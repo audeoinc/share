@@ -1,4 +1,4 @@
-# BigQuery Physical Lineage Repository
+　# BigQuery Physical Lineage Repository
 Version: 2026-07-21
 Status: Definition Registry 完成 / Repository-UDF連携開発中
 
