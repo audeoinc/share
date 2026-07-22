@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "release_name": "lineage_v1.5.0-023",
+  "version": "1.5.0-023",
+  "generated_at": "2026-07-22T13:48:26.081926Z",
+  "source_of_truth": "javascript/src",
+  "bundle": {
+    "path": "javascript/dist/lineage_udf_bundle.js",
+    "sha256": "52b573a9336573817f2d83e4f307dcfafe36166d18b0ecf0ada1e54d928ca849",
+    "size_bytes": 340478
+  },
+  "tests": {
+    "executed": true,
+    "status": "PASSED",
+    "golden_case_count": 46
+  },
+  "report_sql": {
+    "path": "looker/sql/01_query_column_impact.sql",
+    "fields_added": [
+      "impact_type",
+      "dependency_usage_type",
+      "dependency_path_display"
+    ],
+    "supplemental_fields": [
+      "impacted_expression"
+    ],
+    "status": "READY"
+  },
+  "artifacts": {
+    "zip": "lineage_v1.5.0-023.zip",
+    "top_level_folder": "lineage_v1.5.0-023",
+    "deployment_sql": null
+  },
+  "deployment": {
+    "requested": false,
+    "gcs_bundle_uri": null,
+    "gcs_zip_uri": null,
+    "status": "NOT_REQUESTED"
+  }
+}

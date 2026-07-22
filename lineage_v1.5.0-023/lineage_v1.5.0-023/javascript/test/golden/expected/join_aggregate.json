@@ -1,0 +1,55 @@
+{
+  "physical_columns": [
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "CUSTOMER_PURCHASE_HISTORY",
+      "column_name": "CUSTOMER_ID"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "CUSTOMER_PURCHASE_HISTORY",
+      "column_name": "UNIT_PRICE"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "CUSTOMER_PURCHASE_HISTORY",
+      "column_name": "QUANTITY"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "CUSTOMER_MASTER",
+      "column_name": "CUSTOMER_ID"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "CUSTOMER_MASTER",
+      "column_name": "REGION"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "REGION",
+      "scope_id": 1,
+      "dependencies": [
+        "AUDEODB.SAMPLE_DS.CUSTOMER_MASTER.REGION"
+      ]
+    },
+    {
+      "name": "REGION_SALES",
+      "scope_id": 1,
+      "dependencies": [
+        "AUDEODB.SAMPLE_DS.CUSTOMER_PURCHASE_HISTORY.QUANTITY",
+        "AUDEODB.SAMPLE_DS.CUSTOMER_PURCHASE_HISTORY.UNIT_PRICE"
+      ]
+    }
+  ],
+  "purpose": "Regression coverage for join_aggregate.",
+  "coverage": [
+    "Existing Golden Regression"
+  ]
+}

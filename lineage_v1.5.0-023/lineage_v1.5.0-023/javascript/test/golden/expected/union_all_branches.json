@@ -1,0 +1,64 @@
+{
+  "physical_columns": [
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "SALES_CURRENT",
+      "column_name": "ORDER_ID"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "SALES_CURRENT",
+      "column_name": "UNIT_PRICE"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "SALES_CURRENT",
+      "column_name": "QUANTITY"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "SALES_ARCHIVE",
+      "column_name": "LEGACY_ORDER_ID"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "SALES_ARCHIVE",
+      "column_name": "GROSS_AMOUNT"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "SALES_ARCHIVE",
+      "column_name": "DISCOUNT_AMOUNT"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "ORDER_ID",
+      "scope_id": 1,
+      "dependencies": [
+        "AUDEODB.SAMPLE_DS.SALES_ARCHIVE.LEGACY_ORDER_ID",
+        "AUDEODB.SAMPLE_DS.SALES_CURRENT.ORDER_ID"
+      ]
+    },
+    {
+      "name": "AMOUNT",
+      "scope_id": 1,
+      "dependencies": [
+        "AUDEODB.SAMPLE_DS.SALES_ARCHIVE.DISCOUNT_AMOUNT",
+        "AUDEODB.SAMPLE_DS.SALES_ARCHIVE.GROSS_AMOUNT",
+        "AUDEODB.SAMPLE_DS.SALES_CURRENT.QUANTITY",
+        "AUDEODB.SAMPLE_DS.SALES_CURRENT.UNIT_PRICE"
+      ]
+    }
+  ],
+  "purpose": "Regression coverage for union_all_branches.",
+  "coverage": [
+    "Existing Golden Regression"
+  ]
+}
