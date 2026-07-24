@@ -1,7 +1,10 @@
 # BigQuery Physical Lineage Architecture Overview
 
-> **Version:** 0.5 Draft  
+> **Version:** 0.9  
+> **対象コードベース:** lineage v1.5.0-025  
 > **目的:** BigQuery上のカラムレベル依存関係を高精度かつ効率的に把握し、変更時の影響分析を改善するための設計思想とアーキテクチャを説明する。
+>
+> 本ページは全体像とサンプルの提示までを目的とする1ページ構成のドキュメントである。各処理（Lexer、Parser、Resolver等）の詳細仕様は、別途コンポーネント単位の詳細ドキュメントで扱う。
 
 ---
 
@@ -215,7 +218,12 @@ FROM raw.customers AS c;
 
 `SELECT *` はSQL文字列だけでは出力列を確定できない。`INFORMATION_SCHEMA.COLUMNS` 等を参照し、物理スキーマを展開する必要がある。
 
-> 純粋なSELECT *も例として合った方がいい
+```sql
+SELECT *
+FROM raw.orders;
+```
+
+上記のような純粋な `SELECT *` の場合、出力カラムは `raw.orders` の全物理カラムとなる。SQL文字列だけを見てもカラム名・カラム数は分からず、`INFORMATION_SCHEMA.COLUMNS`（または `COLUMN_FIELD_PATHS`）から取得したスキーマ情報と突き合わせて初めて出力列を確定できる。`EXCEPT` や `REPLACE` を伴う場合は、この全カラム展開結果に対してさらに除外・置換を適用する。
 
 ```sql
 SELECT * EXCEPT(update_timestamp)
@@ -303,7 +311,33 @@ LexerはSQL文字列をToken列へ変換する。
 
 Tokenには、値だけでなくToken sequence、行番号、列番号、括弧深度を保持する。これにより、解析エラーや未対応構文の場所を特定しやすくする。
 
--- サンプルを入れた方がいい
+### サンプル
+
+次のSQLを `tokenize()` へ渡すと、
+
+```sql
+SELECT SUM(amount) FROM sales
+```
+
+おおむね次のToken列が得られる（`line_no` / `column_no` は省略）。
+
+| token_seq | token | normalized_token | token_type | paren_depth |
+|---:|---|---|---|---:|
+| 1 | `SELECT` | `SELECT` | KEYWORD | 0 |
+| 2 | `SUM` | `SUM` | IDENTIFIER | 0 |
+| 3 | `(` | `(` | SYMBOL | 0 |
+| 4 | `amount` | `AMOUNT` | IDENTIFIER | 1 |
+| 5 | `)` | `)` | SYMBOL | 0 |
+| 6 | `FROM` | `FROM` | KEYWORD | 0 |
+| 7 | `sales` | `SALES` | IDENTIFIER | 0 |
+
+ポイントは次の3つである。
+
+- `token_seq` は配列indexとは別に1から採番される論理連番であり、Parser・Resolver・保存テーブルの間で位置参照の共通キーとして使われる。
+- `paren_depth` は「括弧の中身だけ」を1段深くする。開き括弧`(`自身はdepth 0のまま保存し、その直後からdepthを1つ上げる。閉じ括弧`)`は逆にdepthを下げてから保存するため、対応する開き括弧と同じdepthになる。この対称性により、`TokenReader.findMatchingCloseParenthesis()` のような対応括弧探索が単純な線形走査で実装できる。
+- `normalized_token` は識別子・Keywordを大文字化した比較用の値であり、`amount` と `AMOUNT` を同一視した照合に使う。文字列リテラルやバッククォート識別子では、外側の引用符・バッククォートを除いた値になる。
+
+未対応文字は握りつぶさず `UNKNOWN` として保持し、閉じ括弧の対応が取れない場合や末尾で括弧が閉じられていない場合は、行・列情報付きの `SyntaxError` として即座に検出する。
 
 ## 3.3 Token Reader
 
@@ -319,7 +353,23 @@ Token ReaderはParserがToken列を参照する共通インターフェースで
 - Token範囲の切り出し
 - Token列パターンの検索
 
--- サンプルを入れた方がいい
+### サンプル
+
+```javascript
+const reader = new TokenReader(tokens);
+
+reader.matches("SELECT");        // true（現在Tokenが SELECT か）
+reader.consumeIf("SELECT");      // 一致すればTokenを消費して返す。しなければnull
+reader.matchesType("IDENTIFIER"); // Token種別による判定
+
+const mark = reader.mark();      // 現在位置をtoken_seqとして保存
+// ...仮に読み進めて、候補が不成立と分かった場合...
+reader.restore(mark);            // 保存位置まで巻き戻す
+
+const closeParen = reader.findMatchingCloseParenthesis(openTokenSeq);
+```
+
+TokenReader内部のポインタ操作は配列indexで行うが、外部へ公開する位置情報は一貫して`token_seq`である。この使い分けにより、Parser側は「配列の何番目か」ではなく「SQL上のどのTokenか」だけを意識すればよくなる。`mark()` / `restore()` は、ある構文候補を試して失敗した場合に読み取り位置を元へ戻す、いわゆるバックトラックに使う。例えばExpression Parserが「これはCASE式か、それとも通常の識別子か」を判定する際、まず候補を1つ読み進めてみて、一致しなければ`restore()`で巻き戻し、別の解析ルートを試す。
 
 ## 3.4 Statement Parser
 
@@ -334,7 +384,31 @@ Statement ParserはSQL文の種別と主要構造を判定する。
 
 最終的に依存関係を生成するSELECT部分を特定し、後続Parserへ渡す。
 
--- サンプルを入れた方がいい
+### サンプル
+
+実装上は `QueryParser` が、この役割の中核を担っている。QueryParser自身はSELECT項目やJOIN条件などの詳細文法を再実装せず、次の順序で既存のClause別Parserを呼び分けるオーケストレーターとして動作する。
+
+1. `WITH` 句があればCTEを検出し、CTE本体を再帰的に `QueryParser` へ渡して解析する。
+2. `UNION` / `INTERSECT` / `EXCEPT` によるSet Operationがあれば、分岐ごとに独立した `QueryParser` を再帰的に生成して解析し、結果を1つのQuery ASTへ統合する。
+3. 上記のいずれでもない単一のSELECT Query Blockについては、`ClauseParser` でClause境界を取得したうえで、`SELECT` / `FROM` / `WHERE` などを専用Parserへ委譲する。
+
+```javascript
+const queryAst = new QueryParser(tokens).parse();
+
+// queryAst の主なフィールド（イメージ）
+{
+  node_type: "QUERY",
+  recursive: false,
+  common_table_expressions: [ /* CTE ASTの配列 */ ],
+  select: [ /* SELECT項目の配列 */ ],
+  from: { /* FROM句の解析結果 */ },
+  set_operations: [ /* UNION等の分岐（あれば） */ ],
+  start_token_seq: 1,
+  end_token_seq: 42
+}
+```
+
+v1.5時点の対象は「1つのSELECT Query Blockと、その前段のCTE・Set Operation」であり、`CREATE VIEW` や `INSERT ... SELECT` などの外側構文は、実行SQL収集の段階でSELECT部分を切り出したうえでQueryParserへ渡す方式を取る。
 
 ## 3.5 Clause Parser
 
@@ -342,7 +416,47 @@ SELECT文をSELECT、FROM、WHERE、GROUP BY、HAVING、QUALIFY、ORDER BYへ分
 
 句境界は括弧深度を考慮して判定し、サブクエリ内部のキーワードを外側SELECTの境界として扱わない。
 
--- サンプルを入れた方がいい
+### サンプル
+
+```sql
+SELECT customer_id FROM sales WHERE amount > 0
+```
+
+このSQLに対して `ClauseParser.parse()` は、おおむね次のようなClause一覧を返す（値はすべて`token_seq`）。
+
+```javascript
+[
+  {
+    clause_seq: 1,
+    clause_type: "SELECT",
+    clause_start_seq: 1,   // "SELECT" token
+    clause_end_seq: 1,
+    body_start_seq: 2,     // "customer_id" token
+    body_end_seq: 2,
+    paren_depth: 0
+  },
+  {
+    clause_seq: 2,
+    clause_type: "FROM",
+    clause_start_seq: 3,
+    clause_end_seq: 3,
+    body_start_seq: 4,
+    body_end_seq: 4,
+    paren_depth: 0
+  },
+  {
+    clause_seq: 3,
+    clause_type: "WHERE",
+    clause_start_seq: 5,
+    clause_end_seq: 5,
+    body_start_seq: 6,
+    body_end_seq: 9,
+    paren_depth: 0
+  }
+]
+```
+
+Clause本文の終了位置は、次のClauseが見つかった時点で確定させる2段階の走査になっている。先にClause開始位置だけを一覧化し、あとから「次のClauseの直前まで」を本文範囲として埋める。`paren_depth` はサブクエリや関数呼び出しの内側にある`SELECT`・`FROM`などをトップレベルClauseとして誤検出しないための判定に使う。
 
 ## 3.6 Expression ParserとAstFactory
 
@@ -356,8 +470,45 @@ flowchart LR
     B --> C[Validated AST Node]
 ```
 
--- サンプルを入れた方がいい
--- ASTの説明を入れておきたい。AstFactoryの意味も分かるようにしておきたい
+### ASTとは
+
+AST（Abstract Syntax Tree、抽象構文木）は、SQL式やStatementの構造を木構造で表現したものである。Token列は「SQLを1次元に並べた文字列の分解」でしかないのに対し、ASTは「どの式がどの式を内包するか」という構造そのものを持つ。例えば `quantity * unit_price` は、Token列としては `quantity` `*` `unit_price` の3つが並んでいるだけだが、ASTでは「`*` 演算子を根とし、左に `quantity`、右に `unit_price` を持つ二項式ノード」という形で表現される。Resolverはこの木構造をたどることで、出力カラムがどの入力カラムに依存するかを再帰的に特定できる。
+
+### AstFactoryの意味
+
+AstFactoryは、AST Nodeの生成と入力検証だけを行う専用クラスであり、Expression Parser自身はNodeを直接組み立てない。この分離には次の意図がある。
+
+- ExpressionParserはSQL文法を読み解く処理に専念できる。
+- AST Nodeの形式（フィールド構成）を変更したいとき、修正箇所をAstFactory側の1か所に集約できる。
+- 壊れたNode（必須フィールド欠落など）を生成時点で検出でき、後続のResolverが不正な形のASTを前提に誤動作することを防げる。
+
+Node種別（`NodeType`）はAstFactory内で `Object.freeze` された定数として一元管理されており、`ARITHMETIC_EXPRESSION`（算術式）、`CASE_EXPRESSION`（CASE式）、`FUNCTION_CALL_EXPRESSION`（関数呼び出し）、`SUBQUERY_EXPRESSION`（サブクエリ）など、2.x節で挙げた構文パターンに対応するNode種別が定義されている。
+
+### サンプル
+
+```javascript
+// quantity * unit_price を解析した場合のASTノード（イメージ）
+{
+  node_type: "ARITHMETIC_EXPRESSION",
+  operator: "*",
+  left: {
+    node_type: "IDENTIFIER_EXPRESSION",
+    name: "quantity",
+    start_token_seq: 3,
+    end_token_seq: 3
+  },
+  right: {
+    node_type: "IDENTIFIER_EXPRESSION",
+    name: "unit_price",
+    start_token_seq: 5,
+    end_token_seq: 5
+  },
+  start_token_seq: 3,
+  end_token_seq: 5
+}
+```
+
+`AstFactory.createBinary()` のようなNode生成関数は、左右のオペランドが有効なASTノードであることを検証したうえで、両者の `start_token_seq` / `end_token_seq` から自ノードの範囲を自動的に算出する。これにより、個々のNodeが「SQL上のどの範囲に対応するか」を常に一貫した方法で保持でき、エラー表示や部分SQLの再現に利用できる。
 
 ## 3.7 Resolver
 
@@ -373,7 +524,47 @@ ResolverはParser結果とBigQuery Metadataを組み合わせて、参照元を�
 - View依存の再帰展開
 - 最終物理カラム
 
--- サンプルを入れた方がいい
+実装上、Resolverは単一クラスではなく、責務ごとに次の段階へ分割されている。
+
+```mermaid
+flowchart LR
+    A[SourceResolver] --> B[ColumnResolver]
+    B --> C[OutputColumnResolver]
+    C --> D[PhysicalColumnResolver]
+    D --> E[LineageResolver]
+    E --> F[ImpactResolver]
+```
+
+| クラス | 主な責務 |
+|---|---|
+| SourceResolver | FROM句・JOIN句・CTE・サブクエリからScope（有効範囲）とテーブル別名を解決する |
+| ColumnResolver | `s.amount` のような修飾参照・非修飾参照を、SourceResolverが作ったScope内の候補Sourceへ結び付ける |
+| OutputColumnResolver | SELECT出力カラム（別名込み）を確定し、`SELECT *` を物理スキーマへ展開する |
+| PhysicalColumnResolver | CTEやView経由の参照を、最終的な物理テーブル・物理カラムまで遡って解決する |
+| LineageResolver | 直接依存を中間オブジェクト経由で再帰展開し、Rank付きの依存関係を組み立てる |
+| ImpactResolver | Repositoryに登録済みの依存情報を使い、指定カラムの影響範囲を求める |
+
+### サンプル
+
+```javascript
+const sourceResolution = new SourceResolver(tokens).resolve(queryAst);
+const columnResolution = new ColumnResolver(tokens).resolve(queryAst, sourceResolution);
+
+// columnResolution.column_references の1要素（イメージ）
+{
+  reference_id: 3,
+  raw_name: "amount",
+  qualifier: null,           // "s.amount" のような修飾参照なら "s"
+  scope_id: "scope_1",
+  resolved_source: {
+    source_type: "PHYSICAL_TABLE",
+    table: "raw.orders",
+    column: "amount"
+  }
+}
+```
+
+`amount` のような非修飾参照はScope内の候補Sourceを列挙して解決し、`s.amount` のように修飾子がある場合はSourceResolverが確定したテーブル別名と突き合わせて一意に解決する。この段階では物理テーブルのカラム存在確認までは行わず、Source（どのテーブル・CTE・サブクエリを指すか）の特定に留める。実カラムの存在確認や`SELECT *`の展開は、後続のOutputColumnResolver / PhysicalColumnResolverへ委譲する。
 
 ## 3.8 ParserとResolverを分離する理由
 
@@ -397,8 +588,6 @@ Repository Builderは解析結果を運用可能な依存情報へ変換する�
 - 有効・無効状態の管理
 - 再実行時の置換
 
-<del>
-
 ## 設計判断
 
 - SQL解析をLexer、Parser、Resolver、Repository Builderへ分割する。
@@ -407,9 +596,6 @@ Repository Builderは解析結果を運用可能な依存情報へ変換する�
 - Repository更新は解析処理と分離し、再実行可能性と鮮度管理を担保する。
 
 ---
-
-</del>
-
 
 # 4. JavaScript UDFによる解析基盤
 
@@ -457,12 +643,12 @@ GCS方式の主理由は、**インラインコードサイズ制限への対応
 
 ## 4.4 bundleサイズ
 
-正式版では実測値を次の形式で記録する。
+`javascript/dist/lineage_udf_bundle.js`（v1.5.0時点）の実測値は次のとおりである。
 
 ```text
 Current bundle size:
-XXX KB
-Approximately X times the inline 32 KB limit
+約 333 KB (340,478 bytes)
+Approximately 10.4 times the inline 32 KB limit
 ```
 
 サイズを記録する目的は、インライン方式を採用できない根拠、肥大化傾向、外部ライブラリ上限への接近状況を確認することである。
@@ -619,11 +805,12 @@ flowchart TB
     end
 
     subgraph Analysis[Analysis]
-        UDF[JavaScript UDF]
-        L[Lexer]
-        P[Parser]
-        A[AST]
-        R[Resolver]
+        subgraph UDF[JavaScript UDF]
+            L[Lexer]
+            P[Parser]
+            A[AST]
+            R[Resolver]
+        end
     end
 
     subgraph Repository[Repository]
@@ -655,7 +842,7 @@ flowchart TB
     Q --> OP
 ```
 
--- JAVASCRIPT UDFの中にLexcer/parcer/ASTがあるように見える方がいい
+Lexer、Parser、AST生成、Resolverはいずれも1つのJavaScript UDF（`parse_lineage`）内で完結する処理であり、BigQuery側からは単一のUDF呼び出しとして見える。UDFはGCS上の `lineage_udf_bundle.js` を外部ライブラリとして参照するため（4.3参照）、UDF定義自体は薄く、実処理はbundle側に集約されている。
 
 ## 6.2 SQLソース
 
@@ -720,10 +907,6 @@ Looker StudioはRepositoryの利用手段であり、中心はRepositoryの精�
 - bundle version
 - parser version
 
-
-<del>
-
-
 ## 設計判断
 
 - View定義とJOBS実行SQLを主要解析ソースとする。
@@ -733,9 +916,6 @@ Looker StudioはRepositoryの利用手段であり、中心はRepositoryの精�
 - 解析失敗や未解決参照を状態として可視化する。
 
 ---
-
-</del>
-
 
 # 7. 設計上の前提・対象範囲（Scope）
 
@@ -874,23 +1054,11 @@ mart.weekly_sales.total_amount
 
 
 
-# Ver.0.5 レビュー観点
+# 次バージョンで反映予定（詳細ドキュメント側で扱う）
 
-- ドキュメントの重心が運用改善に置かれているか
-- Parserの技術説明が目的化していないか
-- Scopeの対象・対象外と理由が妥当か
-- 実装方式の比較が客観的か
-- 章の順序に飛躍がないか
-- Repositoryの役割が十分に伝わるか
-- 今後の拡張性が過度に強調されていないか
-
-# Ver.0.9で反映予定
-
-- `lineage_udf_bundle.js` の実測サイズ
 - BigQuery公式仕様への参照
 - 実Repositoryテーブル名との整合
-- Parser出力例
 - Looker Studio画面項目との整合
-- 回帰試験件数・対応構文一覧
+- 回帰試験件数・対応構文一覧（`docs/PARSER_REGRESSION_TESTS.md` 等と整合）
 - 設定テーブル項目の正式名称
 - 図表の最終調整
