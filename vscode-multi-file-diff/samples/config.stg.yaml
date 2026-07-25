@@ -1,0 +1,25 @@
+# 動作確認用サンプル（stg）
+service:
+  name: lineage-api
+  port: 8080
+  timeout_sec: 60
+
+database:
+  host: stg-db.internal
+  port: 5432
+  name: lineage_stg
+  pool_size: 20
+
+logging:
+  level: info
+  format: json
+  destination: stdout
+
+features:
+  physical_lineage: true
+  column_lineage: true
+  cache: true
+
+retry:
+  max_attempts: 3
+  backoff_sec: 1

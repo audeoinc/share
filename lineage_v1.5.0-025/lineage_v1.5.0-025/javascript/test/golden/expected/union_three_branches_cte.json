@@ -1,0 +1,64 @@
+{
+  "physical_columns": [
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "SALES_CURRENT",
+      "column_name": "ORDER_ID"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "SALES_CURRENT",
+      "column_name": "AMOUNT"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "SALES_ARCHIVE",
+      "column_name": "LEGACY_ORDER_ID"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "SALES_ARCHIVE",
+      "column_name": "GROSS_AMOUNT"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "SALES_RETURNS",
+      "column_name": "RETURN_ID"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "SALES_RETURNS",
+      "column_name": "REFUND_AMOUNT"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "ORDER_ID",
+      "scope_id": 1,
+      "dependencies": [
+        "AUDEODB.SAMPLE_DS.SALES_ARCHIVE.LEGACY_ORDER_ID",
+        "AUDEODB.SAMPLE_DS.SALES_CURRENT.ORDER_ID",
+        "AUDEODB.SAMPLE_DS.SALES_RETURNS.RETURN_ID"
+      ]
+    },
+    {
+      "name": "AMOUNT",
+      "scope_id": 1,
+      "dependencies": [
+        "AUDEODB.SAMPLE_DS.SALES_ARCHIVE.GROSS_AMOUNT",
+        "AUDEODB.SAMPLE_DS.SALES_CURRENT.AMOUNT",
+        "AUDEODB.SAMPLE_DS.SALES_RETURNS.REFUND_AMOUNT"
+      ]
+    }
+  ],
+  "purpose": "Regression coverage for union_three_branches_cte.",
+  "coverage": [
+    "Existing Golden Regression"
+  ]
+}
