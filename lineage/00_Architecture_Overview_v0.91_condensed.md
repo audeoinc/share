@@ -245,20 +245,35 @@ Lineage Repository
 
 ```mermaid
 flowchart TB
-    SQL[SQL Text] --> LX[Lexer]
-    LX --> TK[Token Sequence]
-    TK --> QP[QueryParser]
-    QP --> CP[Clause-specific Parsers]
-    CP --> AST[Query AST / Expression AST]
-    AST --> RS[Resolver Pipeline]
-    MD[Schema Metadata] --> RS
-    RS --> EX[BigQueryExporter]
-    EX --> JSON[UDF Result JSON]
+    SQL[SQL Text]
+    MD[Schema Metadata]
+
+    subgraph UDF["Persistent JavaScript UDF"]
+        LX[Lexer]
+        TK[Token Sequence]
+        QP[QueryParser]
+        CP[Clause-specific Parsers]
+        AST[Query AST / Expression AST]
+        RS[Resolver Pipeline]
+        EX[BigQueryExporter]
+        JSON[UDF Result JSON]
+
+        LX --> TK
+        TK --> QP
+        QP --> CP
+        CP --> AST
+        AST --> RS
+        RS --> EX
+        EX --> JSON
+    end
+
+    SQL --> LX
+    MD --> RS
     JSON --> RP[BigQuery SQL Pipeline]
     RP --> REPO[Lineage Repository]
 ```
 
-公開入口である`LineageEngine`が、Lexer、Parser、Resolver、Exporterを定められた順序で呼び出す。SQLの構造と参照関係をJavaScript内で解決した後、BigQuery SQLパイプラインが結果を検証し、Repositoryへ永続化する。
+図の`Persistent JavaScript UDF`内が、JavaScriptで実行される解析処理である。公開入口である`LineageEngine`が、Lexer、Parser、Resolver、Exporterを定められた順序で呼び出す。SQLの構造と参照関係をJavaScript UDF内で解決した後、BigQuery SQLパイプラインが結果を検証し、Repositoryへ永続化する。
 
 ## 4.2 Lexer
 
@@ -271,10 +286,21 @@ SELECT quantity * unit_price AS total_amount
 FROM raw.orders;
 ```
 
-```text
-SELECT | quantity | * | unit_price | AS | total_amount
-FROM   | raw      | . | orders     | ;
-```
+主要部分は次のToken列になる。
+
+| token_seq | token | normalized_token | token_type | paren_depth |
+|---:|---|---|---|---:|
+| 1 | `SELECT` | `SELECT` | `KEYWORD` | 0 |
+| 2 | `quantity` | `QUANTITY` | `IDENTIFIER` | 0 |
+| 3 | `*` | `*` | `OPERATOR` | 0 |
+| 4 | `unit_price` | `UNIT_PRICE` | `IDENTIFIER` | 0 |
+| 5 | `AS` | `AS` | `KEYWORD` | 0 |
+| 6 | `total_amount` | `TOTAL_AMOUNT` | `IDENTIFIER` | 0 |
+| 7 | `FROM` | `FROM` | `KEYWORD` | 0 |
+| 8 | `raw` | `RAW` | `IDENTIFIER` | 0 |
+| 9 | `.` | `.` | `SYMBOL` | 0 |
+| 10 | `orders` | `ORDERS` | `IDENTIFIER` | 0 |
+| 11 | `;` | `;` | `SYMBOL` | 0 |
 
 各Tokenには値だけでなく、`token_seq`、行番号、列番号、括弧深度を保持する。`token_seq`はParser、Resolver、診断情報、保存データで共有する論理位置である。括弧深度を持つことで、サブクエリ内部の`SELECT`や`FROM`を外側Queryの句境界と区別できる。
 
