@@ -1,0 +1,11 @@
+SELECT
+  customer_id,
+  region
+FROM `AUDEODB.SAMPLE_DS.CUSTOMER_CURRENT`
+
+UNION DISTINCT
+
+SELECT
+  customer_key,
+  sales_region
+FROM `AUDEODB.SAMPLE_DS.CUSTOMER_ARCHIVE`
