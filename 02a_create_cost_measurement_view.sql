@@ -1,5 +1,5 @@
 -- ============================================================================
--- 02a_create_cost_measurement_view.sql
+-- 02a_create_cost_measurement_view_fixed.sql
 -- Long-form sample View for lineage cost and performance measurement
 -- ============================================================================
 -- Prerequisite:
@@ -8,9 +8,9 @@
 -- Design:
 --   Keep the View definition near 500 lines while keeping compact UDF output
 --   below the BigQuery scripting variable limit. The SQL exercises CTEs,
---   joins, nested fields, correlated UNNEST, CASE, aggregate functions,
---   ARRAY<STRUCT>, window functions, QUALIFY, PIVOT, UNION ALL, a scalar
---   correlated subquery, and an ARRAY subquery.
+--   joins, nested fields, CASE, aggregate functions, ARRAY<STRUCT>,
+--   window functions, QUALIFY, PIVOT, UNION ALL, and
+--   customer-level pre-aggregation joined into the final query.
 -- ============================================================================
 SET @@location = 'asia-northeast1';
 
@@ -26,33 +26,12 @@ customer_base AS (
     customer.registered_date,
     customer.address.prefecture AS customer_prefecture,
     customer.address.city AS customer_city,
-    customer.contacts,
     CASE
       WHEN customer.customer_segment = 'ENTERPRISE' THEN 4
       WHEN customer.customer_segment = 'MID_MARKET' THEN 3
       WHEN customer.customer_segment = 'SMB' THEN 2
       ELSE 1 END AS segment_priority
   FROM `audeodb.sample_ds.customers` AS customer
-),
-
-primary_contact AS (
-  SELECT
-    customer.customer_id,
-    contact.contact_type AS primary_contact_type,
-    contact.contact_value AS primary_contact_value,
-    COUNT(contact.contact_type) OVER (
-      PARTITION BY customer.customer_id
-    ) AS contact_count
-  FROM customer_base AS customer
-  LEFT JOIN
-    UNNEST(customer.contacts) AS contact
-    ON TRUE
-  QUALIFY ROW_NUMBER() OVER (
-      PARTITION BY customer.customer_id
-      ORDER BY contact.is_primary DESC,
-        contact.contact_type,
-        contact.contact_value
-    ) = 1
 ),
 
 product_base AS (
@@ -229,6 +208,35 @@ customer_monthly AS (
     order_month
 ),
 
+customer_order_extrema AS (
+  SELECT
+    customer_id,
+    MAX(
+      billed_order_amount
+    ) AS joined_maximum_order_amount
+  FROM order_summary
+  GROUP BY customer_id
+),
+
+customer_month_history AS (
+  SELECT
+    customer_id,
+    ARRAY_AGG(
+      STRUCT(
+        order_month AS order_month,
+        monthly_order_count AS monthly_order_count,
+        monthly_quantity AS monthly_quantity,
+        monthly_billed_amount AS monthly_billed_amount,
+        previous_month_billed_amount AS previous_month_billed_amount,
+        cumulative_billed_amount AS cumulative_billed_amount
+      )
+      ORDER BY order_month DESC
+      LIMIT 12
+    ) AS recent_month_history
+  FROM customer_monthly
+  GROUP BY customer_id
+),
+
 customer_product AS (
   SELECT
     customer_id,
@@ -349,9 +357,6 @@ SELECT
   customer.customer_prefecture,
   customer.customer_city,
   customer.segment_priority,
-  contact.primary_contact_type,
-  contact.primary_contact_value,
-  contact.contact_count,
   COALESCE(
     aggregate.lifetime_order_count,
     0
@@ -405,27 +410,8 @@ SELECT
   category.other_sales_amount,
   labels.customer_label_count,
   labels.customer_label_array,
-  (
-    SELECT
-      MAX(order_value.billed_order_amount)
-    FROM order_summary AS order_value
-    WHERE order_value.customer_id
-        = customer.customer_id
-  ) AS correlated_maximum_order_amount,
-  ARRAY(
-    SELECT AS STRUCT
-      monthly.order_month,
-      monthly.monthly_order_count,
-      monthly.monthly_quantity,
-      monthly.monthly_billed_amount,
-      monthly.previous_month_billed_amount,
-      monthly.cumulative_billed_amount
-    FROM customer_monthly AS monthly
-    WHERE monthly.customer_id
-        = customer.customer_id
-    ORDER BY monthly.order_month DESC
-    LIMIT 12
-  ) AS recent_month_history,
+  extrema.joined_maximum_order_amount,
+  month_history.recent_month_history,
   STRUCT(
     customer.customer_id AS customer_id,
     customer.customer_name AS customer_name,
@@ -485,9 +471,6 @@ SELECT
   ) AS lifetime_value_percentile
 FROM customer_base AS customer
 LEFT JOIN
-  primary_contact AS contact
-  ON contact.customer_id = customer.customer_id
-LEFT JOIN
   customer_aggregate AS aggregate
   ON aggregate.customer_id = customer.customer_id
 LEFT JOIN
@@ -498,4 +481,10 @@ LEFT JOIN
   ON category.customer_id = customer.customer_id
 LEFT JOIN
   customer_labels AS labels
-  ON labels.customer_id = customer.customer_id;
+  ON labels.customer_id = customer.customer_id
+LEFT JOIN
+  customer_order_extrema AS extrema
+  ON extrema.customer_id = customer.customer_id
+LEFT JOIN
+  customer_month_history AS month_history
+  ON month_history.customer_id = customer.customer_id;
