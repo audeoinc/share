@@ -1,0 +1,50 @@
+{
+  "physical_columns": [
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "CUSTOMER_PURCHASE_HISTORY",
+      "column_name": "ORDER_ID"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "CUSTOMER_PURCHASE_HISTORY",
+      "column_name": "UNIT_PRICE"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "CUSTOMER_PURCHASE_HISTORY",
+      "column_name": "QUANTITY"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "CUSTOMER_PURCHASE_HISTORY",
+      "column_name": "DISCOUNT_RATE"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "ORDER_ID",
+      "scope_id": 1,
+      "dependencies": [
+        "AUDEODB.SAMPLE_DS.CUSTOMER_PURCHASE_HISTORY.ORDER_ID"
+      ]
+    },
+    {
+      "name": "NET_AMOUNT",
+      "scope_id": 1,
+      "dependencies": [
+        "AUDEODB.SAMPLE_DS.CUSTOMER_PURCHASE_HISTORY.DISCOUNT_RATE",
+        "AUDEODB.SAMPLE_DS.CUSTOMER_PURCHASE_HISTORY.QUANTITY",
+        "AUDEODB.SAMPLE_DS.CUSTOMER_PURCHASE_HISTORY.UNIT_PRICE"
+      ]
+    }
+  ],
+  "purpose": "Regression coverage for basic_expression.",
+  "coverage": [
+    "Existing Golden Regression"
+  ]
+}
