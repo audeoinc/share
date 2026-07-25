@@ -408,17 +408,73 @@ SELECT項目とFROMソースでは必要となる構造が異なるため、単�
 
 ## 3.7 Expression ParserとAstFactory
 
-Expression Parserはカラム参照、リテラル、演算、関数呼び出し、CASE、CAST、STRUCT、ARRAY、スカラサブクエリ、Window関数を解析する。
+SELECT項目やWHERE条件には、単一のカラム名だけでなく、演算、関数呼び出し、CASE式、Window関数などが入れ子になって記述される。
 
-ASTノード生成、NodeType定義、入力値検証はAstFactoryへ集約する。
-
-```mermaid
-flowchart LR
-    A[Expression Parser] -->|create node| B[AstFactory]
-    B --> C[Validated AST Node]
+```sql
+quantity + unit_price * tax_rate
 ```
 
-ASTは、SQL式を文字列ではなく、構成要素の関係として表現したデータ構造である。
+Expression Parserの役割は、このToken列を左から順に読みながら、各Tokenが式の中でどの役割を持ち、どのToken同士が一つの演算を構成しているかを判定することである。
+
+Expression Parserは主に次の処理を行う。
+
+1. 指定された`start_token_seq`から`end_token_seq`までを式の解析対象として切り出す
+2. コメントTokenを除外し、現在位置を式の先頭へ設定する
+3. 現在位置のTokenが、識別子、リテラル、関数、括弧、単項演算などのどれに該当するか判定する
+4. 演算子の優先順位に従って、左辺と右辺を解析する
+5. 解析した要素をAstFactoryへ渡し、AST Nodeを生成する
+6. 式の末尾まで解析したことを確認し、未消費Tokenがあれば構文エラーとする
+
+### 再帰下降Parser
+
+Expression Parserは、再帰下降Parserとして実装している。
+
+「下降」とは、式全体を扱う大きな文法規則から、より細かな文法規則へ順番に処理を委譲することを指す。現行実装では、概略として次の順序で解析メソッドを呼び出す。
+
+```mermaid
+flowchart TB
+    A[OR Expression] --> B[AND Expression]
+    B --> C[Comparison / Concatenation]
+    C --> D[Additive Expression]
+    D --> E[Multiplicative Expression]
+    E --> F[Unary / Primary Expression]
+```
+
+上にある演算ほど優先順位が低く、下にある演算ほど優先順位が高い。加算の解析中に右辺を読む場合も、先に乗算の解析へ処理を委譲する。そのため、括弧がなくても`*`を`+`より先に結合できる。
+
+「再帰」とは、括弧内の式、単項演算、関数引数、CASE式など、式の中に別の式が現れたときに、解析メソッドが互いを呼び出しながら内側の式にも同じ規則を適用することを指す。スカラサブクエリやEXISTSでは、内側のSELECT Tokenを切り出して`QueryParser`を再帰的に呼び出す。
+
+例えば、次の式を解析する。
+
+```sql
+quantity + unit_price * tax_rate
+```
+
+処理は概略として次のように進む。
+
+| 順序 | 現在の処理 | 読み取る内容 | 生成・保持する結果 |
+|---:|---|---|---|
+| 1 | Additive Expression | `quantity` | 左辺としてIdentifier Nodeを保持 |
+| 2 | Additive Expression | `+` | 加算演算子を検出 |
+| 3 | Multiplicative Expression | `unit_price` | 乗算の左辺としてIdentifier Nodeを保持 |
+| 4 | Multiplicative Expression | `*` | 乗算演算子を検出 |
+| 5 | Primary Expression | `tax_rate` | 乗算の右辺としてIdentifier Nodeを生成 |
+| 6 | Multiplicative Expression | `unit_price * tax_rate` | 乗算Nodeを生成 |
+| 7 | Additive Expression | `quantity + 乗算Node` | 加算Nodeを生成 |
+
+結果は次の構造になる。
+
+```mermaid
+flowchart TB
+    ADD["+"] --> Q[quantity]
+    ADD --> MUL["*"]
+    MUL --> U[unit_price]
+    MUL --> T[tax_rate]
+```
+
+このように、Expression ParserはSQL式を単にカラム名の一覧へ分解するのではなく、演算子の優先順位と式の入れ子を保持したASTへ変換する。
+
+### AST
 
 ```sql
 quantity * unit_price
@@ -445,7 +501,44 @@ quantity * unit_price
 
 文字列検索では`quantity`と`unit_price`が同じ出力式に属することしか分からない。ASTでは、2つの識別子が乗算式の左辺と右辺であることを保持できる。
 
-Expression Parserは演算子の優先順位に対応する再帰下降Parserである。呼び出し階層によって、`OR`、`AND`、比較、文字列連結、加減算、乗除算、単項演算の優先順位を表現する。
+Expression Parserが扱う主な構文は次のとおりである。
+
+- カラム参照と修飾カラム参照
+- 数値、文字列、真偽値、NULLなどのリテラル
+- 算術、比較、論理、文字列連結、単項演算
+- `BETWEEN`、`IN`、`IS`、`IS DISTINCT FROM`
+- 関数呼び出し
+- CASE式
+- 括弧式
+- スカラサブクエリ、ARRAYサブクエリ、EXISTS
+- Window関数とWindow Specification
+- STRUCT、ARRAY、CASTなど、関数形式で記述される式
+
+### AstFactory
+
+Expression Parserは文法を読み取るが、AST Nodeを直接組み立てない。Node生成、`NodeType`定義、入力値検証はAstFactoryへ集約する。
+
+先ほどの式では、概念的に次の順序でAstFactoryを呼び出す。
+
+```javascript
+const quantityNode = AstFactory.createIdentifier(quantityTokens);
+const unitPriceNode = AstFactory.createIdentifier(unitPriceTokens);
+const taxRateNode = AstFactory.createIdentifier(taxRateTokens);
+
+const multiplyNode = AstFactory.createBinary(
+  NodeType.ARITHMETIC_EXPRESSION,
+  "*",
+  unitPriceNode,
+  taxRateNode
+);
+
+const addNode = AstFactory.createBinary(
+  NodeType.ARITHMETIC_EXPRESSION,
+  "+",
+  quantityNode,
+  multiplyNode
+);
+```
 
 AstFactoryはAST Nodeの生成と検証を担当する。Parserが直接任意のオブジェクトを組み立てる方式では、`node_type`や必須プロパティの不一致が発生しやすい。生成処理をFactoryへ集約することで、Parserは文法の読み取りに集中し、AST形式の変更点も限定できる。
 
@@ -627,8 +720,6 @@ Size: 340,478 bytes
 Size: approximately 332.5 KiB
 Ratio to 32 KiB: approximately 10.4 times
 ```
-
-サイズを記録する目的は、インライン方式を採用できない根拠、肥大化傾向、外部ライブラリ上限への接近状況を確認することである。
 
 ## 4.5 コストと性能
 
