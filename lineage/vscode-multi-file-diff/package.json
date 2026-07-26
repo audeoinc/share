@@ -1,0 +1,164 @@
+{
+  "name": "multi-file-diff",
+  "displayName": "Multi File Diff",
+  "description": "エクスプローラーで選択した 2〜3 個のファイルを、VS Code の差分エディタ風の見た目で比較します（社内利用）",
+  "version": "0.2.0",
+  "publisher": "internal",
+  "license": "SEE LICENSE IN LICENSE",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "diff",
+    "compare",
+    "3-way"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hiroshikatada/share"
+  },
+  "main": "./extension.js",
+  "scripts": {
+    "test": "node test/smoke.js",
+    "package": "npx --yes @vscode/vsce package --allow-missing-repository"
+  },
+  "activationEvents": [],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    },
+    "virtualWorkspaces": true
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "multiFileDiff.compareSelected",
+        "title": "選択したファイルを比較",
+        "category": "Multi File Diff"
+      },
+      {
+        "command": "multiFileDiff.compareSelectedInPanel",
+        "title": "選択したファイルを比較 (並列ビュー)",
+        "category": "Multi File Diff"
+      },
+      {
+        "command": "multiFileDiff.compareSelectedNative",
+        "title": "選択したファイルを比較 (標準の差分エディタ)",
+        "category": "Multi File Diff"
+      },
+      {
+        "command": "multiFileDiff.previewHtml",
+        "title": "HTML を Webview でプレビュー",
+        "category": "Multi File Diff"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "multiFileDiff.compareSelected",
+          "when": "listMultiSelection && !explorerResourceIsFolder",
+          "group": "3_compare@10"
+        },
+        {
+          "command": "multiFileDiff.compareSelectedInPanel",
+          "when": "listMultiSelection && !explorerResourceIsFolder",
+          "group": "3_compare@11"
+        },
+        {
+          "command": "multiFileDiff.compareSelectedNative",
+          "when": "listMultiSelection && !explorerResourceIsFolder",
+          "group": "3_compare@12"
+        },
+        {
+          "command": "multiFileDiff.previewHtml",
+          "when": "!listMultiSelection && resourceExtname =~ /^\\.html?$/",
+          "group": "3_compare@20"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "multiFileDiff.previewHtml",
+          "when": "resourceExtname =~ /^\\.html?$/",
+          "group": "3_compare@20"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "multiFileDiff.compareSelected",
+          "when": "false"
+        },
+        {
+          "command": "multiFileDiff.compareSelectedInPanel",
+          "when": "false"
+        },
+        {
+          "command": "multiFileDiff.compareSelectedNative",
+          "when": "false"
+        },
+        {
+          "command": "multiFileDiff.previewHtml",
+          "when": "resourceExtname =~ /^\\.html?$/"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Multi File Diff",
+      "properties": {
+        "multiFileDiff.twoFileMode": {
+          "type": "string",
+          "enum": [
+            "native",
+            "panel"
+          ],
+          "enumDescriptions": [
+            "VS Code 標準の差分エディタで開く（構文ハイライトあり）",
+            "この拡張機能の並列ビューで開く（3 ファイル時と同じ見た目）"
+          ],
+          "default": "native",
+          "description": "2 ファイルを選択したときに「選択したファイルを比較」が使うビュー。3 ファイルのときは常に並列ビューになります。"
+        },
+        "multiFileDiff.ignoreTrimWhitespace": {
+          "type": "boolean",
+          "default": true,
+          "description": "行頭・行末の空白だけの違いを差分として扱わない。"
+        },
+        "multiFileDiff.ignoreCase": {
+          "type": "boolean",
+          "default": false,
+          "description": "大文字・小文字の違いを差分として扱わない。"
+        },
+        "multiFileDiff.collapseUnchanged": {
+          "type": "boolean",
+          "default": true,
+          "description": "一致している行が続く区間を折りたたむ。"
+        },
+        "multiFileDiff.contextLines": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "maximum": 50,
+          "description": "折りたたみ時に差分の前後に残す行数。"
+        },
+        "multiFileDiff.wordWrap": {
+          "type": "boolean",
+          "default": false,
+          "description": "長い行を折り返して表示する。"
+        },
+        "multiFileDiff.openPreviewAfterExport": {
+          "type": "boolean",
+          "default": true,
+          "description": "「HTML 出力」の直後に、出力したファイルを Webview でプレビューする。"
+        },
+        "multiFileDiff.maxFileSizeKB": {
+          "type": "number",
+          "default": 4096,
+          "minimum": 16,
+          "description": "比較を許可するファイルサイズの上限 (KB)。"
+        }
+      }
+    }
+  }
+}

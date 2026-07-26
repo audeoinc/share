@@ -1,0 +1,43 @@
+{
+  "physical_columns": [
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "CUSTOMERS",
+      "column_name": "CUSTOMER_ID"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "CUSTOMERS",
+      "column_name": "CREDIT_LIMIT"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "ORDERS",
+      "column_name": "ORDER_TOTAL"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "CUSTOMER_ID",
+      "scope_id": 1,
+      "dependencies": [
+        "AUDEODB.SAMPLE_DS.CUSTOMERS.CUSTOMER_ID"
+      ]
+    },
+    {
+      "name": "ADJUSTED_LIMIT",
+      "scope_id": 1,
+      "dependencies": [
+        "AUDEODB.SAMPLE_DS.CUSTOMERS.CREDIT_LIMIT",
+        "AUDEODB.SAMPLE_DS.ORDERS.ORDER_TOTAL"
+      ]
+    }
+  ],
+  "purpose": "Regression coverage for scalar_subquery_expression.",
+  "coverage": [
+    "Existing Golden Regression"
+  ]
+}

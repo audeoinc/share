@@ -1,0 +1,59 @@
+{
+  "physical_columns": [
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "SALES_ITEMS",
+      "column_name": "CUSTOMER_ID",
+      "ordinal_position": 1
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "SALES_ITEMS",
+      "column_name": "UNIT_PRICE",
+      "ordinal_position": 2
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "SALES_ITEMS",
+      "column_name": "QUANTITY",
+      "ordinal_position": 3
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "SALES_ITEMS",
+      "column_name": "INTERNAL_FLAG",
+      "ordinal_position": 4
+    }
+  ],
+  "outputs": [
+    {
+      "name": "CUSTOMER_ID",
+      "scope_id": 1,
+      "expression_text": "* EXCEPT(INTERNAL_FLAG)",
+      "dependencies": [
+        "AUDEODB.SAMPLE_DS.SALES_ITEMS.CUSTOMER_ID"
+      ]
+    },
+    {
+      "name": "GROSS_AMOUNT",
+      "scope_id": 1,
+      "expression_text": "* EXCEPT(INTERNAL_FLAG)",
+      "dependencies": [
+        "AUDEODB.SAMPLE_DS.SALES_ITEMS.QUANTITY",
+        "AUDEODB.SAMPLE_DS.SALES_ITEMS.UNIT_PRICE"
+      ]
+    }
+  ],
+  "absent_outputs": [
+    "INTERNAL_FLAG"
+  ],
+  "absent_scope_id": 1,
+  "purpose": "Regression coverage for wildcard_except_cte.",
+  "coverage": [
+    "Existing Golden Regression"
+  ]
+}
