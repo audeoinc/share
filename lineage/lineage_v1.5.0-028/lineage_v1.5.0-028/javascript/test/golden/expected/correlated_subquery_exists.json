@@ -1,0 +1,37 @@
+{
+  "physical_columns": [
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "CUSTOMERS",
+      "column_name": "CUSTOMER_ID"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "ORDERS",
+      "column_name": "CUSTOMER_ID"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "CUSTOMER_ID",
+      "scope_id": 1,
+      "dependencies": [
+        "AUDEODB.SAMPLE_DS.CUSTOMERS.CUSTOMER_ID"
+      ]
+    },
+    {
+      "name": "HAS_ORDER",
+      "scope_id": 1,
+      "dependencies": [
+        "AUDEODB.SAMPLE_DS.CUSTOMERS.CUSTOMER_ID",
+        "AUDEODB.SAMPLE_DS.ORDERS.CUSTOMER_ID"
+      ]
+    }
+  ],
+  "purpose": "Regression coverage for correlated_subquery_exists.",
+  "coverage": [
+    "Existing Golden Regression"
+  ]
+}

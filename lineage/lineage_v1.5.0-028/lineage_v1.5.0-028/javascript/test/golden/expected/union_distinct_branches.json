@@ -1,0 +1,50 @@
+{
+  "physical_columns": [
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "CUSTOMER_CURRENT",
+      "column_name": "CUSTOMER_ID"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "CUSTOMER_CURRENT",
+      "column_name": "REGION"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "CUSTOMER_ARCHIVE",
+      "column_name": "CUSTOMER_KEY"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "CUSTOMER_ARCHIVE",
+      "column_name": "SALES_REGION"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "CUSTOMER_ID",
+      "scope_id": 1,
+      "dependencies": [
+        "AUDEODB.SAMPLE_DS.CUSTOMER_ARCHIVE.CUSTOMER_KEY",
+        "AUDEODB.SAMPLE_DS.CUSTOMER_CURRENT.CUSTOMER_ID"
+      ]
+    },
+    {
+      "name": "REGION",
+      "scope_id": 1,
+      "dependencies": [
+        "AUDEODB.SAMPLE_DS.CUSTOMER_ARCHIVE.SALES_REGION",
+        "AUDEODB.SAMPLE_DS.CUSTOMER_CURRENT.REGION"
+      ]
+    }
+  ],
+  "purpose": "Regression coverage for union_distinct_branches.",
+  "coverage": [
+    "Existing Golden Regression"
+  ]
+}

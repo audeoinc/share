@@ -1,0 +1,42 @@
+{
+  "physical_columns": [
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "SALES",
+      "column_name": "CUSTOMER_ID"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "SALES",
+      "column_name": "CATEGORY"
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "SALES",
+      "column_name": "AMOUNT"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "PC_SALES",
+      "scope_id": 1,
+      "dependencies": [
+        "AUDEODB.SAMPLE_DS.SALES.AMOUNT"
+      ]
+    },
+    {
+      "name": "AV_SALES",
+      "scope_id": 1,
+      "dependencies": [
+        "AUDEODB.SAMPLE_DS.SALES.AMOUNT"
+      ]
+    }
+  ],
+  "purpose": "Regression coverage for pivot.",
+  "coverage": [
+    "Existing Golden Regression"
+  ]
+}

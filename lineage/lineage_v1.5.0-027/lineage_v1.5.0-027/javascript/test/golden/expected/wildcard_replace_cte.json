@@ -1,0 +1,56 @@
+{
+  "physical_columns": [
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "SALES_ITEMS",
+      "column_name": "ORDER_ID",
+      "ordinal_position": 1
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "SALES_ITEMS",
+      "column_name": "AMOUNT",
+      "ordinal_position": 2
+    },
+    {
+      "project_id": "AUDEODB",
+      "dataset_id": "SAMPLE_DS",
+      "table_name": "SALES_ITEMS",
+      "column_name": "QUANTITY",
+      "ordinal_position": 3
+    }
+  ],
+  "outputs": [
+    {
+      "name": "ORDER_ID",
+      "scope_id": 1,
+      "expression_text": "* REPLACE(amount*quantity AS AMOUNT)",
+      "dependencies": [
+        "AUDEODB.SAMPLE_DS.SALES_ITEMS.ORDER_ID"
+      ]
+    },
+    {
+      "name": "AMOUNT",
+      "scope_id": 1,
+      "expression_text": "* REPLACE(amount*quantity AS AMOUNT)",
+      "dependencies": [
+        "AUDEODB.SAMPLE_DS.SALES_ITEMS.AMOUNT",
+        "AUDEODB.SAMPLE_DS.SALES_ITEMS.QUANTITY"
+      ]
+    },
+    {
+      "name": "QUANTITY",
+      "scope_id": 1,
+      "expression_text": "* REPLACE(amount*quantity AS AMOUNT)",
+      "dependencies": [
+        "AUDEODB.SAMPLE_DS.SALES_ITEMS.QUANTITY"
+      ]
+    }
+  ],
+  "purpose": "Regression coverage for wildcard_replace_cte.",
+  "coverage": [
+    "Existing Golden Regression"
+  ]
+}
