@@ -1359,14 +1359,19 @@ BEGIN
           'UNKNOWN'
         );
 
-        ASSERT source_discovery_status = 'COMPLETED'
-        AS FORMAT(
-          'Source discovery did not complete for %s.%s.%s: %s',
-          target.object_project,
-          target.object_dataset,
-          target.object_name,
-          COALESCE(JSON_VALUE(source_discovery_json, '$.error.message'), source_discovery_status)
-        );
+        -- ASSERT ... AS <message> only accepts a string literal, so a
+        -- formatted message is raised through IF ... RAISE instead. The raised
+        -- error is caught by this object's EXCEPTION handler, exactly as an
+        -- ASSERT failure would have been.
+        IF source_discovery_status != 'COMPLETED' THEN
+          RAISE USING MESSAGE = FORMAT(
+            'Source discovery did not complete for %s.%s.%s: %s',
+            target.object_project,
+            target.object_dataset,
+            target.object_name,
+            COALESCE(JSON_VALUE(source_discovery_json, '$.error.message'), source_discovery_status)
+          );
+        END IF;
 
         -- --------------------------------------------------------------------
         -- Phase 2: select metadata only for the discovered source names.
@@ -1462,11 +1467,12 @@ BEGIN
           FROM scoped_physical_columns
         );
 
-        ASSERT physical_metadata_json_bytes < 900000
-        AS FORMAT(
-          'Scoped physical-column metadata is too large for one UDF call (%d bytes).',
-          physical_metadata_json_bytes
-        );
+        IF NOT (physical_metadata_json_bytes < 900000) THEN
+          RAISE USING MESSAGE = FORMAT(
+            'Scoped physical-column metadata is too large for one UDF call (%d bytes).',
+            physical_metadata_json_bytes
+          );
+        END IF;
 
         SET physical_columns_json = (
           SELECT COALESCE(
