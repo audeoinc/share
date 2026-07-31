@@ -44,13 +44,28 @@ DECLARE bootstrap_max_impact_rank INT64 DEFAULT 100;
 -- ----------------------------------------------------------------------------
 -- Repository table naming
 --
--- Physical table names are derived as prefix + canonical base name + suffix so
--- that environments with different naming rules can be configured here without
--- editing the body of the script. Leave both empty to keep the canonical
--- names. To rename a single table, override its SET line below.
+-- Physical table names are derived as
+--   prefix + infix + canonical base name + suffix
+-- so that environments with different naming rules can be configured here
+-- without editing the body of the script. The per-table infix carries a
+-- classification marker (for example 'm_' for master and 't_' for
+-- transaction); include any '_' separators directly in the prefix, infix, and
+-- suffix values. Example: prefix='ope_', infix='m_', suffix='_tky' yields
+-- ope_m_lineage_config_tky. Leave a segment empty to omit it.
 -- ----------------------------------------------------------------------------
 DECLARE bootstrap_table_name_prefix STRING DEFAULT '';
 DECLARE bootstrap_table_name_suffix STRING DEFAULT '';
+
+-- Per-table middle element. Defaults follow the master/transaction split:
+-- ledgers and configuration are 'm_'; derived analysis outputs are 't_'.
+-- Change any single value to reclassify or blank it out.
+DECLARE bootstrap_table_infix_config STRING DEFAULT 'm_';
+DECLARE bootstrap_table_infix_execution_account_config STRING DEFAULT 'm_';
+DECLARE bootstrap_table_infix_definition_registry STRING DEFAULT 'm_';
+DECLARE bootstrap_table_infix_job_registry STRING DEFAULT 'm_';
+DECLARE bootstrap_table_infix_direct_dependency STRING DEFAULT 't_';
+DECLARE bootstrap_table_infix_impact STRING DEFAULT 't_';
+DECLARE bootstrap_table_infix_diagnostic STRING DEFAULT 't_';
 
 DECLARE table_config STRING;
 DECLARE table_execution_account_config STRING;
@@ -87,27 +102,29 @@ DECLARE smoke_test_status STRING;
 DECLARE scheduled_query_service_accounts ARRAY<STRING>;
 DECLARE dag_service_accounts ARRAY<STRING>;
 
--- Physical table names: prefix + canonical base + suffix.
--- Override any single line to rename an individual table.
+-- Physical table names: prefix + infix + canonical base + suffix.
+-- Override any single line to rename or reclassify an individual table.
 SET table_config =
-  bootstrap_table_name_prefix || 'lineage_config' || bootstrap_table_name_suffix;
+  bootstrap_table_name_prefix || bootstrap_table_infix_config
+    || 'lineage_config' || bootstrap_table_name_suffix;
 SET table_execution_account_config =
-  bootstrap_table_name_prefix || 'lineage_execution_account_config'
-    || bootstrap_table_name_suffix;
+  bootstrap_table_name_prefix || bootstrap_table_infix_execution_account_config
+    || 'lineage_execution_account_config' || bootstrap_table_name_suffix;
 SET table_definition_registry =
-  bootstrap_table_name_prefix || 'lineage_definition_registry'
-    || bootstrap_table_name_suffix;
+  bootstrap_table_name_prefix || bootstrap_table_infix_definition_registry
+    || 'lineage_definition_registry' || bootstrap_table_name_suffix;
 SET table_direct_dependency =
-  bootstrap_table_name_prefix || 'lineage_direct_dependency'
-    || bootstrap_table_name_suffix;
+  bootstrap_table_name_prefix || bootstrap_table_infix_direct_dependency
+    || 'lineage_direct_dependency' || bootstrap_table_name_suffix;
 SET table_impact =
-  bootstrap_table_name_prefix || 'lineage_impact' || bootstrap_table_name_suffix;
+  bootstrap_table_name_prefix || bootstrap_table_infix_impact
+    || 'lineage_impact' || bootstrap_table_name_suffix;
 SET table_diagnostic =
-  bootstrap_table_name_prefix || 'lineage_diagnostic'
-    || bootstrap_table_name_suffix;
+  bootstrap_table_name_prefix || bootstrap_table_infix_diagnostic
+    || 'lineage_diagnostic' || bootstrap_table_name_suffix;
 SET table_job_registry =
-  bootstrap_table_name_prefix || 'lineage_job_registry'
-    || bootstrap_table_name_suffix;
+  bootstrap_table_name_prefix || bootstrap_table_infix_job_registry
+    || 'lineage_job_registry' || bootstrap_table_name_suffix;
 
 ASSERT REGEXP_CONTAINS(table_config, r'^[A-Za-z0-9_]+$')
 AS 'Invalid table_config name.';
