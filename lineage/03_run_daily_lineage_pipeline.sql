@@ -140,6 +140,10 @@ DECLARE udf_function_name STRING DEFAULT 'analyze_lineage_json';
 DECLARE parser_strict_mode BOOL DEFAULT FALSE;
 DECLARE configured_max_impact_rank INT64 DEFAULT 100;
 
+-- Set FALSE to skip STEP 2 (Scheduled Query / DAG generated-table collection
+-- from INFORMATION_SCHEMA.JOBS) and process only Views. STEP 1/3/4 still run.
+DECLARE process_generated_tables BOOL DEFAULT TRUE;
+
 -- ----------------------------------------------------------------------------
 -- Repository table naming
 --
@@ -594,7 +598,9 @@ END;
 
 -- ============================================================================
 -- STEP 2: Synchronize Scheduled Query / DAG generated-table definitions
+-- Skipped entirely when process_generated_tables is FALSE (Views-only run).
 -- ============================================================================
+IF process_generated_tables THEN
 BEGIN
   DECLARE step_started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP();
   DECLARE initial_lookback_days INT64 DEFAULT 60;
@@ -1149,6 +1155,7 @@ BEGIN
     (SELECT COUNT(*) FROM recent_generated_table_jobs)
       AS recent_target_job_count;
 END;
+END IF;
 
 -- ============================================================================
 -- Non-completed UDF results retained for the final operational result set.
@@ -1299,6 +1306,8 @@ BEGIN
       AND is_changed = TRUE
       AND definition_text IS NOT NULL
       AND object_type IN ('VIEW', 'TABLE')
+      -- When generated-table collection is off, analyze Views only.
+      AND (@include_tables OR object_type = 'VIEW')
   """;
 
   SET rendered_sql = render_dynamic_sql(
@@ -1317,7 +1326,8 @@ BEGIN
   ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
   AS 'Unresolved placeholder in changed-definitions materialization SQL.';
 
-  EXECUTE IMMEDIATE rendered_sql;
+  EXECUTE IMMEDIATE rendered_sql
+  USING process_generated_tables AS include_tables;
 
   -- Snapshot the active VIEW registry once so the per-object staging query can
   -- classify source object types without referencing the (configurable-named)
