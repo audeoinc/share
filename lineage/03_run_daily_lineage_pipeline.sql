@@ -108,18 +108,30 @@ DECLARE repository_dataset STRING DEFAULT 'lineage_repository';
 DECLARE target_project_id STRING DEFAULT 'audeodb';
 DECLARE target_dataset STRING DEFAULT 'sample_ds';
 
--- Projects that hold physical source tables, each with its own dataset-name
--- filter (case-insensitive LIKE on schema_name), because the dataset naming
--- keyword differs per project. COLUMNS / COLUMN_FIELD_PATHS / TABLES are
+-- Projects that hold physical source tables, each with an include and an
+-- exclude dataset-name pattern (case-insensitive LIKE on schema_name), because
+-- the dataset naming keyword differs per project and some datasets must be
+-- skipped (e.g. empty or inaccessible ones that would raise access-denied when
+-- their COLUMNS are read). COLUMNS / COLUMN_FIELD_PATHS / TABLES are
 -- dataset-scoped, so for each entry the matching same-region datasets are
 -- enumerated from INFORMATION_SCHEMA.SCHEMATA and unioned. Include the target
 -- project and every other project whose tables are sources; all must be in
--- job_region. Use '%' as dataset_filter to scan every dataset in that project,
--- and add multiple entries with the same project_id to apply several patterns.
+-- job_region.
+--   dataset_filter  : keep datasets whose name matches (use '%' for all).
+--   dataset_exclude : drop datasets whose name matches (use '' for none).
+-- Add multiple entries with the same project_id to apply several patterns.
 DECLARE source_project_filters
-  ARRAY<STRUCT<project_id STRING, dataset_filter STRING>>
+  ARRAY<STRUCT<
+    project_id STRING,
+    dataset_filter STRING,
+    dataset_exclude STRING
+  >>
   DEFAULT [
-    STRUCT('audeodb' AS project_id, '%KEYWORD%' AS dataset_filter)
+    STRUCT(
+      'audeodb' AS project_id,
+      '%KEYWORD%' AS dataset_filter,
+      '' AS dataset_exclude
+    )
   ];
 DECLARE job_region STRING DEFAULT 'asia-northeast1';
 DECLARE udf_project_id STRING DEFAULT 'audeodb';
@@ -337,7 +349,7 @@ BEGIN
   AS 'source_project_filters must contain at least one entry.';
 
   FOR src IN (
-    SELECT project_id, dataset_filter
+    SELECT project_id
     FROM UNNEST(source_project_filters)
   )
   DO
@@ -351,19 +363,27 @@ BEGIN
   );
 
   FOR src IN (
-    SELECT project_id, dataset_filter
+    SELECT project_id, dataset_filter, dataset_exclude
     FROM UNNEST(source_project_filters)
   )
   DO
     EXECUTE IMMEDIATE FORMAT(
       'INSERT INTO source_datasets (project_id, dataset_id) '
-      || 'SELECT DISTINCT LOWER(catalog_name), LOWER(schema_name) '
+      -- Preserve the real dataset-id case: it is used to build the
+      -- `project.dataset.INFORMATION_SCHEMA.*` identifier, and BigQuery dataset
+      -- ids are case-sensitive. The LIKE filters below stay case-insensitive.
+      -- @excl = '' disables exclusion; matching datasets are skipped so their
+      -- COLUMNS are never read (avoids access-denied on ignorable datasets).
+      || 'SELECT DISTINCT catalog_name, schema_name '
       || 'FROM `%s.region-%s`.INFORMATION_SCHEMA.SCHEMATA '
-      || 'WHERE LOWER(schema_name) LIKE @pat',
+      || 'WHERE LOWER(schema_name) LIKE @pat '
+      || 'AND (@excl = "" OR LOWER(schema_name) NOT LIKE @excl)',
       src.project_id,
       job_region
     )
-    USING LOWER(src.dataset_filter) AS pat;
+    USING
+      LOWER(COALESCE(src.dataset_filter, '%')) AS pat,
+      LOWER(COALESCE(src.dataset_exclude, '')) AS excl;
   END FOR;
 
   SET source_dataset_count = (SELECT COUNT(*) FROM source_datasets);
