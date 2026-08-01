@@ -107,6 +107,13 @@ DECLARE repository_project_id STRING DEFAULT 'audeodb';
 DECLARE repository_dataset STRING DEFAULT 'lineage_repository';
 DECLARE target_project_id STRING DEFAULT 'audeodb';
 DECLARE target_dataset STRING DEFAULT 'sample_ds';
+
+-- Projects that hold physical source tables referenced by the target Views.
+-- COLUMNS / COLUMN_FIELD_PATHS are dataset-scoped, so every same-region dataset
+-- in these projects is enumerated from INFORMATION_SCHEMA.SCHEMATA and unioned.
+-- Include the target project and every other project whose tables are sources.
+-- All listed projects must be in job_region.
+DECLARE source_project_ids ARRAY<STRING> DEFAULT ['audeodb'];
 DECLARE job_region STRING DEFAULT 'asia-northeast1';
 DECLARE udf_project_id STRING DEFAULT 'audeodb';
 DECLARE udf_dataset STRING DEFAULT 'sample_ds';
@@ -153,6 +160,12 @@ DECLARE repo_tables STRUCT<
 -- Identifier replacement is centralized in render_dynamic_sql().
 DECLARE sql_template STRING;
 DECLARE rendered_sql STRING;
+
+-- Work variables for building the cross-dataset source-metadata union SQL.
+DECLARE columns_union_sql STRING;
+DECLARE field_paths_union_sql STRING;
+DECLARE tables_union_sql STRING;
+DECLARE source_dataset_count INT64;
 
 -- Physical table names: prefix + marker + canonical base + suffix.
 -- The 'm_' / 't_' marker literal is inline; edit it to reclassify a table.
@@ -296,81 +309,108 @@ BEGIN
 
   EXECUTE IMMEDIATE rendered_sql;
 
-  SET sql_template = """
-    CREATE OR REPLACE TEMP TABLE current_target_tables AS
-    SELECT
-      LOWER(table_catalog) AS table_catalog,
-      LOWER(table_schema) AS table_schema,
-      LOWER(table_name) AS table_name,
-      table_type
-    FROM `__TARGET_PROJECT__.region-__JOB_REGION__`.INFORMATION_SCHEMA.TABLES
-  """;
+  -- --------------------------------------------------------------------------
+  -- Physical-source metadata scope
+  --
+  -- COLUMNS / COLUMN_FIELD_PATHS are dataset-scoped, and target Views can
+  -- reference base tables in other datasets and other projects. Every
+  -- same-region dataset in the configured source projects is enumerated from
+  -- INFORMATION_SCHEMA.SCHEMATA, and its COLUMNS / COLUMN_FIELD_PATHS are
+  -- unioned so cross-dataset and cross-project physical columns are visible to
+  -- the resolver. TABLES (region-scoped) are unioned across the same projects
+  -- for source object-type classification.
+  --
+  -- These identifiers come from source_project_ids (validated below) and from
+  -- SCHEMATA (BigQuery dataset names are restricted to [A-Za-z0-9_]), so the
+  -- union SQL is assembled with FORMAT rather than render_dynamic_sql.
+  -- Requirement: the executing account needs metadata read on every listed
+  -- project, and all source datasets must be in job_region.
+  -- --------------------------------------------------------------------------
+  ASSERT ARRAY_LENGTH(source_project_ids) > 0
+  AS 'source_project_ids must contain at least one project.';
 
-  SET rendered_sql = render_dynamic_sql(
-    sql_template,
-    repository_project_id,
-    repository_dataset,
-    target_project_id,
-    target_dataset,
-    job_region,
-    udf_project_id,
-    udf_dataset,
-    udf_function_name,
-    repo_tables
+  FOR src IN (
+    SELECT DISTINCT project_id
+    FROM UNNEST(source_project_ids) AS project_id
+  )
+  DO
+    ASSERT REGEXP_CONTAINS(src.project_id, r'^[A-Za-z0-9._:-]+$')
+    AS 'Invalid source_project_id.';
+  END FOR;
+
+  CREATE OR REPLACE TEMP TABLE source_datasets (
+    project_id STRING,
+    dataset_id STRING
   );
 
-  ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-  AS 'Unresolved placeholder in current_target_tables SQL.';
+  FOR src IN (
+    SELECT DISTINCT project_id
+    FROM UNNEST(source_project_ids) AS project_id
+  )
+  DO
+    EXECUTE IMMEDIATE FORMAT(
+      'INSERT INTO source_datasets (project_id, dataset_id) '
+      || 'SELECT DISTINCT LOWER(catalog_name), LOWER(schema_name) '
+      || 'FROM `%s.region-%s`.INFORMATION_SCHEMA.SCHEMATA',
+      src.project_id,
+      job_region
+    );
+  END FOR;
 
-  EXECUTE IMMEDIATE rendered_sql;
+  SET source_dataset_count = (SELECT COUNT(*) FROM source_datasets);
+  ASSERT source_dataset_count > 0
+  AS 'No source datasets were found in the configured projects and region.';
 
-  SET sql_template = """
-    CREATE OR REPLACE TEMP TABLE current_target_columns AS
-    SELECT *
-    FROM `__TARGET__.INFORMATION_SCHEMA.COLUMNS`
-  """;
-
-  SET rendered_sql = render_dynamic_sql(
-    sql_template,
-    repository_project_id,
-    repository_dataset,
-    target_project_id,
-    target_dataset,
-    job_region,
-    udf_project_id,
-    udf_dataset,
-    udf_function_name,
-    repo_tables
+  -- Region-wide TABLES across the configured source projects.
+  SET tables_union_sql = (
+    SELECT STRING_AGG(
+      FORMAT(
+        'SELECT LOWER(table_catalog) AS table_catalog, '
+        || 'LOWER(table_schema) AS table_schema, '
+        || 'LOWER(table_name) AS table_name, table_type '
+        || 'FROM `%s.region-%s`.INFORMATION_SCHEMA.TABLES',
+        project_id, job_region
+      ),
+      ' UNION ALL '
+    )
+    FROM (SELECT DISTINCT project_id FROM source_datasets)
+  );
+  EXECUTE IMMEDIATE FORMAT(
+    'CREATE OR REPLACE TEMP TABLE current_target_tables AS %s',
+    tables_union_sql
   );
 
-  ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-  AS 'Unresolved placeholder in current_target_columns SQL.';
-
-  EXECUTE IMMEDIATE rendered_sql;
-
-  SET sql_template = """
-    CREATE OR REPLACE TEMP TABLE current_target_column_field_paths AS
-    SELECT *
-    FROM `__TARGET__.INFORMATION_SCHEMA.COLUMN_FIELD_PATHS`
-  """;
-
-  SET rendered_sql = render_dynamic_sql(
-    sql_template,
-    repository_project_id,
-    repository_dataset,
-    target_project_id,
-    target_dataset,
-    job_region,
-    udf_project_id,
-    udf_dataset,
-    udf_function_name,
-    repo_tables
+  -- COLUMNS across every source dataset.
+  SET columns_union_sql = (
+    SELECT STRING_AGG(
+      FORMAT(
+        'SELECT * FROM `%s.%s.INFORMATION_SCHEMA.COLUMNS`',
+        project_id, dataset_id
+      ),
+      ' UNION ALL '
+    )
+    FROM source_datasets
+  );
+  EXECUTE IMMEDIATE FORMAT(
+    'CREATE OR REPLACE TEMP TABLE current_target_columns AS %s',
+    columns_union_sql
   );
 
-  ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-  AS 'Unresolved placeholder in current_target_column_field_paths SQL.';
-
-  EXECUTE IMMEDIATE rendered_sql;
+  -- COLUMN_FIELD_PATHS across every source dataset.
+  SET field_paths_union_sql = (
+    SELECT STRING_AGG(
+      FORMAT(
+        'SELECT * FROM `%s.%s.INFORMATION_SCHEMA.COLUMN_FIELD_PATHS`',
+        project_id, dataset_id
+      ),
+      ' UNION ALL '
+    )
+    FROM source_datasets
+  );
+  EXECUTE IMMEDIATE FORMAT(
+    'CREATE OR REPLACE TEMP TABLE current_target_column_field_paths AS %s',
+    field_paths_union_sql
+  );
 
   SET sql_template = """
       MERGE
