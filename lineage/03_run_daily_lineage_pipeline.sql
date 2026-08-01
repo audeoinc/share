@@ -114,6 +114,11 @@ DECLARE target_dataset STRING DEFAULT 'sample_ds';
 -- Include the target project and every other project whose tables are sources.
 -- All listed projects must be in job_region.
 DECLARE source_project_ids ARRAY<STRING> DEFAULT ['audeodb'];
+
+-- Only datasets whose name matches this pattern are scanned for source
+-- metadata (case-insensitive LIKE on schema_name). Replace KEYWORD with the
+-- required substring, e.g. '%mart%'. Use '%' to scan every dataset.
+DECLARE dataset_name_filter STRING DEFAULT '%KEYWORD%';
 DECLARE job_region STRING DEFAULT 'asia-northeast1';
 DECLARE udf_project_id STRING DEFAULT 'audeodb';
 DECLARE udf_dataset STRING DEFAULT 'sample_ds';
@@ -351,29 +356,32 @@ BEGIN
     EXECUTE IMMEDIATE FORMAT(
       'INSERT INTO source_datasets (project_id, dataset_id) '
       || 'SELECT DISTINCT LOWER(catalog_name), LOWER(schema_name) '
-      || 'FROM `%s.region-%s`.INFORMATION_SCHEMA.SCHEMATA',
+      || 'FROM `%s.region-%s`.INFORMATION_SCHEMA.SCHEMATA '
+      || 'WHERE LOWER(schema_name) LIKE @pat',
       src.project_id,
       job_region
-    );
+    )
+    USING LOWER(dataset_name_filter) AS pat;
   END FOR;
 
   SET source_dataset_count = (SELECT COUNT(*) FROM source_datasets);
   ASSERT source_dataset_count > 0
   AS 'No source datasets were found in the configured projects and region.';
 
-  -- Region-wide TABLES across the configured source projects.
+  -- TABLES per source dataset (dataset-scoped, so only dataset-level metadata
+  -- access is needed; the region-qualified form requires broader permissions).
   SET tables_union_sql = (
     SELECT STRING_AGG(
       FORMAT(
         'SELECT LOWER(table_catalog) AS table_catalog, '
         || 'LOWER(table_schema) AS table_schema, '
         || 'LOWER(table_name) AS table_name, table_type '
-        || 'FROM `%s.region-%s`.INFORMATION_SCHEMA.TABLES',
-        project_id, job_region
+        || 'FROM `%s.%s.INFORMATION_SCHEMA.TABLES`',
+        project_id, dataset_id
       ),
       ' UNION ALL '
     )
-    FROM (SELECT DISTINCT project_id FROM source_datasets)
+    FROM source_datasets
   );
   EXECUTE IMMEDIATE FORMAT(
     'CREATE OR REPLACE TEMP TABLE current_target_tables AS %s',
