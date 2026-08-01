@@ -108,17 +108,19 @@ DECLARE repository_dataset STRING DEFAULT 'lineage_repository';
 DECLARE target_project_id STRING DEFAULT 'audeodb';
 DECLARE target_dataset STRING DEFAULT 'sample_ds';
 
--- Projects that hold physical source tables referenced by the target Views.
--- COLUMNS / COLUMN_FIELD_PATHS are dataset-scoped, so every same-region dataset
--- in these projects is enumerated from INFORMATION_SCHEMA.SCHEMATA and unioned.
--- Include the target project and every other project whose tables are sources.
--- All listed projects must be in job_region.
-DECLARE source_project_ids ARRAY<STRING> DEFAULT ['audeodb'];
-
--- Only datasets whose name matches this pattern are scanned for source
--- metadata (case-insensitive LIKE on schema_name). Replace KEYWORD with the
--- required substring, e.g. '%mart%'. Use '%' to scan every dataset.
-DECLARE dataset_name_filter STRING DEFAULT '%KEYWORD%';
+-- Projects that hold physical source tables, each with its own dataset-name
+-- filter (case-insensitive LIKE on schema_name), because the dataset naming
+-- keyword differs per project. COLUMNS / COLUMN_FIELD_PATHS / TABLES are
+-- dataset-scoped, so for each entry the matching same-region datasets are
+-- enumerated from INFORMATION_SCHEMA.SCHEMATA and unioned. Include the target
+-- project and every other project whose tables are sources; all must be in
+-- job_region. Use '%' as dataset_filter to scan every dataset in that project,
+-- and add multiple entries with the same project_id to apply several patterns.
+DECLARE source_project_filters
+  ARRAY<STRUCT<project_id STRING, dataset_filter STRING>>
+  DEFAULT [
+    STRUCT('audeodb' AS project_id, '%KEYWORD%' AS dataset_filter)
+  ];
 DECLARE job_region STRING DEFAULT 'asia-northeast1';
 DECLARE udf_project_id STRING DEFAULT 'audeodb';
 DECLARE udf_dataset STRING DEFAULT 'sample_ds';
@@ -325,22 +327,22 @@ BEGIN
   -- the resolver. TABLES (region-scoped) are unioned across the same projects
   -- for source object-type classification.
   --
-  -- These identifiers come from source_project_ids (validated below) and from
-  -- SCHEMATA (BigQuery dataset names are restricted to [A-Za-z0-9_]), so the
+  -- These identifiers come from source_project_filters (validated below) and
+  -- from SCHEMATA (BigQuery dataset names are restricted to [A-Za-z0-9_]), so the
   -- union SQL is assembled with FORMAT rather than render_dynamic_sql.
   -- Requirement: the executing account needs metadata read on every listed
   -- project, and all source datasets must be in job_region.
   -- --------------------------------------------------------------------------
-  ASSERT ARRAY_LENGTH(source_project_ids) > 0
-  AS 'source_project_ids must contain at least one project.';
+  ASSERT ARRAY_LENGTH(source_project_filters) > 0
+  AS 'source_project_filters must contain at least one entry.';
 
   FOR src IN (
-    SELECT DISTINCT project_id
-    FROM UNNEST(source_project_ids) AS project_id
+    SELECT project_id, dataset_filter
+    FROM UNNEST(source_project_filters)
   )
   DO
     ASSERT REGEXP_CONTAINS(src.project_id, r'^[A-Za-z0-9._:-]+$')
-    AS 'Invalid source_project_id.';
+    AS 'Invalid source project_id in source_project_filters.';
   END FOR;
 
   CREATE OR REPLACE TEMP TABLE source_datasets (
@@ -349,8 +351,8 @@ BEGIN
   );
 
   FOR src IN (
-    SELECT DISTINCT project_id
-    FROM UNNEST(source_project_ids) AS project_id
+    SELECT project_id, dataset_filter
+    FROM UNNEST(source_project_filters)
   )
   DO
     EXECUTE IMMEDIATE FORMAT(
@@ -361,7 +363,7 @@ BEGIN
       src.project_id,
       job_region
     )
-    USING LOWER(dataset_name_filter) AS pat;
+    USING LOWER(src.dataset_filter) AS pat;
   END FOR;
 
   SET source_dataset_count = (SELECT COUNT(*) FROM source_datasets);
@@ -381,7 +383,7 @@ BEGIN
       ),
       ' UNION ALL '
     )
-    FROM source_datasets
+    FROM (SELECT DISTINCT project_id, dataset_id FROM source_datasets)
   );
   EXECUTE IMMEDIATE FORMAT(
     'CREATE OR REPLACE TEMP TABLE current_target_tables AS %s',
@@ -397,7 +399,7 @@ BEGIN
       ),
       ' UNION ALL '
     )
-    FROM source_datasets
+    FROM (SELECT DISTINCT project_id, dataset_id FROM source_datasets)
   );
   EXECUTE IMMEDIATE FORMAT(
     'CREATE OR REPLACE TEMP TABLE current_target_columns AS %s',
@@ -413,7 +415,7 @@ BEGIN
       ),
       ' UNION ALL '
     )
-    FROM source_datasets
+    FROM (SELECT DISTINCT project_id, dataset_id FROM source_datasets)
   );
   EXECUTE IMMEDIATE FORMAT(
     'CREATE OR REPLACE TEMP TABLE current_target_column_field_paths AS %s',
