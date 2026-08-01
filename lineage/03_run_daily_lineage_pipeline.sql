@@ -1309,8 +1309,14 @@ BEGIN
       -- same BEGIN block to that block's EXCEPTION section.
       DECLARE analysis_id STRING DEFAULT GENERATE_UUID();
       DECLARE analyzed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP();
+      -- The full UDF result JSON can exceed the 1 MiB script-variable limit for
+      -- large Views, so it is held in the udf_result temp table cell (no such
+      -- limit) instead of a STRING variable. exported_json stays declared only
+      -- as a NULL placeholder for the EXCEPTION path. Small scalars extracted
+      -- from the result are kept in variables.
       DECLARE exported_json STRING;
       DECLARE udf_analysis_status STRING;
+      DECLARE udf_analysis_message STRING;
       DECLARE replacement_started BOOL DEFAULT FALSE;
       -- Captured @@error.* values for the EXCEPTION handler's dynamic DML.
       DECLARE err_message STRING;
@@ -1496,12 +1502,13 @@ BEGIN
         -- Phase 3: run the full parser and resolver with scoped metadata.
         -- --------------------------------------------------------------------
         SET sql_template = """
+        CREATE OR REPLACE TEMP TABLE udf_result AS
         SELECT `__UDF__`(
           @definition_text,
           @physical_columns_json,
           @options_json,
           @context_json
-        )
+        ) AS exported_json
       """;
 
       SET rendered_sql = render_dynamic_sql(
@@ -1520,8 +1527,9 @@ BEGIN
       ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
       AS 'Unresolved placeholder in lineage UDF SQL.';
 
+      -- The result JSON is materialized into udf_result (a table cell) rather
+      -- than a script variable, which is capped at 1 MiB.
       EXECUTE IMMEDIATE rendered_sql
-      INTO exported_json
       USING
         target.definition_text AS definition_text,
         physical_columns_json AS physical_columns_json,
@@ -1540,9 +1548,17 @@ BEGIN
           ) AS analyzed_at
         )) AS context_json;
 
-      SET udf_analysis_status = COALESCE(
-        JSON_VALUE(exported_json, '$.analysis.analysis_status'),
-        'UNKNOWN'
+      SET udf_analysis_status = (
+        SELECT COALESCE(
+          JSON_VALUE(exported_json, '$.analysis.analysis_status'),
+          'UNKNOWN'
+        )
+        FROM udf_result
+      );
+
+      SET udf_analysis_message = (
+        SELECT JSON_VALUE(exported_json, '$.analysis.message')
+        FROM udf_result
       );
 
       -- ----------------------------------------------------------------------
@@ -1569,10 +1585,11 @@ BEGIN
           JSON_VALUE(diagnostic_row, '$.diagnostic_json')
         ) AS diagnostic_json,
         analyzed_at AS analyzed_at
-      FROM UNNEST(
+      FROM udf_result,
+      UNNEST(
         COALESCE(
           JSON_QUERY_ARRAY(
-            exported_json,
+            udf_result.exported_json,
             '$.exported_tables.diagnostics'
           ),
           CAST([] AS ARRAY<STRING>)
@@ -1591,9 +1608,10 @@ BEGIN
           JSON_VALUE(path_row, '$.physical_table_name') AS physical_table_name,
           JSON_VALUE(path_row, '$.physical_column_name') AS physical_column_name,
           JSON_VALUE(path_row, '$.field_path') AS field_path
-        FROM UNNEST(
+        FROM udf_result,
+        UNNEST(
           JSON_QUERY_ARRAY(
-            exported_json,
+            udf_result.exported_json,
             '$.exported_tables.lineage_paths'
           )
         ) AS path_row
@@ -1606,9 +1624,10 @@ BEGIN
             AS output_scope_id,
           JSON_VALUE(output_row, '$.expression_text') AS expression_text,
           JSON_VALUE(output_row, '$.lineage_status') AS lineage_status
-        FROM UNNEST(
+        FROM udf_result,
+        UNNEST(
           JSON_QUERY_ARRAY(
-            exported_json,
+            udf_result.exported_json,
             '$.exported_tables.output_lineages'
           )
         ) AS output_row
@@ -2034,10 +2053,7 @@ BEGIN
             ),
             JSON_OBJECT(
               'udf_analysis_status', @p_udf_analysis_status,
-              'analysis_message', JSON_VALUE(
-                @p_exported_json,
-                '$.analysis.message'
-              )
+              'analysis_message', @p_analysis_message
             ),
             @p_analyzed_at
           )
@@ -2064,7 +2080,7 @@ BEGIN
           target.object_name AS p_object_name,
           target.object_type AS p_object_type,
           udf_analysis_status AS p_udf_analysis_status,
-          exported_json AS p_exported_json,
+          udf_analysis_message AS p_analysis_message,
           analyzed_at AS p_analyzed_at;
 
         SET sql_template = """
@@ -2117,15 +2133,15 @@ BEGIN
           target.object_type,
           udf_analysis_status,
           ARRAY_LENGTH(COALESCE(
-            JSON_QUERY_ARRAY(exported_json, '$.exported_tables.diagnostics'),
+            JSON_QUERY_ARRAY(udf_result.exported_json, '$.exported_tables.diagnostics'),
             CAST([] AS ARRAY<STRING>)
           )),
           ARRAY_LENGTH(COALESCE(
-            JSON_QUERY_ARRAY(exported_json, '$.exported_tables.output_lineages'),
+            JSON_QUERY_ARRAY(udf_result.exported_json, '$.exported_tables.output_lineages'),
             CAST([] AS ARRAY<STRING>)
           )),
           ARRAY_LENGTH(COALESCE(
-            JSON_QUERY_ARRAY(exported_json, '$.exported_tables.lineage_paths'),
+            JSON_QUERY_ARRAY(udf_result.exported_json, '$.exported_tables.lineage_paths'),
             CAST([] AS ARRAY<STRING>)
           )),
           diagnostic_code,
@@ -2134,14 +2150,15 @@ BEGIN
           message,
           diagnostic_json,
           SAFE.PARSE_JSON(JSON_VALUE(
-            exported_json,
+            udf_result.exported_json,
             '$.analysis.error_nodes_json'
           )),
-          exported_json
-        FROM staged_lineage_diagnostic;
+          udf_result.exported_json
+        FROM staged_lineage_diagnostic CROSS JOIN udf_result;
 
         IF (SELECT COUNT(*) FROM staged_lineage_diagnostic) = 0 THEN
-          INSERT INTO non_completed_udf_results VALUES (
+          INSERT INTO non_completed_udf_results
+          SELECT
             LOWER(target.object_project),
             LOWER(target.object_dataset),
             LOWER(target.object_name),
@@ -2149,24 +2166,24 @@ BEGIN
             udf_analysis_status,
             0,
             ARRAY_LENGTH(COALESCE(
-              JSON_QUERY_ARRAY(exported_json, '$.exported_tables.output_lineages'),
+              JSON_QUERY_ARRAY(udf_result.exported_json, '$.exported_tables.output_lineages'),
               CAST([] AS ARRAY<STRING>)
             )),
             ARRAY_LENGTH(COALESCE(
-              JSON_QUERY_ARRAY(exported_json, '$.exported_tables.lineage_paths'),
+              JSON_QUERY_ARRAY(udf_result.exported_json, '$.exported_tables.lineage_paths'),
               CAST([] AS ARRAY<STRING>)
             )),
             NULL,
             NULL,
             NULL,
-            JSON_VALUE(exported_json, '$.analysis.message'),
+            JSON_VALUE(udf_result.exported_json, '$.analysis.message'),
             NULL,
             SAFE.PARSE_JSON(JSON_VALUE(
-              exported_json,
+              udf_result.exported_json,
               '$.analysis.error_nodes_json'
             )),
-            exported_json
-          );
+            udf_result.exported_json
+          FROM udf_result;
         END IF;
 
         SET failed_object_count = failed_object_count + 1;
