@@ -106,7 +106,15 @@ BEGIN
 DECLARE repository_project_id STRING DEFAULT 'audeodb';
 DECLARE repository_dataset STRING DEFAULT 'lineage_repository';
 DECLARE target_project_id STRING DEFAULT 'audeodb';
-DECLARE target_dataset STRING DEFAULT 'sample_ds';
+-- Target datasets holding the Views to analyze (single target project).
+-- Provide exact dataset-id case; each is scanned via
+-- `target_project.dataset.INFORMATION_SCHEMA.VIEWS`.
+DECLARE target_datasets ARRAY<STRING> DEFAULT ['sample_ds'];
+-- Vestigial scalar retained only to satisfy render_dynamic_sql's __TARGET__
+-- argument (no longer referenced in templates); set from target_datasets below.
+DECLARE target_dataset STRING;
+DECLARE target_datasets_lower ARRAY<STRING>;
+DECLARE view_defs_union_sql STRING;
 
 -- Projects that hold physical source tables, each with an include and an
 -- exclude dataset-name pattern (case-insensitive LIKE on schema_name), because
@@ -250,8 +258,17 @@ ASSERT REGEXP_CONTAINS(repository_dataset, r'^[A-Za-z0-9_]+$')
 AS 'Invalid repository_dataset.';
 ASSERT REGEXP_CONTAINS(target_project_id, r'^[A-Za-z0-9._:-]+$')
 AS 'Invalid target_project_id.';
-ASSERT REGEXP_CONTAINS(target_dataset, r'^[A-Za-z0-9_]+$')
-AS 'Invalid target_dataset.';
+ASSERT ARRAY_LENGTH(target_datasets) > 0
+AS 'target_datasets must contain at least one dataset.';
+ASSERT (
+  SELECT LOGICAL_AND(REGEXP_CONTAINS(d, r'^[A-Za-z0-9_]+$'))
+  FROM UNNEST(target_datasets) AS d
+)
+AS 'Invalid target dataset name in target_datasets.';
+SET target_dataset = target_datasets[SAFE_OFFSET(0)];
+SET target_datasets_lower = ARRAY(
+  SELECT LOWER(d) FROM UNNEST(target_datasets) AS d
+);
 ASSERT REGEXP_CONTAINS(job_region, r'^[A-Za-z0-9-]+$')
 AS 'Invalid job_region.';
 ASSERT REGEXP_CONTAINS(udf_project_id, r'^[A-Za-z0-9._:-]+$')
@@ -296,41 +313,33 @@ AS 'configured_max_impact_rank must be between 1 and 1000.';
 BEGIN
   DECLARE step_started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP();
 
-  -- Dataset and region are identifiers, so metadata sources are materialized
-  -- through dynamic SQL into stable temporary tables.
-  SET sql_template = """
-    CREATE OR REPLACE TEMP TABLE current_view_definitions AS
-    SELECT
-      LOWER(table_catalog) AS object_project,
-      LOWER(table_schema) AS object_dataset,
-      LOWER(table_name) AS object_name,
-      'VIEW' AS object_type,
-      'VIEW_DEFINITION' AS generation_type,
-      'INFORMATION_SCHEMA.VIEWS' AS definition_source,
-      view_definition AS definition_text,
-      TO_HEX(SHA256(view_definition)) AS definition_hash
-    FROM `__TARGET__.INFORMATION_SCHEMA.VIEWS`
-    WHERE view_definition IS NOT NULL
-      AND TRIM(view_definition) != ''
-  """;
-
-  SET rendered_sql = render_dynamic_sql(
-    sql_template,
-    repository_project_id,
-    repository_dataset,
-    target_project_id,
-    target_dataset,
-    job_region,
-    udf_project_id,
-    udf_dataset,
-    udf_function_name,
-    repo_tables
+  -- View definitions are collected across every target dataset (single target
+  -- project) by unioning `target_project.dataset.INFORMATION_SCHEMA.VIEWS`.
+  -- Dataset ids keep their real case for the identifier; stored object_* are
+  -- lowercased for the registry.
+  SET view_defs_union_sql = (
+    SELECT STRING_AGG(
+      FORMAT(
+        'SELECT LOWER(table_catalog) AS object_project, '
+        || 'LOWER(table_schema) AS object_dataset, '
+        || 'LOWER(table_name) AS object_name, '
+        || '"VIEW" AS object_type, '
+        || '"VIEW_DEFINITION" AS generation_type, '
+        || '"INFORMATION_SCHEMA.VIEWS" AS definition_source, '
+        || 'view_definition AS definition_text, '
+        || 'TO_HEX(SHA256(view_definition)) AS definition_hash '
+        || 'FROM `%s.%s.INFORMATION_SCHEMA.VIEWS` '
+        || 'WHERE view_definition IS NOT NULL AND TRIM(view_definition) != ""',
+        target_project_id, d
+      ),
+      ' UNION ALL '
+    )
+    FROM UNNEST(target_datasets) AS d
   );
-
-  ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-  AS 'Unresolved placeholder in current_view_definitions SQL.';
-
-  EXECUTE IMMEDIATE rendered_sql;
+  EXECUTE IMMEDIATE FORMAT(
+    'CREATE OR REPLACE TEMP TABLE current_view_definitions AS %s',
+    view_defs_union_sql
+  );
 
   -- --------------------------------------------------------------------------
   -- Physical-source metadata scope
@@ -557,7 +566,7 @@ BEGIN
       AND registry.generation_type = 'VIEW_DEFINITION'
       AND registry.is_active = TRUE
       AND LOWER(registry.object_project) = LOWER(@target_project_id)
-      AND LOWER(registry.object_dataset) = LOWER(@target_dataset)
+      AND LOWER(registry.object_dataset) IN UNNEST(@target_datasets)
       AND NOT EXISTS (
         SELECT 1
         FROM current_view_definitions AS source
@@ -586,7 +595,7 @@ BEGIN
   EXECUTE IMMEDIATE rendered_sql
   USING
     target_project_id AS target_project_id,
-    target_dataset AS target_dataset;
+    target_datasets_lower AS target_datasets;
 
   SELECT
     'SYNC_VIEW_REGISTRY' AS step_name,
