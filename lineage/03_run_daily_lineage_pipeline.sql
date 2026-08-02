@@ -152,11 +152,15 @@ DECLARE configured_max_impact_rank INT64 DEFAULT 100;
 -- from INFORMATION_SCHEMA.JOBS) and process only Views. STEP 1/3/4 still run.
 DECLARE process_generated_tables BOOL DEFAULT TRUE;
 
--- Objects whose lowercased "project.dataset.name" matches ANY of these
--- regular expressions are kept in the registry but excluded from analysis
--- (REGEXP_CONTAINS = partial match). Registry names are lowercase, so write
--- patterns in lowercase (use (?i) for explicit case-insensitivity). Empty
--- array = exclude nothing. Example: ['_tmp$', '^proj\\.ds\\.v_debug'].
+-- Analysis target/skip filters on the lowercased "project.dataset.name"
+-- (REGEXP_CONTAINS = partial match; registry names are lowercase, so write
+-- patterns in lowercase, or use (?i) for case-insensitivity). Objects are
+-- filtered as: matches an include pattern (or include is empty) AND matches no
+-- exclude pattern. Non-matching objects stay in the registry but are not
+-- analyzed. Example: include ['^proj\\.mart\\.'], exclude ['_tmp$', 'v_debug'].
+--   include: empty array = analyze all objects; otherwise analyze only matches.
+--   exclude: empty array = exclude nothing.
+DECLARE include_object_patterns ARRAY<STRING> DEFAULT [];
 DECLARE exclude_object_patterns ARRAY<STRING> DEFAULT [];
 
 -- ----------------------------------------------------------------------------
@@ -1324,6 +1328,18 @@ BEGIN
       AND object_type IN ('VIEW', 'TABLE')
       -- When generated-table collection is off, analyze Views only.
       AND (@include_tables OR object_type = 'VIEW')
+      -- Include only objects matching a configured regex (empty = all).
+      AND (
+        ARRAY_LENGTH(@include_patterns) = 0
+        OR EXISTS (
+          SELECT 1
+          FROM UNNEST(@include_patterns) AS pattern
+          WHERE REGEXP_CONTAINS(
+            LOWER(object_project || '.' || object_dataset || '.' || object_name),
+            pattern
+          )
+        )
+      )
       -- Exclude objects matching any configured regex (on project.dataset.name).
       AND NOT EXISTS (
         SELECT 1
@@ -1354,6 +1370,7 @@ BEGIN
   EXECUTE IMMEDIATE rendered_sql
   USING
     process_generated_tables AS include_tables,
+    include_object_patterns AS include_patterns,
     exclude_object_patterns AS exclude_patterns;
 
   -- Snapshot the active VIEW registry once so the per-object staging query can
