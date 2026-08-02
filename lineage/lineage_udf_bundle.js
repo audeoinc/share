@@ -1385,6 +1385,10 @@ class ClauseParser {
       return this.#createSingleTokenClause("QUALIFY");
     }
 
+    if (this.reader.matches("WINDOW")) {
+      return this.#createSingleTokenClause("WINDOW");
+    }
+
     if (this.reader.matches("LIMIT")) {
       return this.#createSingleTokenClause("LIMIT");
     }
@@ -2483,6 +2487,10 @@ class ExpressionParser {
       return this.#parseIsExpression(leftNode);
     }
 
+    if (this.#matches("LIKE")) {
+      return this.#parseLikeExpression(leftNode, false);
+    }
+
     if (this.#matches("NOT")) {
       const markedIndex = this.index;
       this.#consume();
@@ -2497,10 +2505,41 @@ class ExpressionParser {
         return this.#parseBetweenExpression(leftNode, true);
       }
 
+      if (this.#matches("LIKE")) {
+        return this.#parseLikeExpression(leftNode, true);
+      }
+
       this.index = markedIndex;
     }
 
     return leftNode;
+  }
+
+  /*
+   * `expr [NOT] LIKE pattern` を解析する。
+   *
+   * BigQueryの数量子付き `LIKE ANY|SOME|ALL (...)` にも対応する。数量子形は
+   * パターン集合をINと同じ括弧内式リストとして取り込み、lineage上は左辺と
+   * 各パターン式の依存を保持できれば十分なのでIN式として表現する。
+   * 通常形は比較式(COMPARISON_EXPRESSION)として表現する。
+   */
+  #parseLikeExpression(leftNode, isNegated) {
+    const operatorToken = this.#consume();
+    const operatorText = isNegated ? "NOT LIKE" : operatorToken.normalized_token;
+
+    if (this.#matchesAny(["ANY", "SOME", "ALL"])) {
+      this.#consume();
+      return this.#parseInExpression(leftNode, isNegated);
+    }
+
+    const rightNode = this.#parseConcatenationExpression();
+
+    return AstFactory.createBinary(
+      NodeType.COMPARISON_EXPRESSION,
+      operatorText,
+      leftNode,
+      rightNode
+    );
   }
 
   #parseConcatenationExpression() {
@@ -2597,6 +2636,14 @@ class ExpressionParser {
 
     if (token.token === "(") {
       return this.#parseParenthesizedExpression();
+    }
+
+    if (this.#isTypedLiteralPrefix(token)) {
+      return this.#parseTypedLiteral();
+    }
+
+    if (token.normalized_token === "INTERVAL") {
+      return this.#parseIntervalExpression();
     }
 
     if (this.#isLiteralToken(token)) {
@@ -3020,6 +3067,23 @@ class ExpressionParser {
   }
 
   #parseInExpression(leftNode, negated) {
+    /*
+     * `x IN UNNEST(array_expr)` 形式。配列式の依存を保持する。
+     */
+    if (this.#matches("UNNEST")) {
+      this.#consume();
+      const unnestOpen = this.#expect("(", false);
+      const arrayNode = this.#parseOrExpression();
+      const unnestClose = this.#expect(")", false);
+      const unnestValues = AstFactory.createExpressionList(
+        [arrayNode],
+        unnestOpen,
+        unnestClose
+      );
+
+      return AstFactory.createIn(leftNode, unnestValues, negated);
+    }
+
     const openToken = this.#expect("(", false);
 
     if (this.#matches("SELECT") || this.#matches("WITH")) {
@@ -3090,6 +3154,64 @@ class ExpressionParser {
     }
 
     return AstFactory.createLiteral(token, literalType, value);
+  }
+
+  /*
+   * 型付きリテラル(DATE '2020-01-01' / TIMESTAMP '...' / NUMERIC '1.5' 等)か
+   * どうかを判定する。型キーワードの直後が文字列リテラルの場合のみ真。
+   * DATE(...) のような関数呼び出しと区別するため、次Tokenが "(" の場合は
+   * 型付きリテラルとしない。
+   */
+  #isTypedLiteralPrefix(token) {
+    const typedLiteralKeywords = new Set([
+      "DATE", "DATETIME", "TIME", "TIMESTAMP",
+      "NUMERIC", "BIGNUMERIC", "DECIMAL", "BIGDECIMAL",
+      "BYTES", "JSON", "RANGE"
+    ]);
+
+    return typedLiteralKeywords.has(token.normalized_token) &&
+      this.#peek(1)?.token_type === "STRING";
+  }
+
+  #parseTypedLiteral() {
+    const typeToken = this.#consume();
+    const literalToken = this.#consume();
+
+    return AstFactory.createLiteral(
+      literalToken,
+      typeToken.normalized_token,
+      literalToken.token
+    );
+  }
+
+  /*
+   * INTERVAL 式を解析する。
+   *
+   * 対応形:
+   *   INTERVAL 1 DAY
+   *   INTERVAL '1' DAY
+   *   INTERVAL col HOUR            -- 値が列参照なら依存として保持される
+   *   INTERVAL '1:2:3' HOUR TO SECOND
+   *
+   * lineage上は値部の依存を保持できれば十分なため、値部の式ノードを返し、
+   * 後続の単位(および TO 単位)は消費して構文を成立させる。
+   */
+  #parseIntervalExpression() {
+    this.#consume();
+
+    const valueNode = this.#parseUnaryExpression();
+
+    if (this.#current() && this.#isIdentifierToken(this.#current())) {
+      this.#consume();
+
+      if (this.#matches("TO") && this.#peek(1) &&
+          this.#isIdentifierToken(this.#peek(1))) {
+        this.#consume();
+        this.#consume();
+      }
+    }
+
+    return valueNode;
   }
 
   #parseRawSubquery(openToken, subqueryKind = "SCALAR") {
@@ -3177,7 +3299,7 @@ class ExpressionParser {
 
   #isIdentifierToken(token) {
     const reserved = [
-      "AND", "OR", "NOT", "IN", "BETWEEN", "IS", "NULL", "TRUE", "FALSE",
+      "AND", "OR", "NOT", "IN", "BETWEEN", "IS", "LIKE", "NULL", "TRUE", "FALSE",
       "CASE", "WHEN", "THEN", "ELSE", "END", "EXISTS",
       "OVER", "PARTITION", "ORDER", "BY", "ROWS", "RANGE", "GROUPS",
       "ASC", "DESC", "NULLS", "FIRST", "LAST"
@@ -3642,6 +3764,27 @@ class ColumnResolver {
       });
     }
 
+    /*
+     * UNNEST(...) AS v の値そのもの(素の `v`)への参照。UNNESTの別名は要素の
+     * 値列そのものなので、同名の別名を持つUNNESTソースへ解決する。これを
+     * 行わないと、物理テーブルとUNNESTの両方が候補になり AMBIGUOUS →
+     * PHYSICAL_COLUMN_NOT_FOUND(誤ったERROR)になっていた。
+     */
+    const unnestValueSource = this.#findUnnestValueSource(
+      scope.scope_id,
+      columnName
+    );
+
+    if (unnestValueSource) {
+      return this.#createReferenceResult(node, context, scope, {
+        qualifier: null,
+        columnName,
+        status: "SOURCE_RESOLVED",
+        source: unnestValueSource,
+        candidateSourceIds: [unnestValueSource.source_id]
+      });
+    }
+
     const candidateSources = this.#findUnqualifiedCandidates(
       sourceResolution,
       scope.scope_id,
@@ -3726,6 +3869,34 @@ class ColumnResolver {
    * PHYSICAL_TABLE / UNNESTは現段階でスキーマ不明のため、候補から除外できない。
    * 現在scopeに候補が無い場合だけ親scopeへ進み、相関参照の土台とする。
    */
+  /*
+   * scope連鎖の中から、別名が columnName に一致する UNNEST ソースを探す。
+   * 一致が1つだけのときにその要素値参照として解決する(複数なら曖昧)。
+   */
+  #findUnnestValueSource(startScopeId, columnName) {
+    let currentScope = this.scopeById.get(startScopeId);
+
+    while (currentScope) {
+      const matches = currentScope.sources.filter((source) => {
+        return source.source_type === "UNNEST" &&
+          (this.#normalizeName(source.source_alias) === columnName ||
+           this.#normalizeName(source.offset_alias) === columnName);
+      });
+
+      if (matches.length === 1) {
+        return matches[0];
+      }
+
+      if (matches.length > 1) {
+        return null;
+      }
+
+      currentScope = this.scopeById.get(currentScope.parent_scope_id);
+    }
+
+    return null;
+  }
+
   #findUnqualifiedCandidates(sourceResolution, startScopeId, columnName) {
     let currentScope = this.scopeById.get(startScopeId);
 
@@ -4153,7 +4324,13 @@ class FromParser {
       nameParts.push(this.reader.consume().normalized_token);
     }
 
+    /*
+     * TABLESAMPLE SYSTEM (n PERCENT) はサンプリング指定で列系統に影響しない。
+     * 別名の前後どちらにも書けるため、両位置で読み飛ばす。
+     */
+    this.#skipTableSampleClause();
     const aliasInfo = this.#parseAlias();
+    this.#skipTableSampleClause();
     const endToken = aliasInfo.alias_token || this.reader.previous();
 
     return {
@@ -4165,6 +4342,39 @@ class FromParser {
       start_token_seq: startToken.token_seq,
       end_token_seq: endToken.token_seq
     };
+  }
+
+  /*
+   * TABLESAMPLE [method] ( ... ) を読み飛ばす。存在しなければ何もしない。
+   */
+  #skipTableSampleClause() {
+    if (!this.reader.matches("TABLESAMPLE")) {
+      return;
+    }
+
+    this.reader.consume();
+
+    if (this.reader.hasCurrent() && !this.reader.matches("(", false)) {
+      this.reader.consume();
+    }
+
+    if (this.reader.matches("(", false)) {
+      let depth = 0;
+
+      while (this.reader.hasCurrent()) {
+        const token = this.reader.consume();
+
+        if (token.token === "(") {
+          depth++;
+        } else if (token.token === ")") {
+          depth--;
+
+          if (depth === 0) {
+            break;
+          }
+        }
+      }
+    }
   }
 
   /**
@@ -4193,13 +4403,35 @@ class FromParser {
     this.reader.consume();
 
     const aliasInfo = this.#parseAlias();
-    const endToken = aliasInfo.alias_token || closeToken;
+    let endToken = aliasInfo.alias_token || closeToken;
+
+    /*
+     * UNNEST(...) [AS value] WITH OFFSET [AS offset] のオフセット句を取り込む。
+     * offset列は配列インデックスで物理列を持たないため、Token範囲の
+     * 終端更新のみ行い、構文を成立させる。
+     */
+    let offsetAlias = null;
+
+    if (this.reader.matches("WITH") &&
+        this.reader.nextToken()?.normalized_token === "OFFSET") {
+      this.reader.consume();
+      const offsetToken = this.reader.consume();
+      endToken = offsetToken;
+
+      const offsetAliasInfo = this.#parseAlias();
+
+      if (offsetAliasInfo.alias_token) {
+        offsetAlias = offsetAliasInfo.alias;
+        endToken = offsetAliasInfo.alias_token;
+      }
+    }
 
     return {
       source_type: "UNNEST",
       expression,
       alias: aliasInfo.alias,
       alias_type: aliasInfo.alias_type,
+      offset_alias: offsetAlias,
       start_token_seq: unnestToken.token_seq,
       end_token_seq: endToken.token_seq
     };
@@ -4599,7 +4831,8 @@ class FromParser {
     const reserved = [
       "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "OUTER",
       "ON", "USING", "PIVOT", "UNPIVOT",
-      "WHERE", "GROUP", "HAVING", "QUALIFY", "ORDER", "LIMIT"
+      "WHERE", "GROUP", "HAVING", "QUALIFY", "ORDER", "LIMIT",
+      "WITH", "WINDOW", "UNION", "INTERSECT", "EXCEPT", "TABLESAMPLE"
     ];
 
     return !reserved.includes(token.normalized_token);
@@ -5734,6 +5967,66 @@ function tokenize(sqlText) {
     }
 
     /*
+     * 文字列リテラル接頭辞を読み取る。
+     *
+     * BigQueryは r'...'(raw)、b'...'(bytes)、および rb/br の組み合わせを
+     * 文字列リテラルの接頭辞として認める。接頭辞の直後(空白なし)に引用符が
+     * 続く場合のみ文字列として扱い、それ以外は通常の識別子として処理する。
+     * normalized_tokenは接頭辞と引用符を除いた中身にする。
+     */
+    {
+      const twoChar = sqlText.substr(index, 2).toLowerCase();
+      const oneChar = character.toLowerCase();
+      let prefixLength = 0;
+
+      if ((twoChar === "rb" || twoChar === "br") &&
+          (sqlText[index + 2] === "'" || sqlText[index + 2] === '"')) {
+        prefixLength = 2;
+      } else if ((oneChar === "r" || oneChar === "b") &&
+          (sqlText[index + 1] === "'" || sqlText[index + 1] === '"')) {
+        prefixLength = 1;
+      }
+
+      if (prefixLength > 0) {
+        let value = "";
+
+        for (let offset = 0; offset < prefixLength; offset++) {
+          const current = sqlText[index];
+          value += current;
+          advanceCharacter(current);
+        }
+
+        const quoteCharacter = sqlText[index];
+        value += quoteCharacter;
+        advanceCharacter(quoteCharacter);
+
+        while (index < sqlText.length) {
+          const current = sqlText[index];
+          value += current;
+          advanceCharacter(current);
+
+          if (current === quoteCharacter && sqlText[index] === quoteCharacter) {
+            const escapedQuote = sqlText[index];
+            value += escapedQuote;
+            advanceCharacter(escapedQuote);
+            continue;
+          }
+
+          if (current === quoteCharacter) {
+            break;
+          }
+        }
+
+        const normalizedValue = value.length >= prefixLength + 2
+          ? value.substring(prefixLength + 1, value.length - 1)
+          : value;
+
+        pushToken(value, normalizedValue, "STRING", startLine, startColumn);
+        continue;
+      }
+    }
+
+    /*
      * 通常識別子またはKeywordを読み取る。
      *
      * 最初の文字が識別子開始条件を満たした後、識別子として継続できる
@@ -5774,6 +6067,26 @@ function tokenize(sqlText) {
 
         value += current;
         advanceCharacter(current);
+      }
+
+      /*
+       * 指数表記(例: 1.5e3, 2E-4)を取り込む。eまたはEの直後に符号か数字が
+       * 続く場合のみ指数部として扱い、それ以外(例: 1 e AS ...)は別Tokenへ残す。
+       */
+      if ((sqlText[index] === "e" || sqlText[index] === "E") &&
+          /[0-9+\-]/.test(sqlText[index + 1] || "")) {
+        value += sqlText[index];
+        advanceCharacter(sqlText[index]);
+
+        if (sqlText[index] === "+" || sqlText[index] === "-") {
+          value += sqlText[index];
+          advanceCharacter(sqlText[index]);
+        }
+
+        while (index < sqlText.length && /[0-9]/.test(sqlText[index])) {
+          value += sqlText[index];
+          advanceCharacter(sqlText[index]);
+        }
       }
 
       pushToken(value, value, "NUMBER", startLine, startColumn);
@@ -6862,29 +7175,46 @@ class QueryParser {
     const operations = [];
     let branchStartIndex = 0;
 
+    const setOperators = new Set(["UNION", "INTERSECT", "EXCEPT"]);
+
     for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex++) {
       const token = tokens[tokenIndex];
 
-      if (token.paren_depth !== baseDepth || token.normalized_token !== "UNION") {
+      if (token.paren_depth !== baseDepth ||
+          !setOperators.has(token.normalized_token)) {
+        continue;
+      }
+
+      const nextToken = tokens[tokenIndex + 1];
+      const hasModifier = nextToken?.paren_depth === baseDepth &&
+        (nextToken.normalized_token === "ALL" ||
+         nextToken.normalized_token === "DISTINCT");
+
+      /*
+       * INTERSECT / EXCEPT はセット演算では必ず DISTINCT|ALL を伴う。
+       * 修飾子が無い EXCEPT は `SELECT * EXCEPT(col)` の列除外構文なので、
+       * セット演算として分割しない(UNIONは従来どおり修飾子省略を許容)。
+       */
+      if (token.normalized_token !== "UNION" && !hasModifier) {
         continue;
       }
 
       const branch = tokens.slice(branchStartIndex, tokenIndex);
-      if (branch.length === 0) throw new SyntaxError("QueryParser: UNION左辺が空です。");
+      if (branch.length === 0) {
+        throw new SyntaxError("QueryParser: set operation の左辺が空です。");
+      }
       branches.push(this.#normalizeTokenDepth(branch));
 
       let modifier = "DISTINCT";
       let nextIndex = tokenIndex + 1;
-      const nextToken = tokens[nextIndex];
 
-      if (nextToken?.paren_depth === baseDepth &&
-          (nextToken.normalized_token === "ALL" || nextToken.normalized_token === "DISTINCT")) {
+      if (hasModifier) {
         modifier = nextToken.normalized_token;
         nextIndex++;
       }
 
       operations.push({
-        operator: "UNION",
+        operator: token.normalized_token,
         modifier,
         start_token_seq: token.token_seq
       });
@@ -7283,6 +7613,7 @@ class SourceResolver {
       source_type: sourceType,
       source_name: sourceName,
       source_alias: alias,
+      offset_alias: parsedSource.offset_alias ?? null,
       resolved_source_name: sourceName,
       cte_query_scope_id: null,
       subquery_scope_id: null,
