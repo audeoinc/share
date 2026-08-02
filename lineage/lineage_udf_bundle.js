@@ -8918,11 +8918,82 @@ class PhysicalColumnResolver {
       }
     }
 
+    /*
+     * STRUCT フィールドアクセス(例: geo.region)。ColumnResolverは修飾子
+     * `geo` をソース別名とみなし、一致するソースが無いと UNRESOLVED_SOURCE に
+     * する。ここで `修飾子.列名` を field_path として、スコープ内の物理ソースの
+     * メタデータ(COLUMN_FIELD_PATHS由来)に一致するネスト列があれば解決する。
+     */
+    if (reference.qualifier) {
+      const structResolved = this.#resolveStructFieldPathReference(reference);
+
+      if (structResolved) {
+        return structResolved;
+      }
+    }
+
     return this.#createPhysicalReference(reference, {
       physicalStatus: reference.resolution_status,
       sourceId: reference.source_id,
       physicalColumns: []
     });
+  }
+
+  /*
+   * `qualifier.column_name`(および `qualifier` が複数階層の場合はそのまま連結)
+   * を field_path とみなし、スコープ内の物理ソースから一致するネスト列を探す。
+   * 該当ソースが1つなら解決、複数ならAMBIGUOUS、無ければnull。
+   */
+  #resolveStructFieldPathReference(reference) {
+    /*
+     * reference_name には書かれたままのフルパスが入る(例:
+     * geo.region / device.web_info.browser)。qualifier/column_name は
+     * 先頭2要素しか持たないため、深いネストも拾えるフルパスを優先する。
+     */
+    const fieldPath = this.#normalizeName(
+      reference.reference_name ||
+      `${reference.qualifier}.${reference.column_name}`
+    );
+
+    if (!fieldPath || !fieldPath.includes(".")) {
+      return null;
+    }
+
+    const sources = this.sourcesByScopeId.get(reference.scope_id) || [];
+    const matches = [];
+
+    for (const source of sources) {
+      if (source.source_type !== "PHYSICAL_TABLE") {
+        continue;
+      }
+
+      const columns = this.#getColumnsForSource(source).filter(
+        (column) => this.#normalizeName(column.field_path) === fieldPath
+      );
+
+      if (columns.length > 0) {
+        matches.push({ source, columns });
+      }
+    }
+
+    if (matches.length === 1) {
+      return this.#createPhysicalReference(reference, {
+        physicalStatus: "PHYSICAL_RESOLVED",
+        sourceId: matches[0].source.source_id,
+        physicalColumns: matches[0].columns
+      });
+    }
+
+    if (matches.length > 1) {
+      return this.#createPhysicalReference(reference, {
+        physicalStatus: "PHYSICAL_AMBIGUOUS",
+        sourceId: null,
+        physicalColumns: matches.flatMap((item) => item.columns),
+        candidateSourceIds: matches.map((item) => item.source.source_id)
+      });
+    }
+
+    return null;
   }
 
 
@@ -9112,10 +9183,20 @@ class PhysicalColumnResolver {
 
   #resolveAgainstPhysicalSource(reference, sourceId) {
     const source = this.sourceById.get(sourceId);
-    const matchingColumns = this.#findPhysicalColumns(
-      source,
-      reference.column_name
-    );
+
+    /*
+     * ソース別名で修飾された STRUCT フィールドアクセス(例: t.geo.region)。
+     * reference_name から先頭の別名/テーブル名を取り除いた残りがネストパス
+     * (dotを含む)なら、その field_path に厳密一致する列だけへ解決する。
+     * こうしないと column_name 一致で geo(トップ)と geo.region の両方が
+     * 依存として付いてしまう。
+     */
+    const accessPath = this.#deriveStructAccessPath(reference, source);
+    const matchingColumns = accessPath && accessPath.includes(".")
+      ? this.#getColumnsForSource(source).filter(
+          (column) => this.#normalizeName(column.field_path) === accessPath
+        )
+      : this.#findPhysicalColumns(source, reference.column_name);
 
     return this.#createPhysicalReference(reference, {
       physicalStatus: matchingColumns.length > 0
@@ -9126,6 +9207,34 @@ class PhysicalColumnResolver {
       sourceId,
       physicalColumns: matchingColumns
     });
+  }
+
+  /*
+   * reference_name から、ソースを指す先頭の別名/テーブル名要素を取り除いた
+   * アクセスパスを返す。t.geo.region -> geo.region、geo.region -> geo.region。
+   */
+  #deriveStructAccessPath(reference, source) {
+    const rawName = reference.reference_name || reference.column_name;
+    const parts = this.#normalizeName(rawName || "").split(".").filter(Boolean);
+
+    if (parts.length <= 1) {
+      return parts.join(".");
+    }
+
+    const aliasCandidates = new Set(
+      [
+        source?.source_alias,
+        ...(source?.source_name ? source.source_name.split(".") : [])
+      ]
+        .filter(Boolean)
+        .map((value) => this.#normalizeName(value))
+    );
+
+    if (aliasCandidates.has(parts[0])) {
+      parts.shift();
+    }
+
+    return parts.join(".");
   }
 
   /**
