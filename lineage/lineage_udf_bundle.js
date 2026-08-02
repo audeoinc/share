@@ -8400,6 +8400,7 @@ class PhysicalColumnResolver {
 
     this.nextPhysicalReferenceId = 1;
     this.nextExpandedOutputColumnId = 1;
+    this.missingWildcardMetadata = new Map();
     this.#buildMetadataIndex();
     this.#buildResolutionIndexes(context);
 
@@ -8871,6 +8872,8 @@ class PhysicalColumnResolver {
       }
 
       if (source.source_type === "PHYSICAL_TABLE") {
+        this.#recordMissingWildcardMetadata(source, reference);
+
         for (const column of this.#getTopLevelColumns(source)) {
           result.push({
             ...column,
@@ -8971,6 +8974,8 @@ class PhysicalColumnResolver {
         }
 
         if (nestedSource.source_type === "PHYSICAL_TABLE") {
+          this.#recordMissingWildcardMetadata(nestedSource, wildcardReference);
+
           for (const column of this.#getTopLevelColumns(nestedSource)) {
             columnsForThisWildcard.push({
               output_column_name: column.column_name,
@@ -9059,6 +9064,41 @@ class PhysicalColumnResolver {
 
   #hasMetadataForSource(source) {
     return this.#getColumnsForSource(source).length > 0;
+  }
+
+  /*
+   * ワイルドカード(*)の展開先が物理テーブルなのに、その列メタデータが
+   * 収集集合に1件も無い場合を記録する。明示列参照は
+   * PHYSICAL_METADATA_NOT_FOUND で警告されるが、* 展開は静かに0列になる
+   * ため、UNION等では下流で列が原因不明のまま未解決になっていた。
+   * source_name単位で重複排除する。
+   */
+  #recordMissingWildcardMetadata(source, positionReference) {
+    if (!source || source.source_type !== "PHYSICAL_TABLE") {
+      return;
+    }
+
+    if (this.#hasMetadataForSource(source)) {
+      return;
+    }
+
+    const key = this.#normalizeName(source.source_name);
+
+    if (!key || this.missingWildcardMetadata.has(key)) {
+      return;
+    }
+
+    this.missingWildcardMetadata.set(key, {
+      source_id: source.source_id ?? null,
+      source_name: source.source_name ?? null,
+      resolved_source_name:
+        source.resolved_source_name ?? source.source_name ?? null,
+      scope_id: positionReference?.scope_id ?? source.scope_id ?? null,
+      start_token_seq:
+        positionReference?.start_token_seq ?? source.start_token_seq ?? null,
+      end_token_seq:
+        positionReference?.end_token_seq ?? source.end_token_seq ?? null
+    });
   }
 
   #createPhysicalReference(reference, details) {
@@ -9205,6 +9245,27 @@ class PhysicalColumnResolver {
           }
         );
       }
+    }
+
+    for (const entry of this.missingWildcardMetadata.values()) {
+      const displayName = entry.resolved_source_name || entry.source_name;
+
+      context.addDiagnostic(
+        "WARNING",
+        "SOURCE_METADATA_NOT_COLLECTED",
+        `Columns for source "${displayName}" are not in the collected ` +
+        "metadata, so the wildcard (*) over it could not be expanded. Add its " +
+        "project/dataset to the metadata collection (source_project_filters / " +
+        "dataset include-exclude filters), then re-run.",
+        {
+          source_id: entry.source_id,
+          source_name: entry.source_name,
+          resolved_source_name: entry.resolved_source_name,
+          scope_id: entry.scope_id,
+          start_token_seq: entry.start_token_seq,
+          end_token_seq: entry.end_token_seq
+        }
+      );
     }
 
     for (const generatedColumn of result.unpivot_generated_columns || []) {
