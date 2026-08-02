@@ -152,6 +152,13 @@ DECLARE configured_max_impact_rank INT64 DEFAULT 100;
 -- from INFORMATION_SCHEMA.JOBS) and process only Views. STEP 1/3/4 still run.
 DECLARE process_generated_tables BOOL DEFAULT TRUE;
 
+-- Objects whose lowercased "project.dataset.name" matches ANY of these
+-- regular expressions are kept in the registry but excluded from analysis
+-- (REGEXP_CONTAINS = partial match). Registry names are lowercase, so write
+-- patterns in lowercase (use (?i) for explicit case-insensitivity). Empty
+-- array = exclude nothing. Example: ['_tmp$', '^proj\\.ds\\.v_debug'].
+DECLARE exclude_object_patterns ARRAY<STRING> DEFAULT [];
+
 -- ----------------------------------------------------------------------------
 -- Repository table naming
 --
@@ -1317,6 +1324,15 @@ BEGIN
       AND object_type IN ('VIEW', 'TABLE')
       -- When generated-table collection is off, analyze Views only.
       AND (@include_tables OR object_type = 'VIEW')
+      -- Exclude objects matching any configured regex (on project.dataset.name).
+      AND NOT EXISTS (
+        SELECT 1
+        FROM UNNEST(@exclude_patterns) AS pattern
+        WHERE REGEXP_CONTAINS(
+          LOWER(object_project || '.' || object_dataset || '.' || object_name),
+          pattern
+        )
+      )
   """;
 
   SET rendered_sql = render_dynamic_sql(
@@ -1336,7 +1352,9 @@ BEGIN
   AS 'Unresolved placeholder in changed-definitions materialization SQL.';
 
   EXECUTE IMMEDIATE rendered_sql
-  USING process_generated_tables AS include_tables;
+  USING
+    process_generated_tables AS include_tables,
+    exclude_object_patterns AS exclude_patterns;
 
   -- Snapshot the active VIEW registry once so the per-object staging query can
   -- classify source object types without referencing the (configurable-named)
