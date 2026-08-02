@@ -8464,8 +8464,11 @@ class PhysicalColumnResolver {
 
   #buildResolutionIndexes(context) {
     this.sourceById = new Map();
+    this.sourcesByScopeId = new Map();
 
     for (const scope of context.source_resolution.scopes) {
+      this.sourcesByScopeId.set(scope.scope_id, scope.sources);
+
       for (const source of scope.sources) {
         this.sourceById.set(source.source_id, source);
       }
@@ -8514,7 +8517,7 @@ class PhysicalColumnResolver {
       reference.resolution_status === "AMBIGUOUS" &&
       reference.candidate_source_ids.length > 0
     ) {
-      return this.#resolveAmbiguousReference(reference);
+      return this.#resolveAmbiguousReference(reference, context);
     }
 
     if (reference.source_type === "CTE" || reference.source_type === "SUBQUERY") {
@@ -8527,6 +8530,29 @@ class PhysicalColumnResolver {
 
     if (reference.source_type === "UNNEST") {
       return this.#resolveCorrelatedUnnestReference(reference);
+    }
+
+    /*
+     * 遅延ディスアンビグエーション。
+     *
+     * ColumnResolverは物理スキーマを持たず、派生ソース(CTE/サブクエリ)の
+     * 公開列を * カスケード越しには把握できないため、JOINを含むスコープで
+     * 修飾なし列がどのソース由来か決められず UNRESOLVED_COLUMN のまま
+     * 候補ゼロになることがある(例: SELECT aid ... FROM cte c JOIN (..) f)。
+     * ここでは PhysicalColumnResolver が計算できる派生列一覧を使い、
+     * スコープ内で当該列を公開するソースが1つだけなら解決する。
+     */
+    if (!reference.qualifier &&
+        (reference.resolution_status === "UNRESOLVED_COLUMN" ||
+         reference.resolution_status === "AMBIGUOUS")) {
+      const recovered = this.#resolveUnqualifiedAgainstScopeSources(
+        reference,
+        context
+      );
+
+      if (recovered) {
+        return recovered;
+      }
     }
 
     return this.#createPhysicalReference(reference, {
@@ -8635,38 +8661,124 @@ class PhysicalColumnResolver {
    * ここでは各候補テーブルの実カラムを確認し、列を持つSourceが1件だけなら
    * 曖昧性を解消する。複数テーブルに同名列がある場合は曖昧なまま保持する。
    */
-  #resolveAmbiguousReference(reference) {
-    const matchedCandidates = [];
+  #resolveAmbiguousReference(reference, context) {
+    return this.#disambiguateAcrossSources(
+      reference,
+      reference.candidate_source_ids,
+      context
+    );
+  }
 
-    for (const sourceId of reference.candidate_source_ids) {
+  /*
+   * 修飾なし列を、スコープのFROMソース全体から解決する。
+   * ColumnResolverが候補を出せなかった(候補ゼロ)場合の救済に使う。
+   */
+  #resolveUnqualifiedAgainstScopeSources(reference, context) {
+    const sources = this.sourcesByScopeId.get(reference.scope_id) || [];
+    const sourceIds = sources.map((source) => source.source_id);
+
+    if (sourceIds.length === 0) {
+      return null;
+    }
+
+    const resolved = this.#disambiguateAcrossSources(
+      reference,
+      sourceIds,
+      context
+    );
+
+    /*
+     * スコープ内のどのソースにも当該列が無い場合は解決したことにしない
+     * (相関参照など別スコープ由来の可能性を潰さない)。
+     */
+    if (resolved.physical_resolution_status === "PHYSICAL_RESOLVED" ||
+        resolved.physical_resolution_status === "DERIVED_SOURCE_RESOLVED") {
+      return resolved;
+    }
+
+    return null;
+  }
+
+  /*
+   * 物理テーブルと派生ソース(CTE/サブクエリ)の両方を対象に、指定列を
+   * 公開するソースを探して解決する。該当が1つなら解決、複数ならAMBIGUOUS、
+   * 皆無なら COLUMN_NOT_FOUND。
+   */
+  #disambiguateAcrossSources(reference, candidateSourceIds, context) {
+    const physicalMatches = [];
+    const derivedMatches = [];
+
+    for (const sourceId of candidateSourceIds) {
       const source = this.sourceById.get(sourceId);
 
-      if (!source || source.source_type !== "PHYSICAL_TABLE") {
+      if (!source) {
         continue;
       }
 
-      const columns = this.#findPhysicalColumns(source, reference.column_name);
+      if (source.source_type === "PHYSICAL_TABLE") {
+        const columns = this.#findPhysicalColumns(source, reference.column_name);
 
-      if (columns.length > 0) {
-        matchedCandidates.push({ source, columns });
+        if (columns.length > 0) {
+          physicalMatches.push({ source, columns });
+        }
+
+        continue;
+      }
+
+      if (source.source_type === "CTE" || source.source_type === "SUBQUERY") {
+        if (this.#derivedSourceExposesColumn(
+          source,
+          reference.column_name,
+          context
+        )) {
+          derivedMatches.push({ source });
+        }
       }
     }
 
-    if (matchedCandidates.length === 1) {
+    const totalMatches = physicalMatches.length + derivedMatches.length;
+
+    if (totalMatches === 1) {
+      if (physicalMatches.length === 1) {
+        return this.#createPhysicalReference(reference, {
+          physicalStatus: "PHYSICAL_RESOLVED",
+          sourceId: physicalMatches[0].source.source_id,
+          physicalColumns: physicalMatches[0].columns
+        });
+      }
+
       return this.#createPhysicalReference(reference, {
-        physicalStatus: "PHYSICAL_RESOLVED",
-        sourceId: matchedCandidates[0].source.source_id,
-        physicalColumns: matchedCandidates[0].columns
+        physicalStatus: "DERIVED_SOURCE_RESOLVED",
+        sourceId: derivedMatches[0].source.source_id,
+        physicalColumns: []
       });
     }
 
     return this.#createPhysicalReference(reference, {
-      physicalStatus: matchedCandidates.length > 1
+      physicalStatus: totalMatches > 1
         ? "PHYSICAL_AMBIGUOUS"
         : "PHYSICAL_COLUMN_NOT_FOUND",
       sourceId: null,
-      physicalColumns: matchedCandidates.flatMap((item) => item.columns),
-      candidateSourceIds: matchedCandidates.map((item) => item.source.source_id)
+      physicalColumns: physicalMatches.flatMap((item) => item.columns),
+      candidateSourceIds: [
+        ...physicalMatches.map((item) => item.source.source_id),
+        ...derivedMatches.map((item) => item.source.source_id)
+      ]
+    });
+  }
+
+  #derivedSourceExposesColumn(source, columnName, context) {
+    const scopeId = source.cte_query_scope_id ?? source.subquery_scope_id;
+
+    if (scopeId === null || scopeId === undefined || !context) {
+      return false;
+    }
+
+    const target = this.#normalizeName(columnName);
+    const columns = this.#expandDerivedScopeColumns(scopeId, context, new Set());
+
+    return columns.some((column) => {
+      return this.#normalizeName(column.output_column_name) === target;
     });
   }
 
