@@ -1512,9 +1512,22 @@ BEGIN
         -- name can therefore include more than one candidate table, but never
         -- excludes a table that the previous all-metadata approach could use.
         -- --------------------------------------------------------------------
+        -- discovered_metadata_tables maps each discovered source to the metadata
+        -- table(s) that supply its schema. Two match modes:
+        --   * exact  : normal tables (3-part / 2-part / 1-part name equality).
+        --   * wildcard: GA4-style sharded tables referenced as `events_*`. The
+        --     `*` name never equals a shard name (events_20240101), so we match
+        --     shards by pattern (LIKE), keep ONE representative shard per source
+        --     (all shards share a schema; this avoids pulling every daily shard),
+        --     and relabel it back to the wildcard name so lineage stays stable
+        --     across days instead of pointing at a dated shard.
+        -- display_* is the identity emitted to the UDF; table_* is the real
+        -- metadata table the columns are read from.
         CREATE OR REPLACE TEMP TABLE discovered_metadata_tables AS
         WITH discovered_sources AS (
-          SELECT DISTINCT LOWER(JSON_VALUE(source_row, '$')) AS source_name
+          SELECT DISTINCT
+            LOWER(JSON_VALUE(source_row, '$')) AS source_name,
+            STRPOS(JSON_VALUE(source_row, '$'), '*') > 0 AS is_wildcard
           FROM UNNEST(
             COALESCE(
               JSON_QUERY_ARRAY(source_discovery_json, '$.source_tables'),
@@ -1522,32 +1535,97 @@ BEGIN
             )
           ) AS source_row
           WHERE JSON_VALUE(source_row, '$') IS NOT NULL
-        )
-        SELECT DISTINCT
-          metadata.table_catalog,
-          metadata.table_schema,
-          metadata.table_name
-        FROM current_target_columns AS metadata
-        INNER JOIN discovered_sources AS source
-          ON source.source_name = LOWER(FORMAT(
-            '%s.%s.%s',
+        ),
+        metadata_tables AS (
+          SELECT DISTINCT table_catalog, table_schema, table_name
+          FROM current_target_columns
+        ),
+        exact_matches AS (
+          SELECT
             metadata.table_catalog,
             metadata.table_schema,
-            metadata.table_name
-          ))
-          OR source.source_name = LOWER(FORMAT(
-            '%s.%s',
+            metadata.table_name,
+            metadata.table_catalog AS display_catalog,
+            metadata.table_schema AS display_schema,
+            metadata.table_name AS display_name
+          FROM metadata_tables AS metadata
+          INNER JOIN discovered_sources AS source
+            ON source.is_wildcard = FALSE
+           AND (
+             source.source_name = LOWER(FORMAT(
+               '%s.%s.%s',
+               metadata.table_catalog, metadata.table_schema, metadata.table_name
+             ))
+             OR source.source_name = LOWER(FORMAT(
+               '%s.%s', metadata.table_schema, metadata.table_name
+             ))
+             OR source.source_name = LOWER(metadata.table_name)
+           )
+        ),
+        wildcard_ranked AS (
+          SELECT
+            metadata.table_catalog,
             metadata.table_schema,
-            metadata.table_name
-          ))
-          OR source.source_name = LOWER(metadata.table_name);
+            metadata.table_name,
+            source.source_name,
+            ROW_NUMBER() OVER (
+              PARTITION BY
+                source.source_name,
+                metadata.table_catalog,
+                metadata.table_schema
+              ORDER BY metadata.table_name DESC
+            ) AS shard_rank
+          FROM metadata_tables AS metadata
+          INNER JOIN discovered_sources AS source
+            ON source.is_wildcard = TRUE
+           AND (
+             LOWER(FORMAT(
+               '%s.%s.%s',
+               metadata.table_catalog, metadata.table_schema, metadata.table_name
+             )) LIKE REPLACE(REPLACE(source.source_name, '_', '\\_'), '*', '%')
+               ESCAPE '\\'
+             OR LOWER(FORMAT(
+               '%s.%s', metadata.table_schema, metadata.table_name
+             )) LIKE REPLACE(REPLACE(source.source_name, '_', '\\_'), '*', '%')
+               ESCAPE '\\'
+             OR LOWER(metadata.table_name)
+               LIKE REPLACE(REPLACE(source.source_name, '_', '\\_'), '*', '%')
+               ESCAPE '\\'
+           )
+        ),
+        wildcard_matches AS (
+          SELECT
+            table_catalog,
+            table_schema,
+            table_name,
+            table_catalog AS display_catalog,
+            table_schema AS display_schema,
+            SPLIT(source_name, '.')[SAFE_OFFSET(
+              ARRAY_LENGTH(SPLIT(source_name, '.')) - 1
+            )] AS display_name
+          FROM wildcard_ranked
+          WHERE shard_rank = 1
+        )
+        SELECT
+          table_catalog, table_schema, table_name,
+          display_catalog, display_schema, display_name
+        FROM exact_matches
+        UNION DISTINCT
+        SELECT
+          table_catalog, table_schema, table_name,
+          display_catalog, display_schema, display_name
+        FROM wildcard_matches;
 
+        -- Columns are read from the real metadata table (discovered.table_*) but
+        -- emitted under the display identity (discovered.display_*), so a
+        -- wildcard source is reported to the UDF as `events_*` rather than the
+        -- representative dated shard.
         CREATE OR REPLACE TEMP TABLE scoped_physical_columns AS
         WITH top_level_columns AS (
           SELECT
-            column_info.table_catalog AS table_project,
-            column_info.table_schema AS table_dataset,
-            column_info.table_name,
+            discovered.display_catalog AS table_project,
+            discovered.display_schema AS table_dataset,
+            discovered.display_name AS table_name,
             column_info.column_name,
             column_info.column_name AS field_path,
             column_info.ordinal_position,
@@ -1561,9 +1639,9 @@ BEGIN
         ),
         nested_field_paths AS (
           SELECT
-            field.table_catalog AS table_project,
-            field.table_schema AS table_dataset,
-            field.table_name,
+            discovered.display_catalog AS table_project,
+            discovered.display_schema AS table_dataset,
+            discovered.display_name AS table_name,
             field.column_name,
             field.field_path,
             column_info.ordinal_position,
