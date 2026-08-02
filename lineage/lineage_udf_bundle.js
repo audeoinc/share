@@ -9082,35 +9082,87 @@ class PhysicalColumnResolver {
     }
 
     /*
-     * 要素内フィールドへの参照(相関UNNEST)。例: contact.contact_value
+     * 要素内フィールドへの参照。
+     *   物理の繰り返しSTRUCT: UNNEST(event_params) [AS ep], ep.key
+     *     -> 配列列のfield_path接頭辞 + フィールド名 = event_params.key を解決
+     *   相関UNNEST:          UNNEST(customer.contacts) AS c, c.contact_value
+     *   定数/派生の配列:      UNNEST(str)（cte1のSTRUCTリテラル配列） -> 定数
      */
-    if (expressionParts.length < 2) {
-      return this.#createPhysicalReference(reference, {
-        physicalStatus: "UNNEST_DEFERRED",
-        sourceId: reference.source_id,
-        physicalColumns: []
-      });
+
+    // 要素内のフィールドパス(先頭が要素別名ならそれを除去)。
+    const elementAlias = this.#normalizeName(unnestSource.source_alias);
+    const referenceParts = this.#normalizeName(
+      reference.reference_name || reference.column_name
+    ).split(".").filter(Boolean);
+    const fieldWithinElement =
+      (elementAlias && referenceParts.length > 1 &&
+        referenceParts[0] === elementAlias)
+        ? referenceParts.slice(1).join(".")
+        : referenceParts.join(".");
+
+    // 配列式(UNNESTの引数)の所有ソースと、配列のfield_path接頭辞を求める。
+    let arrayOwner = null;
+    let arrayPrefix = null;
+
+    if (expressionParts.length >= 2) {
+      const aliasedOwner = this.#findSiblingSourceByAlias(
+        unnestSource,
+        expressionParts[0]
+      );
+
+      if (aliasedOwner) {
+        arrayOwner = aliasedOwner;
+        arrayPrefix = expressionParts.slice(1).join(".");
+      }
     }
 
-    const parentSource = this.#findSiblingSourceByAlias(
-      unnestSource,
-      expressionParts[0]
-    );
+    if (!arrayOwner) {
+      arrayPrefix = expressionParts.join(".");
+      const siblings = (this.sourcesByScopeId.get(unnestSource.scope_id) || [])
+        .filter((source) => source.source_id !== unnestSource.source_id);
 
-    if (!parentSource || parentSource.source_type !== "PHYSICAL_TABLE") {
-      return this.#createPhysicalReference(reference, {
-        physicalStatus: "UNNEST_DEFERRED",
-        sourceId: reference.source_id,
-        physicalColumns: []
-      });
+      for (const sibling of siblings) {
+        if (sibling.source_type !== "PHYSICAL_TABLE") {
+          continue;
+        }
+
+        const owns = this.#getColumnsForSource(sibling).some((column) =>
+          this.#normalizeName(column.field_path) === arrayPrefix ||
+          this.#normalizeName(column.column_name) === arrayPrefix);
+
+        if (owns) {
+          arrayOwner = sibling;
+          break;
+        }
+      }
     }
 
-    const nestedFieldPath = [
-      ...expressionParts.slice(1),
-      referenceName
-    ].filter(Boolean).join(".");
+    if (arrayOwner && arrayOwner.source_type === "PHYSICAL_TABLE" &&
+        arrayPrefix && fieldWithinElement) {
+      const fullFieldPath = `${arrayPrefix}.${fieldWithinElement}`;
+      const columns = this.#getColumnsForSource(arrayOwner).filter(
+        (column) => this.#normalizeName(column.field_path) === fullFieldPath
+      );
 
-    return this.#resolveParentFieldPath(reference, parentSource, nestedFieldPath);
+      if (columns.length > 0) {
+        return this.#createPhysicalReference(reference, {
+          physicalStatus: "PHYSICAL_RESOLVED",
+          sourceId: arrayOwner.source_id,
+          physicalColumns: columns
+        });
+      }
+    }
+
+    /*
+     * 物理配列に一致するfield_pathが無い、または配列が派生列/リテラル(STRUCT
+     * リテラル配列など)の場合、要素フィールドは上流の物理カラムを持たない定数
+     * として扱う(誤ったPARTIALLY_RESOLVEDを出さない)。
+     */
+    return this.#createPhysicalReference(reference, {
+      physicalStatus: "UNNEST_CONSTANT",
+      sourceId: reference.source_id,
+      physicalColumns: []
+    });
   }
 
   #findSiblingSourceByAlias(unnestSource, alias) {
@@ -9290,6 +9342,7 @@ class PhysicalColumnResolver {
   #disambiguateAcrossSources(reference, candidateSourceIds, context) {
     const physicalMatches = [];
     const derivedMatches = [];
+    const unnestCandidates = [];
 
     for (const sourceId of candidateSourceIds) {
       const source = this.sourceById.get(sourceId);
@@ -9316,6 +9369,12 @@ class PhysicalColumnResolver {
         )) {
           derivedMatches.push({ source });
         }
+
+        continue;
+      }
+
+      if (source.source_type === "UNNEST") {
+        unnestCandidates.push(source);
       }
     }
 
@@ -9335,6 +9394,18 @@ class PhysicalColumnResolver {
         sourceId: derivedMatches[0].source.source_id,
         physicalColumns: []
       });
+    }
+
+    /*
+     * どの物理/派生ソースにも無い修飾なし列で、スコープにUNNESTが1つだけある
+     * 場合は、その要素フィールド(例: UNNEST(event_params) の key/value を別名
+     * なしで参照)とみなしてUNNEST解決へ委譲する。
+     */
+    if (totalMatches === 0 && unnestCandidates.length === 1) {
+      return this.#resolveCorrelatedUnnestReference(
+        { ...reference, source_id: unnestCandidates[0].source_id },
+        context
+      );
     }
 
     return this.#createPhysicalReference(reference, {
@@ -10919,6 +10990,32 @@ class LineageResolver {
           ]
         };
       });
+    }
+
+    /*
+     * 「解決済みだが物理カラム依存を持たない」参照は、派生スコープ探索より先に
+     * 確定させる。定数(STRUCTリテラル配列のUNNESTフィールド)、UNNESTの
+     * WITH OFFSET列、疑似列(_TABLE_SUFFIX等)が該当する。上流の物理カラムが無い
+     * ので、未解決ではなく定数依存(RESOLVED)として扱い、物理エッジは持たない。
+     */
+    const noPhysicalDependencyStatuses = new Set([
+      "PSEUDO_COLUMN_RESOLVED",
+      "UNNEST_OFFSET",
+      "UNNEST_CONSTANT"
+    ]);
+
+    if (noPhysicalDependencyStatuses.has(
+      physicalReference.physical_resolution_status
+    )) {
+      return [{
+        dependency_type: "CONSTANT",
+        dependency_status: "RESOLVED",
+        source_reference_name: reference.reference_name,
+        lineage_path: [
+          ...parentPath,
+          `CONSTANT:${this.#normalizeName(reference.reference_name)}`
+        ]
+      }];
     }
 
     /*
