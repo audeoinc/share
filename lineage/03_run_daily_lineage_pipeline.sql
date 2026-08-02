@@ -1527,7 +1527,19 @@ BEGIN
         WITH discovered_sources AS (
           SELECT DISTINCT
             LOWER(JSON_VALUE(source_row, '$')) AS source_name,
-            STRPOS(JSON_VALUE(source_row, '$'), '*') > 0 AS is_wildcard
+            STRPOS(JSON_VALUE(source_row, '$'), '*') > 0 AS is_wildcard,
+            -- Anchored RE2 pattern for wildcard matching. Table identifiers are
+            -- [A-Za-z0-9_.] plus the '*' wildcard, so only '.' and '*' are
+            -- regex-special: escape '.' to '\.' and turn '*' into '.*'.
+            -- (BigQuery LIKE has no ESCAPE clause, so REGEXP_CONTAINS is used.)
+            CONCAT(
+              '^',
+              REPLACE(
+                REPLACE(LOWER(JSON_VALUE(source_row, '$')), '.', '\\.'),
+                '*', '.*'
+              ),
+              '$'
+            ) AS name_regex
           FROM UNNEST(
             COALESCE(
               JSON_QUERY_ARRAY(source_discovery_json, '$.source_tables'),
@@ -1579,18 +1591,20 @@ BEGIN
           INNER JOIN discovered_sources AS source
             ON source.is_wildcard = TRUE
            AND (
-             LOWER(FORMAT(
-               '%s.%s.%s',
-               metadata.table_catalog, metadata.table_schema, metadata.table_name
-             )) LIKE REPLACE(REPLACE(source.source_name, '_', '\\_'), '*', '%')
-               ESCAPE '\\'
-             OR LOWER(FORMAT(
-               '%s.%s', metadata.table_schema, metadata.table_name
-             )) LIKE REPLACE(REPLACE(source.source_name, '_', '\\_'), '*', '%')
-               ESCAPE '\\'
-             OR LOWER(metadata.table_name)
-               LIKE REPLACE(REPLACE(source.source_name, '_', '\\_'), '*', '%')
-               ESCAPE '\\'
+             REGEXP_CONTAINS(
+               LOWER(FORMAT(
+                 '%s.%s.%s',
+                 metadata.table_catalog, metadata.table_schema, metadata.table_name
+               )),
+               source.name_regex
+             )
+             OR REGEXP_CONTAINS(
+               LOWER(FORMAT(
+                 '%s.%s', metadata.table_schema, metadata.table_name
+               )),
+               source.name_regex
+             )
+             OR REGEXP_CONTAINS(LOWER(metadata.table_name), source.name_regex)
            )
         ),
         wildcard_matches AS (
