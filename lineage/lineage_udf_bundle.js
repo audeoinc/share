@@ -3048,6 +3048,16 @@ class ExpressionParser {
       }
     }
 
+    /*
+     * 集約/ナビゲーション関数の引数末尾に付く修飾句を消費する。
+     *   ARRAY_AGG(x IGNORE NULLS ORDER BY ts LIMIT 5)
+     *   FIRST_VALUE(x RESPECT NULLS)
+     *   STRING_AGG(x, ',' ORDER BY y)
+     * NULL処理(IGNORE|RESPECT NULLS)とLIMITは列系統に寄与しない。ORDER BY /
+     * HAVING MAX|MIN の式は依存として引数リストへ取り込む。
+     */
+    this.#consumeFunctionArgumentSuffixes(argumentsList);
+
     const closeToken = this.#expect(")", false);
     return AstFactory.createFunctionCall(
       nameTokens,
@@ -3056,6 +3066,68 @@ class ExpressionParser {
       closeToken,
       argumentModifier
     );
+  }
+
+  #consumeFunctionArgumentSuffixes(argumentsList) {
+    while (!this.#isEnd() && !this.#matches(")", false)) {
+      if (this.#matches("IGNORE") || this.#matches("RESPECT")) {
+        this.#consume();
+
+        if (this.#matches("NULLS")) {
+          this.#consume();
+        }
+
+        continue;
+      }
+
+      if (this.#matches("ORDER")) {
+        this.#consume();
+        this.#expect("BY");
+
+        while (true) {
+          argumentsList.push(this.#parseOrExpression());
+
+          if (this.#matchesAny(["ASC", "DESC"])) {
+            this.#consume();
+          }
+
+          if (this.#matches("NULLS")) {
+            this.#consume();
+
+            if (this.#matchesAny(["FIRST", "LAST"])) {
+              this.#consume();
+            }
+          }
+
+          if (!this.#matches(",", false)) {
+            break;
+          }
+
+          this.#consume();
+        }
+
+        continue;
+      }
+
+      if (this.#matches("LIMIT")) {
+        this.#consume();
+        this.#parseOrExpression();
+        continue;
+      }
+
+      if (this.#matches("HAVING")) {
+        this.#consume();
+
+        if (this.#matchesAny(["MAX", "MIN"])) {
+          this.#consume();
+        }
+
+        argumentsList.push(this.#parseOrExpression());
+        continue;
+      }
+
+      break;
+    }
   }
 
   #parseParenthesizedExpression() {
