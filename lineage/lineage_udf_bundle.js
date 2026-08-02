@@ -5604,10 +5604,12 @@ function tokenize(sqlText) {
     /*
      * 1行コメントを読み取る。
      *
-     * 「--」を見つけた位置から改行直前までを1つのCOMMENT Tokenにする。
+     * 「--」または「#」を見つけた位置から改行直前までを1つのCOMMENT Token
+     * にする。BigQueryは「--」「#」の両方を単一行コメントとして扱う。
      * 改行はこのTokenに含めず、次のメインループで空白として処理する。
      */
-    if (character === "-" && sqlText[index + 1] === "-") {
+    if ((character === "-" && sqlText[index + 1] === "-") ||
+        character === "#") {
       let value = "";
 
       while (index < sqlText.length && sqlText[index] !== "\n") {
@@ -8946,6 +8948,21 @@ class PhysicalColumnResolver {
         ? [wildcardReference.source_id]
         : wildcardReference.candidate_source_ids;
 
+      /*
+       * このWILDCARD_PENDING列自身の EXCEPT(...) を、下位ソースから
+       * 展開した列へ適用する。これを行わないと、
+       *   x_all AS (SELECT * EXCEPT(col_a) FROM t)
+       *   x_some AS (SELECT * FROM x_all)      -- 2段以上の * カスケード
+       * のように * が多段で伝播するとき、上流でEXCEPTした列が
+       * 下流の再展開で復活してしまう。再帰先も各自のEXCEPTを適用するため、
+       * 多段のEXCEPTが正しく合成される。
+       */
+      const exclusions = new Set(
+        (outputColumn.wildcard_exclusions || [])
+          .map((name) => this.#normalizeName(name))
+      );
+      const columnsForThisWildcard = [];
+
       for (const sourceId of sourceIds) {
         const nestedSource = this.sourceById.get(sourceId);
 
@@ -8955,7 +8972,7 @@ class PhysicalColumnResolver {
 
         if (nestedSource.source_type === "PHYSICAL_TABLE") {
           for (const column of this.#getTopLevelColumns(nestedSource)) {
-            result.push({
+            columnsForThisWildcard.push({
               output_column_name: column.column_name,
               physical_table_name: column.physical_table_name,
               physical_column_name: column.column_name,
@@ -8969,11 +8986,19 @@ class PhysicalColumnResolver {
 
         const nestedScopeId = nestedSource.cte_query_scope_id ||
           nestedSource.subquery_scope_id;
-        result.push(...this.#expandDerivedScopeColumns(
+        columnsForThisWildcard.push(...this.#expandDerivedScopeColumns(
           nestedScopeId,
           context,
           nextVisiting
         ));
+      }
+
+      for (const column of columnsForThisWildcard) {
+        if (exclusions.has(this.#normalizeName(column.output_column_name))) {
+          continue;
+        }
+
+        result.push(column);
       }
     }
 
