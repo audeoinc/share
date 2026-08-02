@@ -4976,6 +4976,25 @@ class GroupByParser {
     }
 
     /*
+     * GROUP BY ALL は「集約対象でない全SELECT列でグループ化」する糖衣構文。
+     * ALL自体は列参照ではないため、グループ化項目を持たない形で返す。
+     * グループキーの列系統は対応するSELECT項目側で保持される。
+     */
+    if (bodyTokens.length === 1 && bodyTokens[0].normalized_token === "ALL") {
+      return {
+        clause_type: "GROUP_BY",
+        group_kind: "ALL",
+        clause_start_seq: groupByClause.clause_start_seq,
+        clause_end_seq: groupByClause.clause_end_seq,
+        body_start_seq: groupByClause.body_start_seq,
+        body_end_seq: groupByClause.body_end_seq,
+        items: [],
+        start_token_seq: groupByClause.clause_start_seq,
+        end_token_seq: groupByClause.body_end_seq
+      };
+    }
+
+    /*
      * JavaScriptメモ
      * ----------------
      * map()は配列の各要素を別の値へ変換し、その結果から新しい配列を作る。
@@ -8818,6 +8837,19 @@ class PhysicalColumnResolver {
     }
 
     /*
+     * ワイルドカードテーブルやパーティションの疑似列(_TABLE_SUFFIX 等)は
+     * 物理列に対応せず系統も持たない。存在しない列として誤検出しないよう、
+     * 依存なしで解決済みとして扱う。
+     */
+    if (this.#isPseudoColumn(reference.column_name)) {
+      return this.#createPhysicalReference(reference, {
+        physicalStatus: "PSEUDO_COLUMN_RESOLVED",
+        sourceId: reference.source_id,
+        physicalColumns: []
+      });
+    }
+
+    /*
      * GROUP BY / HAVING / QUALIFY / ORDER BYから参照されたSELECT出力
      * エイリアスは物理Sourceの列ではない。SELECT式側のLineageが既に
      * 依存列を保持しているため、ここでは正常解決として通過させる。
@@ -8860,7 +8892,7 @@ class PhysicalColumnResolver {
     }
 
     if (reference.source_type === "UNNEST") {
-      return this.#resolveCorrelatedUnnestReference(reference);
+      return this.#resolveCorrelatedUnnestReference(reference, context);
     }
 
     /*
@@ -8911,13 +8943,76 @@ class PhysicalColumnResolver {
    * - 親Sourceが物理テーブルである。
    * - 完全なfield_pathがメタデータに存在する。
    */
-  #resolveCorrelatedUnnestReference(reference) {
+  #resolveCorrelatedUnnestReference(reference, context) {
     const unnestSource = this.sourceById.get(reference.source_id);
-    const expressionParts = unnestSource?.expression?.node_type === "IDENTIFIER_EXPRESSION" &&
+    const expressionParts =
+      unnestSource?.expression?.node_type === "IDENTIFIER_EXPRESSION" &&
       Array.isArray(unnestSource.expression.parts)
-      ? unnestSource.expression.parts.map((part) => this.#normalizeName(part))
-      : [];
+        ? unnestSource.expression.parts.map((part) => this.#normalizeName(part))
+        : [];
 
+    const referenceName = this.#normalizeName(reference.column_name);
+    const isWholeValue = unnestSource &&
+      referenceName === this.#normalizeName(unnestSource.source_alias);
+    const isOffset = unnestSource &&
+      unnestSource.offset_alias &&
+      referenceName === this.#normalizeName(unnestSource.offset_alias);
+
+    /*
+     * WITH OFFSET の列は配列内の位置(整数)で、元列への系統を持たない。
+     */
+    if (isOffset) {
+      return this.#createPhysicalReference(reference, {
+        physicalStatus: "UNNEST_OFFSET",
+        sourceId: reference.source_id,
+        physicalColumns: []
+      });
+    }
+
+    if (expressionParts.length === 0) {
+      return this.#createPhysicalReference(reference, {
+        physicalStatus: "UNNEST_DEFERRED",
+        sourceId: reference.source_id,
+        physicalColumns: []
+      });
+    }
+
+    /*
+     * 要素値そのもの(素の別名)への参照。
+     *   UNNEST(item_id) AS item_id  -> item_id(配列列)の系統
+     *   UNNEST(t.items) AS x        -> t.items フィールドの系統
+     */
+    if (isWholeValue) {
+      if (expressionParts.length === 1) {
+        return this.#resolveUnnestArrayColumn(
+          reference,
+          unnestSource,
+          expressionParts[0],
+          context
+        );
+      }
+
+      const parentSource = this.#findSiblingSourceByAlias(
+        unnestSource,
+        expressionParts[0]
+      );
+
+      if (parentSource?.source_type === "PHYSICAL_TABLE") {
+        const fieldPath = expressionParts.slice(1).join(".");
+
+        return this.#resolveParentFieldPath(reference, parentSource, fieldPath);
+      }
+
+      return this.#createPhysicalReference(reference, {
+        physicalStatus: "UNNEST_DEFERRED",
+        sourceId: reference.source_id,
+        physicalColumns: []
+      });
+    }
+
+    /*
+     * 要素内フィールドへの参照(相関UNNEST)。例: contact.contact_value
+     */
     if (expressionParts.length < 2) {
       return this.#createPhysicalReference(reference, {
         physicalStatus: "UNNEST_DEFERRED",
@@ -8926,12 +9021,10 @@ class PhysicalColumnResolver {
       });
     }
 
-    const parentAlias = expressionParts[0];
-    const parentSource = Array.from(this.sourceById.values()).find((source) => {
-      return source.scope_id === unnestSource.scope_id &&
-        source.source_id !== unnestSource.source_id &&
-        source.source_alias === parentAlias;
-    });
+    const parentSource = this.#findSiblingSourceByAlias(
+      unnestSource,
+      expressionParts[0]
+    );
 
     if (!parentSource || parentSource.source_type !== "PHYSICAL_TABLE") {
       return this.#createPhysicalReference(reference, {
@@ -8943,12 +9036,24 @@ class PhysicalColumnResolver {
 
     const nestedFieldPath = [
       ...expressionParts.slice(1),
-      this.#normalizeName(reference.column_name)
+      referenceName
     ].filter(Boolean).join(".");
 
-    const matchingColumns = this.#getColumnsForSource(parentSource).filter((column) => {
-      return column.field_path === nestedFieldPath;
-    });
+    return this.#resolveParentFieldPath(reference, parentSource, nestedFieldPath);
+  }
+
+  #findSiblingSourceByAlias(unnestSource, alias) {
+    return Array.from(this.sourceById.values()).find((source) => {
+      return source.scope_id === unnestSource.scope_id &&
+        source.source_id !== unnestSource.source_id &&
+        source.source_alias === alias;
+    }) || null;
+  }
+
+  #resolveParentFieldPath(reference, parentSource, fieldPath) {
+    const matchingColumns = this.#getColumnsForSource(parentSource).filter(
+      (column) => column.field_path === fieldPath
+    );
 
     if (matchingColumns.length === 0) {
       return this.#createPhysicalReference(reference, {
@@ -8964,6 +9069,44 @@ class PhysicalColumnResolver {
       physicalStatus: "PHYSICAL_RESOLVED",
       sourceId: parentSource.source_id,
       physicalColumns: matchingColumns
+    });
+  }
+
+  /*
+   * UNNEST(<bare_column>) の要素値を、同一スコープの兄弟ソースが公開する
+   * その配列列へ結び付ける。物理テーブルなら物理列、派生ソースなら
+   * DERIVED_SOURCE_RESOLVED として系統を継ぐ。
+   */
+  #resolveUnnestArrayColumn(reference, unnestSource, arrayColumnName, context) {
+    const siblings = (this.sourcesByScopeId.get(unnestSource.scope_id) || [])
+      .filter((source) => source.source_id !== unnestSource.source_id);
+
+    for (const sibling of siblings) {
+      if (sibling.source_type === "PHYSICAL_TABLE") {
+        const columns = this.#findPhysicalColumns(sibling, arrayColumnName);
+
+        if (columns.length > 0) {
+          return this.#createPhysicalReference(reference, {
+            physicalStatus: "PHYSICAL_RESOLVED",
+            sourceId: sibling.source_id,
+            physicalColumns: columns
+          });
+        }
+      } else if ((sibling.source_type === "CTE" ||
+          sibling.source_type === "SUBQUERY") && context &&
+          this.#derivedSourceExposesColumn(sibling, arrayColumnName, context)) {
+        return this.#createPhysicalReference(reference, {
+          physicalStatus: "DERIVED_SOURCE_RESOLVED",
+          sourceId: sibling.source_id,
+          physicalColumns: []
+        });
+      }
+    }
+
+    return this.#createPhysicalReference(reference, {
+      physicalStatus: "UNNEST_DEFERRED",
+      sourceId: reference.source_id,
+      physicalColumns: []
     });
   }
 
@@ -9502,7 +9645,68 @@ class PhysicalColumnResolver {
       return [];
     }
 
-    return this.tableColumnsByName.get(this.#normalizeName(source.source_name)) || [];
+    const name = this.#normalizeName(source.source_name);
+    const exact = this.tableColumnsByName.get(name);
+
+    if (exact) {
+      return exact;
+    }
+
+    /*
+     * ワイルドカードテーブル(例: `project.dataset.events_*`)は、収集済みの
+     * シャードテーブル(events_20200101 等)のスキーマから列を引く。各シャードは
+     * 同一スキーマ想定なので field_path 単位で重複排除して統合する。
+     */
+    if (name && name.includes("*")) {
+      return this.#getWildcardTableColumns(name);
+    }
+
+    return [];
+  }
+
+  #getWildcardTableColumns(pattern) {
+    const regex = this.#wildcardPatternToRegExp(pattern);
+    const seen = new Set();
+    const result = [];
+
+    for (const [tableName, columns] of this.tableColumnsByName.entries()) {
+      if (!regex.test(tableName)) {
+        continue;
+      }
+
+      for (const column of columns) {
+        const key = `${column.field_path}|${column.column_name}`;
+
+        if (seen.has(key)) {
+          continue;
+        }
+
+        seen.add(key);
+        result.push(column);
+      }
+    }
+
+    return result;
+  }
+
+  #wildcardPatternToRegExp(pattern) {
+    const escaped = pattern
+      .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+      .replace(/\*/g, ".*");
+
+    return new RegExp(`^${escaped}$`);
+  }
+
+  #isPseudoColumn(columnName) {
+    const pseudoColumns = new Set([
+      "_TABLE_SUFFIX",
+      "_TABLE_DATE",
+      "_PARTITIONTIME",
+      "_PARTITIONDATE",
+      "_FILE_NAME"
+    ]);
+
+    return pseudoColumns.has(this.#normalizeName(columnName));
   }
 
   #hasMetadataForSource(source) {
