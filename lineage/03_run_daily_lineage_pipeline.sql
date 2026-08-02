@@ -152,14 +152,16 @@ DECLARE configured_max_impact_rank INT64 DEFAULT 100;
 -- from INFORMATION_SCHEMA.JOBS) and process only Views. STEP 1/3/4 still run.
 DECLARE process_generated_tables BOOL DEFAULT TRUE;
 
--- Analysis target/skip filters on the lowercased "project.dataset.name"
--- (REGEXP_CONTAINS = partial match; registry names are lowercase, so write
--- patterns in lowercase, or use (?i) for case-insensitivity). Objects are
--- filtered as: matches an include pattern (or include is empty) AND matches no
--- exclude pattern. Non-matching objects stay in the registry but are not
--- analyzed. Example: include ['^proj\\.mart\\.'], exclude ['_tmp$', 'v_debug'].
---   include: empty array = analyze all objects; otherwise analyze only matches.
---   exclude: empty array = exclude nothing.
+-- Analysis target/skip filters on the View/object NAME only (object_name).
+-- Project and dataset are already scoped by target_project_id / target_datasets,
+-- so these regexes narrow the many Views by name. REGEXP_CONTAINS = partial
+-- match; object_name is stored lowercase, so write patterns in lowercase (or
+-- use (?i)). Write them as raw strings, e.g. r'^audeo'. Filtering is: matches
+-- an include pattern (or include is empty) AND matches no exclude pattern.
+-- Non-matching Views stay in the registry but are not analyzed.
+--   include: empty array = analyze all; otherwise analyze only name matches
+--            (handy for scoping a test run, e.g. [r'^v_sales']).
+--   exclude: empty array = exclude nothing, e.g. [r'^audeo', r'_tmp$'].
 DECLARE include_object_patterns ARRAY<STRING> DEFAULT [];
 DECLARE exclude_object_patterns ARRAY<STRING> DEFAULT [];
 
@@ -1335,17 +1337,17 @@ BEGIN
           SELECT 1
           FROM UNNEST(@include_patterns) AS pattern
           WHERE REGEXP_CONTAINS(
-            LOWER(object_project || '.' || object_dataset || '.' || object_name),
+            LOWER(object_name),
             pattern
           )
         )
       )
-      -- Exclude objects matching any configured regex (on project.dataset.name).
+      -- Exclude objects whose name matches any configured regex.
       AND NOT EXISTS (
         SELECT 1
         FROM UNNEST(@exclude_patterns) AS pattern
         WHERE REGEXP_CONTAINS(
-          LOWER(object_project || '.' || object_dataset || '.' || object_name),
+          LOWER(object_name),
           pattern
         )
       )
