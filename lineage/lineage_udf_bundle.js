@@ -2638,6 +2638,10 @@ class ExpressionParser {
       return this.#parseParenthesizedExpression();
     }
 
+    if (token.token === "[") {
+      return this.#parseArrayLiteral();
+    }
+
     if (this.#isTypedLiteralPrefix(token)) {
       return this.#parseTypedLiteral();
     }
@@ -3064,6 +3068,31 @@ class ExpressionParser {
     const expressionNode = this.#parseOrExpression();
     const closeToken = this.#expect(")", false);
     return AstFactory.createParenthesized(expressionNode, openToken, closeToken);
+  }
+
+  /*
+   * 配列リテラル [e1, e2, ...] を解析する。要素式の列依存を保持できるよう
+   * EXPRESSION_LIST ノードとして返す(UNNEST([...]) や SELECT [...] で使用)。
+   */
+  #parseArrayLiteral() {
+    const openToken = this.#expect("[", false);
+    const items = [];
+
+    if (!this.#matches("]", false)) {
+      while (true) {
+        items.push(this.#parseOrExpression());
+
+        if (!this.#matches(",", false)) {
+          break;
+        }
+
+        this.#consume();
+      }
+    }
+
+    const closeToken = this.#expect("]", false);
+
+    return AstFactory.createExpressionList(items, openToken, closeToken);
   }
 
   #parseInExpression(leftNode, negated) {
@@ -4587,12 +4616,14 @@ class FromParser {
       usingColumns = usingResult.columns;
       endTokenSeq = usingResult.end_token_seq;
     } else if (joinType !== "CROSS") {
-      const isConditionlessCorrelatedUnnest =
-        joinType === "LEFT" &&
-        source.source_type === "UNNEST" &&
-        this.#referencesVisibleSource(source.expression, visibleSourceNames);
-
-      if (!isConditionlessCorrelatedUnnest) {
+      /*
+       * UNNESTを右辺に取るJOINは、BigQueryではON/USINGを省略できる
+       * (相関UNNEST: LEFT/INNER JOIN UNNEST(t.arr) / UNNEST(arr) など)。
+       * 配列が可視ソースを明示参照していなくても(素の列名やCTE列でも)有効なため、
+       * UNNESTソースなら条件省略を一律で許可する。UNNEST以外の通常JOINは
+       * 従来どおりON/USINGを必須とする。
+       */
+      if (source.source_type !== "UNNEST") {
         throw new SyntaxError(
           `FromParser: ${joinType} JOIN requires ON or USING condition.`
         );
