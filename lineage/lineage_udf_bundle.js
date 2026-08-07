@@ -10454,12 +10454,25 @@ class LineageResolver {
     this.referencesByScopeId = new Map();
     this.wildcardExpansionsByScopeAndName = new Map();
     this.unpivotGeneratedByOutputColumnId = new Map();
+    this.recursiveScopeIds = new Set();
 
     for (const scope of context.source_resolution.scopes) {
       this.scopeById.set(scope.scope_id, scope);
 
       for (const source of scope.sources) {
         this.sourceById.set(source.source_id, source);
+      }
+
+      /*
+       * WITH RECURSIVE の CTE 本文scopeを記録する。再帰項が自分自身を参照して
+       * 再入した場合、それは正当な再帰なので false CYCLE_DETECTED にしない。
+       */
+      for (const cteDefinition of scope.cte_definitions || []) {
+        if (cteDefinition.recursive === true &&
+            cteDefinition.query_scope_id !== null &&
+            cteDefinition.query_scope_id !== undefined) {
+          this.recursiveScopeIds.add(cteDefinition.query_scope_id);
+        }
       }
     }
 
@@ -10527,12 +10540,23 @@ class LineageResolver {
     const lineagePath = [...parentPath, pathEntry];
 
     if (visitingOutputIds.has(outputColumn.output_column_id)) {
+      /*
+       * WITH RECURSIVE の再帰項が同一CTEの出力へ再入するのは正当な再帰であり、
+       * エラーではない。再帰項は新しい物理ソースを足さず、系統はベース項が
+       * 供給するため、ここは依存なし(NO_COLUMN_DEPENDENCY)で終端する。
+       * 非再帰スコープでの再入は従来どおり CYCLE_DETECTED とする。
+       */
+      const isRecursiveSelfReference =
+        this.recursiveScopeIds.has(outputColumn.scope_id);
+
       return {
         lineage_id: this.nextLineageId++,
         output_column_id: outputColumn.output_column_id,
         output_scope_id: outputColumn.scope_id,
         output_column_name: outputColumn.output_column_name,
-        lineage_status: "CYCLE_DETECTED",
+        lineage_status: isRecursiveSelfReference
+          ? "NO_COLUMN_DEPENDENCY"
+          : "CYCLE_DETECTED",
         dependencies: [],
         lineage_path: lineagePath
       };
@@ -11182,38 +11206,52 @@ class LineageResolver {
     let derivedScopeId = this.#findDerivedSourceScope(reference, physicalReference);
 
     /*
-     * PIVOT生成列はColumnResolver実行時点ではSELECTリストに存在しない。
-     * そのため非修飾参照のsource_idが未設定になる場合がある。
-     * 現scopeに派生Sourceが1件だけなら、その公開列へ安全にフォールバックする。
+     * 派生Source自身の公開scopeが、それを参照している現在scopeと一致することは
+     * 非再帰クエリでは有り得ない。一致した場合はソース解決の取り違えなので、
+     * 自己循環(false CYCLE_DETECTED)を避けるため無効化して下の補正へ回す。
+     * これは特に同一CTEの自己JOIN(table_a x LEFT JOIN table_a y)で発生する。
      */
-    if (derivedScopeId === null) {
-      const currentScope = this.scopeById.get(reference.scope_id);
-      const derivedSources = (currentScope?.sources || []).filter((source) => {
-        return source.cte_query_scope_id !== null || source.subquery_scope_id !== null;
-      });
-
-      if (derivedSources.length === 1) {
-        derivedScopeId = derivedSources[0].cte_query_scope_id ??
-          derivedSources[0].subquery_scope_id ?? null;
-      }
+    if (derivedScopeId === reference.scope_id) {
+      derivedScopeId = null;
     }
 
     /*
-     * 親SUBQUERYのSourceが誤って候補になった場合、derivedScopeIdが現在scope自身を
-     * 指して自己循環になる。現在scopeに実際の派生Sourceが1件だけある場合は、
-     * そのCTE/SUBQUERYの公開scopeへ補正する。PIVOT列を外側SUBQUERYで列挙する
-     * ケース（SELECT pc_sales FROM pivoted_cte）で必要になる。
+     * 派生scopeが決まらない/取り違えた場合の補正。
+     * 1) 参照が修飾されているなら、その別名を持つローカル派生Sourceの公開scopeを使う
+     *    (自己JOIN: y.col は y 別名の table_a scope へ)。
+     * 2) 修飾が無い/一致しない場合は、ローカル派生Sourceが1つだけ、または全て同じ
+     *    子scope(=同一CTEの自己JOIN)を指すときにその子scopeを使う。PIVOT生成列を
+     *    外側で列挙するケースもここで解決する。
      */
-    if (derivedScopeId === reference.scope_id) {
+    if (derivedScopeId === null) {
       const currentScope = this.scopeById.get(reference.scope_id);
       const localDerivedSources = (currentScope?.sources || []).filter((source) => {
         const childScopeId = source.cte_query_scope_id ?? source.subquery_scope_id ?? null;
         return childScopeId !== null && childScopeId !== reference.scope_id;
       });
 
-      if (localDerivedSources.length === 1) {
-        derivedScopeId = localDerivedSources[0].cte_query_scope_id ??
-          localDerivedSources[0].subquery_scope_id ?? null;
+      let chosenSource = null;
+
+      if (reference.qualifier) {
+        const normalizedQualifier = this.#normalizeName(reference.qualifier);
+        chosenSource = localDerivedSources.find((source) => {
+          return this.#normalizeName(source.source_alias) === normalizedQualifier;
+        }) || null;
+      }
+
+      if (!chosenSource) {
+        const distinctChildScopes = new Set(localDerivedSources.map((source) => {
+          return source.cte_query_scope_id ?? source.subquery_scope_id;
+        }));
+
+        if (localDerivedSources.length === 1 || distinctChildScopes.size === 1) {
+          chosenSource = localDerivedSources[0];
+        }
+      }
+
+      if (chosenSource) {
+        derivedScopeId = chosenSource.cte_query_scope_id ??
+          chosenSource.subquery_scope_id ?? null;
       }
     }
 
