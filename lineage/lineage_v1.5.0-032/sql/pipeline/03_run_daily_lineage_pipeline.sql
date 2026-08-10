@@ -152,34 +152,45 @@ DECLARE configured_max_impact_rank INT64 DEFAULT 100;
 -- from INFORMATION_SCHEMA.JOBS) and process only Views. STEP 1/3/4 still run.
 DECLARE process_generated_tables BOOL DEFAULT TRUE;
 
--- REGISTRY-stage (collection) object exclusion (regex on the object NAME).
--- Objects whose name matches ANY of these patterns are NOT registered at all:
--- Views are dropped in STEP 1 before entering the definition registry (an
+-- REGISTRY-stage (collection) exclusion. An object is NOT registered at all if
+-- its NAME matches any *_object_patterns entry OR its DATASET matches any
+-- *_dataset_patterns entry (exclusion is OR across the two dimensions). Views
+-- are dropped in STEP 1 before entering the definition registry (an
 -- already-registered View is deactivated), and generated TABLEs are dropped in
--- STEP 2 before entering the job / definition registry (matched on the
--- destination table name). This is stronger than analysis_exclude_object_patterns
--- below (that keeps the row and only skips analysis). REGEXP_CONTAINS = partial
--- match; matching is case-insensitive (name and pattern are lowercased), so write
--- patterns as raw strings in any case. Empty array = exclude nothing.
---   e.g. names ending in a digit and names containing "test":
---        [r'[0-9]$', r'test']
+-- STEP 2 before entering the job / definition registry (name matched on the
+-- destination table, dataset on the destination dataset). This is stronger than
+-- the analysis_* filters below (which keep the row and only skip analysis).
+-- REGEXP_CONTAINS = partial match; matching is case-insensitive (value and
+-- pattern are lowercased), so write patterns as raw strings in any case. Empty
+-- array = exclude nothing on that dimension.
+--   object e.g. names ending in a digit and names containing "test":
+--          [r'[0-9]$', r'test']
+--   dataset e.g. whole staging/scratch datasets: [r'^stg_', r'_scratch$']
 DECLARE registry_exclude_object_patterns ARRAY<STRING> DEFAULT [];
+DECLARE registry_exclude_dataset_patterns ARRAY<STRING> DEFAULT [];
 
--- ANALYSIS-stage filters on the object NAME only (object_name). Applied when
--- selecting which registered objects (VIEWs and, when process_generated_tables =
--- TRUE, generated TABLEs) to analyze. Matched objects STAY in the definition
--- registry and keep change tracking; only lineage analysis is gated. Project and
--- dataset are already scoped by target_project_id / target_datasets, so these
--- regexes narrow objects by name. REGEXP_CONTAINS = partial match; matching is
--- case-insensitive (name and pattern are lowercased), so write patterns as raw
--- strings in any case, e.g. r'^stg_'. Filtering is: matches an include pattern
--- (or include is empty) AND matches no exclude pattern. Non-matching objects
--- stay in the registry but are not analyzed.
---   include: empty array = analyze all; otherwise analyze only name matches
---            (handy for scoping a test run, e.g. [r'^v_sales']).
---   exclude: empty array = exclude nothing, e.g. [r'^stg_', r'_tmp$'].
+-- ANALYSIS-stage filters. Applied when selecting which registered objects (VIEWs
+-- and, when process_generated_tables = TRUE, generated TABLEs) to analyze.
+-- Matched objects STAY in the definition registry and keep change tracking; only
+-- lineage analysis is gated. The object NAME (object_name) and the DATASET
+-- (object_dataset) are filtered independently: the *_object_patterns act on the
+-- name and the *_dataset_patterns act on the dataset. REGEXP_CONTAINS = partial
+-- match; matching is case-insensitive (value and pattern are lowercased), so
+-- write patterns as raw strings in any case, e.g. r'^stg_'. An object is analyzed
+-- when it passes BOTH dimensions' include gate AND is excluded by NEITHER
+-- dimension: (name-include empty OR name matches) AND (dataset-include empty OR
+-- dataset matches) AND (name matches no name-exclude) AND (dataset matches no
+-- dataset-exclude). Non-matching objects stay in the registry but are not
+-- analyzed.
+--   include: empty array = no constraint on that dimension; otherwise analyze
+--            only matches (handy for scoping a run, e.g. object [r'^v_sales'] or
+--            dataset [r'^mart_']).
+--   exclude: empty array = exclude nothing, e.g. object [r'^stg_', r'_tmp$'] or
+--            dataset [r'_staging$'].
 DECLARE analysis_include_object_patterns ARRAY<STRING> DEFAULT [];
 DECLARE analysis_exclude_object_patterns ARRAY<STRING> DEFAULT [];
+DECLARE analysis_include_dataset_patterns ARRAY<STRING> DEFAULT [];
+DECLARE analysis_exclude_dataset_patterns ARRAY<STRING> DEFAULT [];
 
 -- ----------------------------------------------------------------------------
 -- STEP 2 parameters (Scheduled Query / DAG generated-table collection)
@@ -429,16 +440,23 @@ BEGIN
     view_defs_union_sql
   );
 
-  -- Drop Views whose name matches any registry_exclude_object_patterns regex so they
-  -- never enter the definition registry. object_name is already lowercased.
-  -- Any such View already registered is deactivated by the STEP 1 "not found"
-  -- rule below (it is no longer present in current_view_definitions).
-  IF ARRAY_LENGTH(registry_exclude_object_patterns) > 0 THEN
+  -- Drop Views whose name matches any registry_exclude_object_patterns regex, or
+  -- whose dataset matches any registry_exclude_dataset_patterns regex, so they
+  -- never enter the definition registry. object_name / object_dataset are already
+  -- lowercased. Any such View already registered is deactivated by the STEP 1
+  -- "not found" rule below (it is no longer present in current_view_definitions).
+  IF ARRAY_LENGTH(registry_exclude_object_patterns) > 0
+     OR ARRAY_LENGTH(registry_exclude_dataset_patterns) > 0 THEN
     DELETE FROM current_view_definitions AS v
     WHERE EXISTS (
       SELECT 1
       FROM UNNEST(registry_exclude_object_patterns) AS pattern
       WHERE REGEXP_CONTAINS(LOWER(v.object_name), LOWER(pattern))
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM UNNEST(registry_exclude_dataset_patterns) AS pattern
+      WHERE REGEXP_CONTAINS(LOWER(v.object_dataset), LOWER(pattern))
     );
   END IF;
 
@@ -921,12 +939,19 @@ BEGIN
     WHERE (is_scheduled_query OR is_dag)
       -- REGISTRY-stage exclusion for generated TABLEs: drop jobs whose
       -- destination table name matches any registry_exclude_object_patterns
-      -- regex so they never enter the job / definition registry (the STEP 1
-      -- counterpart drops Views the same way). Empty array = exclude nothing.
+      -- regex, or whose destination dataset matches any
+      -- registry_exclude_dataset_patterns regex, so they never enter the job /
+      -- definition registry (the STEP 1 counterpart drops Views the same way).
+      -- Empty array = exclude nothing on that dimension.
       AND NOT EXISTS (
         SELECT 1
         FROM UNNEST(registry_exclude_object_patterns) AS pattern
         WHERE REGEXP_CONTAINS(LOWER(destination_table), LOWER(pattern))
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM UNNEST(registry_exclude_dataset_patterns) AS pattern
+        WHERE REGEXP_CONTAINS(LOWER(destination_dataset), LOWER(pattern))
       )
   ),
   normalized_definitions AS (
@@ -1518,7 +1543,7 @@ BEGIN
       AND object_type IN ('VIEW', 'TABLE')
       -- When generated-table collection is off, analyze Views only.
       AND (@include_tables OR object_type = 'VIEW')
-      -- Include only objects matching a configured regex (empty = all).
+      -- Include only objects whose NAME matches a configured regex (empty = all).
       AND (
         ARRAY_LENGTH(@include_patterns) = 0
         OR EXISTS (
@@ -1530,12 +1555,33 @@ BEGIN
           )
         )
       )
+      -- Include only objects whose DATASET matches a configured regex (empty = all).
+      AND (
+        ARRAY_LENGTH(@include_dataset_patterns) = 0
+        OR EXISTS (
+          SELECT 1
+          FROM UNNEST(@include_dataset_patterns) AS pattern
+          WHERE REGEXP_CONTAINS(
+            LOWER(object_dataset),
+            LOWER(pattern)
+          )
+        )
+      )
       -- Exclude objects whose name matches any configured regex.
       AND NOT EXISTS (
         SELECT 1
         FROM UNNEST(@exclude_patterns) AS pattern
         WHERE REGEXP_CONTAINS(
           LOWER(object_name),
+          LOWER(pattern)
+        )
+      )
+      -- Exclude objects whose dataset matches any configured regex.
+      AND NOT EXISTS (
+        SELECT 1
+        FROM UNNEST(@exclude_dataset_patterns) AS pattern
+        WHERE REGEXP_CONTAINS(
+          LOWER(object_dataset),
           LOWER(pattern)
         )
       )
@@ -1560,7 +1606,9 @@ BEGIN
   USING
     process_generated_tables AS include_tables,
     analysis_include_object_patterns AS include_patterns,
-    analysis_exclude_object_patterns AS exclude_patterns;
+    analysis_exclude_object_patterns AS exclude_patterns,
+    analysis_include_dataset_patterns AS include_dataset_patterns,
+    analysis_exclude_dataset_patterns AS exclude_dataset_patterns;
 
   -- Snapshot the active VIEW registry once so the per-object staging query can
   -- classify source object types without referencing the (configurable-named)

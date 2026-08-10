@@ -55,6 +55,13 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   解析だけを制御。レジストリには残す）。宣言順は実行順に合わせ registry を先に置く。
   旧名: `exclude_view_name_patterns` → `registry_exclude_object_patterns`、
   `include/exclude_object_patterns` → `analysis_include/exclude_object_patterns`。
+- **データセット版フィルタを追加**（object 名版と並列・非破壊、既定 `[]`）：
+  `registry_exclude_dataset_patterns`（登録段。VIEW=object_dataset、生成 TABLE=
+  destination_dataset で除外。名前版と OR）と `analysis_include_dataset_patterns` /
+  `analysis_exclude_dataset_patterns`（解析段。名前版とは独立の AND ゲート：
+  name-include かつ dataset-include を満たし、name-exclude・dataset-exclude の
+  いずれにも当たらない object を解析）。マッチは既存同様
+  `REGEXP_CONTAINS(LOWER(値), LOWER(pattern))`（大文字小文字無視）。
 - 冗長変数の整理：`render_dynamic_sql` の未使用プレースホルダ `__REPOSITORY__` /
   `__TARGET__` と、それだけのために存在した `target_dataset` スカラーを撤去
   （現在は 8 プレースホルダ / 9 パラメータ）。
