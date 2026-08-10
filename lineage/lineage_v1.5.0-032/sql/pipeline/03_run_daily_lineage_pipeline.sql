@@ -1422,10 +1422,6 @@ BEGIN
 
   DECLARE run_started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP();
   DECLARE strict_mode BOOL DEFAULT parser_strict_mode;
-  DECLARE source_discovery_json STRING;
-  DECLARE source_discovery_status STRING;
-  DECLARE physical_columns_json STRING;
-  DECLARE physical_metadata_json_bytes INT64;
   DECLARE analyzed_object_count INT64 DEFAULT 0;
   DECLARE failed_object_count INT64 DEFAULT 0;
 
@@ -1654,1200 +1650,1149 @@ BEGIN
   USING
     TO_JSON_STRING(STRUCT(TRUE AS source_discovery_only)) AS options_json;
 
-  FOR target IN (
-    SELECT
-      object_project,
-      object_dataset,
-      object_name,
-      object_type,
-      generation_type,
-      definition_text,
-      definition_hash,
-      source_discovery_json
-    FROM
-      changed_definitions_with_discovery
-    ORDER BY
-      object_project,
-      object_dataset,
-      object_name,
-      generation_type
-  )
-  DO
-    BEGIN
-      -- Variables declared in this outer block remain visible to the inner
-      -- EXCEPTION handler. BigQuery does not expose variables declared in the
-      -- same BEGIN block to that block's EXCEPTION section.
-      DECLARE analysis_id STRING DEFAULT GENERATE_UUID();
-      DECLARE analyzed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP();
-      -- The full UDF result JSON can exceed the 1 MiB script-variable limit for
-      -- large Views, so it is held in the udf_result temp table cell (no such
-      -- limit) instead of a STRING variable. exported_json stays declared only
-      -- as a NULL placeholder for the EXCEPTION path. Small scalars extracted
-      -- from the result are kept in variables.
-      DECLARE exported_json STRING;
-      DECLARE udf_analysis_status STRING;
-      DECLARE udf_analysis_message STRING;
-      DECLARE replacement_started BOOL DEFAULT FALSE;
-      -- Captured @@error.* values for the EXCEPTION handler's dynamic DML.
-      DECLARE err_message STRING;
-      DECLARE err_statement_text STRING;
-      DECLARE err_stack STRING;
+  -- ==========================================================================
+  -- Batch analysis and publish (full set-based STEP 3).
+  --
+  -- The former per-object FOR loop invoked the UDF and issued ~20 EXECUTE
+  -- IMMEDIATE statements per changed object, running ~15-20N serial BigQuery
+  -- jobs. This block replaces that with a fixed, set-based pipeline whose job
+  -- count does not grow with N:
+  --   1. Scope physical-column metadata for every object in one query.
+  --   2. Run the persistent UDF once across all analyzable objects.
+  --   3. Stage dependencies and diagnostics for all objects in set queries.
+  --   4. Publish with a small number of set-based DML statements.
+  --
+  -- Semantics preserved from the per-object design:
+  --   * COMPLETED objects: direct dependencies and diagnostics are replaced.
+  --   * Non-COMPLETED UDF results: dependencies are NOT touched (last known-good
+  --     rows are preserved, ADR-0004); diagnostics are replaced and a
+  --     UDF_RESULT_NOT_PUBLISHABLE row is recorded; registry -> FAILED.
+  --   * Pre-analysis failures (source discovery did not COMPLETE, or scoped
+  --     metadata exceeds the single-call limit): dependencies untouched, an
+  --     ANALYSIS_EXECUTION_FAILED diagnostic is appended, registry -> FAILED.
+  --
+  -- Behavior change vs the per-object loop: publication is now batch-atomic
+  -- rather than per-object. All staging is computed first; the destructive DML
+  -- runs inside a block that, on any error, restores the affected direct
+  -- dependency and diagnostic rows from pre-publish backups and re-raises. A
+  -- single object can no longer be skipped mid-run while its siblings commit;
+  -- either the whole publish succeeds or the repository is left unchanged. The
+  -- UDF never throws (it returns analysis_status), so per-object failures are
+  -- still isolated as data, not as aborts.
+  -- ==========================================================================
+  BEGIN
+    DECLARE batch_analyzed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP();
+    -- Declared in this enclosing block (not the publish block) so it stays
+    -- visible inside the publish block's EXCEPTION handler: BigQuery does not
+    -- expose a variable to the EXCEPTION section of the same BEGIN block.
+    DECLARE publish_err_message STRING;
 
-      BEGIN
-        -- --------------------------------------------------------------------
-        -- Phase 1: read the physical Source names for this SQL from the batch
-        -- source-discovery result computed once before the loop (see
-        -- changed_definitions_with_discovery above). No per-object UDF
-        -- invocation happens here; the deployed UDF signature is unchanged.
-        -- --------------------------------------------------------------------
-        SET source_discovery_json = target.source_discovery_json;
-
-        SET source_discovery_status = COALESCE(
-          JSON_VALUE(source_discovery_json, '$.analysis.analysis_status'),
-          'UNKNOWN'
-        );
-
-        -- ASSERT ... AS <message> only accepts a string literal, so a
-        -- formatted message is raised through IF ... RAISE instead. The raised
-        -- error is caught by this object's EXCEPTION handler, exactly as an
-        -- ASSERT failure would have been.
-        IF source_discovery_status != 'COMPLETED' THEN
-          RAISE USING MESSAGE = FORMAT(
-            'Source discovery did not complete for %s.%s.%s: %s',
-            target.object_project,
-            target.object_dataset,
-            target.object_name,
-            COALESCE(JSON_VALUE(source_discovery_json, '$.error.message'), source_discovery_status)
-          );
-        END IF;
-
-        -- --------------------------------------------------------------------
-        -- Phase 2: select metadata only for the discovered source names.
-        -- PhysicalColumnResolver accepts 3-part, 2-part, and 1-part SQL
-        -- identifiers. The same three lookup forms are retained here; a short
-        -- name can therefore include more than one candidate table, but never
-        -- excludes a table that the previous all-metadata approach could use.
-        -- --------------------------------------------------------------------
-        -- discovered_metadata_tables maps each discovered source to the metadata
-        -- table(s) that supply its schema. Two match modes:
-        --   * exact  : normal tables (3-part / 2-part / 1-part name equality).
-        --   * wildcard: GA4-style sharded tables referenced as `events_*`. The
-        --     `*` name never equals a shard name (events_20240101), so we match
-        --     shards by regex, keep ONE representative shard per source
-        --     (all shards share a schema; this avoids pulling every daily shard),
-        --     and relabel it back to the wildcard name so lineage stays stable
-        --     across days instead of pointing at a dated shard.
-        -- display_* is the identity emitted to the UDF; table_* is the real
-        -- metadata table the columns are read from.
-        CREATE OR REPLACE TEMP TABLE discovered_metadata_tables AS
-        WITH discovered_sources AS (
-          SELECT DISTINCT
-            LOWER(JSON_VALUE(source_row, '$')) AS source_name,
-            STRPOS(JSON_VALUE(source_row, '$'), '*') > 0 AS is_wildcard,
-            -- Anchored RE2 pattern for wildcard matching. Table identifiers are
-            -- [A-Za-z0-9_.] plus the '*' wildcard, so only '.' and '*' are
-            -- regex-special: escape '.' to '\.' and turn '*' into '.*'.
-            -- (BigQuery LIKE has no ESCAPE clause, so REGEXP_CONTAINS is used.)
-            CONCAT(
-              '^',
-              REPLACE(
-                REPLACE(LOWER(JSON_VALUE(source_row, '$')), '.', '\\.'),
-                '*', '.*'
-              ),
-              '$'
-            ) AS name_regex
-          FROM UNNEST(
-            COALESCE(
-              JSON_QUERY_ARRAY(source_discovery_json, '$.source_tables'),
-              CAST([] AS ARRAY<STRING>)
-            )
-          ) AS source_row
-          WHERE JSON_VALUE(source_row, '$') IS NOT NULL
-        ),
-        metadata_tables AS (
-          SELECT DISTINCT table_catalog, table_schema, table_name
-          FROM current_target_columns
-        ),
-        exact_matches AS (
-          SELECT
-            metadata.table_catalog,
-            metadata.table_schema,
-            metadata.table_name,
-            metadata.table_catalog AS display_catalog,
-            metadata.table_schema AS display_schema,
-            metadata.table_name AS display_name
-          FROM metadata_tables AS metadata
-          INNER JOIN discovered_sources AS source
-            ON source.is_wildcard = FALSE
-           AND (
-             source.source_name = LOWER(FORMAT(
-               '%s.%s.%s',
-               metadata.table_catalog, metadata.table_schema, metadata.table_name
-             ))
-             OR source.source_name = LOWER(FORMAT(
-               '%s.%s', metadata.table_schema, metadata.table_name
-             ))
-             OR source.source_name = LOWER(metadata.table_name)
-           )
-        ),
-        wildcard_ranked AS (
-          SELECT
-            metadata.table_catalog,
-            metadata.table_schema,
-            metadata.table_name,
+    -- ------------------------------------------------------------------------
+    -- 1. Scope physical-column metadata for every object with COMPLETED source
+    -- discovery. This is the set-based form of the loop's Phase 2; the object
+    -- key columns thread the per-object identity through every stage. Objects
+    -- with no matched columns still receive '[]' via the final LEFT JOIN.
+    -- ------------------------------------------------------------------------
+    CREATE OR REPLACE TEMP TABLE batch_object_metadata AS
+    WITH obj AS (
+      SELECT
+        object_project,
+        object_dataset,
+        object_name,
+        object_type,
+        generation_type,
+        definition_hash,
+        source_discovery_json
+      FROM changed_definitions_with_discovery
+      WHERE COALESCE(
+        JSON_VALUE(source_discovery_json, '$.analysis.analysis_status'),
+        'UNKNOWN'
+      ) = 'COMPLETED'
+    ),
+    discovered_sources AS (
+      SELECT DISTINCT
+        o.object_project,
+        o.object_dataset,
+        o.object_name,
+        o.object_type,
+        o.generation_type,
+        o.definition_hash,
+        LOWER(JSON_VALUE(source_row, '$')) AS source_name,
+        STRPOS(JSON_VALUE(source_row, '$'), '*') > 0 AS is_wildcard,
+        CONCAT(
+          '^',
+          REPLACE(
+            REPLACE(LOWER(JSON_VALUE(source_row, '$')), '.', '\\.'),
+            '*', '.*'
+          ),
+          '$'
+        ) AS name_regex
+      FROM obj AS o,
+      UNNEST(
+        COALESCE(
+          JSON_QUERY_ARRAY(o.source_discovery_json, '$.source_tables'),
+          CAST([] AS ARRAY<STRING>)
+        )
+      ) AS source_row
+      WHERE JSON_VALUE(source_row, '$') IS NOT NULL
+    ),
+    metadata_tables AS (
+      SELECT DISTINCT table_catalog, table_schema, table_name
+      FROM current_target_columns
+    ),
+    exact_matches AS (
+      SELECT
+        source.object_project,
+        source.object_dataset,
+        source.object_name,
+        source.object_type,
+        source.generation_type,
+        source.definition_hash,
+        metadata.table_catalog,
+        metadata.table_schema,
+        metadata.table_name,
+        metadata.table_catalog AS display_catalog,
+        metadata.table_schema AS display_schema,
+        metadata.table_name AS display_name
+      FROM metadata_tables AS metadata
+      INNER JOIN discovered_sources AS source
+        ON source.is_wildcard = FALSE
+       AND (
+         source.source_name = LOWER(FORMAT(
+           '%s.%s.%s',
+           metadata.table_catalog, metadata.table_schema, metadata.table_name
+         ))
+         OR source.source_name = LOWER(FORMAT(
+           '%s.%s', metadata.table_schema, metadata.table_name
+         ))
+         OR source.source_name = LOWER(metadata.table_name)
+       )
+    ),
+    wildcard_ranked AS (
+      SELECT
+        source.object_project,
+        source.object_dataset,
+        source.object_name,
+        source.object_type,
+        source.generation_type,
+        source.definition_hash,
+        metadata.table_catalog,
+        metadata.table_schema,
+        metadata.table_name,
+        source.source_name,
+        ROW_NUMBER() OVER (
+          PARTITION BY
+            source.object_project,
+            source.object_dataset,
+            source.object_name,
+            source.object_type,
+            source.generation_type,
+            source.definition_hash,
             source.source_name,
-            ROW_NUMBER() OVER (
-              PARTITION BY
-                source.source_name,
-                metadata.table_catalog,
-                metadata.table_schema
-              ORDER BY metadata.table_name DESC
-            ) AS shard_rank
-          FROM metadata_tables AS metadata
-          INNER JOIN discovered_sources AS source
-            ON source.is_wildcard = TRUE
-           AND (
-             REGEXP_CONTAINS(
-               LOWER(FORMAT(
-                 '%s.%s.%s',
-                 metadata.table_catalog, metadata.table_schema, metadata.table_name
-               )),
-               source.name_regex
-             )
-             OR REGEXP_CONTAINS(
-               LOWER(FORMAT(
-                 '%s.%s', metadata.table_schema, metadata.table_name
-               )),
-               source.name_regex
-             )
-             OR REGEXP_CONTAINS(LOWER(metadata.table_name), source.name_regex)
-           )
-        ),
-        wildcard_matches AS (
-          SELECT
-            table_catalog,
-            table_schema,
-            table_name,
-            table_catalog AS display_catalog,
-            table_schema AS display_schema,
-            SPLIT(source_name, '.')[SAFE_OFFSET(
-              ARRAY_LENGTH(SPLIT(source_name, '.')) - 1
-            )] AS display_name
-          FROM wildcard_ranked
-          WHERE shard_rank = 1
-        )
-        SELECT
-          table_catalog, table_schema, table_name,
-          display_catalog, display_schema, display_name
-        FROM exact_matches
-        UNION DISTINCT
-        SELECT
-          table_catalog, table_schema, table_name,
-          display_catalog, display_schema, display_name
-        FROM wildcard_matches;
-
-        -- Columns are read from the real metadata table (discovered.table_*) but
-        -- emitted under the display identity (discovered.display_*), so a
-        -- wildcard source is reported to the UDF as `events_*` rather than the
-        -- representative dated shard.
-        CREATE OR REPLACE TEMP TABLE scoped_physical_columns AS
-        WITH top_level_columns AS (
-          SELECT
-            discovered.display_catalog AS table_project,
-            discovered.display_schema AS table_dataset,
-            discovered.display_name AS table_name,
-            column_info.column_name,
-            column_info.column_name AS field_path,
-            column_info.ordinal_position,
-            column_info.data_type,
-            column_info.is_nullable
-          FROM current_target_columns AS column_info
-          INNER JOIN discovered_metadata_tables AS discovered
-            ON discovered.table_catalog = column_info.table_catalog
-           AND discovered.table_schema = column_info.table_schema
-           AND discovered.table_name = column_info.table_name
-        ),
-        nested_field_paths AS (
-          SELECT
-            discovered.display_catalog AS table_project,
-            discovered.display_schema AS table_dataset,
-            discovered.display_name AS table_name,
-            field.column_name,
-            field.field_path,
-            column_info.ordinal_position,
-            field.data_type,
-            CAST(NULL AS STRING) AS is_nullable
-          FROM current_target_column_field_paths AS field
-          INNER JOIN discovered_metadata_tables AS discovered
-            ON discovered.table_catalog = field.table_catalog
-           AND discovered.table_schema = field.table_schema
-           AND discovered.table_name = field.table_name
-          LEFT JOIN current_target_columns AS column_info
-            ON column_info.table_catalog = field.table_catalog
-           AND column_info.table_schema = field.table_schema
-           AND column_info.table_name = field.table_name
-           AND column_info.column_name = field.column_name
-          WHERE field.field_path IS NOT NULL
-            AND field.field_path != field.column_name
-            AND STRPOS(field.field_path, '.') > 0
-        )
-        SELECT * FROM top_level_columns
-        UNION ALL
-        SELECT * FROM nested_field_paths;
-
-        SET physical_metadata_json_bytes = (
-          SELECT COALESCE(SUM(BYTE_LENGTH(TO_JSON_STRING(STRUCT(
+            metadata.table_catalog,
+            metadata.table_schema
+          ORDER BY metadata.table_name DESC
+        ) AS shard_rank
+      FROM metadata_tables AS metadata
+      INNER JOIN discovered_sources AS source
+        ON source.is_wildcard = TRUE
+       AND (
+         REGEXP_CONTAINS(
+           LOWER(FORMAT(
+             '%s.%s.%s',
+             metadata.table_catalog, metadata.table_schema, metadata.table_name
+           )),
+           source.name_regex
+         )
+         OR REGEXP_CONTAINS(
+           LOWER(FORMAT(
+             '%s.%s', metadata.table_schema, metadata.table_name
+           )),
+           source.name_regex
+         )
+         OR REGEXP_CONTAINS(LOWER(metadata.table_name), source.name_regex)
+       )
+    ),
+    wildcard_matches AS (
+      SELECT
+        object_project,
+        object_dataset,
+        object_name,
+        object_type,
+        generation_type,
+        definition_hash,
+        table_catalog,
+        table_schema,
+        table_name,
+        table_catalog AS display_catalog,
+        table_schema AS display_schema,
+        SPLIT(source_name, '.')[SAFE_OFFSET(
+          ARRAY_LENGTH(SPLIT(source_name, '.')) - 1
+        )] AS display_name
+      FROM wildcard_ranked
+      WHERE shard_rank = 1
+    ),
+    discovered_metadata_tables AS (
+      SELECT
+        object_project, object_dataset, object_name, object_type,
+        generation_type, definition_hash,
+        table_catalog, table_schema, table_name,
+        display_catalog, display_schema, display_name
+      FROM exact_matches
+      UNION DISTINCT
+      SELECT
+        object_project, object_dataset, object_name, object_type,
+        generation_type, definition_hash,
+        table_catalog, table_schema, table_name,
+        display_catalog, display_schema, display_name
+      FROM wildcard_matches
+    ),
+    top_level_columns AS (
+      SELECT
+        discovered.object_project,
+        discovered.object_dataset,
+        discovered.object_name,
+        discovered.object_type,
+        discovered.generation_type,
+        discovered.definition_hash,
+        discovered.display_catalog AS table_project,
+        discovered.display_schema AS table_dataset,
+        discovered.display_name AS table_name,
+        column_info.column_name,
+        column_info.column_name AS field_path,
+        column_info.ordinal_position,
+        column_info.data_type,
+        column_info.is_nullable
+      FROM current_target_columns AS column_info
+      INNER JOIN discovered_metadata_tables AS discovered
+        ON discovered.table_catalog = column_info.table_catalog
+       AND discovered.table_schema = column_info.table_schema
+       AND discovered.table_name = column_info.table_name
+    ),
+    nested_field_paths AS (
+      SELECT
+        discovered.object_project,
+        discovered.object_dataset,
+        discovered.object_name,
+        discovered.object_type,
+        discovered.generation_type,
+        discovered.definition_hash,
+        discovered.display_catalog AS table_project,
+        discovered.display_schema AS table_dataset,
+        discovered.display_name AS table_name,
+        field.column_name,
+        field.field_path,
+        column_info.ordinal_position,
+        field.data_type,
+        CAST(NULL AS STRING) AS is_nullable
+      FROM current_target_column_field_paths AS field
+      INNER JOIN discovered_metadata_tables AS discovered
+        ON discovered.table_catalog = field.table_catalog
+       AND discovered.table_schema = field.table_schema
+       AND discovered.table_name = field.table_name
+      LEFT JOIN current_target_columns AS column_info
+        ON column_info.table_catalog = field.table_catalog
+       AND column_info.table_schema = field.table_schema
+       AND column_info.table_name = field.table_name
+       AND column_info.column_name = field.column_name
+      WHERE field.field_path IS NOT NULL
+        AND field.field_path != field.column_name
+        AND STRPOS(field.field_path, '.') > 0
+    ),
+    scoped AS (
+      SELECT * FROM top_level_columns
+      UNION ALL
+      SELECT * FROM nested_field_paths
+    ),
+    agg AS (
+      SELECT
+        object_project,
+        object_dataset,
+        object_name,
+        object_type,
+        generation_type,
+        definition_hash,
+        TO_JSON_STRING(ARRAY_AGG(
+          STRUCT(
             LOWER(FORMAT('%s.%s.%s', table_project, table_dataset, table_name)) AS table_name,
             LOWER(column_name) AS column_name,
             LOWER(field_path) AS field_path,
             ordinal_position AS ordinal_position,
             data_type AS data_type,
             is_nullable AS is_nullable
-          ))) + 1), 2)
-          FROM scoped_physical_columns
-        );
-
-        IF NOT (physical_metadata_json_bytes < 900000) THEN
-          RAISE USING MESSAGE = FORMAT(
-            'Scoped physical-column metadata is too large for one UDF call (%d bytes).',
-            physical_metadata_json_bytes
-          );
-        END IF;
-
-        SET physical_columns_json = (
-          SELECT COALESCE(
-            TO_JSON_STRING(ARRAY_AGG(
-              STRUCT(
-                LOWER(FORMAT('%s.%s.%s', table_project, table_dataset, table_name)) AS table_name,
-                LOWER(column_name) AS column_name,
-                LOWER(field_path) AS field_path,
-                ordinal_position AS ordinal_position,
-                data_type AS data_type,
-                is_nullable AS is_nullable
-              )
-              ORDER BY table_project, table_dataset, table_name, ordinal_position, field_path
-            )),
-            '[]'
           )
-          FROM scoped_physical_columns
-        );
-
-        -- --------------------------------------------------------------------
-        -- Phase 3: run the full parser and resolver with scoped metadata.
-        -- --------------------------------------------------------------------
-        SET sql_template = """
-        CREATE OR REPLACE TEMP TABLE udf_result AS
-        SELECT `__UDF__`(
-          @definition_text,
-          @physical_columns_json,
-          @options_json,
-          @context_json
-        ) AS exported_json
-      """;
-
-      SET rendered_sql = render_dynamic_sql(
-        sql_template,
-        repository_project_id,
-        repository_dataset,
-        target_project_id,
-        job_region,
-        udf_project_id,
-        udf_dataset,
-        udf_function_name,
-        repo_tables
+          ORDER BY table_project, table_dataset, table_name, ordinal_position, field_path
+        )) AS physical_columns_json,
+        SUM(BYTE_LENGTH(TO_JSON_STRING(STRUCT(
+          LOWER(FORMAT('%s.%s.%s', table_project, table_dataset, table_name)) AS table_name,
+          LOWER(column_name) AS column_name,
+          LOWER(field_path) AS field_path,
+          ordinal_position AS ordinal_position,
+          data_type AS data_type,
+          is_nullable AS is_nullable
+        ))) + 1) AS physical_metadata_json_bytes
+      FROM scoped
+      GROUP BY
+        object_project, object_dataset, object_name,
+        object_type, generation_type, definition_hash
+    )
+    SELECT
+      obj.object_project,
+      obj.object_dataset,
+      obj.object_name,
+      obj.object_type,
+      obj.generation_type,
+      obj.definition_hash,
+      COALESCE(agg.physical_columns_json, '[]') AS physical_columns_json,
+      COALESCE(agg.physical_metadata_json_bytes, 2) AS physical_metadata_json_bytes
+    FROM obj
+    LEFT JOIN agg
+      USING (
+        object_project, object_dataset, object_name,
+        object_type, generation_type, definition_hash
       );
 
-      ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-      AS 'Unresolved placeholder in lineage UDF SQL.';
-
-      -- The result JSON is materialized into udf_result (a table cell) rather
-      -- than a script variable, which is capped at 1 MiB.
-      EXECUTE IMMEDIATE rendered_sql
-      USING
-        target.definition_text AS definition_text,
-        physical_columns_json AS physical_columns_json,
-        TO_JSON_STRING(STRUCT(
-          strict_mode AS strict_mode,
-          TRUE AS compact_export
-        )) AS options_json,
-        TO_JSON_STRING(STRUCT(
-          analysis_id AS analysis_id,
-          target.object_project AS view_project,
-          target.object_dataset AS view_dataset,
-          target.object_name AS view_name,
-          FORMAT_TIMESTAMP(
-            '%FT%H:%M:%E*S%Ez',
-            analyzed_at
-          ) AS analyzed_at
-        )) AS context_json;
-
-      SET udf_analysis_status = (
-        SELECT COALESCE(
-          JSON_VALUE(exported_json, '$.analysis.analysis_status'),
-          'UNKNOWN'
-        )
-        FROM udf_result
-      );
-
-      SET udf_analysis_message = (
-        SELECT JSON_VALUE(exported_json, '$.analysis.message')
-        FROM udf_result
-      );
-
-      -- ----------------------------------------------------------------------
-      -- Always stage UDF diagnostics before deciding whether the result can be
-      -- published. This preserves the original parser/resolver diagnostics for
-      -- PARTIAL_FAILURE and other non-publishable statuses.
-      -- ----------------------------------------------------------------------
-      CREATE OR REPLACE TEMP TABLE staged_lineage_diagnostic AS
+    -- ------------------------------------------------------------------------
+    -- 2. Assemble the analysis input for every changed object. Each row carries
+    -- a stable analysis_id (materialized here so it is identical in the result
+    -- column and the UDF context), the scoped metadata, and a pre-analysis
+    -- classification. Objects that cannot be analyzed (discovery incomplete or
+    -- metadata over the single-call limit) are flagged, not dropped.
+    -- ------------------------------------------------------------------------
+    CREATE OR REPLACE TEMP TABLE batch_analysis_input AS
+    SELECT
+      t.*,
+      (t.preanalysis_failure_reason IS NULL) AS is_analyzable
+    FROM (
       SELECT
-        target.definition_hash AS definition_hash,
-        LOWER(target.object_project) AS object_project,
-        LOWER(target.object_dataset) AS object_dataset,
-        LOWER(target.object_name) AS object_name,
-        target.object_type AS object_type,
-        COALESCE(JSON_VALUE(diagnostic_row, '$.code'), 'UNKNOWN')
-          AS diagnostic_code,
-        JSON_VALUE(diagnostic_row, '$.stage') AS engine_stage,
-        COALESCE(JSON_VALUE(diagnostic_row, '$.severity'), 'INFO')
-          AS severity,
-        CAST(NULL AS STRING) AS output_column,
-        CAST(NULL AS STRING) AS expression,
-        JSON_VALUE(diagnostic_row, '$.message') AS message,
-        SAFE.PARSE_JSON(
-          JSON_VALUE(diagnostic_row, '$.diagnostic_json')
-        ) AS diagnostic_json,
-        analyzed_at AS analyzed_at
-      FROM udf_result,
-      UNNEST(
+        c.object_project,
+        c.object_dataset,
+        c.object_name,
+        c.object_type,
+        c.generation_type,
+        c.definition_hash,
+        c.definition_text,
+        GENERATE_UUID() AS analysis_id,
         COALESCE(
-          JSON_QUERY_ARRAY(
-            udf_result.exported_json,
-            '$.exported_tables.diagnostics'
-          ),
-          CAST([] AS ARRAY<STRING>)
+          JSON_VALUE(c.source_discovery_json, '$.analysis.analysis_status'),
+          'UNKNOWN'
+        ) AS discovery_status,
+        JSON_VALUE(c.source_discovery_json, '$.error.message')
+          AS discovery_error_message,
+        COALESCE(m.physical_columns_json, '[]') AS physical_columns_json,
+        COALESCE(m.physical_metadata_json_bytes, 2) AS physical_metadata_json_bytes,
+        CASE
+          WHEN COALESCE(
+            JSON_VALUE(c.source_discovery_json, '$.analysis.analysis_status'),
+            'UNKNOWN'
+          ) != 'COMPLETED' THEN 'SOURCE_DISCOVERY'
+          WHEN COALESCE(m.physical_metadata_json_bytes, 2) >= 900000
+            THEN 'METADATA_TOO_LARGE'
+          ELSE NULL
+        END AS preanalysis_failure_reason
+      FROM changed_definitions_with_discovery AS c
+      LEFT JOIN batch_object_metadata AS m
+        ON m.object_project = c.object_project
+       AND m.object_dataset = c.object_dataset
+       AND m.object_name = c.object_name
+       AND m.object_type = c.object_type
+       AND m.generation_type = c.generation_type
+       AND m.definition_hash = c.definition_hash
+    ) AS t;
+
+    -- ------------------------------------------------------------------------
+    -- 3. Run the persistent lineage UDF once for every analyzable object. This
+    -- is the single heavy job that replaces N per-object analysis queries; the
+    -- JavaScript UDF initialization cost is paid once for the whole batch. The
+    -- result JSON lives in a table column (no 1 MiB script-variable limit).
+    -- ------------------------------------------------------------------------
+    SET sql_template = """
+      CREATE OR REPLACE TEMP TABLE batch_udf_results AS
+      SELECT
+        x.object_project,
+        x.object_dataset,
+        x.object_name,
+        x.object_type,
+        x.generation_type,
+        x.definition_hash,
+        x.analysis_id,
+        x.analyzed_at,
+        x.exported_json,
+        COALESCE(
+          JSON_VALUE(x.exported_json, '$.analysis.analysis_status'),
+          'UNKNOWN'
+        ) AS udf_analysis_status,
+        JSON_VALUE(x.exported_json, '$.analysis.message') AS udf_analysis_message
+      FROM (
+        SELECT
+          p.object_project,
+          p.object_dataset,
+          p.object_name,
+          p.object_type,
+          p.generation_type,
+          p.definition_hash,
+          p.analysis_id,
+          @analyzed_at AS analyzed_at,
+          `__UDF__`(
+            p.definition_text,
+            p.physical_columns_json,
+            TO_JSON_STRING(STRUCT(
+              @strict_mode AS strict_mode,
+              TRUE AS compact_export
+            )),
+            TO_JSON_STRING(STRUCT(
+              p.analysis_id AS analysis_id,
+              p.object_project AS view_project,
+              p.object_dataset AS view_dataset,
+              p.object_name AS view_name,
+              @analyzed_at_iso AS analyzed_at
+            ))
+          ) AS exported_json
+        FROM batch_analysis_input AS p
+        WHERE p.is_analyzable
+      ) AS x
+    """;
+
+    SET rendered_sql = render_dynamic_sql(
+      sql_template,
+      repository_project_id,
+      repository_dataset,
+      target_project_id,
+      job_region,
+      udf_project_id,
+      udf_dataset,
+      udf_function_name,
+      repo_tables
+    );
+
+    ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
+    AS 'Unresolved placeholder in batch UDF analysis SQL.';
+
+    EXECUTE IMMEDIATE rendered_sql
+    USING
+      strict_mode AS strict_mode,
+      batch_analyzed_at AS analyzed_at,
+      FORMAT_TIMESTAMP('%FT%H:%M:%E*S%Ez', batch_analyzed_at) AS analyzed_at_iso;
+
+    -- ------------------------------------------------------------------------
+    -- 4. Object key sets driving the set-based publish.
+    -- ------------------------------------------------------------------------
+    CREATE OR REPLACE TEMP TABLE batch_completed_objects AS
+    SELECT
+      object_project, object_dataset, object_name,
+      object_type, generation_type, definition_hash
+    FROM batch_udf_results
+    WHERE udf_analysis_status = 'COMPLETED';
+
+    CREATE OR REPLACE TEMP TABLE batch_udf_failed_objects AS
+    SELECT
+      object_project, object_dataset, object_name,
+      object_type, generation_type, definition_hash
+    FROM batch_udf_results
+    WHERE udf_analysis_status != 'COMPLETED';
+
+    -- Every object that entered the UDF (COMPLETED or not). Diagnostics for all
+    -- of these are replaced; pre-analysis failures are handled separately.
+    CREATE OR REPLACE TEMP TABLE batch_analyzed_objects AS
+    SELECT
+      object_project, object_dataset, object_name,
+      object_type, generation_type, definition_hash
+    FROM batch_udf_results;
+
+    CREATE OR REPLACE TEMP TABLE batch_preanalysis_failures AS
+    SELECT
+      object_project,
+      object_dataset,
+      object_name,
+      object_type,
+      generation_type,
+      definition_hash,
+      definition_text,
+      preanalysis_failure_reason,
+      CASE preanalysis_failure_reason
+        WHEN 'SOURCE_DISCOVERY' THEN FORMAT(
+          'Source discovery did not complete for %s.%s.%s: %s',
+          object_project, object_dataset, object_name,
+          COALESCE(discovery_error_message, discovery_status)
         )
-      ) AS diagnostic_row;
+        WHEN 'METADATA_TOO_LARGE' THEN FORMAT(
+          'Scoped physical-column metadata is too large for one UDF call (%d bytes).',
+          physical_metadata_json_bytes
+        )
+        ELSE 'Pre-analysis failure.'
+      END AS failure_message
+    FROM batch_analysis_input
+    WHERE NOT is_analyzable;
 
-      IF udf_analysis_status = 'COMPLETED' THEN
-        CREATE OR REPLACE TEMP TABLE staged_direct_dependency AS
-      WITH lineage_path_rows AS (
-        SELECT
-          SAFE_CAST(JSON_VALUE(path_row, '$.output_column_id') AS INT64)
-            AS output_column_id,
-          SAFE_CAST(JSON_VALUE(path_row, '$.output_scope_id') AS INT64)
-            AS output_scope_id,
-          JSON_VALUE(path_row, '$.output_column_name') AS output_column_name,
-          JSON_VALUE(path_row, '$.physical_table_name') AS physical_table_name,
-          JSON_VALUE(path_row, '$.physical_column_name') AS physical_column_name,
-          JSON_VALUE(path_row, '$.field_path') AS field_path
-        FROM udf_result,
-        UNNEST(
-          JSON_QUERY_ARRAY(
-            udf_result.exported_json,
-            '$.exported_tables.lineage_paths'
-          )
-        ) AS path_row
-      ),
-      output_lineage_rows AS (
-        SELECT
-          SAFE_CAST(JSON_VALUE(output_row, '$.output_column_id') AS INT64)
-            AS output_column_id,
-          SAFE_CAST(JSON_VALUE(output_row, '$.output_scope_id') AS INT64)
-            AS output_scope_id,
-          JSON_VALUE(output_row, '$.expression_text') AS expression_text,
-          JSON_VALUE(output_row, '$.lineage_status') AS lineage_status
-        FROM udf_result,
-        UNNEST(
-          JSON_QUERY_ARRAY(
-            udf_result.exported_json,
-            '$.exported_tables.output_lineages'
-          )
-        ) AS output_row
-      ),
-      parsed_edges AS (
-        SELECT
-          target.definition_hash AS definition_hash,
-          LOWER(
-            CASE ARRAY_LENGTH(SPLIT(path.physical_table_name, '.'))
-              WHEN 3 THEN SPLIT(path.physical_table_name, '.')[SAFE_OFFSET(0)]
-              ELSE target.object_project
-            END
-          ) AS source_project,
-          LOWER(
-            CASE ARRAY_LENGTH(SPLIT(path.physical_table_name, '.'))
-              WHEN 3 THEN SPLIT(path.physical_table_name, '.')[SAFE_OFFSET(1)]
-              WHEN 2 THEN SPLIT(path.physical_table_name, '.')[SAFE_OFFSET(0)]
-              ELSE target.object_dataset
-            END
-          ) AS source_dataset,
-          LOWER(
-            CASE ARRAY_LENGTH(SPLIT(path.physical_table_name, '.'))
-              WHEN 3 THEN SPLIT(path.physical_table_name, '.')[SAFE_OFFSET(2)]
-              WHEN 2 THEN SPLIT(path.physical_table_name, '.')[SAFE_OFFSET(1)]
-              ELSE SPLIT(path.physical_table_name, '.')[SAFE_OFFSET(0)]
-            END
-          ) AS source_object,
-          LOWER(
-            COALESCE(path.field_path, path.physical_column_name)
-          ) AS source_column,
-          LOWER(target.object_project) AS target_project,
-          LOWER(target.object_dataset) AS target_dataset,
-          LOWER(target.object_name) AS target_object,
-          target.object_type AS target_object_type,
-          LOWER(path.output_column_name) AS target_column,
-          target.generation_type AS generation_type,
-          'COLUMN' AS dependency_type,
-          output.expression_text AS expression,
-          'SELECT' AS usage_type,
-          COALESCE(output.lineage_status, 'RESOLVED')
-            AS resolution_status,
-          CAST(NULL AS STRING) AS resolution_reason,
-          analyzed_at AS analyzed_at
-        FROM lineage_path_rows AS path
-        LEFT JOIN output_lineage_rows AS output
-          ON output.output_column_id = path.output_column_id
-         AND output.output_scope_id = path.output_scope_id
-        WHERE path.physical_table_name IS NOT NULL
-          AND path.output_column_name IS NOT NULL
-      ),
-      normalized_edges AS (
-        SELECT
-          parsed.* EXCEPT(target_object_type),
-          CASE
-            WHEN source_registry.object_type = 'VIEW' THEN 'VIEW'
-            WHEN source_table.table_type = 'VIEW' THEN 'VIEW'
-            ELSE 'TABLE'
-          END AS source_object_type,
-          parsed.target_object_type
-        FROM parsed_edges AS parsed
-        LEFT JOIN
-          active_view_definitions
-            AS source_registry
-          ON source_registry.is_active = TRUE
-         AND LOWER(source_registry.object_project) = parsed.source_project
-         AND LOWER(source_registry.object_dataset) = parsed.source_dataset
-         AND LOWER(source_registry.object_name) = parsed.source_object
-         AND source_registry.object_type = 'VIEW'
-        LEFT JOIN
-          current_target_tables AS source_table
-          ON LOWER(source_table.table_catalog) = parsed.source_project
-         AND LOWER(source_table.table_schema) = parsed.source_dataset
-         AND LOWER(source_table.table_name) = parsed.source_object
-        QUALIFY ROW_NUMBER() OVER (
-          PARTITION BY
-            parsed.definition_hash,
-            parsed.source_project,
-            parsed.source_dataset,
-            parsed.source_object,
-            parsed.source_column,
-            parsed.target_project,
-            parsed.target_dataset,
-            parsed.target_object,
-            parsed.target_column,
-            parsed.generation_type
-          ORDER BY
-            source_registry.updated_at DESC NULLS LAST
-        ) = 1
+    -- ------------------------------------------------------------------------
+    -- 5. Stage direct dependencies (COMPLETED objects only) and diagnostics
+    -- (all analyzed objects). These are the set-based forms of the loop's
+    -- staged_direct_dependency / staged_lineage_diagnostic builds; joins that
+    -- were implicit for a single object now carry the object key explicitly.
+    -- ------------------------------------------------------------------------
+    CREATE OR REPLACE TEMP TABLE batch_staged_direct_dependency AS
+    WITH lineage_path_rows AS (
+      SELECT
+        r.object_project,
+        r.object_dataset,
+        r.object_name,
+        r.object_type,
+        r.generation_type,
+        r.definition_hash,
+        SAFE_CAST(JSON_VALUE(path_row, '$.output_column_id') AS INT64)
+          AS output_column_id,
+        SAFE_CAST(JSON_VALUE(path_row, '$.output_scope_id') AS INT64)
+          AS output_scope_id,
+        JSON_VALUE(path_row, '$.output_column_name') AS output_column_name,
+        JSON_VALUE(path_row, '$.physical_table_name') AS physical_table_name,
+        JSON_VALUE(path_row, '$.physical_column_name') AS physical_column_name,
+        JSON_VALUE(path_row, '$.field_path') AS field_path
+      FROM batch_udf_results AS r,
+      UNNEST(
+        JSON_QUERY_ARRAY(r.exported_json, '$.exported_tables.lineage_paths')
+      ) AS path_row
+      WHERE r.udf_analysis_status = 'COMPLETED'
+    ),
+    output_lineage_rows AS (
+      SELECT
+        r.object_project,
+        r.object_dataset,
+        r.object_name,
+        r.object_type,
+        r.generation_type,
+        r.definition_hash,
+        SAFE_CAST(JSON_VALUE(output_row, '$.output_column_id') AS INT64)
+          AS output_column_id,
+        SAFE_CAST(JSON_VALUE(output_row, '$.output_scope_id') AS INT64)
+          AS output_scope_id,
+        JSON_VALUE(output_row, '$.expression_text') AS expression_text,
+        JSON_VALUE(output_row, '$.lineage_status') AS lineage_status
+      FROM batch_udf_results AS r,
+      UNNEST(
+        JSON_QUERY_ARRAY(r.exported_json, '$.exported_tables.output_lineages')
+      ) AS output_row
+      WHERE r.udf_analysis_status = 'COMPLETED'
+    ),
+    parsed_edges AS (
+      SELECT
+        path.definition_hash AS definition_hash,
+        LOWER(
+          CASE ARRAY_LENGTH(SPLIT(path.physical_table_name, '.'))
+            WHEN 3 THEN SPLIT(path.physical_table_name, '.')[SAFE_OFFSET(0)]
+            ELSE path.object_project
+          END
+        ) AS source_project,
+        LOWER(
+          CASE ARRAY_LENGTH(SPLIT(path.physical_table_name, '.'))
+            WHEN 3 THEN SPLIT(path.physical_table_name, '.')[SAFE_OFFSET(1)]
+            WHEN 2 THEN SPLIT(path.physical_table_name, '.')[SAFE_OFFSET(0)]
+            ELSE path.object_dataset
+          END
+        ) AS source_dataset,
+        LOWER(
+          CASE ARRAY_LENGTH(SPLIT(path.physical_table_name, '.'))
+            WHEN 3 THEN SPLIT(path.physical_table_name, '.')[SAFE_OFFSET(2)]
+            WHEN 2 THEN SPLIT(path.physical_table_name, '.')[SAFE_OFFSET(1)]
+            ELSE SPLIT(path.physical_table_name, '.')[SAFE_OFFSET(0)]
+          END
+        ) AS source_object,
+        LOWER(
+          COALESCE(path.field_path, path.physical_column_name)
+        ) AS source_column,
+        LOWER(path.object_project) AS target_project,
+        LOWER(path.object_dataset) AS target_dataset,
+        LOWER(path.object_name) AS target_object,
+        path.object_type AS target_object_type,
+        LOWER(path.output_column_name) AS target_column,
+        path.generation_type AS generation_type,
+        'COLUMN' AS dependency_type,
+        output.expression_text AS expression,
+        'SELECT' AS usage_type,
+        COALESCE(output.lineage_status, 'RESOLVED')
+          AS resolution_status,
+        CAST(NULL AS STRING) AS resolution_reason,
+        batch_analyzed_at AS analyzed_at
+      FROM lineage_path_rows AS path
+      LEFT JOIN output_lineage_rows AS output
+        ON output.output_column_id = path.output_column_id
+       AND output.output_scope_id = path.output_scope_id
+       AND output.object_project = path.object_project
+       AND output.object_dataset = path.object_dataset
+       AND output.object_name = path.object_name
+       AND output.object_type = path.object_type
+       AND output.generation_type = path.generation_type
+      WHERE path.physical_table_name IS NOT NULL
+        AND path.output_column_name IS NOT NULL
+    ),
+    normalized_edges AS (
+      SELECT
+        parsed.* EXCEPT(target_object_type),
+        CASE
+          WHEN source_registry.object_type = 'VIEW' THEN 'VIEW'
+          WHEN source_table.table_type = 'VIEW' THEN 'VIEW'
+          ELSE 'TABLE'
+        END AS source_object_type,
+        parsed.target_object_type
+      FROM parsed_edges AS parsed
+      LEFT JOIN
+        active_view_definitions
+          AS source_registry
+        ON source_registry.is_active = TRUE
+       AND LOWER(source_registry.object_project) = parsed.source_project
+       AND LOWER(source_registry.object_dataset) = parsed.source_dataset
+       AND LOWER(source_registry.object_name) = parsed.source_object
+       AND source_registry.object_type = 'VIEW'
+      LEFT JOIN
+        current_target_tables AS source_table
+        ON LOWER(source_table.table_catalog) = parsed.source_project
+       AND LOWER(source_table.table_schema) = parsed.source_dataset
+       AND LOWER(source_table.table_name) = parsed.source_object
+      QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY
+          parsed.definition_hash,
+          parsed.source_project,
+          parsed.source_dataset,
+          parsed.source_object,
+          parsed.source_column,
+          parsed.target_project,
+          parsed.target_dataset,
+          parsed.target_object,
+          parsed.target_column,
+          parsed.generation_type
+        ORDER BY
+          source_registry.updated_at DESC NULLS LAST
+      ) = 1
+    )
+    SELECT DISTINCT
+      definition_hash,
+      source_project,
+      source_dataset,
+      source_object,
+      source_object_type,
+      source_column,
+      target_project,
+      target_dataset,
+      target_object,
+      target_object_type,
+      target_column,
+      generation_type,
+      dependency_type,
+      expression,
+      usage_type,
+      resolution_status,
+      resolution_reason,
+      TO_HEX(SHA256(CONCAT(
+        COALESCE(source_project, ''), '|',
+        COALESCE(source_dataset, ''), '|',
+        COALESCE(source_object, ''), '|',
+        COALESCE(source_column, '*'), '|',
+        COALESCE(target_project, ''), '|',
+        COALESCE(target_dataset, ''), '|',
+        COALESCE(target_object, ''), '|',
+        COALESCE(target_column, '*'), '|',
+        generation_type
+      ))) AS edge_key,
+      analyzed_at
+    FROM normalized_edges;
+
+    -- Diagnostics emitted by the UDF for every analyzed object (COMPLETED and
+    -- non-COMPLETED alike). generation_type is carried for precise joins but is
+    -- not part of the diagnostic table schema.
+    CREATE OR REPLACE TEMP TABLE batch_staged_lineage_diagnostic AS
+    SELECT
+      r.definition_hash AS definition_hash,
+      LOWER(r.object_project) AS object_project,
+      LOWER(r.object_dataset) AS object_dataset,
+      LOWER(r.object_name) AS object_name,
+      r.object_type AS object_type,
+      r.generation_type AS generation_type,
+      COALESCE(JSON_VALUE(diagnostic_row, '$.code'), 'UNKNOWN')
+        AS diagnostic_code,
+      JSON_VALUE(diagnostic_row, '$.stage') AS engine_stage,
+      COALESCE(JSON_VALUE(diagnostic_row, '$.severity'), 'INFO')
+        AS severity,
+      CAST(NULL AS STRING) AS output_column,
+      CAST(NULL AS STRING) AS expression,
+      JSON_VALUE(diagnostic_row, '$.message') AS message,
+      SAFE.PARSE_JSON(
+        JSON_VALUE(diagnostic_row, '$.diagnostic_json')
+      ) AS diagnostic_json,
+      r.analyzed_at AS analyzed_at
+    FROM batch_udf_results AS r,
+    UNNEST(
+      COALESCE(
+        JSON_QUERY_ARRAY(r.exported_json, '$.exported_tables.diagnostics'),
+        CAST([] AS ARRAY<STRING>)
       )
-      SELECT DISTINCT
-        definition_hash,
-        source_project,
-        source_dataset,
-        source_object,
-        source_object_type,
-        source_column,
-        target_project,
-        target_dataset,
-        target_object,
-        target_object_type,
-        target_column,
-        generation_type,
-        dependency_type,
-        expression,
-        usage_type,
-        resolution_status,
-        resolution_reason,
-        TO_HEX(SHA256(CONCAT(
-          COALESCE(source_project, ''), '|',
-          COALESCE(source_dataset, ''), '|',
-          COALESCE(source_object, ''), '|',
-          COALESCE(source_column, '*'), '|',
-          COALESCE(target_project, ''), '|',
-          COALESCE(target_dataset, ''), '|',
-          COALESCE(target_object, ''), '|',
-          COALESCE(target_column, '*'), '|',
-          generation_type
-        ))) AS edge_key,
-        analyzed_at
-      FROM normalized_edges;
+    ) AS diagnostic_row;
 
+    -- Synthetic UDF_RESULT_NOT_PUBLISHABLE diagnostic for non-COMPLETED objects.
+    CREATE OR REPLACE TEMP TABLE batch_nonpublishable_diagnostic AS
+    SELECT
+      r.definition_hash AS definition_hash,
+      LOWER(r.object_project) AS object_project,
+      LOWER(r.object_dataset) AS object_dataset,
+      LOWER(r.object_name) AS object_name,
+      r.object_type AS object_type,
+      'UDF_RESULT_NOT_PUBLISHABLE' AS diagnostic_code,
+      '06_analyze_changed_objects' AS engine_stage,
+      'ERROR' AS severity,
+      CAST(NULL AS STRING) AS output_column,
+      CAST(NULL AS STRING) AS expression,
+      FORMAT(
+        'Lineage UDF returned a non-publishable status: %s',
+        r.udf_analysis_status
+      ) AS message,
+      JSON_OBJECT(
+        'udf_analysis_status', r.udf_analysis_status,
+        'analysis_message', r.udf_analysis_message
+      ) AS diagnostic_json,
+      r.analyzed_at AS analyzed_at
+    FROM batch_udf_results AS r
+    WHERE r.udf_analysis_status != 'COMPLETED';
 
+    -- Synthetic ANALYSIS_EXECUTION_FAILED diagnostic for pre-analysis failures.
+    CREATE OR REPLACE TEMP TABLE batch_preanalysis_diagnostic AS
+    SELECT
+      f.definition_hash AS definition_hash,
+      LOWER(f.object_project) AS object_project,
+      LOWER(f.object_dataset) AS object_dataset,
+      LOWER(f.object_name) AS object_name,
+      f.object_type AS object_type,
+      'ANALYSIS_EXECUTION_FAILED' AS diagnostic_code,
+      '06_analyze_changed_objects' AS engine_stage,
+      'ERROR' AS severity,
+      CAST(NULL AS STRING) AS output_column,
+      CAST(NULL AS STRING) AS expression,
+      f.failure_message AS message,
+      JSON_OBJECT(
+        'preanalysis_failure_reason', f.preanalysis_failure_reason
+      ) AS diagnostic_json,
+      batch_analyzed_at AS analyzed_at
+    FROM batch_preanalysis_failures AS f;
+
+    -- ------------------------------------------------------------------------
+    -- 6. Back up the direct-dependency and diagnostic rows the publish will
+    -- overwrite, so the EXCEPTION handler can restore them if any publish
+    -- statement fails (batch equivalent of the loop's per-object backups).
+    -- ------------------------------------------------------------------------
+    SET sql_template = """
+      CREATE OR REPLACE TEMP TABLE batch_previous_direct_dependency AS
+      SELECT dependency.*
+      FROM `__T_DIRECT_DEP__` AS dependency
+      WHERE EXISTS (
+        SELECT 1
+        FROM batch_completed_objects AS obj
+        WHERE LOWER(dependency.target_project) = LOWER(obj.object_project)
+          AND LOWER(dependency.target_dataset) = LOWER(obj.object_dataset)
+          AND LOWER(dependency.target_object) = LOWER(obj.object_name)
+          AND dependency.target_object_type = obj.object_type
+          AND dependency.generation_type = obj.generation_type
+      )
+    """;
+    SET rendered_sql = render_dynamic_sql(
+      sql_template,
+      repository_project_id,
+      repository_dataset,
+      target_project_id,
+      job_region,
+      udf_project_id,
+      udf_dataset,
+      udf_function_name,
+      repo_tables
+    );
+    ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
+    AS 'Unresolved placeholder in batch dependency backup SQL.';
+    EXECUTE IMMEDIATE rendered_sql;
+
+    SET sql_template = """
+      CREATE OR REPLACE TEMP TABLE batch_previous_lineage_diagnostic AS
+      SELECT diagnostic.*
+      FROM `__T_DIAGNOSTIC__` AS diagnostic
+      WHERE EXISTS (
+        SELECT 1
+        FROM batch_analyzed_objects AS obj
+        WHERE LOWER(diagnostic.object_project) = LOWER(obj.object_project)
+          AND LOWER(diagnostic.object_dataset) = LOWER(obj.object_dataset)
+          AND LOWER(diagnostic.object_name) = LOWER(obj.object_name)
+          AND diagnostic.object_type = obj.object_type
+      )
+    """;
+    SET rendered_sql = render_dynamic_sql(
+      sql_template,
+      repository_project_id,
+      repository_dataset,
+      target_project_id,
+      job_region,
+      udf_project_id,
+      udf_dataset,
+      udf_function_name,
+      repo_tables
+    );
+    ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
+    AS 'Unresolved placeholder in batch diagnostic backup SQL.';
+    EXECUTE IMMEDIATE rendered_sql;
+
+    -- ------------------------------------------------------------------------
+    -- 7. Publish. Every statement is set-based and keyed by the object sets
+    -- above. On any failure the handler restores the backed-up rows and
+    -- re-raises, leaving the repository as it was before the publish.
+    -- ------------------------------------------------------------------------
+    BEGIN
+      -- 7a. Replace direct dependencies for COMPLETED objects.
       SET sql_template = """
-        CREATE OR REPLACE TEMP TABLE previous_direct_dependency AS
-        SELECT *
-        FROM
-          `__T_DIRECT_DEP__`
-        WHERE LOWER(target_project) = LOWER(@p_object_project)
-          AND LOWER(target_dataset) = LOWER(@p_object_dataset)
-          AND LOWER(target_object) = LOWER(@p_object_name)
-          AND target_object_type = @p_object_type
-          AND generation_type = @p_generation_type
+        DELETE FROM `__T_DIRECT_DEP__` AS dependency
+        WHERE EXISTS (
+          SELECT 1
+          FROM batch_completed_objects AS obj
+          WHERE LOWER(dependency.target_project) = LOWER(obj.object_project)
+            AND LOWER(dependency.target_dataset) = LOWER(obj.object_dataset)
+            AND LOWER(dependency.target_object) = LOWER(obj.object_name)
+            AND dependency.target_object_type = obj.object_type
+            AND dependency.generation_type = obj.generation_type
+        )
       """;
       SET rendered_sql = render_dynamic_sql(
         sql_template,
-        repository_project_id,
-        repository_dataset,
-        target_project_id,
-        job_region,
-        udf_project_id,
-        udf_dataset,
-        udf_function_name,
-        repo_tables
+        repository_project_id, repository_dataset, target_project_id,
+        job_region, udf_project_id, udf_dataset, udf_function_name, repo_tables
       );
       ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-      AS 'Unresolved placeholder in previous_direct_dependency backup SQL.';
-      EXECUTE IMMEDIATE rendered_sql
-      USING
-        target.object_project AS p_object_project,
-        target.object_dataset AS p_object_dataset,
-        target.object_name AS p_object_name,
-        target.object_type AS p_object_type,
-        target.generation_type AS p_generation_type;
-
-      SET sql_template = """
-        CREATE OR REPLACE TEMP TABLE previous_lineage_diagnostic AS
-        SELECT *
-        FROM
-          `__T_DIAGNOSTIC__`
-        WHERE LOWER(object_project) = LOWER(@p_object_project)
-          AND LOWER(object_dataset) = LOWER(@p_object_dataset)
-          AND LOWER(object_name) = LOWER(@p_object_name)
-          AND object_type = @p_object_type
-      """;
-      SET rendered_sql = render_dynamic_sql(
-        sql_template,
-        repository_project_id,
-        repository_dataset,
-        target_project_id,
-        job_region,
-        udf_project_id,
-        udf_dataset,
-        udf_function_name,
-        repo_tables
-      );
-      ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-      AS 'Unresolved placeholder in previous_lineage_diagnostic backup SQL.';
-      EXECUTE IMMEDIATE rendered_sql
-      USING
-        target.object_project AS p_object_project,
-        target.object_dataset AS p_object_dataset,
-        target.object_name AS p_object_name,
-        target.object_type AS p_object_type;
-
-      SET replacement_started = TRUE;
-
-      SET sql_template = """
-        DELETE FROM
-          `__T_DIRECT_DEP__`
-        WHERE LOWER(target_project) = LOWER(@p_object_project)
-          AND LOWER(target_dataset) = LOWER(@p_object_dataset)
-          AND LOWER(target_object) = LOWER(@p_object_name)
-          AND target_object_type = @p_object_type
-          AND generation_type = @p_generation_type
-      """;
-      SET rendered_sql = render_dynamic_sql(
-        sql_template,
-        repository_project_id,
-        repository_dataset,
-        target_project_id,
-        job_region,
-        udf_project_id,
-        udf_dataset,
-        udf_function_name,
-        repo_tables
-      );
-      ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-      AS 'Unresolved placeholder in direct-dependency replace DELETE SQL.';
-      EXECUTE IMMEDIATE rendered_sql
-      USING
-        target.object_project AS p_object_project,
-        target.object_dataset AS p_object_dataset,
-        target.object_name AS p_object_name,
-        target.object_type AS p_object_type,
-        target.generation_type AS p_generation_type;
-
-      SET sql_template = """
-        INSERT INTO
-          `__T_DIRECT_DEP__`
-        SELECT *
-        FROM staged_direct_dependency
-      """;
-      SET rendered_sql = render_dynamic_sql(
-        sql_template,
-        repository_project_id,
-        repository_dataset,
-        target_project_id,
-        job_region,
-        udf_project_id,
-        udf_dataset,
-        udf_function_name,
-        repo_tables
-      );
-      ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-      AS 'Unresolved placeholder in direct-dependency replace INSERT SQL.';
+      AS 'Unresolved placeholder in batch dependency DELETE SQL.';
       EXECUTE IMMEDIATE rendered_sql;
 
       SET sql_template = """
-        DELETE FROM
-          `__T_DIAGNOSTIC__`
-        WHERE LOWER(object_project) = LOWER(@p_object_project)
-          AND LOWER(object_dataset) = LOWER(@p_object_dataset)
-          AND LOWER(object_name) = LOWER(@p_object_name)
-          AND object_type = @p_object_type
+        INSERT INTO `__T_DIRECT_DEP__` (
+          definition_hash, source_project, source_dataset, source_object,
+          source_object_type, source_column, target_project, target_dataset,
+          target_object, target_object_type, target_column, generation_type,
+          dependency_type, expression, usage_type, resolution_status,
+          resolution_reason, edge_key, analyzed_at
+        )
+        SELECT
+          definition_hash, source_project, source_dataset, source_object,
+          source_object_type, source_column, target_project, target_dataset,
+          target_object, target_object_type, target_column, generation_type,
+          dependency_type, expression, usage_type, resolution_status,
+          resolution_reason, edge_key, analyzed_at
+        FROM batch_staged_direct_dependency
       """;
       SET rendered_sql = render_dynamic_sql(
         sql_template,
-        repository_project_id,
-        repository_dataset,
-        target_project_id,
-        job_region,
-        udf_project_id,
-        udf_dataset,
-        udf_function_name,
-        repo_tables
+        repository_project_id, repository_dataset, target_project_id,
+        job_region, udf_project_id, udf_dataset, udf_function_name, repo_tables
       );
       ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-      AS 'Unresolved placeholder in diagnostic replace DELETE SQL.';
-      EXECUTE IMMEDIATE rendered_sql
-      USING
-        target.object_project AS p_object_project,
-        target.object_dataset AS p_object_dataset,
-        target.object_name AS p_object_name,
-        target.object_type AS p_object_type;
+      AS 'Unresolved placeholder in batch dependency INSERT SQL.';
+      EXECUTE IMMEDIATE rendered_sql;
 
+      -- 7b. Replace diagnostics for all analyzed objects, then insert the UDF
+      -- diagnostics, the non-publishable markers, and (appended) the
+      -- pre-analysis failure diagnostics.
       SET sql_template = """
-        INSERT INTO
-          `__T_DIAGNOSTIC__`
-        SELECT *
-        FROM staged_lineage_diagnostic
+        DELETE FROM `__T_DIAGNOSTIC__` AS diagnostic
+        WHERE EXISTS (
+          SELECT 1
+          FROM batch_analyzed_objects AS obj
+          WHERE LOWER(diagnostic.object_project) = LOWER(obj.object_project)
+            AND LOWER(diagnostic.object_dataset) = LOWER(obj.object_dataset)
+            AND LOWER(diagnostic.object_name) = LOWER(obj.object_name)
+            AND diagnostic.object_type = obj.object_type
+        )
       """;
       SET rendered_sql = render_dynamic_sql(
         sql_template,
-        repository_project_id,
-        repository_dataset,
-        target_project_id,
-        job_region,
-        udf_project_id,
-        udf_dataset,
-        udf_function_name,
-        repo_tables
+        repository_project_id, repository_dataset, target_project_id,
+        job_region, udf_project_id, udf_dataset, udf_function_name, repo_tables
       );
       ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-      AS 'Unresolved placeholder in diagnostic replace INSERT SQL.';
+      AS 'Unresolved placeholder in batch diagnostic DELETE SQL.';
       EXECUTE IMMEDIATE rendered_sql;
 
       SET sql_template = """
-        UPDATE
-          `__T_DEF_REGISTRY__`
+        INSERT INTO `__T_DIAGNOSTIC__` (
+          definition_hash, object_project, object_dataset, object_name,
+          object_type, diagnostic_code, engine_stage, severity, output_column,
+          expression, message, diagnostic_json, analyzed_at
+        )
+        SELECT
+          definition_hash, object_project, object_dataset, object_name,
+          object_type, diagnostic_code, engine_stage, severity, output_column,
+          expression, message, diagnostic_json, analyzed_at
+        FROM batch_staged_lineage_diagnostic
+        UNION ALL
+        SELECT
+          definition_hash, object_project, object_dataset, object_name,
+          object_type, diagnostic_code, engine_stage, severity, output_column,
+          expression, message, diagnostic_json, analyzed_at
+        FROM batch_nonpublishable_diagnostic
+        UNION ALL
+        SELECT
+          definition_hash, object_project, object_dataset, object_name,
+          object_type, diagnostic_code, engine_stage, severity, output_column,
+          expression, message, diagnostic_json, analyzed_at
+        FROM batch_preanalysis_diagnostic
+      """;
+      SET rendered_sql = render_dynamic_sql(
+        sql_template,
+        repository_project_id, repository_dataset, target_project_id,
+        job_region, udf_project_id, udf_dataset, udf_function_name, repo_tables
+      );
+      ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
+      AS 'Unresolved placeholder in batch diagnostic INSERT SQL.';
+      EXECUTE IMMEDIATE rendered_sql;
+
+      -- 7c. Registry: COMPLETED objects.
+      SET sql_template = """
+        UPDATE `__T_DEF_REGISTRY__` AS reg
         SET
           is_changed = FALSE,
-          analysis_status = @p_udf_analysis_status,
-          last_analyzed_hash = @p_definition_hash,
-          last_analyzed_at = @p_analyzed_at,
-          updated_at = @p_analyzed_at
-        WHERE LOWER(object_project) = LOWER(@p_object_project)
-          AND LOWER(object_dataset) = LOWER(@p_object_dataset)
-          AND LOWER(object_name) = LOWER(@p_object_name)
-          AND object_type = @p_object_type
-          AND generation_type = @p_generation_type
-          AND definition_hash = @p_definition_hash
+          analysis_status = 'COMPLETED',
+          last_analyzed_hash = obj.definition_hash,
+          last_analyzed_at = @analyzed_at,
+          updated_at = @analyzed_at
+        FROM batch_completed_objects AS obj
+        WHERE LOWER(reg.object_project) = LOWER(obj.object_project)
+          AND LOWER(reg.object_dataset) = LOWER(obj.object_dataset)
+          AND LOWER(reg.object_name) = LOWER(obj.object_name)
+          AND reg.object_type = obj.object_type
+          AND reg.generation_type = obj.generation_type
+          AND reg.definition_hash = obj.definition_hash
       """;
       SET rendered_sql = render_dynamic_sql(
         sql_template,
-        repository_project_id,
-        repository_dataset,
-        target_project_id,
-        job_region,
-        udf_project_id,
-        udf_dataset,
-        udf_function_name,
-        repo_tables
+        repository_project_id, repository_dataset, target_project_id,
+        job_region, udf_project_id, udf_dataset, udf_function_name, repo_tables
       );
       ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-      AS 'Unresolved placeholder in definition-registry COMPLETED UPDATE SQL.';
+      AS 'Unresolved placeholder in batch registry COMPLETED UPDATE SQL.';
       EXECUTE IMMEDIATE rendered_sql
-      USING
-        udf_analysis_status AS p_udf_analysis_status,
-        target.definition_hash AS p_definition_hash,
-        analyzed_at AS p_analyzed_at,
-        target.object_project AS p_object_project,
-        target.object_dataset AS p_object_dataset,
-        target.object_name AS p_object_name,
-        target.object_type AS p_object_type,
-        target.generation_type AS p_generation_type;
+      USING batch_analyzed_at AS analyzed_at;
 
-        SET analyzed_object_count = analyzed_object_count + 1;
-      ELSE
-        -- Do not replace the last known-good dependency rows when the UDF
-        -- reports PARTIAL_FAILURE or another non-publishable status.
-        -- Replace only the diagnostics so the actual parser/resolver reason is
-        -- available in lineage_diagnostic for troubleshooting.
-        SET sql_template = """
-          DELETE FROM
-            `__T_DIAGNOSTIC__`
-          WHERE LOWER(object_project) = LOWER(@p_object_project)
-            AND LOWER(object_dataset) = LOWER(@p_object_dataset)
-            AND LOWER(object_name) = LOWER(@p_object_name)
-            AND object_type = @p_object_type
-        """;
-        SET rendered_sql = render_dynamic_sql(
-          sql_template,
-          repository_project_id,
-          repository_dataset,
-          target_project_id,
-          job_region,
-          udf_project_id,
-          udf_dataset,
-          udf_function_name,
-          repo_tables
-        );
-        ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-        AS 'Unresolved placeholder in non-publishable diagnostic DELETE SQL.';
-        EXECUTE IMMEDIATE rendered_sql
-        USING
-          target.object_project AS p_object_project,
-          target.object_dataset AS p_object_dataset,
-          target.object_name AS p_object_name,
-          target.object_type AS p_object_type;
-
-        SET sql_template = """
-          INSERT INTO
-            `__T_DIAGNOSTIC__`
-          SELECT *
-          FROM staged_lineage_diagnostic
-        """;
-        SET rendered_sql = render_dynamic_sql(
-          sql_template,
-          repository_project_id,
-          repository_dataset,
-          target_project_id,
-          job_region,
-          udf_project_id,
-          udf_dataset,
-          udf_function_name,
-          repo_tables
-        );
-        ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-        AS 'Unresolved placeholder in non-publishable staged diagnostic INSERT SQL.';
-        EXECUTE IMMEDIATE rendered_sql;
-
-        SET sql_template = """
-          INSERT INTO
-            `__T_DIAGNOSTIC__`
-          (
-            definition_hash,
-            object_project,
-            object_dataset,
-            object_name,
-            object_type,
-            diagnostic_code,
-            engine_stage,
-            severity,
-            output_column,
-            expression,
-            message,
-            diagnostic_json,
-            analyzed_at
-          )
-          VALUES (
-            @p_definition_hash,
-            LOWER(@p_object_project),
-            LOWER(@p_object_dataset),
-            LOWER(@p_object_name),
-            @p_object_type,
-            'UDF_RESULT_NOT_PUBLISHABLE',
-            '06_analyze_changed_objects',
-            'ERROR',
-            NULL,
-            NULL,
-            FORMAT(
-              'Lineage UDF returned a non-publishable status: %s',
-              @p_udf_analysis_status
-            ),
-            JSON_OBJECT(
-              'udf_analysis_status', @p_udf_analysis_status,
-              'analysis_message', @p_analysis_message
-            ),
-            @p_analyzed_at
-          )
-        """;
-        SET rendered_sql = render_dynamic_sql(
-          sql_template,
-          repository_project_id,
-          repository_dataset,
-          target_project_id,
-          job_region,
-          udf_project_id,
-          udf_dataset,
-          udf_function_name,
-          repo_tables
-        );
-        ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-        AS 'Unresolved placeholder in non-publishable diagnostic INSERT SQL.';
-        EXECUTE IMMEDIATE rendered_sql
-        USING
-          target.definition_hash AS p_definition_hash,
-          target.object_project AS p_object_project,
-          target.object_dataset AS p_object_dataset,
-          target.object_name AS p_object_name,
-          target.object_type AS p_object_type,
-          udf_analysis_status AS p_udf_analysis_status,
-          udf_analysis_message AS p_analysis_message,
-          analyzed_at AS p_analyzed_at;
-
-        SET sql_template = """
-          UPDATE
-            `__T_DEF_REGISTRY__`
-          SET
-            is_changed = TRUE,
-            analysis_status = 'FAILED',
-            last_analyzed_at = @p_analyzed_at,
-            updated_at = @p_analyzed_at
-          WHERE LOWER(object_project) = LOWER(@p_object_project)
-            AND LOWER(object_dataset) = LOWER(@p_object_dataset)
-            AND LOWER(object_name) = LOWER(@p_object_name)
-            AND object_type = @p_object_type
-            AND generation_type = @p_generation_type
-            AND definition_hash = @p_definition_hash
-        """;
-        SET rendered_sql = render_dynamic_sql(
-          sql_template,
-          repository_project_id,
-          repository_dataset,
-          target_project_id,
-          job_region,
-          udf_project_id,
-          udf_dataset,
-          udf_function_name,
-          repo_tables
-        );
-        ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-        AS 'Unresolved placeholder in non-publishable registry UPDATE SQL.';
-        EXECUTE IMMEDIATE rendered_sql
-        USING
-          analyzed_at AS p_analyzed_at,
-          target.object_project AS p_object_project,
-          target.object_dataset AS p_object_dataset,
-          target.object_name AS p_object_name,
-          target.object_type AS p_object_type,
-          target.generation_type AS p_generation_type,
-          target.definition_hash AS p_definition_hash;
-
-        -- Keep every non-COMPLETED UDF result for the final result set.
-        -- When the UDF returned no diagnostic row, insert a summary-only row so
-        -- the status and complete JSON result are still visible.
-        INSERT INTO non_completed_udf_results
-        SELECT
-          LOWER(target.object_project),
-          LOWER(target.object_dataset),
-          LOWER(target.object_name),
-          target.object_type,
-          udf_analysis_status,
-          ARRAY_LENGTH(COALESCE(
-            JSON_QUERY_ARRAY(udf_result.exported_json, '$.exported_tables.diagnostics'),
-            CAST([] AS ARRAY<STRING>)
-          )),
-          ARRAY_LENGTH(COALESCE(
-            JSON_QUERY_ARRAY(udf_result.exported_json, '$.exported_tables.output_lineages'),
-            CAST([] AS ARRAY<STRING>)
-          )),
-          ARRAY_LENGTH(COALESCE(
-            JSON_QUERY_ARRAY(udf_result.exported_json, '$.exported_tables.lineage_paths'),
-            CAST([] AS ARRAY<STRING>)
-          )),
-          diagnostic_code,
-          engine_stage,
-          severity,
-          message,
-          diagnostic_json,
-          SAFE.PARSE_JSON(JSON_VALUE(
-            udf_result.exported_json,
-            '$.analysis.error_nodes_json'
-          )),
-          udf_result.exported_json
-        FROM staged_lineage_diagnostic CROSS JOIN udf_result;
-
-        IF (SELECT COUNT(*) FROM staged_lineage_diagnostic) = 0 THEN
-          INSERT INTO non_completed_udf_results
-          SELECT
-            LOWER(target.object_project),
-            LOWER(target.object_dataset),
-            LOWER(target.object_name),
-            target.object_type,
-            udf_analysis_status,
-            0,
-            ARRAY_LENGTH(COALESCE(
-              JSON_QUERY_ARRAY(udf_result.exported_json, '$.exported_tables.output_lineages'),
-              CAST([] AS ARRAY<STRING>)
-            )),
-            ARRAY_LENGTH(COALESCE(
-              JSON_QUERY_ARRAY(udf_result.exported_json, '$.exported_tables.lineage_paths'),
-              CAST([] AS ARRAY<STRING>)
-            )),
-            NULL,
-            NULL,
-            NULL,
-            JSON_VALUE(udf_result.exported_json, '$.analysis.message'),
-            NULL,
-            SAFE.PARSE_JSON(JSON_VALUE(
-              udf_result.exported_json,
-              '$.analysis.error_nodes_json'
-            )),
-            udf_result.exported_json
-          FROM udf_result;
-        END IF;
-
-        SET failed_object_count = failed_object_count + 1;
-      END IF;
-
-      EXCEPTION WHEN ERROR THEN
-        -- Capture @@error.* immediately; later EXECUTE IMMEDIATE statements in
-        -- this handler must not rely on @@error.* remaining populated, and the
-        -- values cannot be read from inside dynamic SQL.
-        SET err_message = @@error.message;
-        SET err_statement_text = @@error.statement_text;
-        SET err_stack = @@error.formatted_stack_trace;
-
-        IF replacement_started THEN
-        SET sql_template = """
-          DELETE FROM
-            `__T_DIRECT_DEP__`
-          WHERE LOWER(target_project) = LOWER(@p_object_project)
-            AND LOWER(target_dataset) = LOWER(@p_object_dataset)
-            AND LOWER(target_object) = LOWER(@p_object_name)
-            AND target_object_type = @p_object_type
-            AND generation_type = @p_generation_type
-        """;
-        SET rendered_sql = render_dynamic_sql(
-          sql_template,
-          repository_project_id,
-          repository_dataset,
-          target_project_id,
-          job_region,
-          udf_project_id,
-          udf_dataset,
-          udf_function_name,
-          repo_tables
-        );
-        ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-        AS 'Unresolved placeholder in rollback direct-dependency DELETE SQL.';
-        EXECUTE IMMEDIATE rendered_sql
-        USING
-          target.object_project AS p_object_project,
-          target.object_dataset AS p_object_dataset,
-          target.object_name AS p_object_name,
-          target.object_type AS p_object_type,
-          target.generation_type AS p_generation_type;
-
-        SET sql_template = """
-          INSERT INTO
-            `__T_DIRECT_DEP__`
-          SELECT *
-          FROM previous_direct_dependency
-        """;
-        SET rendered_sql = render_dynamic_sql(
-          sql_template,
-          repository_project_id,
-          repository_dataset,
-          target_project_id,
-          job_region,
-          udf_project_id,
-          udf_dataset,
-          udf_function_name,
-          repo_tables
-        );
-        ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-        AS 'Unresolved placeholder in rollback direct-dependency INSERT SQL.';
-        EXECUTE IMMEDIATE rendered_sql;
-
-        SET sql_template = """
-          DELETE FROM
-            `__T_DIAGNOSTIC__`
-          WHERE LOWER(object_project) = LOWER(@p_object_project)
-            AND LOWER(object_dataset) = LOWER(@p_object_dataset)
-            AND LOWER(object_name) = LOWER(@p_object_name)
-            AND object_type = @p_object_type
-        """;
-        SET rendered_sql = render_dynamic_sql(
-          sql_template,
-          repository_project_id,
-          repository_dataset,
-          target_project_id,
-          job_region,
-          udf_project_id,
-          udf_dataset,
-          udf_function_name,
-          repo_tables
-        );
-        ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-        AS 'Unresolved placeholder in rollback diagnostic DELETE SQL.';
-        EXECUTE IMMEDIATE rendered_sql
-        USING
-          target.object_project AS p_object_project,
-          target.object_dataset AS p_object_dataset,
-          target.object_name AS p_object_name,
-          target.object_type AS p_object_type;
-
-        SET sql_template = """
-          INSERT INTO
-            `__T_DIAGNOSTIC__`
-          SELECT *
-          FROM previous_lineage_diagnostic
-        """;
-        SET rendered_sql = render_dynamic_sql(
-          sql_template,
-          repository_project_id,
-          repository_dataset,
-          target_project_id,
-          job_region,
-          udf_project_id,
-          udf_dataset,
-          udf_function_name,
-          repo_tables
-        );
-        ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-        AS 'Unresolved placeholder in rollback diagnostic INSERT SQL.';
-        EXECUTE IMMEDIATE rendered_sql;
-      END IF;
-
+      -- 7d. Registry: FAILED objects (non-COMPLETED UDF results + pre-analysis
+      -- failures).
       SET sql_template = """
-        UPDATE
-          `__T_DEF_REGISTRY__`
+        UPDATE `__T_DEF_REGISTRY__` AS reg
         SET
           is_changed = TRUE,
           analysis_status = 'FAILED',
-          updated_at = CURRENT_TIMESTAMP()
-        WHERE LOWER(object_project) = LOWER(@p_object_project)
-          AND LOWER(object_dataset) = LOWER(@p_object_dataset)
-          AND LOWER(object_name) = LOWER(@p_object_name)
-          AND object_type = @p_object_type
-          AND generation_type = @p_generation_type
-          AND definition_hash = @p_definition_hash
+          last_analyzed_at = @analyzed_at,
+          updated_at = @analyzed_at
+        FROM (
+          SELECT
+            object_project, object_dataset, object_name,
+            object_type, generation_type, definition_hash
+          FROM batch_udf_failed_objects
+          UNION DISTINCT
+          SELECT
+            object_project, object_dataset, object_name,
+            object_type, generation_type, definition_hash
+          FROM batch_preanalysis_failures
+        ) AS obj
+        WHERE LOWER(reg.object_project) = LOWER(obj.object_project)
+          AND LOWER(reg.object_dataset) = LOWER(obj.object_dataset)
+          AND LOWER(reg.object_name) = LOWER(obj.object_name)
+          AND reg.object_type = obj.object_type
+          AND reg.generation_type = obj.generation_type
+          AND reg.definition_hash = obj.definition_hash
       """;
       SET rendered_sql = render_dynamic_sql(
         sql_template,
-        repository_project_id,
-        repository_dataset,
-        target_project_id,
-        job_region,
-        udf_project_id,
-        udf_dataset,
-        udf_function_name,
-        repo_tables
+        repository_project_id, repository_dataset, target_project_id,
+        job_region, udf_project_id, udf_dataset, udf_function_name, repo_tables
       );
       ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-      AS 'Unresolved placeholder in exception registry UPDATE SQL.';
+      AS 'Unresolved placeholder in batch registry FAILED UPDATE SQL.';
       EXECUTE IMMEDIATE rendered_sql
-      USING
-        target.object_project AS p_object_project,
-        target.object_dataset AS p_object_dataset,
-        target.object_name AS p_object_name,
-        target.object_type AS p_object_type,
-        target.generation_type AS p_generation_type,
-        target.definition_hash AS p_definition_hash;
+      USING batch_analyzed_at AS analyzed_at;
+
+    EXCEPTION WHEN ERROR THEN
+      -- Capture the error, restore the pre-publish dependency and diagnostic
+      -- rows, then re-raise so the failed run is visible and the repository is
+      -- left exactly as it was before this publish began.
+      SET publish_err_message = @@error.message;
 
       SET sql_template = """
-        INSERT INTO
-          `__T_DIAGNOSTIC__`
-        (
-          definition_hash,
-          object_project,
-          object_dataset,
-          object_name,
-          object_type,
-          diagnostic_code,
-          engine_stage,
-          severity,
-          output_column,
-          expression,
-          message,
-          diagnostic_json,
-          analyzed_at
-        )
-        VALUES (
-          @p_definition_hash,
-          LOWER(@p_object_project),
-          LOWER(@p_object_dataset),
-          LOWER(@p_object_name),
-          @p_object_type,
-          'ANALYSIS_EXECUTION_FAILED',
-          '06_analyze_changed_objects',
-          'ERROR',
-          NULL,
-          NULL,
-          @p_err_message,
-          JSON_OBJECT(
-            'statement_text', @p_err_statement_text,
-            'formatted_stack_trace', @p_err_stack
-          ),
-          CURRENT_TIMESTAMP()
+        DELETE FROM `__T_DIRECT_DEP__` AS dependency
+        WHERE EXISTS (
+          SELECT 1
+          FROM batch_completed_objects AS obj
+          WHERE LOWER(dependency.target_project) = LOWER(obj.object_project)
+            AND LOWER(dependency.target_dataset) = LOWER(obj.object_dataset)
+            AND LOWER(dependency.target_object) = LOWER(obj.object_name)
+            AND dependency.target_object_type = obj.object_type
+            AND dependency.generation_type = obj.generation_type
         )
       """;
       SET rendered_sql = render_dynamic_sql(
         sql_template,
-        repository_project_id,
-        repository_dataset,
-        target_project_id,
-        job_region,
-        udf_project_id,
-        udf_dataset,
-        udf_function_name,
-        repo_tables
+        repository_project_id, repository_dataset, target_project_id,
+        job_region, udf_project_id, udf_dataset, udf_function_name, repo_tables
       );
       ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-      AS 'Unresolved placeholder in exception diagnostic INSERT SQL.';
-      EXECUTE IMMEDIATE rendered_sql
-      USING
-        target.definition_hash AS p_definition_hash,
-        target.object_project AS p_object_project,
-        target.object_dataset AS p_object_dataset,
-        target.object_name AS p_object_name,
-        target.object_type AS p_object_type,
-        err_message AS p_err_message,
-        err_statement_text AS p_err_statement_text,
-        err_stack AS p_err_stack;
+      AS 'Unresolved placeholder in batch rollback dependency DELETE SQL.';
+      EXECUTE IMMEDIATE rendered_sql;
 
-      INSERT INTO non_completed_udf_results VALUES (
-        LOWER(target.object_project),
-        LOWER(target.object_dataset),
-        LOWER(target.object_name),
-        target.object_type,
-        'EXECUTION_FAILED',
-        1,
-        NULL,
-        NULL,
-        'ANALYSIS_EXECUTION_FAILED',
-        '06_analyze_changed_objects',
-        'ERROR',
-        err_message,
-        JSON_OBJECT(
-          'statement_text', err_statement_text,
-          'formatted_stack_trace', err_stack
-        ),
-        JSON_ARRAY(JSON_OBJECT(
-          'severity', 'ERROR',
-          'diagnostic_code', 'ANALYSIS_EXECUTION_FAILED',
-          'message', err_message,
-          'original_sql', target.definition_text
-        )),
-        exported_json
+      SET sql_template = """
+        INSERT INTO `__T_DIRECT_DEP__`
+        SELECT * FROM batch_previous_direct_dependency
+      """;
+      SET rendered_sql = render_dynamic_sql(
+        sql_template,
+        repository_project_id, repository_dataset, target_project_id,
+        job_region, udf_project_id, udf_dataset, udf_function_name, repo_tables
       );
+      ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
+      AS 'Unresolved placeholder in batch rollback dependency INSERT SQL.';
+      EXECUTE IMMEDIATE rendered_sql;
 
-        SET failed_object_count = failed_object_count + 1;
-      END;
+      SET sql_template = """
+        DELETE FROM `__T_DIAGNOSTIC__` AS diagnostic
+        WHERE EXISTS (
+          SELECT 1
+          FROM batch_analyzed_objects AS obj
+          WHERE LOWER(diagnostic.object_project) = LOWER(obj.object_project)
+            AND LOWER(diagnostic.object_dataset) = LOWER(obj.object_dataset)
+            AND LOWER(diagnostic.object_name) = LOWER(obj.object_name)
+            AND diagnostic.object_type = obj.object_type
+        )
+      """;
+      SET rendered_sql = render_dynamic_sql(
+        sql_template,
+        repository_project_id, repository_dataset, target_project_id,
+        job_region, udf_project_id, udf_dataset, udf_function_name, repo_tables
+      );
+      ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
+      AS 'Unresolved placeholder in batch rollback diagnostic DELETE SQL.';
+      EXECUTE IMMEDIATE rendered_sql;
+
+      SET sql_template = """
+        INSERT INTO `__T_DIAGNOSTIC__`
+        SELECT * FROM batch_previous_lineage_diagnostic
+      """;
+      SET rendered_sql = render_dynamic_sql(
+        sql_template,
+        repository_project_id, repository_dataset, target_project_id,
+        job_region, udf_project_id, udf_dataset, udf_function_name, repo_tables
+      );
+      ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
+      AS 'Unresolved placeholder in batch rollback diagnostic INSERT SQL.';
+      EXECUTE IMMEDIATE rendered_sql;
+
+      RAISE USING MESSAGE = FORMAT(
+        'Batch publish failed and was rolled back: %s',
+        publish_err_message
+      );
     END;
-  END FOR;
+
+    -- ------------------------------------------------------------------------
+    -- 8. Retain every non-COMPLETED and pre-analysis result for the final
+    -- operational result set (set-based form of the loop's per-object inserts).
+    -- ------------------------------------------------------------------------
+    -- Non-COMPLETED UDF results: one row per emitted diagnostic.
+    INSERT INTO non_completed_udf_results
+    SELECT
+      LOWER(r.object_project),
+      LOWER(r.object_dataset),
+      LOWER(r.object_name),
+      r.object_type,
+      r.udf_analysis_status,
+      ARRAY_LENGTH(COALESCE(
+        JSON_QUERY_ARRAY(r.exported_json, '$.exported_tables.diagnostics'),
+        CAST([] AS ARRAY<STRING>)
+      )),
+      ARRAY_LENGTH(COALESCE(
+        JSON_QUERY_ARRAY(r.exported_json, '$.exported_tables.output_lineages'),
+        CAST([] AS ARRAY<STRING>)
+      )),
+      ARRAY_LENGTH(COALESCE(
+        JSON_QUERY_ARRAY(r.exported_json, '$.exported_tables.lineage_paths'),
+        CAST([] AS ARRAY<STRING>)
+      )),
+      COALESCE(JSON_VALUE(diagnostic_row, '$.code'), 'UNKNOWN'),
+      JSON_VALUE(diagnostic_row, '$.stage'),
+      COALESCE(JSON_VALUE(diagnostic_row, '$.severity'), 'INFO'),
+      JSON_VALUE(diagnostic_row, '$.message'),
+      SAFE.PARSE_JSON(JSON_VALUE(diagnostic_row, '$.diagnostic_json')),
+      SAFE.PARSE_JSON(JSON_VALUE(r.exported_json, '$.analysis.error_nodes_json')),
+      r.exported_json
+    FROM batch_udf_results AS r,
+    UNNEST(
+      COALESCE(
+        JSON_QUERY_ARRAY(r.exported_json, '$.exported_tables.diagnostics'),
+        CAST([] AS ARRAY<STRING>)
+      )
+    ) AS diagnostic_row
+    WHERE r.udf_analysis_status != 'COMPLETED';
+
+    -- Non-COMPLETED UDF results with no diagnostic row: a single summary row.
+    INSERT INTO non_completed_udf_results
+    SELECT
+      LOWER(r.object_project),
+      LOWER(r.object_dataset),
+      LOWER(r.object_name),
+      r.object_type,
+      r.udf_analysis_status,
+      0,
+      ARRAY_LENGTH(COALESCE(
+        JSON_QUERY_ARRAY(r.exported_json, '$.exported_tables.output_lineages'),
+        CAST([] AS ARRAY<STRING>)
+      )),
+      ARRAY_LENGTH(COALESCE(
+        JSON_QUERY_ARRAY(r.exported_json, '$.exported_tables.lineage_paths'),
+        CAST([] AS ARRAY<STRING>)
+      )),
+      CAST(NULL AS STRING),
+      CAST(NULL AS STRING),
+      CAST(NULL AS STRING),
+      JSON_VALUE(r.exported_json, '$.analysis.message'),
+      CAST(NULL AS JSON),
+      SAFE.PARSE_JSON(JSON_VALUE(r.exported_json, '$.analysis.error_nodes_json')),
+      r.exported_json
+    FROM batch_udf_results AS r
+    WHERE r.udf_analysis_status != 'COMPLETED'
+      AND ARRAY_LENGTH(COALESCE(
+        JSON_QUERY_ARRAY(r.exported_json, '$.exported_tables.diagnostics'),
+        CAST([] AS ARRAY<STRING>)
+      )) = 0;
+
+    -- Pre-analysis failures.
+    INSERT INTO non_completed_udf_results
+    SELECT
+      LOWER(f.object_project),
+      LOWER(f.object_dataset),
+      LOWER(f.object_name),
+      f.object_type,
+      'EXECUTION_FAILED',
+      1,
+      CAST(NULL AS INT64),
+      CAST(NULL AS INT64),
+      'ANALYSIS_EXECUTION_FAILED',
+      '06_analyze_changed_objects',
+      'ERROR',
+      f.failure_message,
+      JSON_OBJECT('preanalysis_failure_reason', f.preanalysis_failure_reason),
+      JSON_ARRAY(JSON_OBJECT(
+        'severity', 'ERROR',
+        'diagnostic_code', 'ANALYSIS_EXECUTION_FAILED',
+        'message', f.failure_message,
+        'original_sql', f.definition_text
+      )),
+      CAST(NULL AS STRING)
+    FROM batch_preanalysis_failures AS f;
+
+    -- ------------------------------------------------------------------------
+    -- 9. Run counters for the summary below.
+    -- ------------------------------------------------------------------------
+    SET analyzed_object_count = (
+      SELECT COUNT(*) FROM batch_completed_objects
+    );
+    SET failed_object_count = (
+      SELECT COUNT(*) FROM batch_udf_failed_objects
+    ) + (
+      SELECT COUNT(*) FROM batch_preanalysis_failures
+    );
+  END;
 
   -- --------------------------------------------------------------------------
   -- Run summary.
