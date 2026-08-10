@@ -91,19 +91,29 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   返すため、ループ内の status チェック＋RAISE でオブジェクト単位に例外送出、ADR-0004 の
   旧 dependency 保護もそのまま）。SQL のみ／エンジン不変。
 - **残タスク（未実施）**：
-  - **① フルのバッチ化（本命）**：ループを撤廃し、本解析 UDF もオブジェクト単位の
-    physical_columns_json を集約して 1 ジョブ化、DML も集合 MERGE 化。~15〜20N ジョブ →
-    定数（5〜6 ジョブ）。COMPLETED 行のみ公開／FAILED は旧 dependency 温存、を集合 DML で
-    再現するのが肝（UDF は analysis_status を返し throw しないので実現可能）。
-  - **③ ループ内 DML の集約**：①に含まれるが単独でも DELETE→INSERT を staging に貯めて
-    ループ後 1 回の MERGE にまとめれば DML ジョブ数を大きく削減できる。
+  - **① フルのバッチ化（実施済み）**：STEP 3 の `FOR ... DO` ループを撤廃し、
+    完全な集合ベースに置換。(1) メタデータ scoping を全obj 1 クエリ（`batch_object_metadata`）、
+    (2) 本解析 UDF を解析可能 obj 全件で 1 ジョブ（`batch_udf_results`）、(3) dependency /
+    diagnostic を集合で staging、(4) オブジェクトキーの temp（`batch_completed_objects` /
+    `batch_udf_failed_objects` / `batch_preanalysis_failures`）を使い数本の集合 DML で公開。
+    STEP 3 のジョブ数が ~15〜20N → 定数に。意味論は維持（COMPLETED=公開、非COMPLETED=旧
+    dependency 温存＋UDF_RESULT_NOT_PUBLISHABLE、事前失敗=ANALYSIS_EXECUTION_FAILED 追記＋
+    FAILED、ADR-0004 準拠）。
+    **挙動変更**：公開はオブジェクト単位ではなく **バッチ原子的**。staging を全部先に計算し、
+    破壊的 DML はバックアップ（`batch_previous_*`）を取ってから実行、失敗時は復元して RAISE。
+    失敗runはリポジトリを変更しない（部分更新なし）。UDF は throw せず status を返すので
+    解析失敗はデータとして隔離される。SQL のみ／エンジン不変。
+    **未検証**：本環境から BigQuery 実行はしていない。本番前に dry-run パースと staging 実行、
+    旧ループとの出力 diff（direct_dependency / lineage_diagnostic / definition_registry）で検証すること。
+  - **③ ループ内 DML の集約**：①に包含済み（公開 DML は集合化された）。
 
 ## 5. 現在地（引き継ぎ時点）
 
 - バンドル: `sha256 = 8b458f3b1f00edf1176aca9c93fbfc583bdddf51b2a4c352832de943f3b390f0`、`418298` bytes
 - `test:release` 28 本 PASS / ゴールデン 48 ケース PASS
 - 二本ツリー（-031 / -032）同期済み
-- 03 STEP 3：ソース探索をバッチ化済み（上記 §4.5 ②）。①③ は未着手。
+- 03 STEP 3：フルバッチ化済み（上記 §4.5 ①②③）。集合ベースに全面置換、ジョブ数は
+  N 非依存。**BigQuery 未検証**（本番前に staging 実行＋旧ループとの出力 diff が必要）。
 
 ## 6. Claude Code で続きを進める手順
 

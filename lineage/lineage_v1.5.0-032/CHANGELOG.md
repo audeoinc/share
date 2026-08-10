@@ -1,5 +1,39 @@
 # 1.5.0-032
 
+- Rewrote STEP 3 of `03_run_daily_lineage_pipeline.sql` from a per-object
+  `FOR ... DO` loop into a fully set-based batch pipeline. The loop previously
+  ran ~15-20 EXECUTE IMMEDIATE statements per changed object (two UDF calls plus
+  metadata scoping, staging, and per-object DELETE/INSERT/UPDATE), i.e. ~15-20N
+  serial BigQuery jobs for N changed objects. The batch form runs a fixed,
+  N-independent set of statements: (1) scope physical-column metadata for all
+  objects in one query; (2) invoke the persistent lineage UDF once across every
+  analyzable object (`batch_udf_results`), paying the JavaScript UDF
+  initialization cost once for the whole run; (3) stage dependencies and
+  diagnostics for all objects with set queries; (4) publish with a handful of
+  set-based DELETE/INSERT/UPDATE statements keyed by object-key temp tables
+  (`batch_completed_objects` / `batch_udf_failed_objects` /
+  `batch_preanalysis_failures`). On a run with N changed objects this collapses
+  the STEP 3 job count from ~15-20N to a small constant.
+  SEMANTICS PRESERVED: COMPLETED objects replace their direct dependencies and
+  diagnostics; non-COMPLETED UDF results keep their last known-good dependencies
+  (ADR-0004) while diagnostics are replaced and a UDF_RESULT_NOT_PUBLISHABLE row
+  is recorded; pre-analysis failures (source discovery not COMPLETE, or scoped
+  metadata over the single-call limit) leave dependencies untouched, append an
+  ANALYSIS_EXECUTION_FAILED diagnostic, and mark the registry FAILED. The
+  non_completed_udf_results result set is populated as before.
+  BEHAVIOR CHANGE: publication is now batch-atomic instead of per-object. All
+  staging is computed before any write; the destructive DML runs in a block that
+  restores the affected direct_dependency / lineage_diagnostic rows from
+  pre-publish backups and re-raises on any error, so a failed run leaves the
+  repository unchanged rather than partially updated. A single object can no
+  longer be committed while a sibling is skipped mid-run. Because the UDF returns
+  analysis_status instead of throwing, per-object analysis failures remain
+  isolated as data. SQL-only change; the engine bundle is unaffected.
+  VALIDATION: this rewrite has not yet been executed against BigQuery from this
+  environment. Before production use, run a dry-run parse and a staging run, and
+  diff its direct_dependency / lineage_diagnostic / definition_registry output
+  against the previous per-object pipeline on the same changed set.
+
 - Sped up STEP 3 by hoisting source discovery out of the per-object loop in
   `03_run_daily_lineage_pipeline.sql`. The persistent UDF is a per-row scalar
   function, so source_discovery_only mode is now run ONCE across every changed
