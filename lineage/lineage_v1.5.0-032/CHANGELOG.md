@@ -1,5 +1,32 @@
 # 1.5.0-032
 
+- Renamed the three name-based object filters in
+  `03_run_daily_lineage_pipeline.sql` so the parameter name states which stage it
+  acts on — and therefore whether a matched object is merely skipped for analysis
+  or kept out of the registry entirely — and made both filter families
+  consistently object-scoped. Mapping:
+  `include_object_patterns` → `analysis_include_object_patterns`,
+  `exclude_object_patterns` → `analysis_exclude_object_patterns`,
+  `exclude_view_name_patterns` → `registry_exclude_object_patterns`. The
+  `analysis_*` pair gates only lineage analysis (matched objects stay registered
+  and keep change tracking; applies to VIEWs and, when
+  process_generated_tables = TRUE, generated TABLEs). `registry_exclude_object_patterns`
+  keeps matched objects out of the registry entirely: Views are dropped in STEP 1
+  before entering the definition registry (an already-registered View is
+  deactivated), and — newly — generated TABLEs are dropped in STEP 2 (matched on
+  the destination table name) before entering the job / definition registry, so
+  the filter is now genuinely object-scoped rather than VIEW-only. The
+  `registry_*` DECLARE is now ordered before the `analysis_*` DECLAREs to match
+  execution order (collection/STEP 1 precedes analysis/STEP 3-4). The dynamic-SQL
+  bind names (`@include_patterns` / `@exclude_patterns`) are unchanged. BEHAVIOR
+  NOTE: the only behavior change is that `registry_exclude_object_patterns` now
+  also filters generated tables in STEP 2; because all three default to `[]`
+  (exclude nothing / analyze all), a runtime that leaves them empty is unaffected.
+  MIGRATION: if you set any of these in your runtime copy, rename them to the new
+  identifiers (values and semantics for the `analysis_*` pair are unchanged; the
+  former view-name exclusion now also applies to generated-table names). SQL-only
+  change; the engine bundle is unaffected.
+
 - Fixed column resolution for mixed qualified/unqualified references across a
   `SELECT *` CTE that is joined to another source. A CTE whose body is
   `SELECT * FROM <physical_table>` exposes an *unknown* set of columns at the
