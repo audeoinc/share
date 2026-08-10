@@ -114,6 +114,24 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
     旧ループとの出力 diff（direct_dependency / lineage_diagnostic / definition_registry）で検証すること。
   - **③ ループ内 DML の集約**：①に包含済み（公開 DML は集合化された）。
 
+## 4.6 消えたソースの not-found を FAILED 扱いしない（03 STEP 3）
+
+- **症状**：DAG/生成テーブルが参照する temp/一時テーブルが今は存在せず、メタデータが
+  無いため not-found。エンジンは「メタデータ皆無＝WARNING（PHYSICAL_METADATA_NOT_FOUND /
+  SOURCE_METADATA_NOT_COLLECTED）」「列だけ無い＝ERROR（PHYSICAL_COLUMN_NOT_FOUND）」を
+  区別するが、WARNING 1 つでも `analysis_status` が COMPLETED_WITH_WARNINGS になり、
+  パイプラインは `COMPLETED` 以外を非公開＝FAILED＋UDF_RESULT_NOT_PUBLISHABLE＋
+  is_changed=TRUE（毎回リトライ）にしていた。
+- **対応**：STEP 3 で `INFORMATION_SCHEMA.TABLES`（`current_target_tables`）を使い原因を
+  切り分け（`batch_object_source_flags`）。ソースが TABLES に**無い**＝本当に消えている
+  （想定内）、TABLES に**在るが列未収集**＝本物のカバレッジ不足。判定 `is_publishable`＝
+  「status が厳密 COMPLETED、または COMPLETED_WITH_WARNINGS かつ present-but-uncollected
+  ソースが無い（＝WARNING は全て消えたソース起因）」。publishable は正常終了：解決できた
+  依存を公開、消えたソースの WARNING は診断に**出さない**、registry=COMPLETED／
+  is_changed=FALSE（リトライ停止）。ERROR あり・PARTIAL_FAILURE・present-uncollected あり
+  は従来通り FAILED で表面化。※消えたソース WARNING と別の実 ERROR が混在する object は
+  FAILED のまま全診断を保持（安全側）。SQL のみ／エンジン不変。**BigQuery 未検証**。
+
 ## 5. 現在地（引き継ぎ時点）
 
 - バンドル: `sha256 = 8b458f3b1f00edf1176aca9c93fbfc583bdddf51b2a4c352832de943f3b390f0`、`418298` bytes
