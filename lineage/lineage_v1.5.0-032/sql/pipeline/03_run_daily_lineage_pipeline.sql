@@ -1601,6 +1601,59 @@ BEGIN
 
   EXECUTE IMMEDIATE rendered_sql;
 
+  -- --------------------------------------------------------------------------
+  -- Batch source discovery: run the persistent UDF in source_discovery_only
+  -- mode ONCE across every changed definition, instead of once per object
+  -- inside the loop below. The UDF is a per-row scalar function, so a single
+  -- query computes each object's source list while paying the JavaScript UDF
+  -- initialization cost a single time rather than once per object. This turns
+  -- the N per-object discovery jobs into one batch job.
+  --
+  -- Isolation is preserved: source_discovery_only never throws (it returns
+  -- analysis_status = 'PARTIAL_FAILURE' with an error payload for a failing
+  -- object), so one object's discovery failure surfaces only as that object's
+  -- source_discovery_json cell. The loop still validates the per-object status
+  -- and RAISEs into this object's EXCEPTION handler exactly as before.
+  -- --------------------------------------------------------------------------
+  SET sql_template = """
+    CREATE OR REPLACE TEMP TABLE changed_definitions_with_discovery AS
+    SELECT
+      object_project,
+      object_dataset,
+      object_name,
+      object_type,
+      generation_type,
+      definition_text,
+      definition_hash,
+      `__UDF__`(
+        definition_text,
+        '[]',
+        @options_json,
+        NULL
+      ) AS source_discovery_json
+    FROM
+      changed_definitions_to_analyze
+  """;
+
+  SET rendered_sql = render_dynamic_sql(
+    sql_template,
+    repository_project_id,
+    repository_dataset,
+    target_project_id,
+    job_region,
+    udf_project_id,
+    udf_dataset,
+    udf_function_name,
+    repo_tables
+  );
+
+  ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
+  AS 'Unresolved placeholder in batch source-discovery SQL.';
+
+  EXECUTE IMMEDIATE rendered_sql
+  USING
+    TO_JSON_STRING(STRUCT(TRUE AS source_discovery_only)) AS options_json;
+
   FOR target IN (
     SELECT
       object_project,
@@ -1609,9 +1662,10 @@ BEGIN
       object_type,
       generation_type,
       definition_text,
-      definition_hash
+      definition_hash,
+      source_discovery_json
     FROM
-      changed_definitions_to_analyze
+      changed_definitions_with_discovery
     ORDER BY
       object_project,
       object_dataset,
@@ -1641,39 +1695,12 @@ BEGIN
 
       BEGIN
         -- --------------------------------------------------------------------
-        -- Phase 1: discover only the physical Source names used by this SQL.
-        -- The same persistent UDF is used in source_discovery_only mode, so
-        -- the deployed UDF signature remains unchanged.
+        -- Phase 1: read the physical Source names for this SQL from the batch
+        -- source-discovery result computed once before the loop (see
+        -- changed_definitions_with_discovery above). No per-object UDF
+        -- invocation happens here; the deployed UDF signature is unchanged.
         -- --------------------------------------------------------------------
-        SET sql_template = """
-          SELECT `__UDF__`(
-            @definition_text,
-            '[]',
-            @options_json,
-            NULL
-          )
-        """;
-
-        SET rendered_sql = render_dynamic_sql(
-          sql_template,
-          repository_project_id,
-          repository_dataset,
-          target_project_id,
-          job_region,
-          udf_project_id,
-          udf_dataset,
-          udf_function_name,
-          repo_tables
-        );
-
-        ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-        AS 'Unresolved placeholder in source discovery UDF SQL.';
-
-        EXECUTE IMMEDIATE rendered_sql
-        INTO source_discovery_json
-        USING
-          target.definition_text AS definition_text,
-          TO_JSON_STRING(STRUCT(TRUE AS source_discovery_only)) AS options_json;
+        SET source_discovery_json = target.source_discovery_json;
 
         SET source_discovery_status = COALESCE(
           JSON_VALUE(source_discovery_json, '$.analysis.analysis_status'),

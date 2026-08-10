@@ -76,11 +76,34 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   場合は空集合ではなく **「不明（null）」を伝播**。CTE が候補として残り、
   `PhysicalColumnResolver` が実メタデータで曖昧性を解消する。テスト `test_v1_5_0_048.js`。
 
+## 4.5 STEP 3 高速化（03 パイプライン）
+
+- **律速の所在**：03 の STEP 3 は「変更オブジェクト 1 件ずつの逐次 `FOR` ループ」で、
+  1 件あたり約 20 の `EXECUTE IMMEDIATE`（UDF 2 回＝ソース探索＋本解析、温度テーブル
+  作成、DELETE/INSERT/UPDATE/MERGE 多数）を直列実行する。変更 N 件で ~15〜20N ジョブが
+  直列に走り、ジョブ起動・スロット取得オーバーヘッド × N が支配的コスト。STEP1/2 は
+  増分 lookback で妥当、STEP4 は `WITH RECURSIVE` の 1 発でセットベース済み。
+- **② 部分改修（実施済み）**：ソース探索 UDF をループ外へ集約。UDF は行ごとのスカラー
+  関数なので、`source_discovery_only` を全変更定義に対して 1 ジョブで実行する温度テーブル
+  `changed_definitions_with_discovery` を作り、ループは `target.source_discovery_json` を
+  直接読む。UDF 呼び出しがオブジェクト当たり 2 回→1 回、探索の JS UDF 初期化コストは
+  実行あたり 1 回に。隔離は維持（`source_discovery_only` は throw せず PARTIAL_FAILURE を
+  返すため、ループ内の status チェック＋RAISE でオブジェクト単位に例外送出、ADR-0004 の
+  旧 dependency 保護もそのまま）。SQL のみ／エンジン不変。
+- **残タスク（未実施）**：
+  - **① フルのバッチ化（本命）**：ループを撤廃し、本解析 UDF もオブジェクト単位の
+    physical_columns_json を集約して 1 ジョブ化、DML も集合 MERGE 化。~15〜20N ジョブ →
+    定数（5〜6 ジョブ）。COMPLETED 行のみ公開／FAILED は旧 dependency 温存、を集合 DML で
+    再現するのが肝（UDF は analysis_status を返し throw しないので実現可能）。
+  - **③ ループ内 DML の集約**：①に含まれるが単独でも DELETE→INSERT を staging に貯めて
+    ループ後 1 回の MERGE にまとめれば DML ジョブ数を大きく削減できる。
+
 ## 5. 現在地（引き継ぎ時点）
 
 - バンドル: `sha256 = 8b458f3b1f00edf1176aca9c93fbfc583bdddf51b2a4c352832de943f3b390f0`、`418298` bytes
 - `test:release` 28 本 PASS / ゴールデン 48 ケース PASS
 - 二本ツリー（-031 / -032）同期済み
+- 03 STEP 3：ソース探索をバッチ化済み（上記 §4.5 ②）。①③ は未着手。
 
 ## 6. Claude Code で続きを進める手順
 
