@@ -1,5 +1,21 @@
 # 1.5.0-032
 
+- Added dataset-level counterparts to the registry and analysis name filters in
+  `03_run_daily_lineage_pipeline.sql`, so filtering can now target whole datasets
+  in addition to object names. New parameters (all default `[]` = no effect):
+  `registry_exclude_dataset_patterns`, `analysis_include_dataset_patterns`,
+  `analysis_exclude_dataset_patterns`. Semantics: REGISTRY-stage exclusion drops
+  an object when its name matches any `registry_exclude_object_patterns` entry OR
+  its dataset matches any `registry_exclude_dataset_patterns` entry (STEP 1 Views
+  on object_dataset, STEP 2 generated TABLEs on destination_dataset). ANALYSIS-
+  stage selection now gates name and dataset independently: an object is analyzed
+  when (name-include empty OR name matches) AND (dataset-include empty OR dataset
+  matches) AND it matches no name-exclude AND no dataset-exclude. All matching is
+  the existing case-insensitive `REGEXP_CONTAINS(LOWER(value), LOWER(pattern))`.
+  The existing `*_object_patterns` behavior is unchanged, and because every new
+  array defaults to empty, runtimes that do not set them are unaffected. SQL-only
+  change; the engine bundle is unaffected.
+
 - Rewrote STEP 3 of `03_run_daily_lineage_pipeline.sql` from a per-object
   `FOR ... DO` loop into a fully set-based batch pipeline. The loop previously
   ran ~15-20 EXECUTE IMMEDIATE statements per changed object (two UDF calls plus
