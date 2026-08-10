@@ -152,28 +152,34 @@ DECLARE configured_max_impact_rank INT64 DEFAULT 100;
 -- from INFORMATION_SCHEMA.JOBS) and process only Views. STEP 1/3/4 still run.
 DECLARE process_generated_tables BOOL DEFAULT TRUE;
 
--- Analysis target/skip filters on the View/object NAME only (object_name).
--- Project and dataset are already scoped by target_project_id / target_datasets,
--- so these regexes narrow the many Views by name. REGEXP_CONTAINS = partial
+-- REGISTRY-stage (collection) object exclusion (regex on the object NAME).
+-- Objects whose name matches ANY of these patterns are NOT registered at all:
+-- Views are dropped in STEP 1 before entering the definition registry (an
+-- already-registered View is deactivated), and generated TABLEs are dropped in
+-- STEP 2 before entering the job / definition registry (matched on the
+-- destination table name). This is stronger than analysis_exclude_object_patterns
+-- below (that keeps the row and only skips analysis). REGEXP_CONTAINS = partial
 -- match; matching is case-insensitive (name and pattern are lowercased), so write
--- patterns as raw strings in any case, e.g. r'^stg_'. Filtering is: matches
--- an include pattern (or include is empty) AND matches no exclude pattern.
--- Non-matching Views stay in the registry but are not analyzed.
---   include: empty array = analyze all; otherwise analyze only name matches
---            (handy for scoping a test run, e.g. [r'^v_sales']).
---   exclude: empty array = exclude nothing, e.g. [r'^stg_', r'_tmp$'].
-DECLARE include_object_patterns ARRAY<STRING> DEFAULT [];
-DECLARE exclude_object_patterns ARRAY<STRING> DEFAULT [];
-
--- Collection-stage VIEW exclusion (regex on the view NAME). Views whose name
--- matches ANY of these patterns are NOT registered at all in STEP 1 (they never
--- enter the definition registry), which is stronger than exclude_object_patterns
--- above (that keeps the row but skips analysis). REGEXP_CONTAINS = partial match;
--- matching is case-insensitive (name and pattern are lowercased), so write
 -- patterns as raw strings in any case. Empty array = exclude nothing.
 --   e.g. names ending in a digit and names containing "test":
 --        [r'[0-9]$', r'test']
-DECLARE exclude_view_name_patterns ARRAY<STRING> DEFAULT [];
+DECLARE registry_exclude_object_patterns ARRAY<STRING> DEFAULT [];
+
+-- ANALYSIS-stage filters on the object NAME only (object_name). Applied when
+-- selecting which registered objects (VIEWs and, when process_generated_tables =
+-- TRUE, generated TABLEs) to analyze. Matched objects STAY in the definition
+-- registry and keep change tracking; only lineage analysis is gated. Project and
+-- dataset are already scoped by target_project_id / target_datasets, so these
+-- regexes narrow objects by name. REGEXP_CONTAINS = partial match; matching is
+-- case-insensitive (name and pattern are lowercased), so write patterns as raw
+-- strings in any case, e.g. r'^stg_'. Filtering is: matches an include pattern
+-- (or include is empty) AND matches no exclude pattern. Non-matching objects
+-- stay in the registry but are not analyzed.
+--   include: empty array = analyze all; otherwise analyze only name matches
+--            (handy for scoping a test run, e.g. [r'^v_sales']).
+--   exclude: empty array = exclude nothing, e.g. [r'^stg_', r'_tmp$'].
+DECLARE analysis_include_object_patterns ARRAY<STRING> DEFAULT [];
+DECLARE analysis_exclude_object_patterns ARRAY<STRING> DEFAULT [];
 
 -- ----------------------------------------------------------------------------
 -- STEP 2 parameters (Scheduled Query / DAG generated-table collection)
@@ -423,15 +429,15 @@ BEGIN
     view_defs_union_sql
   );
 
-  -- Drop Views whose name matches any exclude_view_name_patterns regex so they
+  -- Drop Views whose name matches any registry_exclude_object_patterns regex so they
   -- never enter the definition registry. object_name is already lowercased.
   -- Any such View already registered is deactivated by the STEP 1 "not found"
   -- rule below (it is no longer present in current_view_definitions).
-  IF ARRAY_LENGTH(exclude_view_name_patterns) > 0 THEN
+  IF ARRAY_LENGTH(registry_exclude_object_patterns) > 0 THEN
     DELETE FROM current_view_definitions AS v
     WHERE EXISTS (
       SELECT 1
-      FROM UNNEST(exclude_view_name_patterns) AS pattern
+      FROM UNNEST(registry_exclude_object_patterns) AS pattern
       WHERE REGEXP_CONTAINS(LOWER(v.object_name), LOWER(pattern))
     );
   END IF;
@@ -912,8 +918,16 @@ BEGIN
       LOWER(destination_dataset) AS destination_dataset,
       LOWER(destination_table) AS destination_table
     FROM target_jobs
-    WHERE is_scheduled_query
-       OR is_dag
+    WHERE (is_scheduled_query OR is_dag)
+      -- REGISTRY-stage exclusion for generated TABLEs: drop jobs whose
+      -- destination table name matches any registry_exclude_object_patterns
+      -- regex so they never enter the job / definition registry (the STEP 1
+      -- counterpart drops Views the same way). Empty array = exclude nothing.
+      AND NOT EXISTS (
+        SELECT 1
+        FROM UNNEST(registry_exclude_object_patterns) AS pattern
+        WHERE REGEXP_CONTAINS(LOWER(destination_table), LOWER(pattern))
+      )
   ),
   normalized_definitions AS (
     SELECT
@@ -1549,8 +1563,8 @@ BEGIN
   EXECUTE IMMEDIATE rendered_sql
   USING
     process_generated_tables AS include_tables,
-    include_object_patterns AS include_patterns,
-    exclude_object_patterns AS exclude_patterns;
+    analysis_include_object_patterns AS include_patterns,
+    analysis_exclude_object_patterns AS exclude_patterns;
 
   -- Snapshot the active VIEW registry once so the per-object staging query can
   -- classify source object types without referencing the (configurable-named)

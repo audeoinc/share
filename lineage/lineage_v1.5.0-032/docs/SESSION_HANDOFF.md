@@ -48,7 +48,13 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   JOBS すべてで使う単一リージョン、`@@location` と一致）。
 - 名前フィルタは **大文字小文字を無視**（`REGEXP_CONTAINS(LOWER(name), LOWER(pattern))`）。
   以前は name だけ小文字化し pattern はそのままで、大文字パターンが常に外れていた。
-- VIEW 収集段に `exclude_view_name_patterns`（末尾数字・`test` を含む等を除外）。
+- 名前規則による除外フィルタは 2 系統に統一（いずれも object 名の正規表現）：
+  `registry_exclude_object_patterns`（登録段で存在ごと除外。VIEW は STEP 1、生成
+  TABLE は STEP 2 の destination 名で弾き、レジストリに載せない）と、
+  `analysis_include_object_patterns` / `analysis_exclude_object_patterns`（解析段で
+  解析だけを制御。レジストリには残す）。宣言順は実行順に合わせ registry を先に置く。
+  旧名: `exclude_view_name_patterns` → `registry_exclude_object_patterns`、
+  `include/exclude_object_patterns` → `analysis_include/exclude_object_patterns`。
 - 冗長変数の整理：`render_dynamic_sql` の未使用プレースホルダ `__REPOSITORY__` /
   `__TARGET__` と、それだけのために存在した `target_dataset` スカラーを撤去
   （現在は 8 プレースホルダ / 9 パラメータ）。
