@@ -1,5 +1,23 @@
 # 1.5.0-032
 
+- Sped up STEP 3 by hoisting source discovery out of the per-object loop in
+  `03_run_daily_lineage_pipeline.sql`. The persistent UDF is a per-row scalar
+  function, so source_discovery_only mode is now run ONCE across every changed
+  definition (new `changed_definitions_with_discovery` temp table:
+  `SELECT ..., UDF(definition_text, '[]', {source_discovery_only:TRUE}, NULL)
+  FROM changed_definitions_to_analyze`) instead of a separate per-object UDF
+  query inside the loop. The loop now reads `target.source_discovery_json`
+  directly, so the object's UDF invocations drop from two (discovery + full
+  analysis) to one, and the JavaScript UDF initialization cost for discovery is
+  paid a single time per run rather than once per changed object. On a run with
+  N changed objects this removes N-1 discovery jobs (2N → N+1 UDF jobs total)
+  plus N-1 UDF cold starts. BEHAVIOR NOTE: no functional change. Per-object
+  isolation is preserved because source_discovery_only never throws — it returns
+  analysis_status = 'PARTIAL_FAILURE' with an error payload for a failing object,
+  so the loop's existing status check + RAISE still routes that object to its own
+  EXCEPTION handler (previous dependency rows preserved per ADR-0004). SQL-only
+  change; the engine bundle is unaffected.
+
 - Renamed the three name-based object filters in
   `03_run_daily_lineage_pipeline.sql` so the parameter name states which stage it
   acts on — and therefore whether a matched object is merely skipped for analysis
