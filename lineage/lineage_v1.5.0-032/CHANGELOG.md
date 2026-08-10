@@ -1,5 +1,28 @@
 # 1.5.0-032
 
+- Stopped treating a generated/DAG table as FAILED when the only problem is that
+  a source it references no longer exists. Such sources (temporary or short-lived
+  tables) have no collected columns, so the engine reports PHYSICAL_METADATA_NOT_
+  FOUND / SOURCE_METADATA_NOT_COLLECTED (WARNING), which alone pushed the object
+  to COMPLETED_WITH_WARNINGS -> non-publishable -> registry FAILED, a
+  UDF_RESULT_NOT_PUBLISHABLE diagnostic, and is_changed = TRUE (retried every
+  run). STEP 3 now distinguishes the two causes using INFORMATION_SCHEMA.TABLES
+  (new `batch_object_source_flags`): a discovered source absent from
+  INFORMATION_SCHEMA.TABLES is genuinely gone (expected), while a source present
+  in TABLES but with no collected columns is a real coverage gap. An analyzed
+  object is now publishable when its status is exactly COMPLETED, OR
+  COMPLETED_WITH_WARNINGS with no present-but-uncollected source (i.e. its
+  warnings are explained entirely by absent sources). Publishable objects finish
+  normally: resolved dependencies are published, the absent-source warnings are
+  NOT written to lineage_diagnostic, registry -> COMPLETED with is_changed =
+  FALSE (no more retries). Objects with a real ERROR (e.g. a column missing from
+  a source that DOES exist -> PHYSICAL_COLUMN_NOT_FOUND), a PARTIAL_FAILURE, or a
+  present-but-uncollected source are unchanged (still surfaced and FAILED). Note:
+  an object that mixes an absent-source warning with an independent real error
+  stays FAILED and keeps all of its diagnostics. SQL-only change (STEP 3 publish
+  classification); the engine bundle is unaffected. As with the other STEP 3
+  work, validate on BigQuery before production.
+
 - Added dataset-level counterparts to the registry and analysis name filters in
   `03_run_daily_lineage_pipeline.sql`, so filtering can now target whole datasets
   in addition to object names. New parameters (all default `[]` = no effect):

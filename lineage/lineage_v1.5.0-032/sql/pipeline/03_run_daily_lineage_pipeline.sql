@@ -2125,19 +2125,168 @@ BEGIN
     -- ------------------------------------------------------------------------
     -- 4. Object key sets driving the set-based publish.
     -- ------------------------------------------------------------------------
+    -- Per-object source-existence flags. A DAG/generated table can reference
+    -- source tables that were temporary or short-lived and no longer exist. The
+    -- engine reports a source with no collected columns as PHYSICAL_METADATA_
+    -- NOT_FOUND / SOURCE_METADATA_NOT_COLLECTED (WARNING), which alone would push
+    -- the object to COMPLETED_WITH_WARNINGS and make it non-publishable. We split
+    -- the two causes using INFORMATION_SCHEMA:
+    --   has_absent_source            : a discovered source is NOT in
+    --                                  INFORMATION_SCHEMA.TABLES (genuinely gone;
+    --                                  the not-found is expected, suppress it).
+    --   has_present_uncollected_source: a discovered source IS in TABLES but has
+    --                                  no columns collected (a real coverage gap;
+    --                                  keep surfacing it).
+    -- Wildcard sources (events_*) match by regex, matching the metadata-scoping
+    -- rules above.
+    CREATE OR REPLACE TEMP TABLE batch_object_source_flags AS
+    WITH obj AS (
+      SELECT
+        object_project, object_dataset, object_name,
+        object_type, generation_type, definition_hash, source_discovery_json
+      FROM changed_definitions_with_discovery
+      WHERE COALESCE(
+        JSON_VALUE(source_discovery_json, '$.analysis.analysis_status'),
+        'UNKNOWN'
+      ) = 'COMPLETED'
+    ),
+    discovered_sources AS (
+      SELECT DISTINCT
+        o.object_project, o.object_dataset, o.object_name,
+        o.object_type, o.generation_type, o.definition_hash,
+        LOWER(JSON_VALUE(source_row, '$')) AS source_name,
+        STRPOS(JSON_VALUE(source_row, '$'), '*') > 0 AS is_wildcard,
+        CONCAT(
+          '^',
+          REPLACE(
+            REPLACE(LOWER(JSON_VALUE(source_row, '$')), '.', '\\.'),
+            '*', '.*'
+          ),
+          '$'
+        ) AS name_regex
+      FROM obj AS o,
+      UNNEST(
+        COALESCE(
+          JSON_QUERY_ARRAY(o.source_discovery_json, '$.source_tables'),
+          CAST([] AS ARRAY<STRING>)
+        )
+      ) AS source_row
+      WHERE JSON_VALUE(source_row, '$') IS NOT NULL
+    ),
+    tables AS (
+      SELECT DISTINCT table_catalog, table_schema, table_name
+      FROM current_target_tables
+    ),
+    cols AS (
+      SELECT DISTINCT table_catalog, table_schema, table_name
+      FROM current_target_columns
+    ),
+    tables_matched AS (
+      SELECT DISTINCT
+        s.object_project, s.object_dataset, s.object_name,
+        s.object_type, s.generation_type, s.definition_hash, s.source_name
+      FROM discovered_sources AS s
+      JOIN tables AS m
+        ON (
+          s.is_wildcard = FALSE
+          AND (
+            s.source_name = LOWER(FORMAT('%s.%s.%s', m.table_catalog, m.table_schema, m.table_name))
+            OR s.source_name = LOWER(FORMAT('%s.%s', m.table_schema, m.table_name))
+            OR s.source_name = LOWER(m.table_name)
+          )
+        )
+        OR (
+          s.is_wildcard = TRUE
+          AND (
+            REGEXP_CONTAINS(LOWER(FORMAT('%s.%s.%s', m.table_catalog, m.table_schema, m.table_name)), s.name_regex)
+            OR REGEXP_CONTAINS(LOWER(FORMAT('%s.%s', m.table_schema, m.table_name)), s.name_regex)
+            OR REGEXP_CONTAINS(LOWER(m.table_name), s.name_regex)
+          )
+        )
+    ),
+    cols_matched AS (
+      SELECT DISTINCT
+        s.object_project, s.object_dataset, s.object_name,
+        s.object_type, s.generation_type, s.definition_hash, s.source_name
+      FROM discovered_sources AS s
+      JOIN cols AS m
+        ON (
+          s.is_wildcard = FALSE
+          AND (
+            s.source_name = LOWER(FORMAT('%s.%s.%s', m.table_catalog, m.table_schema, m.table_name))
+            OR s.source_name = LOWER(FORMAT('%s.%s', m.table_schema, m.table_name))
+            OR s.source_name = LOWER(m.table_name)
+          )
+        )
+        OR (
+          s.is_wildcard = TRUE
+          AND (
+            REGEXP_CONTAINS(LOWER(FORMAT('%s.%s.%s', m.table_catalog, m.table_schema, m.table_name)), s.name_regex)
+            OR REGEXP_CONTAINS(LOWER(FORMAT('%s.%s', m.table_schema, m.table_name)), s.name_regex)
+            OR REGEXP_CONTAINS(LOWER(m.table_name), s.name_regex)
+          )
+        )
+    ),
+    per_source AS (
+      SELECT
+        s.object_project, s.object_dataset, s.object_name,
+        s.object_type, s.generation_type, s.definition_hash,
+        (tm.source_name IS NOT NULL) AS exists_in_tables,
+        (cm.source_name IS NOT NULL) AS has_columns
+      FROM discovered_sources AS s
+      LEFT JOIN tables_matched AS tm
+        USING (object_project, object_dataset, object_name,
+               object_type, generation_type, definition_hash, source_name)
+      LEFT JOIN cols_matched AS cm
+        USING (object_project, object_dataset, object_name,
+               object_type, generation_type, definition_hash, source_name)
+    )
+    SELECT
+      object_project, object_dataset, object_name,
+      object_type, generation_type, definition_hash,
+      LOGICAL_OR(NOT exists_in_tables) AS has_absent_source,
+      LOGICAL_OR(exists_in_tables AND NOT has_columns) AS has_present_uncollected_source
+    FROM per_source
+    GROUP BY
+      object_project, object_dataset, object_name,
+      object_type, generation_type, definition_hash;
+
+    -- Resolve each analyzed object to a publishable / not-publishable verdict.
+    -- Publishable = exact COMPLETED, OR COMPLETED_WITH_WARNINGS whose warnings are
+    -- explained entirely by sources absent from INFORMATION_SCHEMA.TABLES (i.e.
+    -- no present-but-uncollected source). Such objects finish normally: their
+    -- resolved dependencies are published, the absent-source warnings are NOT
+    -- recorded, and is_changed is cleared so they stop being retried.
+    CREATE OR REPLACE TEMP TABLE batch_object_status AS
+    SELECT
+      r.object_project, r.object_dataset, r.object_name,
+      r.object_type, r.generation_type, r.definition_hash,
+      r.udf_analysis_status,
+      r.udf_analysis_message,
+      CASE
+        WHEN r.udf_analysis_status = 'COMPLETED' THEN TRUE
+        WHEN r.udf_analysis_status = 'COMPLETED_WITH_WARNINGS'
+          AND NOT COALESCE(f.has_present_uncollected_source, FALSE) THEN TRUE
+        ELSE FALSE
+      END AS is_publishable
+    FROM batch_udf_results AS r
+    LEFT JOIN batch_object_source_flags AS f
+      USING (object_project, object_dataset, object_name,
+             object_type, generation_type, definition_hash);
+
     CREATE OR REPLACE TEMP TABLE batch_completed_objects AS
     SELECT
       object_project, object_dataset, object_name,
       object_type, generation_type, definition_hash
-    FROM batch_udf_results
-    WHERE udf_analysis_status = 'COMPLETED';
+    FROM batch_object_status
+    WHERE is_publishable;
 
     CREATE OR REPLACE TEMP TABLE batch_udf_failed_objects AS
     SELECT
       object_project, object_dataset, object_name,
       object_type, generation_type, definition_hash
-    FROM batch_udf_results
-    WHERE udf_analysis_status != 'COMPLETED';
+    FROM batch_object_status
+    WHERE NOT is_publishable;
 
     -- Every object that entered the UDF (COMPLETED or not). Diagnostics for all
     -- of these are replaced; pre-analysis failures are handled separately.
@@ -2199,7 +2348,16 @@ BEGIN
       UNNEST(
         JSON_QUERY_ARRAY(r.exported_json, '$.exported_tables.lineage_paths')
       ) AS path_row
-      WHERE r.udf_analysis_status = 'COMPLETED'
+      WHERE EXISTS (
+        SELECT 1
+        FROM batch_completed_objects AS pub
+        WHERE pub.object_project = r.object_project
+          AND pub.object_dataset = r.object_dataset
+          AND pub.object_name = r.object_name
+          AND pub.object_type = r.object_type
+          AND pub.generation_type = r.generation_type
+          AND pub.definition_hash = r.definition_hash
+      )
     ),
     output_lineage_rows AS (
       SELECT
@@ -2219,7 +2377,16 @@ BEGIN
       UNNEST(
         JSON_QUERY_ARRAY(r.exported_json, '$.exported_tables.output_lineages')
       ) AS output_row
-      WHERE r.udf_analysis_status = 'COMPLETED'
+      WHERE EXISTS (
+        SELECT 1
+        FROM batch_completed_objects AS pub
+        WHERE pub.object_project = r.object_project
+          AND pub.object_dataset = r.object_dataset
+          AND pub.object_name = r.object_name
+          AND pub.object_type = r.object_type
+          AND pub.generation_type = r.generation_type
+          AND pub.definition_hash = r.definition_hash
+      )
     ),
     parsed_edges AS (
       SELECT
@@ -2372,9 +2539,23 @@ BEGIN
         JSON_QUERY_ARRAY(r.exported_json, '$.exported_tables.diagnostics'),
         CAST([] AS ARRAY<STRING>)
       )
-    ) AS diagnostic_row;
+    ) AS diagnostic_row
+    -- Only stage diagnostics for objects that are NOT publishable. Publishable
+    -- objects (exact COMPLETED, or COMPLETED_WITH_WARNINGS whose warnings are all
+    -- from sources absent in INFORMATION_SCHEMA.TABLES) contribute no diagnostics,
+    -- so absent-source not-found warnings are never recorded.
+    WHERE EXISTS (
+      SELECT 1
+      FROM batch_udf_failed_objects AS fail
+      WHERE fail.object_project = r.object_project
+        AND fail.object_dataset = r.object_dataset
+        AND fail.object_name = r.object_name
+        AND fail.object_type = r.object_type
+        AND fail.generation_type = r.generation_type
+        AND fail.definition_hash = r.definition_hash
+    );
 
-    -- Synthetic UDF_RESULT_NOT_PUBLISHABLE diagnostic for non-COMPLETED objects.
+    -- Synthetic UDF_RESULT_NOT_PUBLISHABLE diagnostic for non-publishable objects.
     CREATE OR REPLACE TEMP TABLE batch_nonpublishable_diagnostic AS
     SELECT
       r.definition_hash AS definition_hash,
@@ -2397,7 +2578,16 @@ BEGIN
       ) AS diagnostic_json,
       r.analyzed_at AS analyzed_at
     FROM batch_udf_results AS r
-    WHERE r.udf_analysis_status != 'COMPLETED';
+    WHERE EXISTS (
+      SELECT 1
+      FROM batch_udf_failed_objects AS fail
+      WHERE fail.object_project = r.object_project
+        AND fail.object_dataset = r.object_dataset
+        AND fail.object_name = r.object_name
+        AND fail.object_type = r.object_type
+        AND fail.generation_type = r.generation_type
+        AND fail.definition_hash = r.definition_hash
+    );
 
     -- Synthetic ANALYSIS_EXECUTION_FAILED diagnostic for pre-analysis failures.
     CREATE OR REPLACE TEMP TABLE batch_preanalysis_diagnostic AS
@@ -2771,9 +2961,18 @@ BEGIN
         CAST([] AS ARRAY<STRING>)
       )
     ) AS diagnostic_row
-    WHERE r.udf_analysis_status != 'COMPLETED';
+    WHERE EXISTS (
+      SELECT 1
+      FROM batch_udf_failed_objects AS fail
+      WHERE fail.object_project = r.object_project
+        AND fail.object_dataset = r.object_dataset
+        AND fail.object_name = r.object_name
+        AND fail.object_type = r.object_type
+        AND fail.generation_type = r.generation_type
+        AND fail.definition_hash = r.definition_hash
+    );
 
-    -- Non-COMPLETED UDF results with no diagnostic row: a single summary row.
+    -- Non-publishable UDF results with no diagnostic row: a single summary row.
     INSERT INTO non_completed_udf_results
     SELECT
       LOWER(r.object_project),
@@ -2798,7 +2997,16 @@ BEGIN
       SAFE.PARSE_JSON(JSON_VALUE(r.exported_json, '$.analysis.error_nodes_json')),
       r.exported_json
     FROM batch_udf_results AS r
-    WHERE r.udf_analysis_status != 'COMPLETED'
+    WHERE EXISTS (
+      SELECT 1
+      FROM batch_udf_failed_objects AS fail
+      WHERE fail.object_project = r.object_project
+        AND fail.object_dataset = r.object_dataset
+        AND fail.object_name = r.object_name
+        AND fail.object_type = r.object_type
+        AND fail.generation_type = r.generation_type
+        AND fail.definition_hash = r.definition_hash
+    )
       AND ARRAY_LENGTH(COALESCE(
         JSON_QUERY_ARRAY(r.exported_json, '$.exported_tables.diagnostics'),
         CAST([] AS ARRAY<STRING>)
