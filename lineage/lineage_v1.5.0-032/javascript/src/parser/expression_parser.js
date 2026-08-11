@@ -259,6 +259,21 @@ class ExpressionParser {
         continue;
       }
 
+      // Field access on a completed value expression: fn(...).field,
+      // (expr).field, arr[i].field. This '.' follows a call / parenthesized /
+      // subscript result, NOT an identifier chain (a.b.c is fully consumed by
+      // #parseIdentifierOrFunctionCall before it returns, so its '.' never
+      // reaches here). Guard on an identifier after the dot so a stray '.' still
+      // falls through unchanged.
+      if (this.#matches(".", false)) {
+        const afterDot = this.#peek(1);
+
+        if (afterDot && (this.#isIdentifierToken(afterDot) || afterDot.token === "*")) {
+          expressionNode = this.#parseFieldAccess(expressionNode);
+          continue;
+        }
+      }
+
       break;
     }
 
@@ -299,6 +314,37 @@ class ExpressionParser {
       [baseNode, indexNode],
       openBracket,
       closeBracket
+    );
+  }
+
+  /**
+   * 完了済みの値式（関数呼び出し / 括弧式 / 添字アクセスの結果）に続く後置の
+   * フィールドアクセス base.field を解析する。
+   *
+   * ここでの '.' は「値」に対するフィールド選択であり、識別子チェーン a.b.c
+   * （#parseIdentifierOrFunctionCall が先に消費する）とは異なる。関数の戻り値
+   * などの不透明/派生値の STRUCT フィールドを指すため、末尾フィールド名は物理列
+   * として解決せず lineage を持たない。base（関数なら引数）の lineage だけを
+   * 残す。位置キーワードを非計上にした配列添字 base[...] と同じ設計。
+   * 例：myfn('key', event_params).string_value → 依存は event_params のみ、
+   * .string_value は非計上（かつては RAW_EXPRESSION に退避して string_value を
+   * 裸の列として誤解決し PHYSICAL_COLUMN_NOT_FOUND を出していた）。
+   */
+  #parseFieldAccess(baseNode) {
+    const dotToken = this.#expect(".", false);
+    const fieldToken = this.#consume();
+
+    const nameToken = {
+      token_seq: baseNode.start_token_seq,
+      token: ".",
+      normalized_token: "."
+    };
+
+    return AstFactory.createFunctionCall(
+      [nameToken],
+      [baseNode],
+      dotToken,
+      fieldToken
     );
   }
 

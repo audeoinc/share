@@ -1,5 +1,26 @@
 # 1.5.0-032
 
+- Fixed a spurious PHYSICAL_COLUMN_NOT_FOUND for field access on a function-call
+  result, e.g. the GA4 pattern `fn('key', event_params).string_value`. The
+  postfix parser handled `OVER` and array subscripts `[ ... ]` but not a `.field`
+  access following a completed value expression (a function call, a parenthesized
+  expression, or a subscript). Such an item degraded to RAW_EXPRESSION, which
+  harvested the trailing field name as a bare unqualified column reference, so
+  `.string_value` was resolved against the physical tables, not found, and raised
+  an ERROR (COMPLETED_WITH_ERRORS -> non-publishable / FAILED) even though
+  `string_value` is a nested struct field, not a top-level column. The parser now
+  parses `base.field` on a call/parenthesized/subscript result. Mirroring the
+  array-subscript design (position keywords carry no lineage), the accessed field
+  selects from an opaque/derived value (the function's return STRUCT) and carries
+  NO physical-column lineage; only the base expression's lineage is kept — so the
+  output still depends on the function argument (`event_params`, broadly all of
+  its collected field paths) and the trailing `.string_value` no longer resolves
+  as a column. Identifier chains like `event_params.value.string_value` (a struct
+  field path on a real column) are unaffected — they are consumed before the
+  postfix stage. Test: `test_v1_5_0_049.js`. Engine change: bundle rebuilt
+  (sha256 b14244de…, 420340 bytes), `release_manifest.json` updated; redeploy the
+  UDF bundle to GCS.
+
 - Stopped treating a generated/DAG table as FAILED when the only problem is that
   a source it references no longer exists. Such sources (temporary or short-lived
   tables) have no collected columns, so the engine reports PHYSICAL_METADATA_NOT_

@@ -84,7 +84,9 @@ npm test                        # build + verify:bundle + test:release を一括
 
 ## 7. 現在地
 
-- バンドル: `sha256 = 8b458f3b1f00edf1176aca9c93fbfc583bdddf51b2a4c352832de943f3b390f0`、`418298` bytes
-- `test:release` 28 本 PASS / ゴールデン 48 ケース PASS
-- 直近の修正: `SELECT *` を中身とする CTE を JOIN した際の、修飾あり/なし混在列の
-  解決バグ（詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭）
+- バンドル: `sha256 = b14244de878672e8eecd88c06e4c27359de1ffd16d6780f522caa059bc838e02`、`420340` bytes
+- `test:release` 29 本 PASS / ゴールデン 48 ケース PASS
+- 直近の修正: 関数呼び出し結果への後置フィールドアクセス（GA4 の
+  `fn('key', event_params).string_value` 等）で末尾フィールドが裸の列と誤解決され
+  `PHYSICAL_COLUMN_NOT_FOUND` になっていた不具合を修正（`test_v1_5_0_049`）。
+  詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭。

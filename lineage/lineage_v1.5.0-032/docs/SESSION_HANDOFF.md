@@ -132,10 +132,25 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   は従来通り FAILED で表面化。※消えたソース WARNING と別の実 ERROR が混在する object は
   FAILED のまま全診断を保持（安全側）。SQL のみ／エンジン不変。**BigQuery 未検証**。
 
+## 4.7 関数結果への後置フィールドアクセス（`fn(...).string_value`）の誤 not-found 修正
+
+- **症状**：GA4 の `fn('key', event_params).string_value` のような「**関数呼び出し結果への
+  ドットアクセス**」で、末尾 `.string_value` が裸の列 `string_value` として誤解決され
+  `PHYSICAL_COLUMN_NOT_FOUND`（ERROR）→ COMPLETED_WITH_ERRORS → 非公開/FAILED。
+- **原因**：パーサの後置処理（`#parsePostfixExpression`）が `OVER` と 添字 `[...]` のみ対応で、
+  `)`/`]` の直後の `.field` を扱えず、select 項目が RAW_EXPRESSION に退避 → 中の識別子
+  `string_value` を裸の列参照として収集していた。
+- **修正**：後置 `base.field`（関数呼び出し/括弧式/添字の結果）をパース対応（`#parseFieldAccess`）。
+  配列添字と同じ設計で、**末尾フィールドは lineage を持たない**（不透明な戻り STRUCT の
+  フィールド選択）、**base（関数なら引数）の lineage のみ保持**。よって出力は `event_params`
+  （その全 field_path に広く帰属）に依存し、`.string_value` は非計上。列への識別子チェーン
+  `event_params.value.string_value` は後置段の前に消費されるため無影響。テスト
+  `test_v1_5_0_049`。エンジン変更（要 GCS 再デプロイ）。
+
 ## 5. 現在地（引き継ぎ時点）
 
-- バンドル: `sha256 = 8b458f3b1f00edf1176aca9c93fbfc583bdddf51b2a4c352832de943f3b390f0`、`418298` bytes
-- `test:release` 28 本 PASS / ゴールデン 48 ケース PASS
+- バンドル: `sha256 = b14244de878672e8eecd88c06e4c27359de1ffd16d6780f522caa059bc838e02`、`420340` bytes
+- `test:release` 29 本 PASS / ゴールデン 48 ケース PASS
 - 二本ツリー（-031 / -032）同期済み
 - 03 STEP 3：フルバッチ化済み（上記 §4.5 ①②③）。集合ベースに全面置換、ジョブ数は
   N 非依存。**BigQuery 未検証**（本番前に staging 実行＋旧ループとの出力 diff が必要）。
