@@ -147,10 +147,21 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   `event_params.value.string_value` は後置段の前に消費されるため無影響。テスト
   `test_v1_5_0_049`。エンジン変更（要 GCS 再デプロイ）。
 
+## 4.8 文字列リテラル `'ALL'`/`'DISTINCT'` を SELECT 修飾子と誤認する不具合
+
+- **症状**：先頭 SELECT 項目が `'ALL' AS col1` のような**文字列リテラル**のとき
+  "SelectParser: SELECT item 1 has no expression"（PARTIAL_FAILURE）。
+- **原因**：`SelectParser#removeSelectModifiers` が `SELECT [ALL|DISTINCT]` 集合修飾子と
+  `AS STRUCT|VALUE` を先頭から除去する際、`normalized_token` だけで判定していた。文字列
+  `'ALL'`（token_type=STRING、normalized_token="ALL"）を修飾子と誤認し除去 → 式が消えた。
+- **修正**：修飾子判定に **`token_type === "KEYWORD"` を追加**（ALL/DISTINCT/AS はキーワード、
+  文字列は STRING）。本来の `SELECT ALL/DISTINCT` や `SELECT AS STRUCT|VALUE` は無影響。
+  テスト `test_v1_5_0_050`。エンジン変更（要 GCS 再デプロイ）。
+
 ## 5. 現在地（引き継ぎ時点）
 
-- バンドル: `sha256 = b14244de878672e8eecd88c06e4c27359de1ffd16d6780f522caa059bc838e02`、`420340` bytes
-- `test:release` 29 本 PASS / ゴールデン 48 ケース PASS
+- バンドル: `sha256 = 2d485eb6190651d56bc468e40e18be2327b0b3b2faa0055a7b06fd0ed2554ee9`、`420900` bytes
+- `test:release` 30 本 PASS / ゴールデン 48 ケース PASS
 - 二本ツリー（-031 / -032）同期済み
 - 03 STEP 3：フルバッチ化済み（上記 §4.5 ①②③）。集合ベースに全面置換、ジョブ数は
   N 非依存。**BigQuery 未検証**（本番前に staging 実行＋旧ループとの出力 diff が必要）。

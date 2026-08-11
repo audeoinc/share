@@ -1,5 +1,18 @@
 # 1.5.0-032
 
+- Fixed "SelectParser: SELECT item 1 has no expression" for a string literal
+  whose contents spell a SELECT set-quantifier, e.g. `SELECT 'ALL' AS col1`.
+  SelectParser#removeSelectModifiers strips a leading SELECT ALL / SELECT DISTINCT
+  quantifier (and the AS STRUCT / AS VALUE modifier) before the first item's
+  expression is parsed, but it matched on normalized_token alone. A string literal
+  `'ALL'` / `'DISTINCT'` (token_type STRING, normalized_token "ALL"/"DISTINCT")
+  was mistaken for the quantifier and stripped, leaving the first item with no
+  expression (PARTIAL_FAILURE). The modifier checks now also require
+  token_type === "KEYWORD", so a quoted string is never treated as a modifier;
+  genuine SELECT ALL / DISTINCT / AS STRUCT|VALUE are unaffected. Test:
+  `test_v1_5_0_050.js`. Engine change: bundle rebuilt (sha256 2d485eb…, 420900
+  bytes), `release_manifest.json` updated; redeploy the UDF bundle to GCS.
+
 - Fixed a spurious PHYSICAL_COLUMN_NOT_FOUND for field access on a function-call
   result, e.g. the GA4 pattern `fn('key', event_params).string_value`. The
   postfix parser handled `OVER` and array subscripts `[ ... ]` but not a `.field`

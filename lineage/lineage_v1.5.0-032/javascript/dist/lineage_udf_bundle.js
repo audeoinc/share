@@ -1788,8 +1788,13 @@ class SelectParser {
 
     const firstContentToken = tokens[firstContentIndex];
 
+    // Only a KEYWORD DISTINCT/ALL is the SELECT set-quantifier. A string literal
+    // whose contents happen to spell ALL/DISTINCT (e.g. SELECT 'ALL' AS col1)
+    // shares the normalized_token but is token_type STRING, and must NOT be
+    // stripped — doing so left the item with no expression.
     if (
       firstContentToken &&
+      firstContentToken.token_type === "KEYWORD" &&
       ["DISTINCT", "ALL"].includes(firstContentToken.normalized_token)
     ) {
       return tokens.slice(firstContentIndex + 1);
@@ -1804,7 +1809,10 @@ class SelectParser {
       ? tokens[secondContentIndex]
       : null;
 
+    // As above, only a KEYWORD AS introduces AS STRUCT / AS VALUE; a string
+    // literal 'AS' (token_type STRING) must not be treated as the modifier.
     if (
+      firstContentToken?.token_type === "KEYWORD" &&
       firstContentToken?.normalized_token === "AS" &&
       ["STRUCT", "VALUE"].includes(secondContentToken?.normalized_token)
     ) {
