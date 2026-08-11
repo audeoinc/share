@@ -51,6 +51,21 @@ class QueryParser {
       throw new SyntaxError("QueryParser: Query Tokenが空です。");
     }
 
+    /*
+     * クエリ全体が余分な括弧で囲まれている（(SELECT ...) 全体が 1 組の括弧）場合は、
+     * 外側の括弧を外して再解析する。DAG/JOBS 由来 SQL でしばしば見られる。
+     * 先頭が '(' で、その対応する ')' が末尾（末尾 ';' は無視）である場合のみ剥がす。
+     * (SELECT ...) UNION ... のように途中で閉じる場合は剥がさない。
+     */
+    const innerTokens = this.#stripWrappingParentheses(this.tokens);
+
+    if (innerTokens) {
+      return new QueryParser(this.#normalizeTokenDepth(innerTokens), {
+        isSubquery: this.isSubquery,
+        disableSetOperations: this.disableSetOperations
+      }).parse();
+    }
+
     const cteResult = this.#parseCommonTableExpressions(contentTokens);
 
     if (!this.disableSetOperations) {
@@ -484,6 +499,81 @@ class QueryParser {
 
   #removeCommentTokens(tokens) {
     return tokens.filter((token) => token.token_type !== "COMMENT");
+  }
+
+  /**
+   * クエリ全体を包む余分な括弧を検出して内側 Token を返す。剥がせない場合は null。
+   * 条件：先頭の非コメント Token が '(' で、その対応 ')' が末尾（末尾 ';' は無視）に
+   * 一致し、内側が SELECT / WITH / '(' で始まる（＝クエリ）こと。
+   */
+  #stripWrappingParentheses(tokens) {
+    const meaningful = [];
+
+    for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex++) {
+      if (tokens[tokenIndex].token_type !== "COMMENT") {
+        meaningful.push(tokenIndex);
+      }
+    }
+
+    if (meaningful.length < 2) {
+      return null;
+    }
+
+    const firstIndex = meaningful[0];
+
+    if (tokens[firstIndex].token !== "(") {
+      return null;
+    }
+
+    let lastMeaningfulPosition = meaningful.length - 1;
+
+    if (tokens[meaningful[lastMeaningfulPosition]].token === ";") {
+      lastMeaningfulPosition -= 1;
+    }
+
+    if (lastMeaningfulPosition <= 0) {
+      return null;
+    }
+
+    const lastIndex = meaningful[lastMeaningfulPosition];
+
+    let depth = 0;
+    let matchIndex = -1;
+
+    for (const tokenIndex of meaningful) {
+      const tokenText = tokens[tokenIndex].token;
+
+      if (tokenText === "(") {
+        depth += 1;
+      } else if (tokenText === ")") {
+        depth -= 1;
+
+        if (depth === 0) {
+          matchIndex = tokenIndex;
+          break;
+        }
+      }
+    }
+
+    if (matchIndex !== lastIndex) {
+      return null;
+    }
+
+    const inner = tokens.slice(firstIndex + 1, matchIndex);
+    const innerFirst = inner.find((token) => token.token_type !== "COMMENT");
+
+    if (!innerFirst) {
+      return null;
+    }
+
+    const isQueryStart = innerFirst.token === "(" ||
+      ["SELECT", "WITH"].includes(innerFirst.normalized_token);
+
+    if (!isQueryStart) {
+      return null;
+    }
+
+    return inner;
   }
 
   #findLastMeaningfulToken(tokens) {

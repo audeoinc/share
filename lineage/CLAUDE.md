@@ -84,9 +84,9 @@ npm test                        # build + verify:bundle + test:release を一括
 
 ## 7. 現在地
 
-- バンドル: `sha256 = ea17ae4cfdc065620cbf5cd374bca321b8b121b2dd3072e8bea05157a483defb`、`426507` bytes
-- `test:release` 33 本 PASS / ゴールデン 48 ケース PASS
-- 直近の修正: EXTRACT(part FROM expr [AT TIME ZONE tz]) と WEEK(<WEEKDAY>) デートパートの
-  解析漏れを修正（WHERE 等で expected ")" but FROM、WEEK(MONDAY)/AT を列と誤認）。datepart は
-  非計上、source/tz は依存として保持。`test_v1_5_0_053`。
+- バンドル: `sha256 = a4a43b2c2ce845969b27efb38b2b5f83099171b6aa3de11a7063d4d46c192884`、`433278` bytes
+- `test:release` 34 本 PASS / ゴールデン 48 ケース PASS
+- 直近の修正: JOBS 由来 SQL のパーサ 3 件を修正（型付き STRUCT/ARRAY コンストラクタ
+  `STRUCT<...>(...)` / `ARRAY<...>[...]`、クエリ全体を囲む余分な括弧 `(SELECT ...)`、
+  括弧タプル `(a,b) IN (...)`）。`test_v1_5_0_054`。
   詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭。
