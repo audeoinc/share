@@ -468,11 +468,33 @@ function tokenize(sqlText) {
     if (isDigit(character)) {
       let value = "";
 
-      while (index < sqlText.length && /[0-9.]/.test(sqlText[index])) {
-        const current = sqlText[index];
+      // Integer part.
+      while (index < sqlText.length && /[0-9]/.test(sqlText[index])) {
+        value += sqlText[index];
+        advanceCharacter(sqlText[index]);
+      }
 
-        value += current;
-        advanceCharacter(current);
+      /*
+       * Fractional part. A '.' belongs to the number (123.45, trailing 123.)
+       * UNLESS it is immediately followed by an identifier-start character, in
+       * which case the '.' is a path separator / field access and the number
+       * ends before it. Without this, a dashed table path with a digit-ending
+       * segment — e.g. `my-project-123.dataset` — lexed `123.` as one number
+       * token (eating the separator) and broke FROM parsing. `123.45` keeps the
+       * dot (next char is a digit); `123.` at end / before whitespace also keeps
+       * it (unchanged); only `123.<letter>` now splits.
+       */
+      while (
+        sqlText[index] === "." &&
+        !/[A-Za-z_`]/.test(sqlText[index + 1] || "")
+      ) {
+        value += ".";
+        advanceCharacter(".");
+
+        while (index < sqlText.length && /[0-9]/.test(sqlText[index])) {
+          value += sqlText[index];
+          advanceCharacter(sqlText[index]);
+        }
       }
 
       /*

@@ -1,5 +1,23 @@
 # 1.5.0-032
 
+- Fixed "FromParser: JOIN was expected, but found \"-\"." for an unquoted dashed
+  table path in FROM — most commonly a dashed project id, e.g.
+  `FROM my-project.dataset.table` or `my-project-123.dataset.table`. The lexer
+  splits `my-project` into `my` `-` `project`, and FromParser#parseTableSource
+  only walked '.'-separated parts, so it stopped at the first '-' and reported a
+  spurious JOIN-expected error (PARTIAL_FAILURE). Two changes: (1)
+  FromParser#parseTableSource now merges hyphen-joined tokens (and numeric
+  segments) into one path part (`my - project` -> MY-PROJECT); (2) the lexer no
+  longer swallows a '.' into a number when the '.' is immediately followed by an
+  identifier-start character, so `my-project-123.dataset` tokenizes as `123` `.`
+  `dataset` (path separator) rather than `123.` `dataset`. Real float literals
+  (1.5, 1., 1.5e3, 3.14) are unaffected, and backtick-quoted paths
+  (`` `my-project.d.t` ``) already worked. Known limitation: a segment that mixes
+  digits and letters with no separator (e.g. `my-2nd`) is still mis-lexed;
+  backtick-quote such paths. Test: `test_v1_5_0_051.js`. Engine change: bundle
+  rebuilt (sha256 526f9433…, 422958 bytes), `release_manifest.json` updated;
+  redeploy the UDF bundle to GCS.
+
 - Fixed "SelectParser: SELECT item 1 has no expression" for a string literal
   whose contents spell a SELECT set-quantifier, e.g. `SELECT 'ALL' AS col1`.
   SelectParser#removeSelectModifiers strips a leading SELECT ALL / SELECT DISTINCT

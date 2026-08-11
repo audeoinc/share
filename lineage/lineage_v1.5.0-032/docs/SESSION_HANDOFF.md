@@ -158,10 +158,25 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   文字列は STRING）。本来の `SELECT ALL/DISTINCT` や `SELECT AS STRUCT|VALUE` は無影響。
   テスト `test_v1_5_0_050`。エンジン変更（要 GCS 再デプロイ）。
 
+## 4.9 未クォートのダッシュ付きテーブルパス（`my-project.d.t`）の FROM 解析
+
+- **症状**：FROM に未クォートのダッシュ付きテーブルパス（ダッシュ付きプロジェクトID
+  `my-project.dataset.table` 等）があると "FromParser: JOIN was expected, but found -"
+  （PARTIAL_FAILURE）。バッククォート版 `` `my-project.d.t` `` は従来通り可。
+- **原因**：レキサが `my-project` を `my`/`-`/`project` に分割。`FromParser#parseTableSource`
+  は `.` 区切りしか辿らず最初の `-` で停止。加えて数字終わりのID（`my-project-123.d`）は
+  レキサが `123.` を区切りドットごと1数値トークンとして食う別問題もあった。
+- **修正**：(1) `FromParser#parseTableSource` がハイフン連結（`my - project`→`MY-PROJECT`、
+  数値セグメントも）を1パートに統合。(2) レキサは、数値直後の `.` が**英字識別子の前**なら
+  数値に取り込まず区切りとして扱う（`123.dataset`→`123`/`.`/`dataset`）。小数
+  `1.5`/`1.`/`1.5e3`/`3.14` は無影響。テスト `test_v1_5_0_051`。
+- **既知の限界**：区切り無しで数字と英字が混在するセグメント（例 `my-2nd`）は依然
+  誤トークン化 → その場合はバッククォート推奨。エンジン変更（要 GCS 再デプロイ）。
+
 ## 5. 現在地（引き継ぎ時点）
 
-- バンドル: `sha256 = 2d485eb6190651d56bc468e40e18be2327b0b3b2faa0055a7b06fd0ed2554ee9`、`420900` bytes
-- `test:release` 30 本 PASS / ゴールデン 48 ケース PASS
+- バンドル: `sha256 = 526f94333024c1cae01ac10f11f187eddfedcfba30fc85a182f6f72dfb48e9d3`、`422958` bytes
+- `test:release` 31 本 PASS / ゴールデン 48 ケース PASS
 - 二本ツリー（-031 / -032）同期済み
 - 03 STEP 3：フルバッチ化済み（上記 §4.5 ①②③）。集合ベースに全面置換、ジョブ数は
   N 非依存。**BigQuery 未検証**（本番前に staging 実行＋旧ループとの出力 diff が必要）。
