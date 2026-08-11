@@ -173,10 +173,22 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 - **既知の限界**：区切り無しで数字と英字が混在するセグメント（例 `my-2nd`）は依然
   誤トークン化 → その場合はバッククォート推奨。エンジン変更（要 GCS 再デプロイ）。
 
+## 4.10 名前付きクエリパラメータ `@key` / `@@system_var` の対応
+
+- **症状**：JOBS 収集 SQL に dbt 由来の `@key` 等の名前付きパラメータがあると、式パーサが
+  `token "@" cannot start an expression`（式コンテキスト→PARTIAL_FAILURE）／SELECT 位置では
+  RAW_EXPRESSION に退避して名前を裸の列として誤解決（PHYSICAL_COLUMN_NOT_FOUND）。
+- **原因**：Lexer は `@` を単独 UNKNOWN トークンとして返すが、式パーサに `@` を始端とする
+  一次式が無かった。
+- **修正**：`@name` / `@@name` を **LITERAL_EXPRESSION（kind "PARAMETER"）** としてパース。
+  パラメータは外部スカラー値でテーブル列ではないため **lineage を持たない**。`@` 直後の名前は
+  予約語でも消費（`@end` / `@order` も有効なパラメータ名）。同一文の実列 lineage は保持。
+  テスト `test_v1_5_0_052`。エンジン変更（要 GCS 再デプロイ）。
+
 ## 5. 現在地（引き継ぎ時点）
 
-- バンドル: `sha256 = 526f94333024c1cae01ac10f11f187eddfedcfba30fc85a182f6f72dfb48e9d3`、`422958` bytes
-- `test:release` 31 本 PASS / ゴールデン 48 ケース PASS
+- バンドル: `sha256 = ff86d61877bf75f12ff8e03b8bdcc16861fa2a5e18b59206504adb20d4a00e68`、`424573` bytes
+- `test:release` 32 本 PASS / ゴールデン 48 ケース PASS
 - 二本ツリー（-031 / -032）同期済み
 - 03 STEP 3：フルバッチ化済み（上記 §4.5 ①②③）。集合ベースに全面置換、ジョブ数は
   N 非依存。**BigQuery 未検証**（本番前に staging 実行＋旧ループとの出力 diff が必要）。

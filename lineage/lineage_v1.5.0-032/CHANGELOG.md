@@ -1,5 +1,19 @@
 # 1.5.0-032
 
+- Handled BigQuery named query parameters `@name` (and `@@system_variable`) in
+  the expression parser, e.g. dbt-style `@key` placeholders that appear in
+  JOBS-collected SQL. The lexer emits `@` as its own token and the parser had no
+  primary for it, so `WHERE c = @key` threw "ExpressionParser: token \"@\" cannot
+  start an expression" (PARTIAL_FAILURE), and `SELECT @key` degraded to
+  RAW_EXPRESSION and mis-harvested the parameter name as a bare column (spurious
+  PHYSICAL_COLUMN_NOT_FOUND). `@name` / `@@name` now parse as a LITERAL_EXPRESSION
+  of kind "PARAMETER": a parameter is an external scalar value, not a table
+  column, so it carries no lineage. The name after `@` is consumed even when it
+  is a reserved keyword (`@end`, `@order` are valid parameter names). Real column
+  lineage in the same statement is preserved. Test: `test_v1_5_0_052.js`. Engine
+  change: bundle rebuilt (sha256 ff86d618…, 424573 bytes), `release_manifest.json`
+  updated; redeploy the UDF bundle to GCS.
+
 - Fixed "FromParser: JOIN was expected, but found \"-\"." for an unquoted dashed
   table path in FROM — most commonly a dashed project id, e.g.
   `FROM my-project.dataset.table` or `my-project-123.dataset.table`. The lexer
