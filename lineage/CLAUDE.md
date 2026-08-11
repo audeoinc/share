@@ -84,9 +84,9 @@ npm test                        # build + verify:bundle + test:release を一括
 
 ## 7. 現在地
 
-- バンドル: `sha256 = 526f94333024c1cae01ac10f11f187eddfedcfba30fc85a182f6f72dfb48e9d3`、`422958` bytes
-- `test:release` 31 本 PASS / ゴールデン 48 ケース PASS
-- 直近の修正: FROM 句の未クォートなダッシュ付きテーブルパス（`my-project.d.t` /
-  `my-project-123.d.t` 等のプロジェクトID）で "JOIN was expected but found -" になる
-  不具合を修正（FromParser のハイフン連結＋レキサの数値末尾ドット判定。`test_v1_5_0_051`）。
+- バンドル: `sha256 = ff86d61877bf75f12ff8e03b8bdcc16861fa2a5e18b59206504adb20d4a00e68`、`424573` bytes
+- `test:release` 32 本 PASS / ゴールデン 48 ケース PASS
+- 直近の修正: 名前付きクエリパラメータ `@key` / `@@system_var`（dbt 由来・JOBS SQL）を
+  式パーサが "cannot start an expression" で弾いていた不具合を修正（リネージを持たない
+  リテラル相当としてパース、予約語名 `@end` も可。`test_v1_5_0_052`）。
   詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭。
