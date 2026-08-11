@@ -1,5 +1,22 @@
 # 1.5.0-032
 
+- Parsed EXTRACT and the WEEK(<WEEKDAY>) date part correctly. `EXTRACT(part FROM
+  expr [AT TIME ZONE tz])` was not handled as a special form: in a SELECT item it
+  survived via the RAW_EXPRESSION fallback, but in a WHERE / nested context it
+  threw "ExpressionParser: expected \")\", but found \"FROM\"." (PARTIAL_FAILURE),
+  and identifier-typed tokens inside were mis-harvested as columns — the weekday
+  in `EXTRACT(WEEK(MONDAY) FROM dt)` and the `AT` of `AT TIME ZONE` both raised a
+  spurious PHYSICAL_COLUMN_NOT_FOUND. Separately, `WEEK(<WEEKDAY>)` as a
+  DATE_TRUNC granularity (`DATE_TRUNC(dt, WEEK(MONDAY))`) mis-harvested the
+  weekday too. EXTRACT is now parsed as `EXTRACT(datepart FROM source [AT TIME
+  ZONE tz])`: the datepart (including `WEEK(<WEEKDAY>)`) carries no lineage, while
+  the source expression and any time-zone expression carry lineage (so
+  `AT TIME ZONE tz_column` captures tz). `WEEK(<WEEKDAY>)` parses as a no-lineage
+  date part wherever it appears. Bare dateparts as ordinary function arguments
+  (`DATE_TRUNC(dt, WEEK)`, `DATE_DIFF(a, b, DAY)`) are unaffected. Test:
+  `test_v1_5_0_053.js`. Engine change: bundle rebuilt (sha256 ea17ae4c…, 426507
+  bytes), `release_manifest.json` updated; redeploy the UDF bundle to GCS.
+
 - Handled BigQuery named query parameters `@name` (and `@@system_variable`) in
   the expression parser, e.g. dbt-style `@key` placeholders that appear in
   JOBS-collected SQL. The lexer emits `@` as its own token and the parser had no
