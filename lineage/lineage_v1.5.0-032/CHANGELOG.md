@@ -1,5 +1,24 @@
 # 1.5.0-032
 
+- Fixed three parser gaps seen in JOBS-collected SQL. (1) Typed STRUCT / ARRAY
+  constructors — `STRUCT<f1 T1, f2 T2>(v1, v2)`, `ARRAY<STRUCT<...>>[...]`. The
+  angle-bracket type list was read as comparisons, which broke array literals
+  ("expected \"]\", but found \"STRING\".") and, for a top-level SELECT item,
+  split the item on the comma inside `<...>` so the type field names were
+  harvested as columns. Now `STRUCT<...>(...)` / `ARRAY<...>[...]` parse with the
+  type skipped (no lineage) and the value/element lineage kept, and the SELECT
+  item splitter tracks STRUCT/ARRAY angle depth so `<...>` commas no longer split
+  items (plain comparisons `a < b, c > d` are unaffected). (2) A whole query
+  wrapped in parentheses — `(SELECT ...)` — reported "トップレベルのSELECT Clauseが
+  見つかりません。"; QueryParser now strips a matched outer paren pair (re-normalizing
+  paren depth) and re-parses, while `(SELECT ...) UNION ALL (SELECT ...)` is still
+  split rather than unwrapped. (3) A parenthesized tuple / row value — `(a, b) IN
+  (SELECT ...)` or `(a, b) IN ((1,2),(3,4))` — reported "expected \")\", but found
+  \",\"."; the parenthesized-expression parser now returns an EXPRESSION_LIST that
+  keeps every element's lineage. Test: `test_v1_5_0_054.js`. Engine change: bundle
+  rebuilt (sha256 a4a43b2c…, 433278 bytes), `release_manifest.json` updated;
+  redeploy the UDF bundle to GCS.
+
 - Parsed EXTRACT and the WEEK(<WEEKDAY>) date part correctly. `EXTRACT(part FROM
   expr [AT TIME ZONE tz])` was not handled as a special form: in a SELECT item it
   survived via the RAW_EXPRESSION fallback, but in a WHERE / nested context it

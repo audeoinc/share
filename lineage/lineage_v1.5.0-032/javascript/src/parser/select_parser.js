@@ -202,9 +202,32 @@ class SelectParser {
   #splitTopLevelByComma(tokens, itemDepth) {
     const result = [];
     let currentItem = [];
+    let angleDepth = 0;
+    let previousMeaningful = null;
 
     for (const token of tokens) {
-      if (token.token === "," && token.paren_depth === itemDepth) {
+      /*
+       * 型パラメータの山括弧 STRUCT<...> / ARRAY<...> 内部のカンマは項目区切りに
+       * しない。paren_depth は () / [] しか数えないため、山括弧の深さを別に追う。
+       * '<' が型を開くのは STRUCT / ARRAY（またはネスト型を閉じた '>'）の直後だけで、
+       * 値の比較 a < b では加算しないため通常の比較には影響しない。
+       */
+      if (
+        token.token === "<" &&
+        previousMeaningful &&
+        (["STRUCT", "ARRAY"].includes(previousMeaningful.normalized_token) ||
+          previousMeaningful.token === ">")
+      ) {
+        angleDepth += 1;
+      } else if (token.token === ">" && angleDepth > 0) {
+        angleDepth -= 1;
+      }
+
+      if (
+        token.token === "," &&
+        token.paren_depth === itemDepth &&
+        angleDepth === 0
+      ) {
         const trimmedItem = this.#removeCommentTokens(currentItem);
 
         if (trimmedItem.length === 0) {
@@ -215,10 +238,19 @@ class SelectParser {
 
         result.push(trimmedItem);
         currentItem = [];
+
+        if (token.token_type !== "COMMENT") {
+          previousMeaningful = token;
+        }
+
         continue;
       }
 
       currentItem.push(token);
+
+      if (token.token_type !== "COMMENT") {
+        previousMeaningful = token;
+      }
     }
 
     const lastItem = this.#removeCommentTokens(currentItem);

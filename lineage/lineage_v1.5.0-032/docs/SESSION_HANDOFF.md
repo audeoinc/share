@@ -199,8 +199,8 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 
 ## 5. 現在地（引き継ぎ時点）
 
-- バンドル: `sha256 = ea17ae4cfdc065620cbf5cd374bca321b8b121b2dd3072e8bea05157a483defb`、`426507` bytes
-- `test:release` 33 本 PASS / ゴールデン 48 ケース PASS
+- バンドル: `sha256 = a4a43b2c2ce845969b27efb38b2b5f83099171b6aa3de11a7063d4d46c192884`、`433278` bytes
+- `test:release` 34 本 PASS / ゴールデン 48 ケース PASS
 - 二本ツリー（-031 / -032）同期済み
 - 03 STEP 3：フルバッチ化済み（上記 §4.5 ①②③）。集合ベースに全面置換、ジョブ数は
   N 非依存。**BigQuery 未検証**（本番前に staging 実行＋旧ループとの出力 diff が必要）。

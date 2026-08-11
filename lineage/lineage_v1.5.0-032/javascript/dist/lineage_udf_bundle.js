@@ -1863,9 +1863,32 @@ class SelectParser {
   #splitTopLevelByComma(tokens, itemDepth) {
     const result = [];
     let currentItem = [];
+    let angleDepth = 0;
+    let previousMeaningful = null;
 
     for (const token of tokens) {
-      if (token.token === "," && token.paren_depth === itemDepth) {
+      /*
+       * 型パラメータの山括弧 STRUCT<...> / ARRAY<...> 内部のカンマは項目区切りに
+       * しない。paren_depth は () / [] しか数えないため、山括弧の深さを別に追う。
+       * '<' が型を開くのは STRUCT / ARRAY（またはネスト型を閉じた '>'）の直後だけで、
+       * 値の比較 a < b では加算しないため通常の比較には影響しない。
+       */
+      if (
+        token.token === "<" &&
+        previousMeaningful &&
+        (["STRUCT", "ARRAY"].includes(previousMeaningful.normalized_token) ||
+          previousMeaningful.token === ">")
+      ) {
+        angleDepth += 1;
+      } else if (token.token === ">" && angleDepth > 0) {
+        angleDepth -= 1;
+      }
+
+      if (
+        token.token === "," &&
+        token.paren_depth === itemDepth &&
+        angleDepth === 0
+      ) {
         const trimmedItem = this.#removeCommentTokens(currentItem);
 
         if (trimmedItem.length === 0) {
@@ -1876,10 +1899,19 @@ class SelectParser {
 
         result.push(trimmedItem);
         currentItem = [];
+
+        if (token.token_type !== "COMMENT") {
+          previousMeaningful = token;
+        }
+
         continue;
       }
 
       currentItem.push(token);
+
+      if (token.token_type !== "COMMENT") {
+        previousMeaningful = token;
+      }
     }
 
     const lastItem = this.#removeCommentTokens(currentItem);
@@ -2758,6 +2790,27 @@ class ExpressionParser {
       return this.#parseLiteral();
     }
 
+    // Typed STRUCT constructor STRUCT<field type, ...>(v1, v2, ...). The angle-
+    // bracket type list is not a comparison; skip it and keep the value lineage.
+    if (
+      token.normalized_token === "STRUCT" &&
+      this.#peek(1) &&
+      this.#peek(1).token === "<"
+    ) {
+      return this.#parseTypedStruct();
+    }
+
+    // Typed ARRAY constructor ARRAY<element type>[e1, e2, ...] (or ARRAY<...>(
+    // SELECT ...)). The angle-bracket type is skipped; the element/subquery
+    // lineage is kept.
+    if (
+      token.normalized_token === "ARRAY" &&
+      this.#peek(1) &&
+      this.#peek(1).token === "<"
+    ) {
+      return this.#parseTypedArray();
+    }
+
     if (this.#isIdentifierToken(token) || token.token === "*") {
       return this.#parseIdentifierOrFunctionCall();
     }
@@ -2799,6 +2852,71 @@ class ExpressionParser {
       }
 
       this.#expect(")", false);
+    }
+  }
+
+  /**
+   * 型付き STRUCT コンストラクタ STRUCT<field type, ...>(v1, v2, ...) を解析する。
+   * 山括弧の型パラメータ（`<` ... `>`、ネスト可）は列参照を持たないため読み飛ばし、
+   * 値リスト (v1, v2, ...) の各要素を lineage 付きで EXPRESSION_LIST として返す。
+   */
+  #parseTypedStruct() {
+    this.#consume();
+    this.#skipAngleBracketType();
+
+    const openToken = this.#expect("(", false);
+    const items = [];
+
+    if (!this.#matches(")", false)) {
+      while (true) {
+        items.push(this.#parseOrExpression());
+
+        if (!this.#matches(",", false)) {
+          break;
+        }
+
+        this.#consume();
+      }
+    }
+
+    const closeToken = this.#expect(")", false);
+    return AstFactory.createExpressionList(items, openToken, closeToken);
+  }
+
+  /**
+   * 型付き ARRAY コンストラクタ ARRAY<element type>[e1, e2, ...] を解析する。
+   * 山括弧の型を読み飛ばし、要素配列リテラル（または ARRAY<...>(SELECT ...)）の
+   * lineage を保持する。
+   */
+  #parseTypedArray() {
+    this.#consume();
+    this.#skipAngleBracketType();
+
+    if (this.#matches("[", false)) {
+      return this.#parseArrayLiteral();
+    }
+
+    const openToken = this.#expect("(", false);
+    return this.#parseRawSubquery(openToken, "ARRAY");
+  }
+
+  /**
+   * 山括弧の型パラメータ `<` ... `>`（ネスト可）を読み飛ばす。開き山括弧に
+   * 位置している前提で呼ぶ。型パラメータは列参照を持たない。
+   */
+  #skipAngleBracketType() {
+    this.#expect("<", false);
+
+    let angleDepth = 1;
+
+    while (!this.#isEnd() && angleDepth > 0) {
+      const typeToken = this.#consume();
+
+      if (typeToken.token === "<") {
+        angleDepth += 1;
+      } else if (typeToken.token === ">") {
+        angleDepth -= 1;
+      }
     }
   }
 
@@ -3344,6 +3462,24 @@ class ExpressionParser {
     }
 
     const expressionNode = this.#parseOrExpression();
+
+    /*
+     * カンマが続く場合はタプル / STRUCT の行値。例：(a, b) IN (...) の左辺や、
+     * 型付き STRUCT 配列リテラルの各行 (v1, v2)。各要素の lineage を保持するため
+     * EXPRESSION_LIST として返す。
+     */
+    if (this.#matches(",", false)) {
+      const items = [expressionNode];
+
+      while (this.#matches(",", false)) {
+        this.#consume();
+        items.push(this.#parseOrExpression());
+      }
+
+      const listCloseToken = this.#expect(")", false);
+      return AstFactory.createExpressionList(items, openToken, listCloseToken);
+    }
+
     const closeToken = this.#expect(")", false);
     return AstFactory.createParenthesized(expressionNode, openToken, closeToken);
   }
@@ -7296,6 +7432,21 @@ class QueryParser {
       throw new SyntaxError("QueryParser: Query Tokenが空です。");
     }
 
+    /*
+     * クエリ全体が余分な括弧で囲まれている（(SELECT ...) 全体が 1 組の括弧）場合は、
+     * 外側の括弧を外して再解析する。DAG/JOBS 由来 SQL でしばしば見られる。
+     * 先頭が '(' で、その対応する ')' が末尾（末尾 ';' は無視）である場合のみ剥がす。
+     * (SELECT ...) UNION ... のように途中で閉じる場合は剥がさない。
+     */
+    const innerTokens = this.#stripWrappingParentheses(this.tokens);
+
+    if (innerTokens) {
+      return new QueryParser(this.#normalizeTokenDepth(innerTokens), {
+        isSubquery: this.isSubquery,
+        disableSetOperations: this.disableSetOperations
+      }).parse();
+    }
+
     const cteResult = this.#parseCommonTableExpressions(contentTokens);
 
     if (!this.disableSetOperations) {
@@ -7729,6 +7880,81 @@ class QueryParser {
 
   #removeCommentTokens(tokens) {
     return tokens.filter((token) => token.token_type !== "COMMENT");
+  }
+
+  /**
+   * クエリ全体を包む余分な括弧を検出して内側 Token を返す。剥がせない場合は null。
+   * 条件：先頭の非コメント Token が '(' で、その対応 ')' が末尾（末尾 ';' は無視）に
+   * 一致し、内側が SELECT / WITH / '(' で始まる（＝クエリ）こと。
+   */
+  #stripWrappingParentheses(tokens) {
+    const meaningful = [];
+
+    for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex++) {
+      if (tokens[tokenIndex].token_type !== "COMMENT") {
+        meaningful.push(tokenIndex);
+      }
+    }
+
+    if (meaningful.length < 2) {
+      return null;
+    }
+
+    const firstIndex = meaningful[0];
+
+    if (tokens[firstIndex].token !== "(") {
+      return null;
+    }
+
+    let lastMeaningfulPosition = meaningful.length - 1;
+
+    if (tokens[meaningful[lastMeaningfulPosition]].token === ";") {
+      lastMeaningfulPosition -= 1;
+    }
+
+    if (lastMeaningfulPosition <= 0) {
+      return null;
+    }
+
+    const lastIndex = meaningful[lastMeaningfulPosition];
+
+    let depth = 0;
+    let matchIndex = -1;
+
+    for (const tokenIndex of meaningful) {
+      const tokenText = tokens[tokenIndex].token;
+
+      if (tokenText === "(") {
+        depth += 1;
+      } else if (tokenText === ")") {
+        depth -= 1;
+
+        if (depth === 0) {
+          matchIndex = tokenIndex;
+          break;
+        }
+      }
+    }
+
+    if (matchIndex !== lastIndex) {
+      return null;
+    }
+
+    const inner = tokens.slice(firstIndex + 1, matchIndex);
+    const innerFirst = inner.find((token) => token.token_type !== "COMMENT");
+
+    if (!innerFirst) {
+      return null;
+    }
+
+    const isQueryStart = innerFirst.token === "(" ||
+      ["SELECT", "WITH"].includes(innerFirst.normalized_token);
+
+    if (!isQueryStart) {
+      return null;
+    }
+
+    return inner;
   }
 
   #findLastMeaningfulToken(tokens) {
