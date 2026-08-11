@@ -84,9 +84,9 @@ npm test                        # build + verify:bundle + test:release を一括
 
 ## 7. 現在地
 
-- バンドル: `sha256 = b14244de878672e8eecd88c06e4c27359de1ffd16d6780f522caa059bc838e02`、`420340` bytes
-- `test:release` 29 本 PASS / ゴールデン 48 ケース PASS
-- 直近の修正: 関数呼び出し結果への後置フィールドアクセス（GA4 の
-  `fn('key', event_params).string_value` 等）で末尾フィールドが裸の列と誤解決され
-  `PHYSICAL_COLUMN_NOT_FOUND` になっていた不具合を修正（`test_v1_5_0_049`）。
+- バンドル: `sha256 = 2d485eb6190651d56bc468e40e18be2327b0b3b2faa0055a7b06fd0ed2554ee9`、`420900` bytes
+- `test:release` 30 本 PASS / ゴールデン 48 ケース PASS
+- 直近の修正: 先頭 SELECT 項目が文字列リテラル `'ALL'`/`'DISTINCT'` のとき、集合修飾子
+  `SELECT ALL/DISTINCT` と誤認され "SELECT item 1 has no expression" になる不具合を修正
+  （修飾子判定に `token_type === "KEYWORD"` を要求。`test_v1_5_0_050`）。
   詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭。
