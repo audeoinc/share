@@ -84,9 +84,9 @@ npm test                        # build + verify:bundle + test:release を一括
 
 ## 7. 現在地
 
-- バンドル: `sha256 = 2d485eb6190651d56bc468e40e18be2327b0b3b2faa0055a7b06fd0ed2554ee9`、`420900` bytes
-- `test:release` 30 本 PASS / ゴールデン 48 ケース PASS
-- 直近の修正: 先頭 SELECT 項目が文字列リテラル `'ALL'`/`'DISTINCT'` のとき、集合修飾子
-  `SELECT ALL/DISTINCT` と誤認され "SELECT item 1 has no expression" になる不具合を修正
-  （修飾子判定に `token_type === "KEYWORD"` を要求。`test_v1_5_0_050`）。
+- バンドル: `sha256 = 526f94333024c1cae01ac10f11f187eddfedcfba30fc85a182f6f72dfb48e9d3`、`422958` bytes
+- `test:release` 31 本 PASS / ゴールデン 48 ケース PASS
+- 直近の修正: FROM 句の未クォートなダッシュ付きテーブルパス（`my-project.d.t` /
+  `my-project-123.d.t` 等のプロジェクトID）で "JOIN was expected but found -" になる
+  不具合を修正（FromParser のハイフン連結＋レキサの数値末尾ドット判定。`test_v1_5_0_051`）。
   詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭。

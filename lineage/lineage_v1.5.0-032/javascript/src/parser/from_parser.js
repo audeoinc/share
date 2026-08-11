@@ -132,7 +132,7 @@ class FromParser {
       );
     }
 
-    nameParts.push(this.reader.consume().normalized_token);
+    nameParts.push(this.#consumeHyphenatedNamePart());
 
     while (this.reader.matches(".", false)) {
       this.reader.consume();
@@ -143,7 +143,7 @@ class FromParser {
         throw new SyntaxError("FromParser: identifier was expected after '.'.");
       }
 
-      nameParts.push(this.reader.consume().normalized_token);
+      nameParts.push(this.#consumeHyphenatedNamePart());
     }
 
     /*
@@ -164,6 +164,35 @@ class FromParser {
       start_token_seq: startToken.token_seq,
       end_token_seq: endToken.token_seq
     };
+  }
+
+  /**
+   * テーブルパスの1パートを読む。BigQuery は未クォートのテーブルパスに
+   * ハイフンを許容する（特にダッシュ付きプロジェクトID `my-project-123`）。
+   * Lexer は `my-project` を `my` `-` `project` に分割するため、テーブル名
+   * 位置では後続の `- <識別子|数値>` を同一パートへ連結する。FROM のテーブル名
+   * 位置に現れる `-` は減算ではありえず、名前の一部としてのみ意味を持つ。
+   */
+  #consumeHyphenatedNamePart() {
+    let part = this.reader.consume().normalized_token;
+
+    while (this.reader.matches("-", false)) {
+      this.reader.consume();
+
+      const nextToken = this.reader.current();
+      const isNamePart = nextToken &&
+        (this.#isNameToken(nextToken) || nextToken.token_type === "NUMBER");
+
+      if (!isNamePart) {
+        throw new SyntaxError(
+          "FromParser: identifier or number was expected after '-' in a table name."
+        );
+      }
+
+      part += "-" + this.reader.consume().normalized_token;
+    }
+
+    return part;
   }
 
   /*
