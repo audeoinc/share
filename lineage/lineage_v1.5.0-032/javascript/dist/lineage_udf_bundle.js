@@ -2783,6 +2783,25 @@ class ExpressionParser {
    * 生成しない。Lexer は '@' を単独 Token として返し、名前がそれに続く
    * （@@ の場合は '@' が 2 つ）。
    */
+  /**
+   * EXTRACT の先頭に置かれるデートパートを読み飛ばす（lineage を持たない）。
+   * 単一のパート Token（MONTH / WEEK / DATE / DAYOFWEEK / ISOWEEK ...）に加え、
+   * WEEK(<WEEKDAY>) の括弧付き形も消費する。
+   */
+  #consumeDatePart() {
+    this.#consume();
+
+    if (this.#matches("(", false)) {
+      this.#consume();
+
+      while (!this.#isEnd() && !this.#matches(")", false)) {
+        this.#consume();
+      }
+
+      this.#expect(")", false);
+    }
+  }
+
   #parseNamedParameter() {
     const atToken = this.#consume();
     let representativeToken = atToken;
@@ -3168,6 +3187,48 @@ class ExpressionParser {
         castCloseToken,
         null
       );
+    }
+
+    /*
+     * EXTRACT(part FROM expr [AT TIME ZONE tz]) は通常の引数リストではない。
+     * part はデートパート（MONTH / WEEK / DATE / ISOWEEK ... あるいは
+     * WEEK(<WEEKDAY>)）で列参照ではないため lineage を持たない。ソース式
+     * (expr) と、あれば時間帯式 (tz) だけを子として保持する。
+     */
+    if (functionName === "EXTRACT") {
+      this.#consumeDatePart();
+      this.#expect("FROM");
+
+      const extractChildren = [this.#parseOrExpression()];
+
+      if (this.#matches("AT")) {
+        this.#consume();
+        this.#expect("TIME");
+        this.#expect("ZONE");
+        extractChildren.push(this.#parseOrExpression());
+      }
+
+      const extractCloseToken = this.#expect(")", false);
+      return AstFactory.createFunctionCall(
+        nameTokens,
+        extractChildren,
+        openToken,
+        extractCloseToken,
+        null
+      );
+    }
+
+    /*
+     * WEEK(<WEEKDAY>) はスカラー関数ではなくデートパート（DATE_TRUNC 等の粒度
+     * 指定に現れる）。WEEKDAY（MONDAY 等）は列ではないため lineage を持たない。
+     */
+    if (functionName === "WEEK") {
+      while (!this.#isEnd() && !this.#matches(")", false)) {
+        this.#consume();
+      }
+
+      const weekCloseToken = this.#expect(")", false);
+      return AstFactory.createLiteral(weekCloseToken, "DATE_PART", null);
     }
 
     const argumentsList = [];

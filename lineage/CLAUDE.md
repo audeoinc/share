@@ -84,9 +84,9 @@ npm test                        # build + verify:bundle + test:release を一括
 
 ## 7. 現在地
 
-- バンドル: `sha256 = ff86d61877bf75f12ff8e03b8bdcc16861fa2a5e18b59206504adb20d4a00e68`、`424573` bytes
-- `test:release` 32 本 PASS / ゴールデン 48 ケース PASS
-- 直近の修正: 名前付きクエリパラメータ `@key` / `@@system_var`（dbt 由来・JOBS SQL）を
-  式パーサが "cannot start an expression" で弾いていた不具合を修正（リネージを持たない
-  リテラル相当としてパース、予約語名 `@end` も可。`test_v1_5_0_052`）。
+- バンドル: `sha256 = ea17ae4cfdc065620cbf5cd374bca321b8b121b2dd3072e8bea05157a483defb`、`426507` bytes
+- `test:release` 33 本 PASS / ゴールデン 48 ケース PASS
+- 直近の修正: EXTRACT(part FROM expr [AT TIME ZONE tz]) と WEEK(<WEEKDAY>) デートパートの
+  解析漏れを修正（WHERE 等で expected ")" but FROM、WEEK(MONDAY)/AT を列と誤認）。datepart は
+  非計上、source/tz は依存として保持。`test_v1_5_0_053`。
   詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭。

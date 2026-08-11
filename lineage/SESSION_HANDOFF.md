@@ -72,8 +72,8 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 
 ## 5. 現在地（引き継ぎ時点）
 
-- バンドル: `sha256 = ff86d61877bf75f12ff8e03b8bdcc16861fa2a5e18b59206504adb20d4a00e68`、`424573` bytes
-- `test:release` 32 本 PASS / ゴールデン 48 ケース PASS
+- バンドル: `sha256 = ea17ae4cfdc065620cbf5cd374bca321b8b121b2dd3072e8bea05157a483defb`、`426507` bytes
+- `test:release` 33 本 PASS / ゴールデン 48 ケース PASS
 - 二本ツリー（-031 / -032）同期済み
 
 ## 6. Claude Code で続きを進める手順

@@ -185,10 +185,22 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   予約語でも消費（`@end` / `@order` も有効なパラメータ名）。同一文の実列 lineage は保持。
   テスト `test_v1_5_0_052`。エンジン変更（要 GCS 再デプロイ）。
 
+## 4.11 EXTRACT / WEEK(<WEEKDAY>) デートパートの解析
+
+- **症状**：`EXTRACT(part FROM expr [AT TIME ZONE tz])` が特殊構文として未対応。SELECT 位置は
+  RAW_EXPRESSION フォールバックで通っていたが、WHERE 等では `expected ")" but found "FROM"`
+  （PARTIAL_FAILURE）。さらに `EXTRACT(WEEK(MONDAY) FROM dt)` の `MONDAY` や `AT TIME ZONE` の
+  `AT` を列と誤認（PHYSICAL_COLUMN_NOT_FOUND）。`DATE_TRUNC(dt, WEEK(MONDAY))` の `MONDAY` も同様。
+- **修正**：`EXTRACT` を特殊構文としてパース（`#consumeDatePart` で part を読み飛ばし、`FROM` の
+  後の source 式と `AT TIME ZONE` の tz 式のみ lineage 保持）。`WEEK(<WEEKDAY>)` は
+  デートパート（非スカラー関数）として no-lineage リテラル化。bare datepart 引数
+  （`DATE_TRUNC(dt, WEEK)` / `DATE_DIFF(a,b,DAY)`）は無影響。テスト `test_v1_5_0_053`。
+  エンジン変更（要 GCS 再デプロイ）。
+
 ## 5. 現在地（引き継ぎ時点）
 
-- バンドル: `sha256 = ff86d61877bf75f12ff8e03b8bdcc16861fa2a5e18b59206504adb20d4a00e68`、`424573` bytes
-- `test:release` 32 本 PASS / ゴールデン 48 ケース PASS
+- バンドル: `sha256 = ea17ae4cfdc065620cbf5cd374bca321b8b121b2dd3072e8bea05157a483defb`、`426507` bytes
+- `test:release` 33 本 PASS / ゴールデン 48 ケース PASS
 - 二本ツリー（-031 / -032）同期済み
 - 03 STEP 3：フルバッチ化済み（上記 §4.5 ①②③）。集合ベースに全面置換、ジョブ数は
   N 非依存。**BigQuery 未検証**（本番前に staging 実行＋旧ループとの出力 diff が必要）。
