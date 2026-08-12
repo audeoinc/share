@@ -84,9 +84,10 @@ npm test                        # build + verify:bundle + test:release を一括
 
 ## 7. 現在地
 
-- バンドル: `sha256 = 397fb7e452ebe01983d25c4af5122172a139584cc1e6f15f8841be797a13c0b9`、`435847` bytes
-- `test:release` 37 本 PASS / ゴールデン 48 ケース PASS
-- 直近の修正: `JOIN ... USING(col)` の結合キーが FROM/左側ソースに無い場合（例: cola が結合先の
-  CTE だけにあり FROM の物理表には無い）、056 の「先頭ソースへ確定解決」が物理表を選び
-  `PHYSICAL_COLUMN_NOT_FOUND` になる不具合を修正（列を公開すると分かっている候補を優先）。
-  `test_v1_5_0_057`。詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭。
+- バンドル: `sha256 = c25189ec9f1dd1d5c2fe310a2455f850ebf0d8f3589c22dfd19d8db04e45f4f0`、`437077` bytes
+- `test:release` 38 本 PASS / ゴールデン 48 ケース PASS
+- 直近の修正: `UNNEST(array) WITH OFFSET AS offset` の別名が予約語 `offset` のとき、SELECT の
+  `offset` がキーワード字句となり出力列名が導出できず `OUTPUT_COLUMN_NAME_UNRESOLVED`（WARNING）
+  になる不具合を修正（SelectParser に `#isColumnNameToken` を追加し、ExpressionParser と同じ
+  予約語基準で非予約 KEYWORD を列名として導出）。`test_v1_5_0_058`。
+  詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭。

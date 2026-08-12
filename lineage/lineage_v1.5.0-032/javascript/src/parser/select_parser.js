@@ -468,7 +468,7 @@ class SelectParser {
       (token) => token.token_type !== "COMMENT"
     );
 
-    if (significantTokens.length === 1 && this.#isIdentifierToken(significantTokens[0])) {
+    if (significantTokens.length === 1 && this.#isColumnNameToken(significantTokens[0])) {
       return {
         expression_tokens: itemTokens,
         output_alias: significantTokens[0].normalized_token,
@@ -480,7 +480,7 @@ class SelectParser {
       const columnToken = significantTokens[significantTokens.length - 1];
       const dotToken = significantTokens[significantTokens.length - 2];
 
-      if (dotToken.token === "." && this.#isIdentifierToken(columnToken)) {
+      if (dotToken.token === "." && this.#isColumnNameToken(columnToken)) {
         return {
           expression_tokens: itemTokens,
           output_alias: columnToken.normalized_token,
@@ -633,6 +633,35 @@ class SelectParser {
    */
   #isIdentifierToken(token) {
     return ["IDENTIFIER", "BACKTICK_IDENTIFIER"].includes(token.token_type);
+  }
+
+  /**
+   * SELECT項目の暗黙出力列名として使える「列名Token」か判定する。
+   *
+   * `#isIdentifierToken` は IDENTIFIER / BACKTICK のみを名前として扱うが、
+   * BigQueryでは `OFFSET`（`UNNEST(arr) WITH OFFSET AS offset` の別名）のように、
+   * キーワードでも識別子（列名）として使える語がある。ExpressionParser は
+   * これらを IDENTIFIER_EXPRESSION として解決するため、出力名の導出も同じ基準に
+   * 合わせる。真に予約された語（NULL/TRUE/FALSE や論理・句キーワード）は
+   * 列名にならないため除外し、無名（UNNAMED）のままにする。
+   */
+  #isColumnNameToken(token) {
+    if (["IDENTIFIER", "BACKTICK_IDENTIFIER"].includes(token.token_type)) {
+      return true;
+    }
+
+    if (token.token_type !== "KEYWORD") {
+      return false;
+    }
+
+    const reserved = [
+      "AND", "OR", "NOT", "IN", "BETWEEN", "IS", "LIKE", "NULL", "TRUE", "FALSE",
+      "CASE", "WHEN", "THEN", "ELSE", "END", "EXISTS",
+      "OVER", "PARTITION", "ORDER", "BY", "ROWS", "RANGE", "GROUPS",
+      "ASC", "DESC", "NULLS", "FIRST", "LAST"
+    ];
+
+    return !reserved.includes(token.normalized_token);
   }
 
   /**
