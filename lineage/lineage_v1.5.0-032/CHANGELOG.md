@@ -1,5 +1,19 @@
 # 1.5.0-032
 
+- Added a `labels ARRAY<STRUCT<key STRING, value STRING>>` column to
+  `lineage_definition_registry` so a FAILED object can be traced to its source
+  DAG (dag_id, task_id, ...) without joining to the job registry. Populated in
+  `03_run_daily_lineage_pipeline.sql` STEP 2 from the source job's labels
+  (carried through `latest_generated_table_definitions` into the generated-table
+  definition-registry MERGE, both the matched UPDATE and the not-matched INSERT).
+  Views are unaffected — STEP 1 leaves `labels` unset, so it defaults to NULL.
+  The job registry already stored `labels`; this copies them onto the analyzable
+  object row. SQL-only change; the engine bundle is unaffected. MIGRATION: 01
+  uses CREATE OR REPLACE TABLE (which would drop data), so on an existing
+  deployment do NOT re-run 01 — instead `ALTER TABLE <definition_registry> ADD
+  COLUMN IF NOT EXISTS labels ARRAY<STRUCT<key STRING, value STRING>>;` and the
+  next daily run backfills labels for generated TABLEs.
+
 - Fixed named parameters whose name collides with a clause keyword — @limit,
   @order, @where, @group, @from, @offset, @select — which failed even though
   v1.5.0-052 added @name handling. The lexer emitted '@' and the name as two

@@ -197,6 +197,20 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   （`DATE_TRUNC(dt, WEEK)` / `DATE_DIFF(a,b,DAY)`）は無影響。テスト `test_v1_5_0_053`。
   エンジン変更（要 GCS 再デプロイ）。
 
+## 4.12 definition_registry に labels 列を追加（エラー追跡用）
+
+- **目的**：FAILED オブジェクトを DAG（dag_id / task_id 等）へ紐付けやすくする。labels は
+  既に `lineage_job_registry` にあるが、解析/エラーの主テーブル `lineage_definition_registry`
+  には無く join が必要だった。
+- **実装（SQLのみ・エンジン不変）**：01 の definition_registry に
+  `labels ARRAY<STRUCT<key STRING, value STRING>>` を追加。03 STEP 2 で
+  `latest_generated_table_definitions` に labels を通し、生成テーブルの def_registry MERGE
+  （MATCHED UPDATE / NOT MATCHED INSERT 両方）で `source.labels` を格納。View（STEP 1）は
+  未指定＝NULL 既定。
+- **移行注意**：01 は `CREATE OR REPLACE TABLE`（データ消去）。既存本番では 01 を再実行せず
+  `ALTER TABLE <definition_registry> ADD COLUMN IF NOT EXISTS labels ARRAY<STRUCT<key STRING,
+  value STRING>>;` を実行 → 次回日次で生成テーブル分が backfill される。
+
 ## 5. 現在地（引き継ぎ時点）
 
 - バンドル: `sha256 = 7d567a2309b89e808f450b274278d25ccfefd0913618454b63104d52d4a76855`、`433565` bytes

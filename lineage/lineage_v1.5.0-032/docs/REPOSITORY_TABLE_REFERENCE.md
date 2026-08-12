@@ -72,6 +72,7 @@ BigQuery Physical Lineage Repositoryで利用する永続テーブルのカラ�
 | `source_job_id` | STRING | 可 | JOBS由来の場合のJob ID |
 | `source_job_time` | TIMESTAMP | 可 | JOBの実行時刻 |
 | `source_user_email` | STRING | 可 | JOB実行主体のメールアドレス |
+| `labels` | ARRAY<STRUCT<key STRING, value STRING>> | 可 | Generated TableのソースJOBのLabel（dag_id等）。エラー原因追跡用にJOBからそのまま転記。Viewは常にNULL |
 | `is_changed` | BOOL | 不可 | UDF再解析が必要な変更対象であるか |
 | `is_active` | BOOL | 不可 | 現在も有効な解析対象であるか |
 | `analysis_status` | STRING | 可 | 直近の解析状態 |
