@@ -84,10 +84,9 @@ npm test                        # build + verify:bundle + test:release を一括
 
 ## 7. 現在地
 
-- バンドル: `sha256 = c25189ec9f1dd1d5c2fe310a2455f850ebf0d8f3589c22dfd19d8db04e45f4f0`、`437077` bytes
-- `test:release` 38 本 PASS / ゴールデン 48 ケース PASS
-- 直近の修正: `UNNEST(array) WITH OFFSET AS offset` の別名が予約語 `offset` のとき、SELECT の
-  `offset` がキーワード字句となり出力列名が導出できず `OUTPUT_COLUMN_NAME_UNRESOLVED`（WARNING）
-  になる不具合を修正（SelectParser に `#isColumnNameToken` を追加し、ExpressionParser と同じ
-  予約語基準で非予約 KEYWORD を列名として導出）。`test_v1_5_0_058`。
-  詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭。
+- バンドル: `sha256 = 81667d372f1be1330c9c6548cb30239f39a9c2b922aa9c84301ede2295da3f5c`、`437648` bytes
+- `test:release` 39 本 PASS / ゴールデン 48 ケース PASS
+- 直近の修正: `INTERVAL <expr> <part>` の値が算術式（`DATE_ADD(d, INTERVAL n * 2 DAY)` 等）だと、
+  値を単項精度でしか解析せず日付単位を取りこぼし、関数引数内で `expected ) but found day`、
+  素の式で INTERVAL 列誤解決になる不具合を修正（値部を加減算精度 `#parseAdditiveExpression` で解析）。
+  `test_v1_5_0_059`。詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭。

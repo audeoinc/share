@@ -1,5 +1,20 @@
 # 1.5.0-032
 
+- Fixed `INTERVAL <expr> <part>` when the value is an arithmetic expression, e.g.
+  `DATE_ADD(d, INTERVAL n * 2 DAY)` / `INTERVAL n + 1 DAY`. As a function argument
+  it raised `ExpressionParser: expected ")", but found "day"`; as a bare SELECT
+  item it mis-resolved `INTERVAL` as a column (`PHYSICAL_COLUMN_NOT_FOUND`). A
+  literal value like `INTERVAL 2 DAY` and a bare column `INTERVAL n DAY` worked.
+  Cause: `#parseIntervalExpression` parsed the value at unary precedence
+  (`#parseUnaryExpression`), so it stopped before `*` / `/` / `+` / `-` and left
+  the trailing date part unconsumed. The value is now parsed at additive
+  precedence (`#parseAdditiveExpression`); the date part is a bare keyword (not an
+  operator) so arithmetic parsing always stops just before it and never
+  over-consumes. Columns inside the interval value (e.g. `n`) are now kept in the
+  lineage. Test: test_v1_5_0_059.js. Engine change: bundle rebuilt (sha256
+  81667d37..., 437648 bytes), release_manifest.json updated; redeploy the UDF
+  bundle to GCS.
+
 - Fixed `UNNEST(array) WITH OFFSET AS offset` when the offset alias is the
   reserved word `offset`. `SELECT offset FROM t, UNNEST(arr) AS e WITH OFFSET AS
   offset` raised a `OUTPUT_COLUMN_NAME_UNRESOLVED` (WARNING) — the output column
