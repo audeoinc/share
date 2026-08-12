@@ -1149,7 +1149,8 @@ BEGIN
       NOT destination_is_persistent AS is_ephemeral,
       job_id AS source_job_id,
       creation_time AS source_job_time,
-      user_email AS source_user_email
+      user_email AS source_user_email,
+      labels AS labels
     FROM classified
     QUALIFY ROW_NUMBER() OVER (
       PARTITION BY
@@ -1210,6 +1211,7 @@ BEGIN
           target.source_job_id = source.source_job_id,
           target.source_job_time = source.source_job_time,
           target.source_user_email = source.source_user_email,
+          target.labels = source.labels,
           target.is_changed = (
             target.is_changed
             OR target.definition_hash IS DISTINCT FROM source.definition_hash
@@ -1238,6 +1240,7 @@ BEGIN
           source_job_id,
           source_job_time,
           source_user_email,
+          labels,
           is_changed,
           is_active,
           analysis_status,
@@ -1262,6 +1265,7 @@ BEGIN
           source.source_job_id,
           source.source_job_time,
           source.source_user_email,
+          source.labels,
           TRUE,
           TRUE,
           NULL,

@@ -179,6 +179,10 @@ EXECUTE IMMEDIATE FORMAT(
     source_job_id STRING,
     source_job_time TIMESTAMP,
     source_user_email STRING,
+    -- Job labels (dag_id, task_id, ...) carried over from the source job for
+    -- generated TABLEs, so a FAILED object can be traced to its DAG without
+    -- joining to the job registry. NULL for Views (which have no job labels).
+    labels ARRAY<STRUCT<key STRING, value STRING>>,
     is_changed BOOL NOT NULL,
     is_active BOOL NOT NULL,
     analysis_status STRING,
