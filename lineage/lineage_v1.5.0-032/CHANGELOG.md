@@ -1,5 +1,17 @@
 # 1.5.0-032
 
+- Fixed named parameters whose name collides with a clause keyword — @limit,
+  @order, @where, @group, @from, @offset, @select — which failed even though
+  v1.5.0-052 added @name handling. The lexer emitted '@' and the name as two
+  tokens, so the ClauseParser saw the bare keyword token and mistook that
+  position for the start of a clause (e.g. "LimitParser: body_start_seq must be
+  an integer" for `a = @limit`). The lexer now reads @name / @@name as a single
+  PARAMETER token (normalized with the '@', e.g. '@LIMIT'), so it never collides
+  with a clause keyword; the expression parser consumes the PARAMETER token as a
+  no-lineage literal. Test: test_v1_5_0_055.js. Engine change: bundle rebuilt
+  (sha256 7d567a23..., 433565 bytes), release_manifest.json updated; redeploy the
+  UDF bundle to GCS.
+
 - Fixed three parser gaps seen in JOBS-collected SQL. (1) Typed STRUCT / ARRAY
   constructors — `STRUCT<f1 T1, f2 T2>(v1, v2)`, `ARRAY<STRUCT<...>>[...]`. The
   angle-bracket type list was read as comparisons, which broke array literals

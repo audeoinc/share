@@ -433,6 +433,31 @@ function tokenize(sqlText) {
     }
 
     /*
+     * 名前付きクエリパラメータ @name / システム変数 @@name（dbt 由来の @key /
+     * @limit など）を 1 つの Token として読み取る。'@' と名前を分けると、名前が
+     * 句キーワード（LIMIT / ORDER / WHERE ...）と一致する場合に ClauseParser が
+     * その位置を句の開始と誤認してしまう。token_type を PARAMETER にし、
+     * normalized も '@' 込み（例: '@LIMIT'）にすることでキーワードと衝突させない。
+     */
+    if (character === "@") {
+      let value = "@";
+      advanceCharacter("@");
+
+      if (sqlText[index] === "@") {
+        value += "@";
+        advanceCharacter("@");
+      }
+
+      while (index < sqlText.length && isIdentifierPart(sqlText[index])) {
+        value += sqlText[index];
+        advanceCharacter(sqlText[index]);
+      }
+
+      pushToken(value, value.toUpperCase(), "PARAMETER", startLine, startColumn);
+      continue;
+    }
+
+    /*
      * 通常識別子またはKeywordを読み取る。
      *
      * 最初の文字が識別子開始条件を満たした後、識別子として継続できる
