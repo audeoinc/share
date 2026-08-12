@@ -1964,14 +1964,21 @@ BEGIN
         object_type,
         generation_type,
         definition_hash,
+        -- Only the fields the lineage engine actually reads are shipped to the
+        -- UDF: table_name / column_name / field_path (name resolution) and
+        -- ordinal_position (candidate ordering). data_type and is_nullable are
+        -- parsed but never emitted in the exported output, so they are dropped
+        -- from the per-object payload. This materially shrinks the JSON for
+        -- objects referencing wide / deeply-nested tables (a complex nested
+        -- data_type signature can dominate a column's bytes) and reduces the
+        -- JavaScript UDF's peak memory ("UDF out of memory") as the target set
+        -- grows.
         TO_JSON_STRING(ARRAY_AGG(
           STRUCT(
             LOWER(FORMAT('%s.%s.%s', table_project, table_dataset, table_name)) AS table_name,
             LOWER(column_name) AS column_name,
             LOWER(field_path) AS field_path,
-            ordinal_position AS ordinal_position,
-            data_type AS data_type,
-            is_nullable AS is_nullable
+            ordinal_position AS ordinal_position
           )
           ORDER BY table_project, table_dataset, table_name, ordinal_position, field_path
         )) AS physical_columns_json,
@@ -1979,9 +1986,7 @@ BEGIN
           LOWER(FORMAT('%s.%s.%s', table_project, table_dataset, table_name)) AS table_name,
           LOWER(column_name) AS column_name,
           LOWER(field_path) AS field_path,
-          ordinal_position AS ordinal_position,
-          data_type AS data_type,
-          is_nullable AS is_nullable
+          ordinal_position AS ordinal_position
         ))) + 1) AS physical_metadata_json_bytes
       FROM scoped
       GROUP BY
