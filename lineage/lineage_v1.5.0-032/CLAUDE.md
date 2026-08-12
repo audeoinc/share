@@ -84,10 +84,9 @@ npm test                        # build + verify:bundle + test:release を一括
 
 ## 7. 現在地
 
-- バンドル: `sha256 = c25189ec9f1dd1d5c2fe310a2455f850ebf0d8f3589c22dfd19d8db04e45f4f0`、`437077` bytes
-- `test:release` 38 本 PASS / ゴールデン 48 ケース PASS
-- 直近の修正: `UNNEST(array) WITH OFFSET AS offset` の別名が予約語 `offset` のとき、SELECT の
-  `offset` がキーワード字句となり出力列名が導出できず `OUTPUT_COLUMN_NAME_UNRESOLVED`（WARNING）
-  になる不具合を修正（SelectParser に `#isColumnNameToken` を追加し、ExpressionParser と同じ
-  予約語基準で非予約 KEYWORD を列名として導出）。`test_v1_5_0_058`。
+- バンドル: `sha256 = 0a31b8c9a86faae55f8108e94b7a237906add0e96da6cd6b823f026371a8e3c5`、`441569` bytes
+- `test:release` 41 本 PASS / ゴールデン 48 ケース PASS
+- 直近の修正: 03 STEP 3 で UDF へ渡す per-object の物理列メタデータ（`physical_columns_json`）から
+  `data_type` / `is_nullable` を除去し、UDF ピークメモリ（"UDF out of memory"）を削減（エンジンは
+  これらを出力に含めないため結果不変）。SQLのみ・バンドル不変。`test_v1_5_0_061`。
   詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭。

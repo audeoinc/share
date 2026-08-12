@@ -1,5 +1,51 @@
 # 1.5.0-032
 
+- Reduced the per-object physical-column metadata payload passed to the lineage
+  UDF in `03_run_daily_lineage_pipeline.sql` STEP 3, to cut the JavaScript UDF's
+  peak memory ("Resource exceeded during query execution / UDF out of memory")
+  as the analyzed target set grows. The `physical_columns_json` built per object
+  now ships only the fields the engine reads — table_name, column_name,
+  field_path, ordinal_position — and drops `data_type` and `is_nullable`. The
+  engine parses those two but never emits them in the exported output, so results
+  are unchanged; a nested/complex `data_type` signature (e.g.
+  `ARRAY<STRUCT<...>>` on GA-style event tables) can dominate a column's bytes,
+  so removing it materially shrinks the payload for objects over wide/nested
+  tables. The METADATA_TOO_LARGE byte guard now measures the same reduced
+  payload. SQL-only change; the engine bundle is unaffected. Test:
+  test_v1_5_0_061.js locks the contract that engine output is independent of
+  data_type/is_nullable.
+
+- Fixed `CREATE ... AS (SELECT ...)` — a CTAS / CREATE VIEW whose body is a
+  parenthesized query, e.g. `CREATE OR REPLACE TEMP TABLE t AS (SELECT ...)`.
+  QueryParser raised `トップレベルのSELECT Clauseが見つかりません。` The unparenthesized
+  form `CREATE ... AS SELECT ...` worked because ClauseParser finds the SELECT at
+  paren depth 0; with the parentheses the SELECT sits at depth 1, and the existing
+  `#stripWrappingParentheses` only unwraps a query that *starts* with `(`, not one
+  wrapped after a `CREATE ... AS` prefix. QueryParser now also recognizes a
+  statement body of the form `... AS (query)` via `#stripStatementBodyParentheses`
+  (a depth-0 `AS` immediately followed by a depth-0 `(` whose matching `)` is the
+  last meaningful token, inner starting with SELECT/WITH) and re-parses the inner
+  query. The target table name comes from the analysis metadata, so the
+  `CREATE ... AS` prefix carries no lineage. `WITH t AS (...) SELECT ...`, column
+  aliases `x AS y`, and scalar subqueries `(SELECT ...) AS y` are unaffected.
+  Test: test_v1_5_0_060.js. Engine change: bundle rebuilt (sha256 0a31b8c9...,
+  441569 bytes), release_manifest.json updated; redeploy the UDF bundle to GCS.
+
+- Fixed `INTERVAL <expr> <part>` when the value is an arithmetic expression, e.g.
+  `DATE_ADD(d, INTERVAL n * 2 DAY)` / `INTERVAL n + 1 DAY`. As a function argument
+  it raised `ExpressionParser: expected ")", but found "day"`; as a bare SELECT
+  item it mis-resolved `INTERVAL` as a column (`PHYSICAL_COLUMN_NOT_FOUND`). A
+  literal value like `INTERVAL 2 DAY` and a bare column `INTERVAL n DAY` worked.
+  Cause: `#parseIntervalExpression` parsed the value at unary precedence
+  (`#parseUnaryExpression`), so it stopped before `*` / `/` / `+` / `-` and left
+  the trailing date part unconsumed. The value is now parsed at additive
+  precedence (`#parseAdditiveExpression`); the date part is a bare keyword (not an
+  operator) so arithmetic parsing always stops just before it and never
+  over-consumes. Columns inside the interval value (e.g. `n`) are now kept in the
+  lineage. Test: test_v1_5_0_059.js. Engine change: bundle rebuilt (sha256
+  81667d37..., 437648 bytes), release_manifest.json updated; redeploy the UDF
+  bundle to GCS.
+
 - Fixed `UNNEST(array) WITH OFFSET AS offset` when the offset alias is the
   reserved word `offset`. `SELECT offset FROM t, UNNEST(arr) AS e WITH OFFSET AS
   offset` raised a `OUTPUT_COLUMN_NAME_UNRESOLVED` (WARNING) — the output column
