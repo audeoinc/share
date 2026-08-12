@@ -84,7 +84,8 @@ npm test                        # build + verify:bundle + test:release を一括
 
 ## 7. 現在地
 
-- バンドル: `sha256 = 8b458f3b1f00edf1176aca9c93fbfc583bdddf51b2a4c352832de943f3b390f0`、`418298` bytes
-- `test:release` 28 本 PASS / ゴールデン 48 ケース PASS
-- 直近の修正: `SELECT *` を中身とする CTE を JOIN した際の、修飾あり/なし混在列の
-  解決バグ（詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭）
+- バンドル: `sha256 = 7d567a2309b89e808f450b274278d25ccfefd0913618454b63104d52d4a76855`、`433565` bytes
+- `test:release` 35 本 PASS / ゴールデン 48 ケース PASS
+- 直近の修正: 名前付きパラメータ名が句キーワードと衝突（`@limit`/`@order`/`@where` 等）すると
+  ClauseParser が句開始と誤認する不具合を修正（レキサで `@name`/`@@name` を単一 PARAMETER
+  トークン化）。`test_v1_5_0_055`。詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭。
