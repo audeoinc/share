@@ -1,5 +1,20 @@
 # 1.5.0-032
 
+- Reduced the per-object physical-column metadata payload passed to the lineage
+  UDF in `03_run_daily_lineage_pipeline.sql` STEP 3, to cut the JavaScript UDF's
+  peak memory ("Resource exceeded during query execution / UDF out of memory")
+  as the analyzed target set grows. The `physical_columns_json` built per object
+  now ships only the fields the engine reads — table_name, column_name,
+  field_path, ordinal_position — and drops `data_type` and `is_nullable`. The
+  engine parses those two but never emits them in the exported output, so results
+  are unchanged; a nested/complex `data_type` signature (e.g.
+  `ARRAY<STRUCT<...>>` on GA-style event tables) can dominate a column's bytes,
+  so removing it materially shrinks the payload for objects over wide/nested
+  tables. The METADATA_TOO_LARGE byte guard now measures the same reduced
+  payload. SQL-only change; the engine bundle is unaffected. Test:
+  test_v1_5_0_061.js locks the contract that engine output is independent of
+  data_type/is_nullable.
+
 - Fixed `CREATE ... AS (SELECT ...)` — a CTAS / CREATE VIEW whose body is a
   parenthesized query, e.g. `CREATE OR REPLACE TEMP TABLE t AS (SELECT ...)`.
   QueryParser raised `トップレベルのSELECT Clauseが見つかりません。` The unparenthesized

@@ -101,11 +101,17 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   （末尾 ';' 無視）、内側が SELECT/WITH の場合に括弧内クエリを取り出す `#stripStatementBodyParentheses`
   を追加。対象テーブル名はメタデータ側で与えるため前置きは lineage 非寄与。CTE/列別名 AS/スカラー
   サブクエリ AS は非対象。テスト `test_v1_5_0_060.js`。
+- **UDF out of memory 対策：メタデータ縮小（直近・SQLのみ）**：対象増加で 03 STEP 3 の JS UDF が
+  "Resource exceeded / UDF out of memory"。UDF へ渡す per-object の `physical_columns_json` から
+  `data_type` / `is_nullable` を除去（エンジンは内部で伝播するのみでエクスポート出力に含めない＝結果不変）。
+  ネスト/複合型の `data_type`（`ARRAY<STRUCT<...>>` 等）は1列のバイト数を支配し得るため、広い/深い
+  テーブル参照時のペイロードが大きく縮む。METADATA_TOO_LARGE ガードも縮小後で測定。エンジン不変。
+  テスト `test_v1_5_0_061.js`（出力が data_type/is_nullable の有無に依存しない契約を固定）。
 
 ## 5. 現在地（引き継ぎ時点）
 
 - バンドル: `sha256 = 0a31b8c9a86faae55f8108e94b7a237906add0e96da6cd6b823f026371a8e3c5`、`441569` bytes
-- `test:release` 40 本 PASS / ゴールデン 48 ケース PASS
+- `test:release` 41 本 PASS / ゴールデン 48 ケース PASS
 - 二本ツリー（-031 / -032）同期済み
 
 ## 6. Claude Code で続きを進める手順

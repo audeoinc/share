@@ -296,10 +296,27 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 - **非対象（回帰確認済み）**：`WITH t AS (...) SELECT ...`（括弧の後ろに続きがある）、列別名 `x AS y`、
   スカラーサブクエリ `(SELECT ...) AS y`、括弧なし CTAS、全体括弧 `(SELECT ...)`。テスト `test_v1_5_0_060.js`。
 
+## 4.18 UDF out of memory 対策：物理列メタデータの縮小（SQLのみ）
+
+- **症状**：解析対象を増やしたところ、03 STEP 3 の JS UDF で "Resource exceeded during query
+  execution / UDF out of memory"。
+- **切り分け**：エンジンにモジュールレベルの蓄積状態（行をまたぐキャッシュ）は無く、各 UDF 呼び出しは
+  独立（呼び出しごとに `new LineageEngine` → 文字列を返すのみ）。よって BigQuery の JS UDF メモリ上限に
+  対し、単一の巨大オブジェクト（大きな SQL＋大きなメタデータ）または多数行処理でのヒープ蓄積が原因。
+- **対処（今回・SQLのみ）**：UDF へ渡す per-object の `physical_columns_json` から `data_type` /
+  `is_nullable` を除去。エンジンはこれらを内部で伝播するだけで、エクスポート出力（lineage_paths /
+  physical_column_references 等）には一切含めないため、解析結果は不変（`test_v1_5_0_061.js` で
+  「出力が data_type/is_nullable の有無に依存しない」ことを固定）。ネスト/複合型の `data_type`
+  （`ARRAY<STRUCT<...>>` 等、GA 系イベントテーブル）は1列のバイト数を支配し得るため、広い/深い
+  テーブルを参照するオブジェクトのペイロードが大きく縮む。`03_...sql` の agg で ARRAY_AGG の STRUCT と
+  METADATA_TOO_LARGE 用の BYTE_LENGTH の両方から2フィールドを削除。エンジンバンドルは不変。
+- **未実施の追加レバー（必要なら）**：SQL本文サイズのガード追加、METADATA_TOO_LARGE 閾値の引き下げ、
+  UDF バッチのチャンク分割（固定件数ループ）。ユーザー選択は「メタデータ縮小」のみ。
+
 ## 5. 現在地（引き継ぎ時点）
 
 - バンドル: `sha256 = 0a31b8c9a86faae55f8108e94b7a237906add0e96da6cd6b823f026371a8e3c5`、`441569` bytes
-- `test:release` 40 本 PASS / ゴールデン 48 ケース PASS
+- `test:release` 41 本 PASS / ゴールデン 48 ケース PASS
 - 二本ツリー（-031 / -032）同期済み
 - 03 STEP 3：フルバッチ化済み（上記 §4.5 ①②③）。集合ベースに全面置換、ジョブ数は
   N 非依存。**BigQuery 未検証**（本番前に staging 実行＋旧ループとの出力 diff が必要）。

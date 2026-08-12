@@ -85,8 +85,8 @@ npm test                        # build + verify:bundle + test:release を一括
 ## 7. 現在地
 
 - バンドル: `sha256 = 0a31b8c9a86faae55f8108e94b7a237906add0e96da6cd6b823f026371a8e3c5`、`441569` bytes
-- `test:release` 40 本 PASS / ゴールデン 48 ケース PASS
-- 直近の修正: `CREATE ... AS (SELECT ...)`（括弧付き本体の CTAS / CREATE VIEW）で QueryParser が
-  「トップレベルの SELECT が見つからない」を出す不具合を修正（深さ0の `AS (` … 末尾 `)` を検出して
-  括弧内クエリを取り出す `#stripStatementBodyParentheses` を追加）。`test_v1_5_0_060`。
+- `test:release` 41 本 PASS / ゴールデン 48 ケース PASS
+- 直近の修正: 03 STEP 3 で UDF へ渡す per-object の物理列メタデータ（`physical_columns_json`）から
+  `data_type` / `is_nullable` を除去し、UDF ピークメモリ（"UDF out of memory"）を削減（エンジンは
+  これらを出力に含めないため結果不変）。SQLのみ・バンドル不変。`test_v1_5_0_061`。
   詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭。
