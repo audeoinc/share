@@ -84,8 +84,9 @@ npm test                        # build + verify:bundle + test:release を一括
 
 ## 7. 現在地
 
-- バンドル: `sha256 = 7d567a2309b89e808f450b274278d25ccfefd0913618454b63104d52d4a76855`、`433565` bytes
-- `test:release` 35 本 PASS / ゴールデン 48 ケース PASS
-- 直近の修正: 名前付きパラメータ名が句キーワードと衝突（`@limit`/`@order`/`@where` 等）すると
-  ClauseParser が句開始と誤認する不具合を修正（レキサで `@name`/`@@name` を単一 PARAMETER
-  トークン化）。`test_v1_5_0_055`。詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭。
+- バンドル: `sha256 = 2480400b3ecc7ebabf9aea1f19cec402a44aa7a38a98974f66fce4f75eb5e005`、`435251` bytes
+- `test:release` 36 本 PASS / ゴールデン 48 ケース PASS
+- 直近の修正: `JOIN ... USING(col)` の結合キーを修飾なし参照すると、複数ソースに存在するため
+  `PHYSICAL_COLUMN_AMBIGUOUS`（ERROR）を誤検知する不具合を修正（SourceResolver が USING 列名を
+  `scope.join_using_columns` に記録し、ColumnResolver が先頭ソースへ確定解決）。`test_v1_5_0_056`。
+  詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭。

@@ -69,11 +69,17 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   修正＝ワイルドカードが列不明のソース（物理/UNNEST/列不明の子スコープ）を取り込む
   場合は空集合ではなく **「不明（null）」を伝播**。CTE が候補として残り、
   `PhysicalColumnResolver` が実メタデータで曖昧性を解消する。テスト `test_v1_5_0_048.js`。
+- **`JOIN ... USING(col)` の結合キー誤検知（直近）**：修飾なしの `col` が複数ソースに
+  存在するため `PHYSICAL_COLUMN_AMBIGUOUS`（ERROR）を誤検知（報告例＝全ソース CTE を
+  2 回 INNER JOIN + USING）。原因＝パーサは `join.using_columns` を記録するがリゾルバが
+  未使用。修正＝SourceResolver が `scope.join_using_columns` に USING 列名を記録し、
+  ColumnResolver は該当列を先頭（FROM/左側）ソースへ確定解決（USING は結合キーを 1 論理列へ
+  統合＝曖昧でない）。`ON` 結合での同名列は従来どおり曖昧扱い。テスト `test_v1_5_0_056.js`。
 
 ## 5. 現在地（引き継ぎ時点）
 
-- バンドル: `sha256 = 7d567a2309b89e808f450b274278d25ccfefd0913618454b63104d52d4a76855`、`433565` bytes
-- `test:release` 35 本 PASS / ゴールデン 48 ケース PASS
+- バンドル: `sha256 = 2480400b3ecc7ebabf9aea1f19cec402a44aa7a38a98974f66fce4f75eb5e005`、`435251` bytes
+- `test:release` 36 本 PASS / ゴールデン 48 ケース PASS
 - 二本ツリー（-031 / -032）同期済み
 
 ## 6. Claude Code で続きを進める手順
