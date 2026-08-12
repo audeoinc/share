@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta id="viewport-meta" name="viewport" content="width=device-width, initial-scale=1" />
+  <title>顧客提案ジェネレーター</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">🎧 顧客提案ジェネレーター</div>
+    <div class="subtitle">BQデータ × Gemini 3.5 エージェント（ADK / モック環境）</div>
+    <div class="topbar-right">
+      <!-- モバイルでだけ表示（JSが物理画面サイズで判定）。PC版=固定幅表示に切替 -->
+      <button id="viewport-toggle" class="viewport-toggle hidden" type="button"
+        title="モバイル表示とPC版（デスクトップ幅）表示を切り替える">🖥️ PC版で表示</button>
+      <label class="theme-select">
+        <span>テーマ</span>
+        <select id="theme-select" title="カラーテーマ">
+          <option value="system">🖥️ システム</option>
+          <option value="light">☀️ ライト</option>
+          <option value="dark">🌙 ダーク</option>
+        </select>
+      </label>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- 左: 顧客一覧（BQ相当） -->
+    <section class="panel customers">
+      <h2>顧客一覧 <span class="muted">（BQ: customers）</span></h2>
+      <div id="customer-list" class="customer-list">
+        <div class="loading">読み込み中…</div>
+      </div>
+    </section>
+
+    <div class="splitter" id="splitter-left" title="ドラッグで幅を調整 / タブで開閉">
+      <button id="collapse-left" class="pane-tab" title="顧客一覧を閉じる">‹</button>
+    </div>
+
+    <!-- 中央: 詳細 + 生成結果 -->
+    <section class="panel detail">
+      <div id="empty-state" class="empty">
+        左の一覧から顧客を選ぶと、詳細と提案生成ができます。
+      </div>
+
+      <div id="detail-view" class="hidden">
+        <div class="detail-head">
+          <div>
+            <h2 id="cust-name"></h2>
+            <div id="cust-meta" class="muted"></div>
+          </div>
+          <button id="btn-generate" class="btn primary">✨ この顧客の提案を生成</button>
+        </div>
+
+        <div class="cards">
+          <div class="card">
+            <h3>顧客属性</h3>
+            <dl id="cust-attrs" class="attrs"></dl>
+          </div>
+          <div class="card">
+            <h3>購買履歴 <span class="muted">（BQ: purchases）</span></h3>
+            <table id="purchase-table" class="table">
+              <thead><tr><th>日付</th><th>商品</th><th>金額</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- この顧客の保存済み提案（BQ） -->
+        <div class="card saved">
+          <h3>この顧客の保存済み提案 <span class="muted">（BQ: proposals）</span></h3>
+          <div id="saved-list" class="saved-list"></div>
+        </div>
+
+        <!-- 生成履歴（版管理）: 既定は閉じ、必要な時だけ開く -->
+        <details class="card history">
+          <summary>生成履歴（版） <span class="muted">（生成・再提案の記録。復元／2件で比較）</span></summary>
+          <div id="compare-box" class="compare-box hidden"></div>
+          <div id="history-list" class="history-list"></div>
+        </details>
+
+        <!-- 分析 + 提案（編集フォーム） -->
+        <div id="result" class="result hidden">
+          <div class="card analysis">
+            <h3>🔎 分析結果 <span class="muted">（analyst エージェント）</span></h3>
+            <div id="analysis-text" class="analysis-text"></div>
+          </div>
+
+          <details id="thinking-box" class="thinking-box hidden">
+            <summary>🧠 モデルの思考プロセス <span class="muted">（クリックで開閉。Geminiの内部推論をそのまま表示）</span></summary>
+            <div id="thinking-text" class="thinking-text"></div>
+          </details>
+
+          <div class="card proposal">
+            <h3>📝 提案 <span class="muted">（編集できます）</span></h3>
+
+            <label class="fld-label" for="prop-title-input">タイトル</label>
+            <input id="prop-title-input" class="fld-input" type="text" placeholder="提案タイトル" />
+
+            <label class="fld-label" for="prop-body-input">本文</label>
+            <textarea id="prop-body-input" class="fld-input" rows="6" placeholder="提案本文"></textarea>
+
+            <label class="fld-label">推奨商品（クリックで選択 / 画像を右のメールプレビューへドラッグ）</label>
+            <div id="product-palette" class="product-palette"></div>
+
+            <div class="refine">
+              <div class="rec-label">指示して改善（会話で継続。前の指示も覚えています）</div>
+              <div class="refine-row">
+                <input id="refine-input" type="text"
+                  placeholder="例: もっと低予算で → さらに丁寧なトーンで → やっぱり前の案に近づけて" />
+                <button id="btn-refine" class="btn">🔄 再提案</button>
+              </div>
+              <div id="conversation-log" class="conversation-log"></div>
+            </div>
+
+            <div class="eval-row">
+              <button id="btn-evaluate" class="btn">🧪 この提案を評価</button>
+              <span class="rec-label">AI審査員が grounding / relevance / actionability を1〜5で採点</span>
+            </div>
+            <div id="eval-result" class="eval-result hidden"></div>
+
+            <div class="draft-row">
+              <span id="edit-mode-badge" class="badge draft"></span>
+              <span id="draft-badge" class="muted"></span>
+              <span class="spacer"></span>
+              <button id="btn-approve" class="btn approve">✅ 承認してBQに保存</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="splitter" id="splitter-right" title="ドラッグで幅を調整"></div>
+
+    <!-- 右: メールプレビュー（固定表示） -->
+    <section class="panel preview-pane">
+      <h2>✉️ メールプレビュー <span class="muted">（商品はドラッグで並べ替え）</span></h2>
+      <div id="preview-empty" class="empty">
+        顧客を選んで提案を生成すると、ここにメールが表示されます。
+      </div>
+      <div id="preview-content" class="hidden">
+        <div class="email">
+          <div class="email-head">
+            <div><span class="eh-label">From</span> 営業担当 &lt;sales@example.com&gt;</div>
+            <div><span class="eh-label">To</span> <span id="pv-to"></span></div>
+            <div><span class="eh-label">件名</span> <span id="pv-subject"></span></div>
+          </div>
+          <div class="email-body">
+            <p id="pv-greeting"></p>
+            <p id="pv-body" class="pv-body"></p>
+            <div class="pv-products-label">おすすめ商品 <span class="muted">（ドラッグで並べ替え / 枠外へドロップで削除）</span></div>
+            <div id="preview-products" class="pv-products"></div>
+            <p class="pv-closing">ご検討のほど、よろしくお願いいたします。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 左ペインを開くタブ（閉じているときだけ表示） -->
+  <button id="expand-left" class="expand-left hidden" title="顧客一覧を開く">›</button>
+
+  <!-- モデル稼働中の表示（生成/再提案共通・画面に固定してスクロールしても見える） -->
+  <div id="activity" class="activity hidden" aria-live="polite">
+    <div class="activity-card">
+      <div class="spinner"></div>
+      <div id="activity-status">モデルが考えています…</div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

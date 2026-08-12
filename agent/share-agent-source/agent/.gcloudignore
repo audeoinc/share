@@ -1,0 +1,10 @@
+# Cloud Build にアップロードしないもの（--source デプロイ時に使用）
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+proposal_app/.env
+node_modules/
+.git/
+.gitignore
+*.session.db

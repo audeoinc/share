@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+proposal_app/.env
+proposal_app/.adk/
+.adk/
+*.db
+*.session.db
