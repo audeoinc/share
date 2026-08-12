@@ -84,9 +84,9 @@ npm test                        # build + verify:bundle + test:release を一括
 
 ## 7. 現在地
 
-- バンドル: `sha256 = 2480400b3ecc7ebabf9aea1f19cec402a44aa7a38a98974f66fce4f75eb5e005`、`435251` bytes
-- `test:release` 36 本 PASS / ゴールデン 48 ケース PASS
-- 直近の修正: `JOIN ... USING(col)` の結合キーを修飾なし参照すると、複数ソースに存在するため
-  `PHYSICAL_COLUMN_AMBIGUOUS`（ERROR）を誤検知する不具合を修正（SourceResolver が USING 列名を
-  `scope.join_using_columns` に記録し、ColumnResolver が先頭ソースへ確定解決）。`test_v1_5_0_056`。
-  詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭。
+- バンドル: `sha256 = 397fb7e452ebe01983d25c4af5122172a139584cc1e6f15f8841be797a13c0b9`、`435847` bytes
+- `test:release` 37 本 PASS / ゴールデン 48 ケース PASS
+- 直近の修正: `JOIN ... USING(col)` の結合キーが FROM/左側ソースに無い場合（例: cola が結合先の
+  CTE だけにあり FROM の物理表には無い）、056 の「先頭ソースへ確定解決」が物理表を選び
+  `PHYSICAL_COLUMN_NOT_FOUND` になる不具合を修正（列を公開すると分かっている候補を優先）。
+  `test_v1_5_0_057`。詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭。

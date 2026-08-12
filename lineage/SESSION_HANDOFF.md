@@ -75,11 +75,17 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   未使用。修正＝SourceResolver が `scope.join_using_columns` に USING 列名を記録し、
   ColumnResolver は該当列を先頭（FROM/左側）ソースへ確定解決（USING は結合キーを 1 論理列へ
   統合＝曖昧でない）。`ON` 結合での同名列は従来どおり曖昧扱い。テスト `test_v1_5_0_056.js`。
+- **USING 列が FROM/左側ソースに無いケース（056 の追随修正）**：`SELECT cola FROM tablea
+  INNER JOIN aaa USING(id) INNER JOIN bbb USING(cola)` で `cola` が CTE `aaa`/`bbb` にあり
+  物理表 `tablea` に無い場合、056 の「先頭ソースへ確定解決」が `tablea` を選び
+  `PHYSICAL_COLUMN_NOT_FOUND`。修正＝候補のうち列を公開すると分かっているもの（CTE/派生、
+  `#getColumnStatus`==RESOLVED）を優先し、全て物理で確定不能な場合のみ先頭へフォールバック。
+  テスト `test_v1_5_0_057.js`。
 
 ## 5. 現在地（引き継ぎ時点）
 
-- バンドル: `sha256 = 2480400b3ecc7ebabf9aea1f19cec402a44aa7a38a98974f66fce4f75eb5e005`、`435251` bytes
-- `test:release` 36 本 PASS / ゴールデン 48 ケース PASS
+- バンドル: `sha256 = 397fb7e452ebe01983d25c4af5122172a139584cc1e6f15f8841be797a13c0b9`、`435847` bytes
+- `test:release` 37 本 PASS / ゴールデン 48 ケース PASS
 - 二本ツリー（-031 / -032）同期済み
 
 ## 6. Claude Code で続きを進める手順
