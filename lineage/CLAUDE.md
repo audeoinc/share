@@ -86,7 +86,7 @@ npm test                        # build + verify:bundle + test:release を一括
 
 - バンドル: `sha256 = 0a31b8c9a86faae55f8108e94b7a237906add0e96da6cd6b823f026371a8e3c5`、`441569` bytes
 - `test:release` 41 本 PASS / ゴールデン 48 ケース PASS
-- 直近の修正: 03 STEP 3 で UDF へ渡す per-object の物理列メタデータ（`physical_columns_json`）から
-  `data_type` / `is_nullable` を除去し、UDF ピークメモリ（"UDF out of memory"）を削減（エンジンは
-  これらを出力に含めないため結果不変）。SQLのみ・バンドル不変。`test_v1_5_0_061`。
-  詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭。
+- 直近の修正: 03 STEP 3 の UDF 実行を全件1クエリからチャンク分割（`analysis_udf_chunk_size`
+  既定200件ずつ INSERT ループ）へ変更し、対象増加時の "UDF out of memory"（スロット上の V8 ヒープ
+  蓄積）を回避。診断で単一巨大SQLは無く集約が原因と判明（メタデータ縮小では効かず）。SQLのみ・
+  バンドル不変・BigQuery 未検証。詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭。
