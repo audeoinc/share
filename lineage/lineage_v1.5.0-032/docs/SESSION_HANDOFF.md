@@ -249,10 +249,26 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   CTE → 物理 `p.d.src.cola`）。
 - **回帰**：FROM の物理表側に USING キーがある通常ケースも従来どおり解決。テスト `test_v1_5_0_057.js`。
 
+## 4.15 `UNNEST(array) WITH OFFSET AS offset` の別名が予約語 `offset` のケース
+
+- **症状**：`SELECT id, offset FROM t, UNNEST(arr) AS e WITH OFFSET AS offset` で、SELECT の
+  `offset` の出力列名が解決できず `OUTPUT_COLUMN_NAME_UNRESOLVED`（WARNING、
+  `COMPLETED_WITH_WARNINGS`）。別名が `pos` 等の通常識別子ならクリーンだった。offset 値自体の
+  解決（リネージ無し）は問題なく、出力名の導出だけが失敗していた。
+- **原因**：`offset` は Lexer が `OFFSET` キーワードとして字句化する。SelectParser の暗黙出力名
+  導出 `#deriveColumnAlias` が `#isIdentifierToken`（IDENTIFIER/BACKTICK のみ）で判定していたため
+  KEYWORD の列名を導出できなかった。一方 ExpressionParser の `#isIdentifierToken` は非予約 KEYWORD
+  を識別子（列参照）として解決するため、式ASTは `offset` を列として扱えていた（不整合）。
+- **修正（エンジン変更・要 GCS 再デプロイ）**：SelectParser に `#isColumnNameToken` を追加し、
+  ExpressionParser と同じ予約語集合（`NULL`/`TRUE`/`FALSE`・論理/句キーワード等）を除いた KEYWORD を
+  列名として受理。`#deriveColumnAlias` の単一トークン列・ドット修飾列の両方でこれを使う。`OFFSET`
+  等の非予約語は列名になり、真の予約語リテラル（`NULL` 等）は従来どおり無名のまま。
+- **回帰**：識別子別名 `pos`、`SELECT NULL`（無名維持）を併せて確認。テスト `test_v1_5_0_058.js`。
+
 ## 5. 現在地（引き継ぎ時点）
 
-- バンドル: `sha256 = 397fb7e452ebe01983d25c4af5122172a139584cc1e6f15f8841be797a13c0b9`、`435847` bytes
-- `test:release` 37 本 PASS / ゴールデン 48 ケース PASS
+- バンドル: `sha256 = c25189ec9f1dd1d5c2fe310a2455f850ebf0d8f3589c22dfd19d8db04e45f4f0`、`437077` bytes
+- `test:release` 38 本 PASS / ゴールデン 48 ケース PASS
 - 二本ツリー（-031 / -032）同期済み
 - 03 STEP 3：フルバッチ化済み（上記 §4.5 ①②③）。集合ベースに全面置換、ジョブ数は
   N 非依存。**BigQuery 未検証**（本番前に staging 実行＋旧ループとの出力 diff が必要）。

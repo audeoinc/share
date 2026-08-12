@@ -1,5 +1,21 @@
 # 1.5.0-032
 
+- Fixed `UNNEST(array) WITH OFFSET AS offset` when the offset alias is the
+  reserved word `offset`. `SELECT offset FROM t, UNNEST(arr) AS e WITH OFFSET AS
+  offset` raised a `OUTPUT_COLUMN_NAME_UNRESOLVED` (WARNING) — the output column
+  had no resolvable name — while a non-keyword alias like `pos` worked. The
+  offset value itself was fine; only the SELECT output name failed. Cause:
+  `offset` is lexed as the `OFFSET` keyword, and SelectParser's implicit
+  output-name derivation (`#deriveColumnAlias`) accepted only IDENTIFIER /
+  BACKTICK tokens, so it could not name a keyword column — even though
+  ExpressionParser already resolves non-reserved keywords as identifier (column)
+  references. SelectParser now derives the output name for a single bare column
+  token via a new `#isColumnNameToken`, which mirrors ExpressionParser's
+  reserved-word set (so `OFFSET` and other non-reserved keywords name the
+  column, while `NULL`/`TRUE`/`FALSE` and logical/clause keywords stay unnamed).
+  Test: test_v1_5_0_058.js. Engine change: bundle rebuilt (sha256 c25189ec...,
+  437077 bytes), release_manifest.json updated; redeploy the UDF bundle to GCS.
+
 - Followed up the v1.5.0-056 `JOIN ... USING(col)` fix for the case where the
   USING key is not present in the FROM/left source. v1.5.0-056 resolved an
   unqualified USING column to the first (FROM/left) candidate, but a USING key
