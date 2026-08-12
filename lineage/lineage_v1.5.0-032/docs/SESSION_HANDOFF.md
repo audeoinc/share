@@ -265,10 +265,58 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   等の非予約語は列名になり、真の予約語リテラル（`NULL` 等）は従来どおり無名のまま。
 - **回帰**：識別子別名 `pos`、`SELECT NULL`（無名維持）を併せて確認。テスト `test_v1_5_0_058.js`。
 
+## 4.16 `INTERVAL <expr> <part>` の値が算術式のケース
+
+- **症状**：`DATE_ADD(d, INTERVAL n * 2 DAY)` や `INTERVAL n + 1 DAY` のように INTERVAL の値部が
+  算術式だと、関数引数内で `ExpressionParser: expected ")", but found "day"`、素の SELECT 項目では
+  `INTERVAL` が列参照へ誤解決し `PHYSICAL_COLUMN_NOT_FOUND`。リテラル値 `INTERVAL 2 DAY` や
+  単独列 `INTERVAL n DAY` は問題なかった（値の後ろに演算子が無いため）。
+- **原因**：`#parseIntervalExpression` が値部を `#parseUnaryExpression`（単項精度）で解析していた。
+  単項は `*`/`/`/`+`/`-` の手前で止まるため、`n * 2` の場合 `n` だけを値として返し、続く `* 2 DAY` が
+  取り残される。関数引数では末尾の日付単位が閉じ `)` 検査に衝突し、素の式では式解析失敗の
+  フォールバックで先頭語が列扱いになっていた。
+- **修正（エンジン変更・要 GCS 再デプロイ）**：値部を `#parseAdditiveExpression`（加減算精度、
+  乗除算も含む）で解析。日付単位（DAY 等）は裸のキーワードで演算子ではないため、加減算解析は必ず
+  単位の手前で停止し過剰消費しない。値部に含まれる列（例: n）の依存も lineage に保持される。
+- **回帰**：リテラル値・単独列・負値・`DAY TO SECOND` 句を併せて確認。テスト `test_v1_5_0_059.js`。
+
+## 4.17 `CREATE ... AS (SELECT ...)` の括弧付き本体
+
+- **症状**：`CREATE OR REPLACE TEMP TABLE t AS (SELECT ...)` で QueryParser が
+  「トップレベルの SELECT Clause が見つかりません」。括弧なし `CREATE ... AS SELECT ...` は
+  通っていた。
+- **原因**：ClauseParser は深さ0の SELECT を探すが、`AS (SELECT ...)` では SELECT が括弧内（深さ1）
+  に入る。既存の `#stripWrappingParentheses` は「先頭の非コメント Token が '('」の全体括弧しか
+  剥がさないため、`CREATE ... AS` の前置きの後ろに来る括弧付きクエリには対応していなかった。
+- **修正（エンジン変更・要 GCS 再デプロイ）**：QueryParser に `#stripStatementBodyParentheses` を追加。
+  深さ0の `AS` の直後（コメント除く）が深さ0の `(` で、その対応する `)` が末尾（末尾 ';' 無視）に
+  一致し、内側が SELECT/WITH で始まる場合に、括弧内のクエリだけを取り出して `#normalizeTokenDepth`
+  後に再解析する。対象テーブル名は解析メタデータ（view_project/dataset/name）で与えるため、
+  `CREATE ... AS` の前置きは lineage に寄与しない。
+- **非対象（回帰確認済み）**：`WITH t AS (...) SELECT ...`（括弧の後ろに続きがある）、列別名 `x AS y`、
+  スカラーサブクエリ `(SELECT ...) AS y`、括弧なし CTAS、全体括弧 `(SELECT ...)`。テスト `test_v1_5_0_060.js`。
+
+## 4.18 UDF out of memory 対策：物理列メタデータの縮小（SQLのみ）
+
+- **症状**：解析対象を増やしたところ、03 STEP 3 の JS UDF で "Resource exceeded during query
+  execution / UDF out of memory"。
+- **切り分け**：エンジンにモジュールレベルの蓄積状態（行をまたぐキャッシュ）は無く、各 UDF 呼び出しは
+  独立（呼び出しごとに `new LineageEngine` → 文字列を返すのみ）。よって BigQuery の JS UDF メモリ上限に
+  対し、単一の巨大オブジェクト（大きな SQL＋大きなメタデータ）または多数行処理でのヒープ蓄積が原因。
+- **対処（今回・SQLのみ）**：UDF へ渡す per-object の `physical_columns_json` から `data_type` /
+  `is_nullable` を除去。エンジンはこれらを内部で伝播するだけで、エクスポート出力（lineage_paths /
+  physical_column_references 等）には一切含めないため、解析結果は不変（`test_v1_5_0_061.js` で
+  「出力が data_type/is_nullable の有無に依存しない」ことを固定）。ネスト/複合型の `data_type`
+  （`ARRAY<STRUCT<...>>` 等、GA 系イベントテーブル）は1列のバイト数を支配し得るため、広い/深い
+  テーブルを参照するオブジェクトのペイロードが大きく縮む。`03_...sql` の agg で ARRAY_AGG の STRUCT と
+  METADATA_TOO_LARGE 用の BYTE_LENGTH の両方から2フィールドを削除。エンジンバンドルは不変。
+- **未実施の追加レバー（必要なら）**：SQL本文サイズのガード追加、METADATA_TOO_LARGE 閾値の引き下げ、
+  UDF バッチのチャンク分割（固定件数ループ）。ユーザー選択は「メタデータ縮小」のみ。
+
 ## 5. 現在地（引き継ぎ時点）
 
-- バンドル: `sha256 = c25189ec9f1dd1d5c2fe310a2455f850ebf0d8f3589c22dfd19d8db04e45f4f0`、`437077` bytes
-- `test:release` 38 本 PASS / ゴールデン 48 ケース PASS
+- バンドル: `sha256 = 0a31b8c9a86faae55f8108e94b7a237906add0e96da6cd6b823f026371a8e3c5`、`441569` bytes
+- `test:release` 41 本 PASS / ゴールデン 48 ケース PASS
 - 二本ツリー（-031 / -032）同期済み
 - 03 STEP 3：フルバッチ化済み（上記 §4.5 ①②③）。集合ベースに全面置換、ジョブ数は
   N 非依存。**BigQuery 未検証**（本番前に staging 実行＋旧ループとの出力 diff が必要）。

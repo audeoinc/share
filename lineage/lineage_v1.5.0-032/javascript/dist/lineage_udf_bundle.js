@@ -3638,15 +3638,22 @@ class ExpressionParser {
    *   INTERVAL 1 DAY
    *   INTERVAL '1' DAY
    *   INTERVAL col HOUR            -- 値が列参照なら依存として保持される
+   *   INTERVAL n * 2 DAY           -- 値が算術式でも可
    *   INTERVAL '1:2:3' HOUR TO SECOND
    *
    * lineage上は値部の依存を保持できれば十分なため、値部の式ノードを返し、
    * 後続の単位(および TO 単位)は消費して構文を成立させる。
+   *
+   * 値部は加減算・乗除算を含む式（int64式）を取り得る。単項精度だけで解析すると
+   * `INTERVAL n * 2 DAY` のように演算子の後ろへ続く単位を取りこぼし、
+   * 関数引数内では「expected ) but found <part>」、素の式では単位の誤解決を招く。
+   * 日付単位(DAY等)は裸のキーワードで演算子ではないため、加減算精度で解析しても
+   * 必ず単位の手前で停止し、過剰消費しない。
    */
   #parseIntervalExpression() {
     this.#consume();
 
-    const valueNode = this.#parseUnaryExpression();
+    const valueNode = this.#parseAdditiveExpression();
 
     if (this.#current() && this.#isIdentifierToken(this.#current())) {
       this.#consume();
@@ -7508,6 +7515,23 @@ class QueryParser {
       }).parse();
     }
 
+    /*
+     * CREATE [OR REPLACE] [TEMP] TABLE t AS (SELECT ...) / CREATE VIEW v AS
+     * (SELECT ...) のように、文の本体が「AS (クエリ)」で括弧に包まれている場合。
+     * CREATE ... AS SELECT ...（括弧なし）は ClauseParser が深さ0の SELECT を拾えるが、
+     * 括弧付きだと SELECT が深さ1に入り「トップレベルの SELECT が見つからない」になる。
+     * 対象テーブル名は解析メタデータ側で与えられるため、前置き（CREATE ... AS）は
+     * lineage に寄与しない。括弧内のクエリだけを取り出して再解析する。
+     */
+    const statementBodyTokens = this.#stripStatementBodyParentheses(this.tokens);
+
+    if (statementBodyTokens) {
+      return new QueryParser(this.#normalizeTokenDepth(statementBodyTokens), {
+        isSubquery: this.isSubquery,
+        disableSetOperations: this.disableSetOperations
+      }).parse();
+    }
+
     const cteResult = this.#parseCommonTableExpressions(contentTokens);
 
     if (!this.disableSetOperations) {
@@ -8002,6 +8026,111 @@ class QueryParser {
     }
 
     const inner = tokens.slice(firstIndex + 1, matchIndex);
+    const innerFirst = inner.find((token) => token.token_type !== "COMMENT");
+
+    if (!innerFirst) {
+      return null;
+    }
+
+    const isQueryStart = innerFirst.token === "(" ||
+      ["SELECT", "WITH"].includes(innerFirst.normalized_token);
+
+    if (!isQueryStart) {
+      return null;
+    }
+
+    return inner;
+  }
+
+  /**
+   * 文の本体が「AS (クエリ)」で括弧に包まれた形（CREATE ... AS (SELECT ...) /
+   * CREATE VIEW ... AS (SELECT ...)）を検出し、括弧内の Token を返す。剥がせない
+   * 場合は null。
+   *
+   * 条件：深さ0の 'AS' の直後（コメントを除く）が深さ0の '(' で、その対応する ')' が
+   * 末尾（末尾 ';' は無視）に一致し、内側が SELECT / WITH / '(' で始まる（＝クエリ）こと。
+   * WITH t AS (...) SELECT ... のように括弧の後ろに続きがある形や、列別名 AS x は
+   * 対象にならない。
+   */
+  #stripStatementBodyParentheses(tokens) {
+    const meaningful = [];
+
+    for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex++) {
+      if (tokens[tokenIndex].token_type !== "COMMENT") {
+        meaningful.push(tokenIndex);
+      }
+    }
+
+    if (meaningful.length < 3) {
+      return null;
+    }
+
+    let lastMeaningfulPosition = meaningful.length - 1;
+
+    if (tokens[meaningful[lastMeaningfulPosition]].token === ";") {
+      lastMeaningfulPosition -= 1;
+    }
+
+    if (lastMeaningfulPosition <= 0) {
+      return null;
+    }
+
+    const lastIndex = meaningful[lastMeaningfulPosition];
+
+    if (tokens[lastIndex].token !== ")") {
+      return null;
+    }
+
+    /* 末尾 ')' に対応する深さ0の '(' を探し、その直前が深さ0の 'AS' か確認する。 */
+    let openPosition = -1;
+
+    for (let position = 0; position <= lastMeaningfulPosition; position++) {
+      const tokenIndex = meaningful[position];
+
+      if (
+        tokens[tokenIndex].token === "(" &&
+        tokens[tokenIndex].paren_depth === 0
+      ) {
+        openPosition = position;
+        break;
+      }
+    }
+
+    if (openPosition <= 0) {
+      return null;
+    }
+
+    const openIndex = meaningful[openPosition];
+    const beforeOpen = tokens[meaningful[openPosition - 1]];
+
+    if (beforeOpen.normalized_token !== "AS" || beforeOpen.paren_depth !== 0) {
+      return null;
+    }
+
+    /* '(' の対応する ')' が末尾の ')' でなければ、途中で閉じているため対象外。 */
+    let depth = 0;
+    let matchIndex = -1;
+
+    for (let position = openPosition; position <= lastMeaningfulPosition; position++) {
+      const tokenText = tokens[meaningful[position]].token;
+
+      if (tokenText === "(") {
+        depth += 1;
+      } else if (tokenText === ")") {
+        depth -= 1;
+
+        if (depth === 0) {
+          matchIndex = meaningful[position];
+          break;
+        }
+      }
+    }
+
+    if (matchIndex !== lastIndex) {
+      return null;
+    }
+
+    const inner = tokens.slice(openIndex + 1, matchIndex);
     const innerFirst = inner.find((token) => token.token_type !== "COMMENT");
 
     if (!innerFirst) {
