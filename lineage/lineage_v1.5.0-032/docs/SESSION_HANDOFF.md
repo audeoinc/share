@@ -280,10 +280,26 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   単位の手前で停止し過剰消費しない。値部に含まれる列（例: n）の依存も lineage に保持される。
 - **回帰**：リテラル値・単独列・負値・`DAY TO SECOND` 句を併せて確認。テスト `test_v1_5_0_059.js`。
 
+## 4.17 `CREATE ... AS (SELECT ...)` の括弧付き本体
+
+- **症状**：`CREATE OR REPLACE TEMP TABLE t AS (SELECT ...)` で QueryParser が
+  「トップレベルの SELECT Clause が見つかりません」。括弧なし `CREATE ... AS SELECT ...` は
+  通っていた。
+- **原因**：ClauseParser は深さ0の SELECT を探すが、`AS (SELECT ...)` では SELECT が括弧内（深さ1）
+  に入る。既存の `#stripWrappingParentheses` は「先頭の非コメント Token が '('」の全体括弧しか
+  剥がさないため、`CREATE ... AS` の前置きの後ろに来る括弧付きクエリには対応していなかった。
+- **修正（エンジン変更・要 GCS 再デプロイ）**：QueryParser に `#stripStatementBodyParentheses` を追加。
+  深さ0の `AS` の直後（コメント除く）が深さ0の `(` で、その対応する `)` が末尾（末尾 ';' 無視）に
+  一致し、内側が SELECT/WITH で始まる場合に、括弧内のクエリだけを取り出して `#normalizeTokenDepth`
+  後に再解析する。対象テーブル名は解析メタデータ（view_project/dataset/name）で与えるため、
+  `CREATE ... AS` の前置きは lineage に寄与しない。
+- **非対象（回帰確認済み）**：`WITH t AS (...) SELECT ...`（括弧の後ろに続きがある）、列別名 `x AS y`、
+  スカラーサブクエリ `(SELECT ...) AS y`、括弧なし CTAS、全体括弧 `(SELECT ...)`。テスト `test_v1_5_0_060.js`。
+
 ## 5. 現在地（引き継ぎ時点）
 
-- バンドル: `sha256 = 81667d372f1be1330c9c6548cb30239f39a9c2b922aa9c84301ede2295da3f5c`、`437648` bytes
-- `test:release` 39 本 PASS / ゴールデン 48 ケース PASS
+- バンドル: `sha256 = 0a31b8c9a86faae55f8108e94b7a237906add0e96da6cd6b823f026371a8e3c5`、`441569` bytes
+- `test:release` 40 本 PASS / ゴールデン 48 ケース PASS
 - 二本ツリー（-031 / -032）同期済み
 - 03 STEP 3：フルバッチ化済み（上記 §4.5 ①②③）。集合ベースに全面置換、ジョブ数は
   N 非依存。**BigQuery 未検証**（本番前に staging 実行＋旧ループとの出力 diff が必要）。

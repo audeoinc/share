@@ -94,11 +94,18 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   誤解決（`PHYSICAL_COLUMN_NOT_FOUND`）。リテラル値・列値は問題なかった。修正＝値部を加減算精度
   （`#parseAdditiveExpression`）で解析（日付単位は裸のキーワードで必ず手前で停止＝過剰消費なし）。
   値内の列（n 等）も lineage に保持。テスト `test_v1_5_0_059.js`。
+- **`CREATE ... AS (SELECT ...)` の括弧付き本体（直近）**：`CREATE OR REPLACE TEMP TABLE t AS
+  (SELECT ...)` で「トップレベルの SELECT が見つからない」。括弧なし `AS SELECT ...` は ClauseParser
+  が深さ0の SELECT を拾えるが、括弧付きだと SELECT が深さ1に入る。既存 `#stripWrappingParentheses`
+  は「先頭が '('」の全体括弧しか剥がさなかった。修正＝深さ0の `AS` 直後の深さ0 `(` で対応 `)` が末尾
+  （末尾 ';' 無視）、内側が SELECT/WITH の場合に括弧内クエリを取り出す `#stripStatementBodyParentheses`
+  を追加。対象テーブル名はメタデータ側で与えるため前置きは lineage 非寄与。CTE/列別名 AS/スカラー
+  サブクエリ AS は非対象。テスト `test_v1_5_0_060.js`。
 
 ## 5. 現在地（引き継ぎ時点）
 
-- バンドル: `sha256 = 81667d372f1be1330c9c6548cb30239f39a9c2b922aa9c84301ede2295da3f5c`、`437648` bytes
-- `test:release` 39 本 PASS / ゴールデン 48 ケース PASS
+- バンドル: `sha256 = 0a31b8c9a86faae55f8108e94b7a237906add0e96da6cd6b823f026371a8e3c5`、`441569` bytes
+- `test:release` 40 本 PASS / ゴールデン 48 ケース PASS
 - 二本ツリー（-031 / -032）同期済み
 
 ## 6. Claude Code で続きを進める手順
