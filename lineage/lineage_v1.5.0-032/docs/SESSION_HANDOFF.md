@@ -233,10 +233,26 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 - **回帰**：`ON` 結合（USING でない）で両ソースに同名列があり修飾なし参照は、従来どおり
   `PHYSICAL_COLUMN_AMBIGUOUS` のまま。テスト `test_v1_5_0_056.js`。
 
+## 4.14 USING 列が FROM/左側ソースに無いケースの解決（4.13 の追随）
+
+- **症状**：`SELECT cola FROM tablea INNER JOIN aaa USING(id) INNER JOIN bbb USING(cola)` で、
+  `cola` が CTE `aaa`/`bbb` にあり FROM の物理表 `tablea` には無い場合、4.13（v1.5.0-056）の
+  「USING 列を先頭候補へ確定解決」が物理表 `tablea` を選び、`tablea` に `cola` が無く
+  `PHYSICAL_COLUMN_NOT_FOUND`（ERROR）。
+- **原因**：`#findUnqualifiedCandidates` は物理ソース（列不明＝`#getKnownOutputColumns`==null）を
+  常に候補に含めるため、候補は `[tablea, aaa, bbb]`。056 は無条件に `candidateSources[0]`
+  （=tablea）を選んでいた。USING 列は結合先のいずれかにあればよく、FROM 側が必ず持つとは限らない。
+- **修正（エンジン変更・要 GCS 再デプロイ）**：`column_resolver.js #resolveUnqualifiedReference` の
+  USING 分岐で、候補のうち列を公開すると分かっているもの（`#getColumnStatus`==`"RESOLVED"`＝
+  CTE/派生で出力列に含む）を `find` で優先。見つからない（全て物理でスキーマ未連携）場合のみ
+  `candidateSources[0]` へフォールバック。結合キーはその公開ソースへ属性（例では `cola` →
+  CTE → 物理 `p.d.src.cola`）。
+- **回帰**：FROM の物理表側に USING キーがある通常ケースも従来どおり解決。テスト `test_v1_5_0_057.js`。
+
 ## 5. 現在地（引き継ぎ時点）
 
-- バンドル: `sha256 = 2480400b3ecc7ebabf9aea1f19cec402a44aa7a38a98974f66fce4f75eb5e005`、`435251` bytes
-- `test:release` 36 本 PASS / ゴールデン 48 ケース PASS
+- バンドル: `sha256 = 397fb7e452ebe01983d25c4af5122172a139584cc1e6f15f8841be797a13c0b9`、`435847` bytes
+- `test:release` 37 本 PASS / ゴールデン 48 ケース PASS
 - 二本ツリー（-031 / -032）同期済み
 - 03 STEP 3：フルバッチ化済み（上記 §4.5 ①②③）。集合ベースに全面置換、ジョブ数は
   N 非依存。**BigQuery 未検証**（本番前に staging 実行＋旧ループとの出力 diff が必要）。

@@ -1,5 +1,20 @@
 # 1.5.0-032
 
+- Followed up the v1.5.0-056 `JOIN ... USING(col)` fix for the case where the
+  USING key is not present in the FROM/left source. v1.5.0-056 resolved an
+  unqualified USING column to the first (FROM/left) candidate, but a USING key
+  need only exist in one of the joined sources — a physical FROM table may not
+  contain it (e.g. `SELECT cola FROM tablea INNER JOIN aaa USING(id) INNER JOIN
+  bbb USING(cola)` where `cola` lives in the CTEs `aaa`/`bbb`, not in `tablea`).
+  Resolving to `tablea` then raised `PHYSICAL_COLUMN_NOT_FOUND`. ColumnResolver
+  now prefers the first candidate that is known to expose the column (a CTE /
+  derived source whose output includes it, i.e. `#getColumnStatus` == RESOLVED),
+  falling back to the first candidate only when none is definitively known to
+  expose it (all sources physical / schema-not-yet-linked). The join key traces
+  to that source (here `cola` → the CTE → its physical source). Test:
+  test_v1_5_0_057.js. Engine change: bundle rebuilt (sha256 397fb7e4...,
+  435847 bytes), release_manifest.json updated; redeploy the UDF bundle to GCS.
+
 - Fixed a false `PHYSICAL_COLUMN_AMBIGUOUS` (ERROR) on the join key of a
   `JOIN ... USING(col)` when the column is referenced unqualified and exists in
   two or more join sources (reported case: two `INNER JOIN`s, all sources CTEs,

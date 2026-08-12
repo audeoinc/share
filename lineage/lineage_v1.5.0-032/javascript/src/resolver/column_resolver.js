@@ -454,7 +454,16 @@ class ColumnResolver {
         : [];
 
       if (usingColumns.includes(columnName)) {
-        const usingSource = candidateSources[0];
+        /*
+         * USING列は結合先のいずれかに存在すればよく、FROM/左側ソースが
+         * 必ず持つとは限らない(例: FROM 物理表 JOIN cte USING(col) で col は
+         * cte 側にしかない)。列を公開していると分かっている候補(CTE/派生)を
+         * 優先し、確定できない(全て物理でスキーマ未連携)場合のみ先頭へ倒す。
+         */
+        const exposingSource = candidateSources.find(
+          (candidate) => this.#getColumnStatus(candidate, columnName) === "RESOLVED"
+        );
+        const usingSource = exposingSource || candidateSources[0];
         const usingColumnStatus = this.#getColumnStatus(usingSource, columnName);
 
         return this.#createReferenceResult(node, context, scope, {
