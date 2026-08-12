@@ -4220,6 +4220,29 @@ class ColumnResolver {
     }
 
     if (candidateSources.length > 1) {
+      /*
+       * JOIN ... USING(col) は結合キーcolを1つの論理列へ統合するため、
+       * 修飾なしのcol参照は複数ソースに存在しても曖昧ではない。
+       * この場合は登録順で先頭(FROM/左側)のソースへ確定解決し、
+       * 誤ったAMBIGUOUS(→PHYSICAL_COLUMN_AMBIGUOUS)を避ける。
+       */
+      const usingColumns = Array.isArray(scope.join_using_columns)
+        ? scope.join_using_columns
+        : [];
+
+      if (usingColumns.includes(columnName)) {
+        const usingSource = candidateSources[0];
+        const usingColumnStatus = this.#getColumnStatus(usingSource, columnName);
+
+        return this.#createReferenceResult(node, context, scope, {
+          qualifier: null,
+          columnName,
+          status: usingColumnStatus,
+          source: usingSource,
+          candidateSourceIds: [usingSource.source_id]
+        });
+      }
+
       return this.#createReferenceResult(node, context, scope, {
         qualifier: null,
         columnName,
@@ -8070,6 +8093,7 @@ class SourceResolver {
       cte_definitions: [],
       set_operations: [],
       sources: [],
+      join_using_columns: [],
       reference_map: Object.create(null)
     };
 
@@ -8139,6 +8163,26 @@ class SourceResolver {
 
     for (const join of joins) {
       this.#registerSource(scope, join.source, "JOIN", join.join_seq);
+
+      /*
+       * JOIN ... USING(col) は結合キーcolを1つの論理列へ統合する。
+       * 修飾なしのcol参照は曖昧ではないため、USING列名をscopeへ記録し、
+       * ColumnResolverが複数候補を曖昧扱いせず確定解決できるようにする。
+       */
+      const usingColumns = Array.isArray(join.using_columns)
+        ? join.using_columns
+        : [];
+
+      for (const usingColumn of usingColumns) {
+        const normalizedUsingColumn = this.#normalizeName(usingColumn);
+
+        if (
+          normalizedUsingColumn &&
+          !scope.join_using_columns.includes(normalizedUsingColumn)
+        ) {
+          scope.join_using_columns.push(normalizedUsingColumn);
+        }
+      }
     }
 
     for (const setOperation of queryAst.set_operations || []) {
