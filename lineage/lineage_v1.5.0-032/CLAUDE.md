@@ -84,9 +84,8 @@ npm test                        # build + verify:bundle + test:release を一括
 
 ## 7. 現在地
 
-- バンドル: `sha256 = a4a43b2c2ce845969b27efb38b2b5f83099171b6aa3de11a7063d4d46c192884`、`433278` bytes
-- `test:release` 34 本 PASS / ゴールデン 48 ケース PASS
-- 直近の修正: JOBS 由来 SQL のパーサ 3 件を修正（型付き STRUCT/ARRAY コンストラクタ
-  `STRUCT<...>(...)` / `ARRAY<...>[...]`、クエリ全体を囲む余分な括弧 `(SELECT ...)`、
-  括弧タプル `(a,b) IN (...)`）。`test_v1_5_0_054`。
-  詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭。
+- バンドル: `sha256 = 7d567a2309b89e808f450b274278d25ccfefd0913618454b63104d52d4a76855`、`433565` bytes
+- `test:release` 35 本 PASS / ゴールデン 48 ケース PASS
+- 直近の修正: 名前付きパラメータ名が句キーワードと衝突（`@limit`/`@order`/`@where` 等）すると
+  ClauseParser が句開始と誤認する不具合を修正（レキサで `@name`/`@@name` を単一 PARAMETER
+  トークン化）。`test_v1_5_0_055`。詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭。

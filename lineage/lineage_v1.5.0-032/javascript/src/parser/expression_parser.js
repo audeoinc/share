@@ -409,10 +409,12 @@ class ExpressionParser {
     }
 
     // BigQuery named query parameter @name (and @@system_variable), e.g. the
-    // dbt-style @key placeholders that appear in JOBS-collected SQL. The lexer
-    // emits '@' as its own token followed by the name.
-    if (token.token === "@") {
-      return this.#parseNamedParameter();
+    // dbt-style @key / @limit placeholders in JOBS-collected SQL. The lexer emits
+    // the whole thing as one PARAMETER token. A parameter is an external scalar
+    // value, not a table column, so it carries no lineage (treated as a literal).
+    if (token.token_type === "PARAMETER") {
+      this.#consume();
+      return AstFactory.createLiteral(token, "PARAMETER", null);
     }
 
     throw new SyntaxError(
@@ -512,33 +514,6 @@ class ExpressionParser {
       }
     }
   }
-
-  #parseNamedParameter() {
-    const atToken = this.#consume();
-    let representativeToken = atToken;
-
-    if (this.#current() && this.#current().token === "@") {
-      this.#consume();
-    }
-
-    // The token right after '@' is the parameter name. Consume it even when it
-    // is a reserved keyword — @end / @order are valid parameter names because the
-    // '@' disambiguates them from the keyword — so accept any name-like token
-    // type rather than #isIdentifierToken (which rejects reserved words).
-    const nameToken = this.#current();
-    const isNameLike = nameToken && [
-      "IDENTIFIER",
-      "KEYWORD",
-      "BACKTICK_IDENTIFIER"
-    ].includes(nameToken.token_type);
-
-    if (isNameLike) {
-      representativeToken = this.#consume();
-    }
-
-    return AstFactory.createLiteral(representativeToken, "PARAMETER", null);
-  }
-
 
   /**
    * 関数呼び出しに続くOVER句を解析する。
