@@ -101,12 +101,17 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   （末尾 ';' 無視）、内側が SELECT/WITH の場合に括弧内クエリを取り出す `#stripStatementBodyParentheses`
   を追加。対象テーブル名はメタデータ側で与えるため前置きは lineage 非寄与。CTE/列別名 AS/スカラー
   サブクエリ AS は非対象。テスト `test_v1_5_0_060.js`。
-- **UDF out of memory 対策：メタデータ縮小（直近・SQLのみ）**：対象増加で 03 STEP 3 の JS UDF が
+- **UDF out of memory 対策：メタデータ縮小（SQLのみ）**：対象増加で 03 STEP 3 の JS UDF が
   "Resource exceeded / UDF out of memory"。UDF へ渡す per-object の `physical_columns_json` から
   `data_type` / `is_nullable` を除去（エンジンは内部で伝播するのみでエクスポート出力に含めない＝結果不変）。
   ネスト/複合型の `data_type`（`ARRAY<STRUCT<...>>` 等）は1列のバイト数を支配し得るため、広い/深い
-  テーブル参照時のペイロードが大きく縮む。METADATA_TOO_LARGE ガードも縮小後で測定。エンジン不変。
-  テスト `test_v1_5_0_061.js`（出力が data_type/is_nullable の有無に依存しない契約を固定）。
+  テーブル参照時のペイロードが大きく縮む。テスト `test_v1_5_0_061.js`。**※これだけでは解消せず**。
+- **UDF out of memory 対策：STEP 3 UDF のチャンク分割（直近・SQLのみ）**：診断で対象 2667 件・最大SQL
+  64KB・中央値192B と判明＝単一巨大SQLは無く**集約ピーク**が原因。STEP 3 の UDF 実行を全件1クエリ→
+  固定件数ループ（`analysis_udf_chunk_size` 既定200、`batch_analysis_input.udf_chunk` で分割、
+  `batch_udf_results` を `WHERE FALSE` で空作成後 `INSERT ... WHERE udf_chunk=@i` を chunk_count 回）
+  へ変更。スロットあたりの UDF 呼び出し数を制限。効果不足なら chunk_size を下げる。エンジン不変・
+  BigQuery 未検証。詳細は `docs/SESSION_HANDOFF.md` §4.19。
 
 ## 5. 現在地（引き継ぎ時点）
 

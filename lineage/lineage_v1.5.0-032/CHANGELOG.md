@@ -1,5 +1,21 @@
 # 1.5.0-032
 
+- Ran the STEP 3 lineage UDF in fixed-size chunks instead of one query over all
+  analyzable objects, to stop "Resource exceeded during query execution: UDF out
+  of memory" as the target set grows. Diagnosis on a failing run: 2667 objects,
+  max SQL 64 KB, p50 192 B — no single large object, so the peak is aggregate
+  (a single query calling the JavaScript UDF across thousands of rows accumulates
+  V8 heap in the per-slot UDF context). The prior metadata slimming did not help
+  because memory was not metadata-bound. `03_run_daily_lineage_pipeline.sql` now
+  numbers analyzable rows into buckets of `analysis_udf_chunk_size` (new DECLARE,
+  default 200) via a `udf_chunk` column on `batch_analysis_input`, creates
+  `batch_udf_results` empty once (the UDF SELECT with `WHERE FALSE`, fixing the
+  schema without invoking the UDF), then loops one `INSERT ... WHERE udf_chunk =
+  @chunk_index` job per chunk so each job/context runs at most chunk_size
+  invocations. Lower the chunk size if OOM persists; raise it to cut per-run job
+  overhead. Trade-off: more sequential jobs than the single-query batch. SQL-only
+  change; the engine bundle is unaffected. Not yet validated against BigQuery.
+
 - Reduced the per-object physical-column metadata payload passed to the lineage
   UDF in `03_run_daily_lineage_pipeline.sql` STEP 3, to cut the JavaScript UDF's
   peak memory ("Resource exceeded during query execution / UDF out of memory")
