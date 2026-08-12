@@ -61,6 +61,10 @@ noError("@limit in WHERE", "SELECT a FROM p.d.t WHERE c = @key AND a = @limit");
 noError("@limit as LIMIT value", "SELECT a FROM p.d.t LIMIT @limit");
 noError("@limit OFFSET @offset",
   "SELECT a FROM p.d.t ORDER BY c LIMIT @limit OFFSET @offset");
+// The reported "LIMIT Clause contains multiple OFFSET keywords": before the
+// lexer fix, @offset split into '@' + 'offset' (an OFFSET keyword) and the
+// LimitParser counted it alongside the real OFFSET.
+noError("literal count + @offset", "SELECT a FROM p.d.t LIMIT 100 OFFSET @offset");
 noError("@order / @group", "SELECT a FROM p.d.t WHERE c = @order OR a = @group");
 noError("@where / @select", "SELECT a FROM p.d.t WHERE c = @where AND a = @select");
 noError("@from / @to", "SELECT a FROM p.d.t WHERE c BETWEEN @from AND @to");
