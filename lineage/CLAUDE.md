@@ -84,9 +84,9 @@ npm test                        # build + verify:bundle + test:release を一括
 
 ## 7. 現在地
 
-- バンドル: `sha256 = 81667d372f1be1330c9c6548cb30239f39a9c2b922aa9c84301ede2295da3f5c`、`437648` bytes
-- `test:release` 39 本 PASS / ゴールデン 48 ケース PASS
-- 直近の修正: `INTERVAL <expr> <part>` の値が算術式（`DATE_ADD(d, INTERVAL n * 2 DAY)` 等）だと、
-  値を単項精度でしか解析せず日付単位を取りこぼし、関数引数内で `expected ) but found day`、
-  素の式で INTERVAL 列誤解決になる不具合を修正（値部を加減算精度 `#parseAdditiveExpression` で解析）。
-  `test_v1_5_0_059`。詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭。
+- バンドル: `sha256 = 0a31b8c9a86faae55f8108e94b7a237906add0e96da6cd6b823f026371a8e3c5`、`441569` bytes
+- `test:release` 40 本 PASS / ゴールデン 48 ケース PASS
+- 直近の修正: `CREATE ... AS (SELECT ...)`（括弧付き本体の CTAS / CREATE VIEW）で QueryParser が
+  「トップレベルの SELECT が見つからない」を出す不具合を修正（深さ0の `AS (` … 末尾 `)` を検出して
+  括弧内クエリを取り出す `#stripStatementBodyParentheses` を追加）。`test_v1_5_0_060`。
+  詳細は `docs/SESSION_HANDOFF.md` と `CHANGELOG.md` 冒頭。

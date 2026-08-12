@@ -1,5 +1,21 @@
 # 1.5.0-032
 
+- Fixed `CREATE ... AS (SELECT ...)` — a CTAS / CREATE VIEW whose body is a
+  parenthesized query, e.g. `CREATE OR REPLACE TEMP TABLE t AS (SELECT ...)`.
+  QueryParser raised `トップレベルのSELECT Clauseが見つかりません。` The unparenthesized
+  form `CREATE ... AS SELECT ...` worked because ClauseParser finds the SELECT at
+  paren depth 0; with the parentheses the SELECT sits at depth 1, and the existing
+  `#stripWrappingParentheses` only unwraps a query that *starts* with `(`, not one
+  wrapped after a `CREATE ... AS` prefix. QueryParser now also recognizes a
+  statement body of the form `... AS (query)` via `#stripStatementBodyParentheses`
+  (a depth-0 `AS` immediately followed by a depth-0 `(` whose matching `)` is the
+  last meaningful token, inner starting with SELECT/WITH) and re-parses the inner
+  query. The target table name comes from the analysis metadata, so the
+  `CREATE ... AS` prefix carries no lineage. `WITH t AS (...) SELECT ...`, column
+  aliases `x AS y`, and scalar subqueries `(SELECT ...) AS y` are unaffected.
+  Test: test_v1_5_0_060.js. Engine change: bundle rebuilt (sha256 0a31b8c9...,
+  441569 bytes), release_manifest.json updated; redeploy the UDF bundle to GCS.
+
 - Fixed `INTERVAL <expr> <part>` when the value is an arithmetic expression, e.g.
   `DATE_ADD(d, INTERVAL n * 2 DAY)` / `INTERVAL n + 1 DAY`. As a function argument
   it raised `ExpressionParser: expected ")", but found "day"`; as a bare SELECT
