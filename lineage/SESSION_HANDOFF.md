@@ -81,11 +81,18 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   `PHYSICAL_COLUMN_NOT_FOUND`。修正＝候補のうち列を公開すると分かっているもの（CTE/派生、
   `#getColumnStatus`==RESOLVED）を優先し、全て物理で確定不能な場合のみ先頭へフォールバック。
   テスト `test_v1_5_0_057.js`。
+- **`UNNEST(array) WITH OFFSET AS offset` の別名が予約語 `offset`（直近）**：`SELECT offset
+  FROM t, UNNEST(arr) AS e WITH OFFSET AS offset` で、SELECT の `offset` が KEYWORD 字句となり
+  SelectParser の暗黙出力名導出（`#deriveColumnAlias`）が IDENTIFIER/BACKTICK のみ受理のため
+  出力列が無名→`OUTPUT_COLUMN_NAME_UNRESOLVED`（WARNING）。ExpressionParser は非予約 KEYWORD を
+  識別子解決するのに SelectParser だけ弾いていた不整合。修正＝`#isColumnNameToken` を追加し、
+  ExpressionParser と同じ予約語基準で非予約 KEYWORD を列名として導出（NULL/TRUE/FALSE 等は無名
+  のまま）。テスト `test_v1_5_0_058.js`。
 
 ## 5. 現在地（引き継ぎ時点）
 
-- バンドル: `sha256 = 397fb7e452ebe01983d25c4af5122172a139584cc1e6f15f8841be797a13c0b9`、`435847` bytes
-- `test:release` 37 本 PASS / ゴールデン 48 ケース PASS
+- バンドル: `sha256 = c25189ec9f1dd1d5c2fe310a2455f850ebf0d8f3589c22dfd19d8db04e45f4f0`、`437077` bytes
+- `test:release` 38 本 PASS / ゴールデン 48 ケース PASS
 - 二本ツリー（-031 / -032）同期済み
 
 ## 6. Claude Code で続きを進める手順
