@@ -313,6 +313,23 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 - **未実施の追加レバー（必要なら）**：SQL本文サイズのガード追加、METADATA_TOO_LARGE 閾値の引き下げ、
   UDF バッチのチャンク分割（固定件数ループ）。ユーザー選択は「メタデータ縮小」のみ。
 
+## 4.19 UDF out of memory 対策：STEP 3 UDF のチャンク分割（4.18 の続き・SQLのみ）
+
+- **4.18 では解消せず**（メタデータ縮小では効かなかった）。実データ診断で原因を確定：
+  対象 **2667 件**、最大 SQL **64KB**、中央値 192B、p95 9KB。**単一の巨大 SQL は無く**、
+  全件を 1 クエリで UDF 実行する際の**スロット上の V8 ヒープ蓄積（集約ピーク）**が原因。
+- **対処（今回・SQLのみ）**：STEP 3 の UDF 実行を全件1クエリ→**固定件数チャンクのループ**へ変更。
+  - `analysis_udf_chunk_size`（新 DECLARE・既定 200）を追加。
+  - `batch_analysis_input` に `udf_chunk` 列（analyzable 行を analyzability で PARTITION した
+    ROW_NUMBER を chunk_size で DIV）を追加。
+  - `batch_udf_results` は UDF SELECT の `WHERE FALSE` で**空テーブルとして先に作成**（UDF 未評価で
+    スキーマ確定）。以後 `INSERT ... WHERE udf_chunk = @chunk_index` を chunk_count 回ループ。
+  - `analysis_udf_chunk_count = DIV(COUNT(*) + size - 1, size)`（0 件なら 0 → ループ無し）。
+  - INSERT テンプレートはループ外で1回 render、`@chunk_index` のみ差し替え。
+  - 効果不足なら chunk_size を下げる／過剰なジョブ数なら上げる。トレードオフ：単一クエリより
+    逐次ジョブ数が増える。エンジンバンドルは不変・**BigQuery 未検証**。
+- **未実施の追加レバー**：SQL本文サイズガード、METADATA_TOO_LARGE 閾値引き下げ。
+
 ## 5. 現在地（引き継ぎ時点）
 
 - バンドル: `sha256 = 0a31b8c9a86faae55f8108e94b7a237906add0e96da6cd6b823f026371a8e3c5`、`441569` bytes
