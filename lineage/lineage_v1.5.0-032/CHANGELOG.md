@@ -1,5 +1,22 @@
 # 1.5.0-032
 
+- Fixed a false `PHYSICAL_COLUMN_AMBIGUOUS` (ERROR) on the join key of a
+  `JOIN ... USING(col)` when the column is referenced unqualified and exists in
+  two or more join sources (reported case: two `INNER JOIN`s, all sources CTEs,
+  joined with `USING`, no column qualification). The parser recorded the USING
+  columns in `join.using_columns`, but the resolver ignored them: SourceResolver
+  did not carry USING info onto the scope, and ColumnResolver flagged any
+  unqualified column found in 2+ sources as AMBIGUOUS. `USING(col)` merges the
+  join key into a single logical column, so such a reference is not ambiguous.
+  SourceResolver now records the normalized USING column names on
+  `scope.join_using_columns`, and ColumnResolver resolves an unqualified USING
+  column deterministically to the first (FROM/left) candidate source instead of
+  AMBIGUOUS. Lineage for the join key is attributed to the left source (full
+  dual-source union attribution would be a larger change). Genuine ambiguity via
+  an `ON` join (same column name in both sources, no USING) still errors. Test:
+  test_v1_5_0_056.js. Engine change: bundle rebuilt (sha256 2480400b...,
+  435251 bytes), release_manifest.json updated; redeploy the UDF bundle to GCS.
+
 - Added a `labels ARRAY<STRUCT<key STRING, value STRING>>` column to
   `lineage_definition_registry` so a FAILED object can be traced to its source
   DAG (dag_id, task_id, ...) without joining to the job registry. Populated in

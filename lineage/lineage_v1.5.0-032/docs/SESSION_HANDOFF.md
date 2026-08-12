@@ -211,10 +211,32 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   `ALTER TABLE <definition_registry> ADD COLUMN IF NOT EXISTS labels ARRAY<STRUCT<key STRING,
   value STRING>>;` を実行 → 次回日次で生成テーブル分が backfill される。
 
+## 4.13 `JOIN ... USING(col)` 結合キーの AMBIGUOUS 誤検知を修正
+
+- **症状**：全ソースが CTE、2 回 INNER JOIN、`USING` 結合、カラム修飾なしの SQL
+  （`SELECT id FROM c1 INNER JOIN c2 USING(id) INNER JOIN c3 USING(id)`）で、`id` が
+  「複数ソースに存在する曖昧な列」と判定され `PHYSICAL_COLUMN_AMBIGUOUS`（ERROR）。
+- **原因**：パーサ（`from_parser.js`）は `JOIN ... USING(col)` の列を `join.using_columns`
+  に記録していたが、リゾルバが未使用。`source_resolver.js #resolveQueryScope` は JOIN 登録時に
+  USING 情報を scope に残さず、`column_resolver.js #resolveUnqualifiedReference` は候補ソースが
+  2 件以上あれば無条件で `AMBIGUOUS` を返していた。`USING` は結合キーを 1 論理列へ統合する構文
+  なので、この参照は本来曖昧でない。
+- **修正（エンジン変更・要 GCS 再デプロイ）**：
+  - `source_resolver.js` — scope に `join_using_columns: []` を追加し、JOIN ループで
+    `join.using_columns` を正規化（大文字化）して記録。
+  - `column_resolver.js` — 非修飾参照で候補が 2 件以上のとき、列名が `scope.join_using_columns`
+    に含まれれば登録順で先頭（FROM/左側）の候補へ確定解決し、`#getColumnStatus` で状態を付与。
+    含まれなければ従来どおり `AMBIGUOUS`。
+- **リネージ属性**：結合キーは左ソース側に付く。両ソースへの完全なユニオン属性は
+  lineage_resolver が単一 source_id で派生を辿る設計のため、より大きな変更になる（今回は誤 ERROR
+  解消を優先）。
+- **回帰**：`ON` 結合（USING でない）で両ソースに同名列があり修飾なし参照は、従来どおり
+  `PHYSICAL_COLUMN_AMBIGUOUS` のまま。テスト `test_v1_5_0_056.js`。
+
 ## 5. 現在地（引き継ぎ時点）
 
-- バンドル: `sha256 = 7d567a2309b89e808f450b274278d25ccfefd0913618454b63104d52d4a76855`、`433565` bytes
-- `test:release` 35 本 PASS / ゴールデン 48 ケース PASS
+- バンドル: `sha256 = 2480400b3ecc7ebabf9aea1f19cec402a44aa7a38a98974f66fce4f75eb5e005`、`435251` bytes
+- `test:release` 36 本 PASS / ゴールデン 48 ケース PASS
 - 二本ツリー（-031 / -032）同期済み
 - 03 STEP 3：フルバッチ化済み（上記 §4.5 ①②③）。集合ベースに全面置換、ジョブ数は
   N 非依存。**BigQuery 未検証**（本番前に staging 実行＋旧ループとの出力 diff が必要）。
