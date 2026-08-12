@@ -88,11 +88,17 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   識別子解決するのに SelectParser だけ弾いていた不整合。修正＝`#isColumnNameToken` を追加し、
   ExpressionParser と同じ予約語基準で非予約 KEYWORD を列名として導出（NULL/TRUE/FALSE 等は無名
   のまま）。テスト `test_v1_5_0_058.js`。
+- **`INTERVAL <expr> <part>` の値が算術式（直近）**：`DATE_ADD(d, INTERVAL n * 2 DAY)` /
+  `INTERVAL n + 1 DAY` で、値を単項精度（`#parseUnaryExpression`）でしか解析せず `*`/`/`/`+`/`-`
+  の後ろの日付単位を取りこぼし、関数引数内で `expected ) but found day`、素の式で INTERVAL 列
+  誤解決（`PHYSICAL_COLUMN_NOT_FOUND`）。リテラル値・列値は問題なかった。修正＝値部を加減算精度
+  （`#parseAdditiveExpression`）で解析（日付単位は裸のキーワードで必ず手前で停止＝過剰消費なし）。
+  値内の列（n 等）も lineage に保持。テスト `test_v1_5_0_059.js`。
 
 ## 5. 現在地（引き継ぎ時点）
 
-- バンドル: `sha256 = c25189ec9f1dd1d5c2fe310a2455f850ebf0d8f3589c22dfd19d8db04e45f4f0`、`437077` bytes
-- `test:release` 38 本 PASS / ゴールデン 48 ケース PASS
+- バンドル: `sha256 = 81667d372f1be1330c9c6548cb30239f39a9c2b922aa9c84301ede2295da3f5c`、`437648` bytes
+- `test:release` 39 本 PASS / ゴールデン 48 ケース PASS
 - 二本ツリー（-031 / -032）同期済み
 
 ## 6. Claude Code で続きを進める手順

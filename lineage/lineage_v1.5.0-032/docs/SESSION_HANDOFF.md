@@ -265,10 +265,25 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   等の非予約語は列名になり、真の予約語リテラル（`NULL` 等）は従来どおり無名のまま。
 - **回帰**：識別子別名 `pos`、`SELECT NULL`（無名維持）を併せて確認。テスト `test_v1_5_0_058.js`。
 
+## 4.16 `INTERVAL <expr> <part>` の値が算術式のケース
+
+- **症状**：`DATE_ADD(d, INTERVAL n * 2 DAY)` や `INTERVAL n + 1 DAY` のように INTERVAL の値部が
+  算術式だと、関数引数内で `ExpressionParser: expected ")", but found "day"`、素の SELECT 項目では
+  `INTERVAL` が列参照へ誤解決し `PHYSICAL_COLUMN_NOT_FOUND`。リテラル値 `INTERVAL 2 DAY` や
+  単独列 `INTERVAL n DAY` は問題なかった（値の後ろに演算子が無いため）。
+- **原因**：`#parseIntervalExpression` が値部を `#parseUnaryExpression`（単項精度）で解析していた。
+  単項は `*`/`/`/`+`/`-` の手前で止まるため、`n * 2` の場合 `n` だけを値として返し、続く `* 2 DAY` が
+  取り残される。関数引数では末尾の日付単位が閉じ `)` 検査に衝突し、素の式では式解析失敗の
+  フォールバックで先頭語が列扱いになっていた。
+- **修正（エンジン変更・要 GCS 再デプロイ）**：値部を `#parseAdditiveExpression`（加減算精度、
+  乗除算も含む）で解析。日付単位（DAY 等）は裸のキーワードで演算子ではないため、加減算解析は必ず
+  単位の手前で停止し過剰消費しない。値部に含まれる列（例: n）の依存も lineage に保持される。
+- **回帰**：リテラル値・単独列・負値・`DAY TO SECOND` 句を併せて確認。テスト `test_v1_5_0_059.js`。
+
 ## 5. 現在地（引き継ぎ時点）
 
-- バンドル: `sha256 = c25189ec9f1dd1d5c2fe310a2455f850ebf0d8f3589c22dfd19d8db04e45f4f0`、`437077` bytes
-- `test:release` 38 本 PASS / ゴールデン 48 ケース PASS
+- バンドル: `sha256 = 81667d372f1be1330c9c6548cb30239f39a9c2b922aa9c84301ede2295da3f5c`、`437648` bytes
+- `test:release` 39 本 PASS / ゴールデン 48 ケース PASS
 - 二本ツリー（-031 / -032）同期済み
 - 03 STEP 3：フルバッチ化済み（上記 §4.5 ①②③）。集合ベースに全面置換、ジョブ数は
   N 非依存。**BigQuery 未検証**（本番前に staging 実行＋旧ループとの出力 diff が必要）。
