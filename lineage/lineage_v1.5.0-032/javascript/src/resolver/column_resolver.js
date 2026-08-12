@@ -443,6 +443,29 @@ class ColumnResolver {
     }
 
     if (candidateSources.length > 1) {
+      /*
+       * JOIN ... USING(col) は結合キーcolを1つの論理列へ統合するため、
+       * 修飾なしのcol参照は複数ソースに存在しても曖昧ではない。
+       * この場合は登録順で先頭(FROM/左側)のソースへ確定解決し、
+       * 誤ったAMBIGUOUS(→PHYSICAL_COLUMN_AMBIGUOUS)を避ける。
+       */
+      const usingColumns = Array.isArray(scope.join_using_columns)
+        ? scope.join_using_columns
+        : [];
+
+      if (usingColumns.includes(columnName)) {
+        const usingSource = candidateSources[0];
+        const usingColumnStatus = this.#getColumnStatus(usingSource, columnName);
+
+        return this.#createReferenceResult(node, context, scope, {
+          qualifier: null,
+          columnName,
+          status: usingColumnStatus,
+          source: usingSource,
+          candidateSourceIds: [usingSource.source_id]
+        });
+      }
+
       return this.#createReferenceResult(node, context, scope, {
         qualifier: null,
         columnName,
