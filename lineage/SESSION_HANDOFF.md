@@ -106,12 +106,16 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   `data_type` / `is_nullable` を除去（エンジンは内部で伝播するのみでエクスポート出力に含めない＝結果不変）。
   ネスト/複合型の `data_type`（`ARRAY<STRUCT<...>>` 等）は1列のバイト数を支配し得るため、広い/深い
   テーブル参照時のペイロードが大きく縮む。テスト `test_v1_5_0_061.js`。**※これだけでは解消せず**。
-- **UDF out of memory 対策：STEP 3 UDF のチャンク分割（直近・SQLのみ）**：診断で対象 2667 件・最大SQL
+- **UDF out of memory 対策：STEP 3 UDF のチャンク分割（SQLのみ）**：診断で対象 2667 件・最大SQL
   64KB・中央値192B と判明＝単一巨大SQLは無く**集約ピーク**が原因。STEP 3 の UDF 実行を全件1クエリ→
   固定件数ループ（`analysis_udf_chunk_size` 既定200、`batch_analysis_input.udf_chunk` で分割、
   `batch_udf_results` を `WHERE FALSE` で空作成後 `INSERT ... WHERE udf_chunk=@i` を chunk_count 回）
-  へ変更。スロットあたりの UDF 呼び出し数を制限。効果不足なら chunk_size を下げる。エンジン不変・
-  BigQuery 未検証。詳細は `docs/SESSION_HANDOFF.md` §4.19。
+  へ変更。**※これだけでは解消せず**（探索パスが未分割で残っていた）。§4.19。
+- **UDF out of memory 対策：ソース探索パスのチャンク分割（直近・SQLのみ）**：03 には UDF 全件パスが
+  **2つ**あり（①ソース探索 `source_discovery_only` → `changed_definitions_with_discovery`、②STEP 3 解析）、
+  ①が未分割で残っていたため STEP 3 の chunk_size を下げても効かなかった。①も同方式でチャンク分割
+  （`discovery_udf_chunk_size` 既定200、`WHERE FALSE` で空作成後 `INSERT ... WHERE discovery_chunk=@i`、
+  chunk は changed 集合の ROW_NUMBER を chunk_size で DIV）。エンジン不変・BigQuery 未検証。§4.20。
 
 ## 5. 現在地（引き継ぎ時点）
 
