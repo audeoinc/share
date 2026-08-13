@@ -1,5 +1,20 @@
 # 1.5.0-032
 
+- Also chunked the batch **source-discovery** UDF pass, which the STEP 3 chunking
+  had missed. `03_run_daily_lineage_pipeline.sql` runs the JavaScript UDF a
+  second time over every changed definition in `source_discovery_only` mode to
+  build `changed_definitions_with_discovery` — a separate single-query UDF pass
+  across the whole changed set. At large target counts this pass hits the same
+  "UDF out of memory" aggregate ceiling, so lowering `analysis_udf_chunk_size`
+  alone did not help (it only chunks the analysis pass). Source discovery now
+  runs in fixed-size chunks too: new DECLARE `discovery_udf_chunk_size` (default
+  200); `changed_definitions_with_discovery` is created empty via the UDF SELECT
+  with `WHERE FALSE`, then filled by one `INSERT ... WHERE discovery_chunk =
+  @chunk_index` job per chunk (the chunk is `ROW_NUMBER()` over the changed set
+  bucketed by the chunk size, so the UDF runs on at most chunk_size rows per
+  job). SQL-only change; the engine bundle is unaffected. Not yet validated
+  against BigQuery.
+
 - Ran the STEP 3 lineage UDF in fixed-size chunks instead of one query over all
   analyzable objects, to stop "Resource exceeded during query execution: UDF out
   of memory" as the target set grows. Diagnosis on a failing run: 2667 objects,
