@@ -1454,6 +1454,16 @@ BEGIN
   DECLARE analyzed_object_count INT64 DEFAULT 0;
   DECLARE failed_object_count INT64 DEFAULT 0;
 
+  -- Source discovery runs the JavaScript UDF across every changed definition,
+  -- like the STEP 3 analysis pass, and at large target counts it likewise
+  -- accumulates V8 heap in the per-slot UDF context and hits "Resource exceeded
+  -- during query execution: UDF out of memory". It is therefore run in
+  -- fixed-size chunks (one EXECUTE IMMEDIATE job per chunk). Lower this if OOM
+  -- persists; keep it roughly in step with analysis_udf_chunk_size below.
+  DECLARE discovery_udf_chunk_size INT64 DEFAULT 200;
+  DECLARE discovery_udf_chunk_count INT64 DEFAULT 0;
+  DECLARE discovery_udf_chunk_index INT64 DEFAULT 0;
+
   -- --------------------------------------------------------------------------
   -- Remove repository rows whose target definition is no longer active.
   -- --------------------------------------------------------------------------
@@ -1663,6 +1673,8 @@ BEGIN
   -- source_discovery_json cell. The loop still validates the per-object status
   -- and RAISEs into this object's EXCEPTION handler exactly as before.
   -- --------------------------------------------------------------------------
+  -- Create the discovery result table empty (WHERE FALSE: the UDF is not
+  -- evaluated, only the schema is fixed), then fill it one chunk per job.
   SET sql_template = """
     CREATE OR REPLACE TEMP TABLE changed_definitions_with_discovery AS
     SELECT
@@ -1681,6 +1693,66 @@ BEGIN
       ) AS source_discovery_json
     FROM
       changed_definitions_to_analyze
+    WHERE FALSE
+  """;
+
+  SET rendered_sql = render_dynamic_sql(
+    sql_template,
+    repository_project_id,
+    repository_dataset,
+    target_project_id,
+    job_region,
+    udf_project_id,
+    udf_dataset,
+    udf_function_name,
+    repo_tables
+  );
+
+  ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
+  AS 'Unresolved placeholder in batch source-discovery result-table SQL.';
+
+  EXECUTE IMMEDIATE rendered_sql
+  USING
+    TO_JSON_STRING(STRUCT(TRUE AS source_discovery_only)) AS options_json;
+
+  SET discovery_udf_chunk_count = (
+    SELECT DIV(COUNT(*) + discovery_udf_chunk_size - 1, discovery_udf_chunk_size)
+    FROM changed_definitions_to_analyze
+  );
+
+  -- Per-chunk INSERT. A row's chunk is its ROW_NUMBER (over the full changed set)
+  -- bucketed by @chunk_size; the UDF is evaluated only for the selected chunk, so
+  -- each job runs at most @chunk_size invocations.
+  SET sql_template = """
+    INSERT INTO changed_definitions_with_discovery
+    SELECT
+      object_project,
+      object_dataset,
+      object_name,
+      object_type,
+      generation_type,
+      definition_text,
+      definition_hash,
+      `__UDF__`(
+        definition_text,
+        '[]',
+        @options_json,
+        NULL
+      ) AS source_discovery_json
+    FROM (
+      SELECT
+        c.*,
+        DIV(
+          ROW_NUMBER() OVER (
+            ORDER BY
+              object_project, object_dataset, object_name,
+              object_type, generation_type, definition_hash
+          ) - 1,
+          @chunk_size
+        ) AS discovery_chunk
+      FROM changed_definitions_to_analyze AS c
+    )
+    WHERE discovery_chunk = @chunk_index
   """;
 
   SET rendered_sql = render_dynamic_sql(
@@ -1698,9 +1770,17 @@ BEGIN
   ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
   AS 'Unresolved placeholder in batch source-discovery SQL.';
 
-  EXECUTE IMMEDIATE rendered_sql
-  USING
-    TO_JSON_STRING(STRUCT(TRUE AS source_discovery_only)) AS options_json;
+  SET discovery_udf_chunk_index = 0;
+
+  WHILE discovery_udf_chunk_index < discovery_udf_chunk_count DO
+    EXECUTE IMMEDIATE rendered_sql
+    USING
+      TO_JSON_STRING(STRUCT(TRUE AS source_discovery_only)) AS options_json,
+      discovery_udf_chunk_size AS chunk_size,
+      discovery_udf_chunk_index AS chunk_index;
+
+    SET discovery_udf_chunk_index = discovery_udf_chunk_index + 1;
+  END WHILE;
 
   -- ==========================================================================
   -- Batch analysis and publish (full set-based STEP 3).
