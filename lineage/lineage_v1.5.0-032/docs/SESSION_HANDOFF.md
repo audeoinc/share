@@ -328,7 +328,28 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   - INSERT テンプレートはループ外で1回 render、`@chunk_index` のみ差し替え。
   - 効果不足なら chunk_size を下げる／過剰なジョブ数なら上げる。トレードオフ：単一クエリより
     逐次ジョブ数が増える。エンジンバンドルは不変・**BigQuery 未検証**。
-- **未実施の追加レバー**：SQL本文サイズガード、METADATA_TOO_LARGE 閾値引き下げ。
+- **※4.19 だけでは解消せず**：03 には UDF 全件パスが2つあり、探索パス（下記 4.20）が未分割で残っていた。
+
+## 4.20 UDF out of memory 対策：ソース探索パスのチャンク分割（4.19 の続き・SQLのみ）
+
+- **症状の継続**：4.19（STEP 3 チャンク分割）を入れても、対象増加時にまだ "UDF out of memory"。
+  `analysis_udf_chunk_size` を下げても効かない。
+- **原因**：03 には JS UDF を changed 全件に回すパスが**2つ**ある。
+  ① **ソース探索**（1652 付近）：`source_discovery_only` モードで UDF を全 changed 定義に回し
+     `changed_definitions_with_discovery`（`source_discovery_json`）を作る単一クエリ。**未分割だった**。
+  ② **STEP 3 解析**（2090 付近）：4.19 で分割済み。
+  ①も同じ集約ピークで OOM するため、②だけ分割しても解消しない（②の chunk_size は①に無関係）。
+- **対処（今回・SQLのみ）**：①も固定件数チャンクのループへ。
+  - 新 DECLARE `discovery_udf_chunk_size`（既定 200、ブロック 1430 の変数群に追加）。
+  - `changed_definitions_with_discovery` を UDF SELECT の `WHERE FALSE` で空作成（スキーマ確定）。
+  - `discovery_udf_chunk_count = DIV(COUNT(*) + size - 1, size)`（changed_definitions_to_analyze 基準）。
+  - `INSERT ... FROM (SELECT c.*, DIV(ROW_NUMBER() OVER(ORDER BY オブジェクトキー) - 1, @chunk_size) AS discovery_chunk
+    FROM changed_definitions_to_analyze c) WHERE discovery_chunk=@chunk_index` を chunk_count 回ループ。
+    UDF は選択チャンクの行だけに評価される。
+  - `changed_definitions_to_analyze` 自体は不変（chunk は探索ステップ内で ROW_NUMBER 再計算）。
+- **切り分けのヒント**：どちらのパスで落ちたかは失敗ジョブの SQL で分かる。
+  `... changed_definitions_with_discovery ... source_discovery_json` なら①、
+  `INSERT INTO batch_udf_results` なら②。エンジン不変・**BigQuery 未検証**。
 
 ## 5. 現在地（引き継ぎ時点）
 
