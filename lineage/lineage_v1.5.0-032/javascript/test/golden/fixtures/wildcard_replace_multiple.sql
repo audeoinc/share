@@ -1,2 +1,0 @@
-SELECT * REPLACE(amount * 1.1 AS amount, UPPER(status) AS status)
-FROM `PROJECT_ID.DATASET.ORDERS`
