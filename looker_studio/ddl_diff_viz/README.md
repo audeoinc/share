@@ -122,7 +122,8 @@ src/
   icon.png       コンポーネント選択画面のアイコン
   manifest.json  デプロイ時に GCS パスを埋め込むテンプレート
 scripts/
-  preview.mjs    ローカルプレビュー兼スモークテスト（8 シナリオ / 14 アサーション）
+  preview.mjs    ローカルプレビュー兼スモークテスト（viz.js を直接叩く）
+  e2e.mjs        dscc 結線の通しテスト（実ブラウザ + RENDER の postMessage）
   release.mjs    GCS に手で置く一式を release/ に組み立てる
 release/         ↑の生成物（コミット済み。手動配置用。直接編集しない）
 samples/         動作確認用の SQL
@@ -135,7 +136,9 @@ deploy.sh        ビルド + GCS へアップロード
 
 ```bash
 npm install
-npm test        # スモークテスト（HTML を生成せず検証だけ）
+npm test        # viz.js のスモークテスト（10 シナリオ / 23 アサーション）
+npm run e2e     # dscc 結線の通しテスト。実ブラウザに RENDER を postMessage して検証
+                # （playwright 未インストールならスキップされる）
 npm run preview # dist/preview.html を生成 → ブラウザで開いて全シナリオを確認
 npm run build   # dist/index.js（bundle, 約 26KB）+ index.json + index.css + icon.png
 npm run release # ↑を release/ に組み立てる（手動配置用。コミットする）
@@ -229,6 +232,27 @@ gs://my-bucket → 権限 → アクセスを許可
   プリンシパル: example.co.jp（ドメイン）
   ロール: Storage オブジェクト閲覧者
 ```
+
+## トラブルシュート
+
+読み込み直後に必ずプレースホルダを描くようにしてあるので、**画面に何が出るかで切り分けられる。**
+
+| 画面 | 意味 | 対処 |
+|---|---|---|
+| **完全に真っ白** | `index.js` が Looker Studio に届いていない | manifest の `js` パスと GCS 上の実パスを 1 文字ずつ照合。バケットの読み取り権限。古いキャッシュ |
+| `ddl-diff vX を読み込みました。データを待っています…` のまま | JS は動いているが RENDER が来ない | スタイルタブに「比較する 2 件」が出ているか確認。出ていなければ `index.json` が読めていない（`config` パスを照合） |
+| `8 秒待ってもデータが届きません` + 手順 | 同上（待機のまま確定） | 表示された手順どおりに確認。最後の手段としてメトリクス欄に `Record Count` を割り当てる |
+| `dscc.subscribeToData に失敗しました: dscId must be…` | iframe の URL に `dscId` が無い | Looker Studio 以外の場所で開いている。レポート内から開き直す |
+| `JS エラー: …` / `描画に失敗しました: …` | 実行時例外 | メッセージをそのまま報告 |
+| `Looker Studio から 1 行もデータが渡ってきていません` | 結線は正常。データが 0 件 | フィールド割り当て → データソースの中身 → `Record Count` の順に確認 |
+| `フィールド id が想定と違います` | GCS の `index.json` が古い | `index.json` を再アップロードし、`Cache-Control: no-cache` を設定 |
+
+さらに詳しく見るには、スタイルタブの**「デバッグ情報を表示する」をオン**にする。
+受け取った行数・フィールド id・各行の DDL 文字数・解決した before/after が表示される。
+ブラウザの DevTools で iframe を選べば `[ddl-diff] received` のログで生データも見られる。
+
+プレースホルダには**版名（`ddl-diff v0.2.0`）が出る**ので、キャッシュで古い `index.js` を
+掴んでいないかもここで判別できる。
 
 ## 制約・注意
 
