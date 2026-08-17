@@ -204,6 +204,22 @@ GCS_BUCKET=my-bucket GCS_PREFIX=viz/ddl-diff ./deploy.sh
 > 更新するときも同じで、`index.js` を上書きアップロードするだけ。
 > `manifest.json` は GCS パスが変わらない限り触らない。
 
+### `manifest.json` の各フィールド
+
+`name` / `organization` / `description` / `logoUrl` / `packageUrl` / `supportUrl` は
+**必須**（`organizationUrl` / `privacyPolicyUrl` / `termsOfServiceUrl` / `devMode` は任意）。
+ただし **URL の中身は検証されない** — 公式の雛形が `"https://url"` や `"https://logo"` と
+いうダミーを入れているくらいなので、社内利用ならそのままでも動く。
+必須フィールドを空文字や欠落にするのは避けること。
+
+`name` と `organization` はビジュアライゼーション追加画面に表示される識別名なので、
+空だと社内で選ぶときに区別できなくなる。ギャラリーに公開する場合は
+すべて実在する値が審査要件になる。
+
+`logoUrl` / `iconUrl` は `https://storage.googleapis.com/...` を指している。
+バケットを一般公開していない場合この URL は認証が通らずアイコンが表示されないが、
+**表示だけの問題でビジュアライゼーションの動作には影響しない。**
+
 **レポート閲覧者がバケットを読める必要がある。**
 DDL の中身がビジュアライゼーション経由で見えるので、`allUsers` ではなく
 組織ドメイン限定を推奨:
