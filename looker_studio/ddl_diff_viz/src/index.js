@@ -16,21 +16,27 @@ const dscc = require('@google/dscc');
 const { buildHtml } = require('./viz');
 
 // キャッシュ由来の「古い版を見ている」を切り分けるための版表示。
-const BUILD_TAG = 'ddl-diff v0.2.0';
+const BUILD_TAG = 'ddl-diff v0.2.1';
 const ROOT_ID = 'ddl-diff-root';
 const NO_DATA_TIMEOUT_MS = 8000;
 
 let drawn = false; // 一度データを描けたか（以後はエラー表示で上書きしない）
 
-function root() {
-  let el = document.getElementById(ROOT_ID);
-  if (!el) {
-    el = document.createElement('div');
-    el.id = ROOT_ID;
-    // body がまだ無い段階で評価されても落ちないように documentElement へ退避する
-    (document.body || document.documentElement).appendChild(el);
-  }
-  return el;
+/**
+ * body ができてから fn を呼ぶ。
+ * <head> 内でこのスクリプトが評価されると body がまだ無い。documentElement に
+ * appendChild すると <body> の外に置かれてしまい、例外は出ないのに何も表示されない
+ * （＝原因の分からない真っ白）ため、body を待ってから触る。
+ */
+function withBody(fn) {
+  if (document.body) { fn(); return; }
+  const timer = setInterval(function () {
+    if (document.body) { clearInterval(timer); fn(); }
+  }, 30);
+  document.addEventListener('DOMContentLoaded', function () {
+    clearInterval(timer);
+    if (document.body) fn();
+  });
 }
 
 function box(border, bg, fg, text) {
@@ -43,12 +49,27 @@ function box(border, bg, fg, text) {
   );
 }
 
+let lastHtml = '';
+
 function paint(html) {
-  try {
-    root().innerHTML = html;
-  } catch (e) {
-    try { console.error('[ddl-diff] paint failed', e); } catch (e2) { /* noop */ }
-  }
+  lastHtml = html;
+  // 複数回 flush されても lastHtml を入れ直すだけなので冪等
+  withBody(function () {
+    try {
+      let el = document.getElementById(ROOT_ID);
+      if (!el) {
+        el = document.createElement('div');
+        el.id = ROOT_ID;
+        document.body.appendChild(el);
+      } else if (el.parentNode !== document.body) {
+        // body の外に置かれてしまっていたら引き戻す
+        document.body.appendChild(el);
+      }
+      el.innerHTML = lastHtml;
+    } catch (e) {
+      try { console.error('[ddl-diff] paint failed', e); } catch (e2) { /* noop */ }
+    }
+  });
 }
 
 function info(text) { paint(box('#8250DF', '#FBF7FF', '#3B2A57', text)); }

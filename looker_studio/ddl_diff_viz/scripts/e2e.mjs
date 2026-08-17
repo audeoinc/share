@@ -73,12 +73,25 @@ const renderMessage = {
   },
 };
 
+const css = await readFile(join(rootDir, 'src', 'index.css'), 'utf8');
+
 const harness = join(rootDir, 'dist', 'e2e-harness.html');
 await writeFile(
   harness,
   '<!doctype html><meta charset="utf-8"><title>e2e</title>\n' +
-  `<style>${await readFile(join(rootDir, 'src', 'index.css'), 'utf8')}</style>\n` +
+  `<style>${css}</style>\n` +
   '<script src="./index.js"></script>\n'
+);
+
+// body 生成前にスクリプトが評価されるケース。
+// documentElement へ appendChild していると「例外は出ないのに何も見えない」
+// という一番厄介な真っ白になるので、明示的に検証する。
+const headHarness = join(rootDir, 'dist', 'e2e-harness-head.html');
+await writeFile(
+  headHarness,
+  '<!doctype html>\n<html lang="ja">\n<head>\n<meta charset="utf-8">\n<title>e2e head</title>\n' +
+  `<style>${css}</style>\n` +
+  '<script src="./index.js"></script>\n</head>\n<body>\n<!-- body はスクリプト評価後に現れる -->\n</body>\n</html>\n'
 );
 
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || undefined });
@@ -98,6 +111,26 @@ await page.waitForTimeout(500);
 const html = await page.locator('#ddl-diff-root').innerHTML().catch(() => '');
 const text = html.replace(/<[^>]*>/g, '');
 await page.screenshot({ path: join(rootDir, 'dist', 'e2e.png'), fullPage: true });
+await page.close();
+
+// --- body 生成前にスクリプトが評価されるケース ---
+const headPage = await browser.newPage({ viewport: { width: 900, height: 300 } });
+const headErrors = [];
+headPage.on('pageerror', (e) => headErrors.push(e.message));
+await headPage.goto('file://' + headHarness + '?dscId=e2e-head');
+await headPage.waitForTimeout(500);
+const headState = await headPage.evaluate(() => {
+  const el = document.getElementById('ddl-diff-root');
+  if (!el) return { found: false };
+  const r = el.getBoundingClientRect();
+  return {
+    found: true,
+    inBody: el.parentNode === document.body,
+    parent: el.parentNode ? el.parentNode.nodeName : null,
+    visible: r.width > 0 && r.height > 0,
+    text: el.innerText.trim(),
+  };
+});
 await browser.close();
 
 const checks = [
@@ -111,6 +144,12 @@ const checks = [
   ['増減バッジが出る', /\+\d/.test(text) && /−\d/.test(text)],
   ['SQL 行が描画されている', text.includes('CREATE OR REPLACE VIEW')],
   ['JS の未捕捉エラーがない', errors.length === 0],
+  // body 生成前に評価されても表示されること
+  ['[head] root が生成される', headState.found === true],
+  ['[head] root が body の直下にある', headState.inBody === true],
+  ['[head] 実際に表示領域を持つ', headState.visible === true],
+  ['[head] プレースホルダが読める', /読み込みました/.test(headState.text || '')],
+  ['[head] 未捕捉エラーがない', headErrors.length === 0],
 ];
 
 console.log('--- データ到着前 ---');
