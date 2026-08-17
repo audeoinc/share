@@ -281,3 +281,58 @@ GROUP BY view_key;
 -- ---------------------------------------------------------------------
 -- CREATE OR REPLACE TABLE `PROJECT.DATASET.view_ddl_diff` AS
 -- SELECT * FROM `PROJECT.DATASET.v_view_ddl_diff_split`;
+
+
+-- =====================================================================
+-- 4. Looker Studio の「カスタムクエリ」用
+--    ── レポート上で key を 2 つ選んで比較する
+--
+--    コミュニティ ビジュアライゼーションが使えない環境（GCS バケットの
+--    一般公開が禁止されている等）では、こちらが本線になる。
+--
+--    使い方:
+--      1. Looker Studio → データを追加 → BigQuery → カスタムクエリ
+--      2. 下の SELECT をそのまま貼る（PROJECT.DATASET は置換）
+--      3. 「パラメータ」で before_key / after_key を STRING として追加し、
+--         「レポート編集者と閲覧者が値を変更できるようにする」を有効にする
+--      4. レポートにパラメータ用のコントロールを 2 つ置く
+--
+--    注意:
+--      ・VIEW ではなくカスタムクエリにするのは、VIEW に @パラメータを
+--        書けないため。UDF (DIFF_LINES) は永続関数なので呼べる。
+--      ・Looker Studio のパラメータのリスト候補は静的（データから自動生成
+--        されない）。key が頻繁に増えるなら、候補リストの更新が手間になる。
+--        その場合は「テキスト入力」型にして key を貼り付ける運用が楽。
+--      ・どちらの key も見つからない場合は 0 行になる（表が空になる）。
+-- =====================================================================
+-- SELECT
+--   d.seq,
+--   d.op,
+--   CASE d.op WHEN '-' THEN '−' WHEN '+' THEN '+' WHEN '~' THEN '±' ELSE '' END AS mark,
+--   CAST(d.left_no  AS INT64) AS left_no,
+--   CAST(d.right_no AS INT64) AS right_no,
+--   -- Looker Studio の表は連続する半角スペースを潰すので NBSP に置換して
+--   -- インデントを保持する
+--   IFNULL(CONCAT(REPEAT(CHR(160), LENGTH(d.left_text)  - LENGTH(LTRIM(d.left_text,  ' '))),
+--                 LTRIM(d.left_text,  ' ')), '') AS left_line,
+--   IFNULL(CONCAT(REPEAT(CHR(160), LENGTH(d.right_text) - LENGTH(LTRIM(d.right_text, ' '))),
+--                 LTRIM(d.right_text, ' ')), '') AS right_line,
+--   d.left_text,
+--   d.right_text,
+--   -- 変更行の前後 3 行だけ表示したいとき用（GitHub の折りたたみ相当）
+--   COUNTIF(d.op <> '=') OVER (ORDER BY d.seq ROWS BETWEEN 3 PRECEDING AND 3 FOLLOWING) > 0
+--     AS near_change_3,
+--   -- スコアカード用
+--   COUNTIF(d.op IN ('+','~')) OVER () AS added_lines,
+--   COUNTIF(d.op IN ('-','~')) OVER () AS deleted_lines,
+--   @before_key AS before_key,
+--   @after_key  AS after_key
+-- FROM (
+--   SELECT
+--     IFNULL((SELECT ddl FROM `PROJECT.DATASET.v_ddl_by_key`
+--             WHERE key = @before_key LIMIT 1), '') AS before_ddl,
+--     IFNULL((SELECT ddl FROM `PROJECT.DATASET.v_ddl_by_key`
+--             WHERE key = @after_key  LIMIT 1), '') AS after_ddl
+-- ) AS p,
+-- UNNEST(`PROJECT.DATASET.DIFF_LINES`(p.before_ddl, p.after_ddl, FALSE)) AS d
+-- ORDER BY d.seq
