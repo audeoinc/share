@@ -32,6 +32,9 @@ function fatal(el, err) {
 
 function draw(data) {
   const el = root();
+  // iframe を右クリック →「フレームを調査」で中身を確認できるようにしておく。
+  // 画面に出す診断はスタイル設定の「デバッグ情報を表示する」で切り替える。
+  try { console.log('[ddl-diff] received', data); } catch (e) { /* noop */ }
   try {
     // 生成される HTML は render.js 側でエスケープ済み。
     // また innerHTML で挿入された <script> はブラウザ仕様上実行されない。

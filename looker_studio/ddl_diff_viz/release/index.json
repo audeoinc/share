@@ -1,7 +1,7 @@
 {
   "data": [
     {
-      "id": "ddl",
+      "id": "diffData",
       "label": "DDL",
       "elements": [
         {
@@ -15,6 +15,12 @@
           "label": "DDL",
           "type": "DIMENSION",
           "options": { "min": 1, "max": 1 }
+        },
+        {
+          "id": "dummyMetric",
+          "label": "メトリクス（任意・データが返らない時に Record Count を入れる）",
+          "type": "METRIC",
+          "options": { "min": 0, "max": 1 }
         }
       ]
     }
@@ -39,6 +45,12 @@
         {
           "id": "swap",
           "label": "左右を入れ替える",
+          "type": "CHECKBOX",
+          "defaultValue": false
+        },
+        {
+          "id": "debug",
+          "label": "デバッグ情報を表示する",
           "type": "CHECKBOX",
           "defaultValue": false
         }
@@ -86,15 +98,15 @@
         },
         {
           "id": "diffLineOpacity",
-          "label": "差分行の背景の濃さ",
-          "type": "OPACITY",
-          "defaultValue": 0.3
+          "label": "差分行の背景の濃さ（0〜1）",
+          "type": "TEXTINPUT",
+          "defaultValue": "0.30"
         },
         {
           "id": "diffCharOpacity",
-          "label": "差分文字の濃さ",
-          "type": "OPACITY",
-          "defaultValue": 0.55
+          "label": "差分文字の濃さ（0〜1）",
+          "type": "TEXTINPUT",
+          "defaultValue": "0.55"
         }
       ]
     },

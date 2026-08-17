@@ -93,6 +93,39 @@ function notice(text, kind) {
   );
 }
 
+/**
+ * Looker Studio が実際に何を渡してきたかを画面に出す。
+ * デプロイ先の中を覗けないので、切り分けはこれを見て行う。
+ */
+function debugBlock(rows, style, picked) {
+  const lines = [];
+  lines.push(`rows: ${rows ? rows.length : 'null'}`);
+  if (rows && rows.length > 0) {
+    lines.push(`1 行目のフィールド id: [${Object.keys(rows[0]).join(', ')}]`);
+    rows.slice(0, 10).forEach((r, i) => {
+      lines.push(
+        `  [${i}] key=${JSON.stringify(first(r.key))} ` +
+        `ddl=${str(r.ddl).length} 文字 ` +
+        `ddl先頭=${JSON.stringify(str(r.ddl).slice(0, 40))}`
+      );
+    });
+    if (rows.length > 10) lines.push(`  … 他 ${rows.length - 10} 行`);
+  }
+  lines.push(`style で受け取った id: [${Object.keys(style || {}).join(', ')}]`);
+  if (picked) {
+    lines.push(
+      `解決結果: before=${JSON.stringify(picked.before && picked.before.key)} ` +
+      `after=${JSON.stringify(picked.after && picked.after.key)}`
+    );
+  }
+  return (
+    `<pre style="margin:8px 0;padding:8px 12px;border:1px solid #8250DF;` +
+    `border-left-width:4px;border-radius:4px;background:#FBF7FF;color:#3B2A57;` +
+    `font:11px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;` +
+    `white-space:pre-wrap;word-break:break-all">${esc(lines.join('\n'))}</pre>`
+  );
+}
+
 /** 増減行数のバッジ（GitHub の Files changed ヘッダー相当）。 */
 function summaryHeader(diffRows) {
   let added = 0, deleted = 0;
@@ -173,12 +206,38 @@ function pickPair(rows, style) {
  * @returns {string} HTML
  */
 function buildHtml(rows, style) {
+  const debug = boolStyle(style, 'debug', false);
+
   if (!rows || rows.length === 0) {
-    return notice('データがありません。「key」「DDL」にフィールドを割り当ててください。');
+    return (
+      (debug ? debugBlock(rows, style, null) : '') +
+      notice(
+        'Looker Studio から 1 行もデータが渡ってきていません。' +
+        '(1) 「key」「DDL」にフィールドを割り当てたか (2) データソース自体にデータがあるか ' +
+        '(3) メトリクス欄に Record Count を割り当てると返るか、を順に確認してください。',
+        'warn'
+      )
+    );
   }
 
-  const { before, after, warnings, total } = pickPair(rows, style);
-  let out = warnings.map((w) => notice(w, 'warn')).join('');
+  // 期待するフィールド id が来ていない = config が古い可能性が高い
+  const keys = Object.keys(rows[0]);
+  if (!keys.includes('key') || !keys.includes('ddl')) {
+    return (
+      debugBlock(rows, style, null) +
+      notice(
+        `フィールド id が想定と違います（受け取ったのは [${keys.join(', ')}]、期待するのは key と ddl）。` +
+        'GCS の index.json が古いままの可能性があります。再アップロードし、' +
+        'index.js / index.json のキャッシュ設定を確認してください。',
+        'warn'
+      )
+    );
+  }
+
+  const picked = pickPair(rows, style);
+  const { before, after, warnings, total } = picked;
+  let out = (debug ? debugBlock(rows, style, picked) : '') +
+    warnings.map((w) => notice(w, 'warn')).join('');
 
   if (!before || !after) {
     return out + notice(
