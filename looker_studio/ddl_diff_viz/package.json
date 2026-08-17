@@ -8,6 +8,7 @@
     "build:dev": "esbuild src/index.js --bundle --format=iife --target=es2017 --outfile=dist/index.js && node scripts/copy-assets.mjs",
     "preview": "node scripts/preview.mjs",
     "test": "node scripts/preview.mjs --check",
+    "release": "npm run build && node scripts/release.mjs",
     "deploy": "./deploy.sh"
   },
   "devDependencies": {

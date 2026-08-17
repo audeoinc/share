@@ -119,9 +119,12 @@ src/
   lib/render.js  ベンダリング（HTML レンダリング）
   index.json     データ / スタイル設定の定義（Looker Studio のプロパティパネル）
   index.css      iframe 側のスクロール領域だけ
+  icon.png       コンポーネント選択画面のアイコン
   manifest.json  デプロイ時に GCS パスを埋め込むテンプレート
 scripts/
   preview.mjs    ローカルプレビュー兼スモークテスト（8 シナリオ / 14 アサーション）
+  release.mjs    GCS に手で置く一式を release/ に組み立てる
+release/         ↑の生成物（コミット済み。手動配置用。直接編集しない）
 samples/         動作確認用の SQL
 deploy.sh        ビルド + GCS へアップロード
 ```
@@ -134,22 +137,82 @@ deploy.sh        ビルド + GCS へアップロード
 npm install
 npm test        # スモークテスト（HTML を生成せず検証だけ）
 npm run preview # dist/preview.html を生成 → ブラウザで開いて全シナリオを確認
-npm run build   # dist/index.js（bundle, 約 25KB）+ index.json + index.css
+npm run build   # dist/index.js（bundle, 約 26KB）+ index.json + index.css + icon.png
+npm run release # ↑を release/ に組み立てる（手動配置用。コミットする）
 ```
 
 ## デプロイ
+
+### GCS に置くのは 5 ファイルだけ
+
+`src/lib/` や `src/viz.js`、`@google/dscc` は **esbuild が `index.js` に全部インライン化する**ので、
+GCS にコピーする必要はない。
+
+```
+gs://my-bucket/viz/ddl-diff/
+  manifest.json   Looker Studio が最初に読む。GCS パスを埋めてから置く
+  index.js        バンドル済み本体（lib/ + viz.js + dscc を内包、約 26KB）
+  index.json      データ / スタイル設定の定義
+  index.css       iframe 側のスクロール領域
+  icon.png        コンポーネント選択画面のアイコン
+```
+
+`node_modules/` も `src/` も置かない。バンドルが自己完結していることは
+`npm test` とは別に確認できる:
+
+```bash
+# 未解決の require / import が 1 つも残っていないこと
+grep -oE "require\([\"'][^\"']+[\"']\)" dist/index.js
+```
+
+### シェルが使える場合
 
 ```bash
 GCS_BUCKET=my-bucket GCS_PREFIX=viz/ddl-diff ./deploy.sh
 ```
 
-`manifest.json` の GCS パスを埋め込み、`manifest.json` / `index.js` / `index.json` /
-`index.css` を `gs://my-bucket/viz/ddl-diff/` に配置する。
+`manifest.json` の GCS パスを埋め込んでから 5 ファイルをアップロードする。
 `Cache-Control: no-cache` を付けているので、再デプロイが即反映される。
 
-**レポート閲覧者がバケットを読める必要がある。** deploy.sh の最後に IAM 付与コマンドを表示する。
+### 手動で配置する場合
+
+`release/` に**ビルド済みの 5 ファイルをコミットしてある**ので、npm 実行環境がなくても
+そのままアップロードできる（`npm run release` で再生成する）。
+
+1. `release/` の 5 ファイルをダウンロードする
+2. **`manifest.json` の 2 箇所のプレースホルダを置換する**（ここだけ手作業）
+   - `GCS_URI_BASE` → `gs://my-bucket/viz/ddl-diff`
+   - `GCS_HTTPS_BASE` → `https://storage.googleapis.com/my-bucket/viz/ddl-diff`
+
+   置換後はこうなる:
+   ```json
+   "resource": {
+     "js":     "gs://my-bucket/viz/ddl-diff/index.js",
+     "config": "gs://my-bucket/viz/ddl-diff/index.json",
+     "css":    "gs://my-bucket/viz/ddl-diff/index.css"
+   }
+   ```
+3. Cloud Console → Cloud Storage → バケット → `viz/ddl-diff/` フォルダを作り、
+   5 ファイルをアップロードする（**`manifest.json` はこのフォルダの直下に置く**。
+   Looker Studio に渡すパスはこのフォルダ自身）
+4. アップロード後、`index.js` の「オブジェクトを編集」→ メタデータで
+   `Cache-Control: no-cache, max-age=0` を設定する。省略すると GCS の既定
+   （`public, max-age=3600`）で 1 時間キャッシュされ、更新が反映されなくなる
+5. Looker Studio のレポート編集画面 → **[追加] → [コミュニティ ビジュアリゼーションと
+   コンポーネント] → [+ 独自の作成物を追加]** に `gs://my-bucket/viz/ddl-diff` を入力する
+
+> 更新するときも同じで、`index.js` を上書きアップロードするだけ。
+> `manifest.json` は GCS パスが変わらない限り触らない。
+
+**レポート閲覧者がバケットを読める必要がある。**
 DDL の中身がビジュアライゼーション経由で見えるので、`allUsers` ではなく
-`domain:` での限定を推奨。
+組織ドメイン限定を推奨:
+
+```
+gs://my-bucket → 権限 → アクセスを許可
+  プリンシパル: example.co.jp（ドメイン）
+  ロール: Storage オブジェクト閲覧者
+```
 
 ## 制約・注意
 

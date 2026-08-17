@@ -28,9 +28,10 @@ sed -e "s#GCS_URI_BASE#${URI_BASE}#g" \
 
 echo "==> upload"
 # no-cache を付けないと、更新しても Looker Studio が古い JS を掴み続ける
+# （Looker Studio 側のキャッシュは manifest の devMode で制御する。別レイヤー）
 gcloud storage cp \
   --cache-control="no-cache, max-age=0" \
-  dist/manifest.json dist/index.js dist/index.json dist/index.css \
+  dist/manifest.json dist/index.js dist/index.json dist/index.css dist/icon.png \
   "${URI_BASE}/"
 
 echo
