@@ -38,10 +38,13 @@ echo
 echo "デプロイ完了。Looker Studio に貼り付けるパス:"
 echo "  ${URI_BASE}"
 echo
-echo "レポート閲覧者がバケットを読める必要があります。未設定なら次のいずれかを実施してください:"
-echo "  # 組織内に限定（推奨）"
-echo "  gcloud storage buckets add-iam-policy-binding gs://${GCS_BUCKET} \\"
-echo "    --member=domain:example.co.jp --role=roles/storage.objectViewer"
-echo "  # 一般公開（社外にも DDL が見えるため通常は不可）"
+echo "バケットは一般公開（allUsers に読み取り）が必要です。"
+echo "Looker Studio は getThirdPartyScript というサーバー側フェッチャで JS を取得し、"
+echo "閲覧者の認証情報を持たないため、ドメイン限定では 403 になります。"
+echo "公開されるのはこのビジュアライゼーションのコードだけで、DDL などのデータは"
+echo "BigQuery から Looker Studio 経由で iframe に渡るため GCS には一切載りません。"
+echo
 echo "  gcloud storage buckets add-iam-policy-binding gs://${GCS_BUCKET} \\"
 echo "    --member=allUsers --role=roles/storage.objectViewer"
+echo
+echo "他の用途と同居させないため、viz 資材専用のバケットを使うことを推奨します。"

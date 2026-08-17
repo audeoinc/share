@@ -223,15 +223,31 @@ GCS_BUCKET=my-bucket GCS_PREFIX=viz/ddl-diff ./deploy.sh
 バケットを一般公開していない場合この URL は認証が通らずアイコンが表示されないが、
 **表示だけの問題でビジュアライゼーションの動作には影響しない。**
 
-**レポート閲覧者がバケットを読める必要がある。**
-DDL の中身がビジュアライゼーション経由で見えるので、`allUsers` ではなく
-組織ドメイン限定を推奨:
+### バケットは一般公開が必須
+
+**5 ファイルは `allUsers` から読める状態にしなければならない。**
+[公式ドキュメント](https://developers.google.com/looker-studio/visualization/upload-viz)に
+"all of your resources must be publicly available in a Google Cloud Storage bucket" と明記されている。
+
+Looker Studio は `getThirdPartyScript` というサーバー側フェッチャで JS を取得し、
+**閲覧者の認証情報を持たない**。そのためドメイン限定 IAM では
+`getThirdPartyScript` が 403 になり、JS が読めず真っ白になる。
+（`manifest.json` / `index.json` は別経路のため読めてしまい、
+「設定項目は出るのに描画されない」という紛らわしい症状になる。）
 
 ```
 gs://my-bucket → 権限 → アクセスを許可
-  プリンシパル: example.co.jp（ドメイン）
+  プリンシパル: allUsers
   ロール: Storage オブジェクト閲覧者
 ```
+
+**公開されるのはこのビジュアライゼーションのコードだけ。** DDL などのデータは
+BigQuery → Looker Studio → iframe（postMessage）と流れるので、GCS には一切載らない。
+それでも、他の用途と同居させないために **viz 資材専用のバケット**を使うのが望ましい。
+
+> バケットで「公開アクセスの防止」が**適用**になっていると `allUsers` を付与できない。
+> 組織ポリシー（`storage.publicAccessPrevention`）で強制されている場合は、
+> 例外設定か専用プロジェクトの用意を管理者に依頼する必要がある。
 
 ## トラブルシュート
 
@@ -239,7 +255,8 @@ gs://my-bucket → 権限 → アクセスを許可
 
 | 画面 | 意味 | 対処 |
 |---|---|---|
-| **完全に真っ白** | `index.js` が Looker Studio に届いていない | manifest の `js` パスと GCS 上の実パスを 1 文字ずつ照合。バケットの読み取り権限。古いキャッシュ |
+| **完全に真っ白**／DevTools で `getThirdPartyScript` が **403** | バケットが公開されていない。これが最頻の原因 | `allUsers` に `Storage オブジェクト閲覧者` を付与する（上記「バケットは一般公開が必須」）。設定項目は表示されるのに描画されない場合もこれ |
+| **完全に真っ白**／`getThirdPartyScript` が **404** | パスが違う | manifest の `js` パスと GCS 上の実パスを 1 文字ずつ照合。`release/` フォルダごとドラッグして 1 階層深くなっていないか |
 | `ddl-diff vX を読み込みました。データを待っています…` のまま | JS は動いているが RENDER が来ない | スタイルタブに「比較する 2 件」が出ているか確認。出ていなければ `index.json` が読めていない（`config` パスを照合） |
 | `8 秒待ってもデータが届きません` + 手順 | 同上（待機のまま確定） | 表示された手順どおりに確認。最後の手段としてメトリクス欄に `Record Count` を割り当てる |
 | `dscc.subscribeToData に失敗しました: dscId must be…` | iframe の URL に `dscId` が無い | Looker Studio 以外の場所で開いている。レポート内から開き直す |
