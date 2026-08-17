@@ -101,17 +101,20 @@ CTE を差し替えるだけ。同じスナップショット表の 2 日付で�
 
 ## 見た目を GitHub そのものにしたい場合の代替案
 
-### A. コミュニティ ビジュアライゼーション（本命だが工数大）
+### A. コミュニティ ビジュアライゼーション → **[`ddl_diff_viz/`](./ddl_diff_viz/) に実装済み**
 
-Looker Studio は `dscc`（Community Component）で自作の JS ビジュアルを作れる。
-ここに [diff2html](https://diff2html.xyz/) / [jsdiff](https://github.com/kpdecker/diff) を
-バンドルすれば、side-by-side ハイライトも文字単位の差分も**GitHub とほぼ同じ**表示にできる。
+`dscc` で自作のビジュアライゼーションを作る方式。**行内の単語単位ハイライトまで
+GitHub と同等**の表示ができる。`diff_html/` の VS Code 拡張の差分ロジックを
+そのままベンダリングしてあるので、diff2html を別途持ち込む必要はない。
 
-- `@google/dscc-gen` で雛形 → GCS バケットにデプロイ → レポートで manifest パスを指定
+- BigQuery からは **DDL 2 本をそのまま渡す**（HTML を事前生成して格納しない）
 - ビジュアルは sandbox iframe 内で動くため**外部ネットワーク不可**。ライブラリは同梱必須
+- GCS バケットへのデプロイと、閲覧者へのバケット読み取り権限が必要
 - 組織ポリシーでコミュニティ ビジュアライゼーションが許可されている必要がある
-- 渡すデータは「DDL 全文 2 つ」でもよいが、フィールド長の制約を避けるなら
-  行分割済みのテーブルを渡して JS 側で結合するのが安全
+
+セットアップ手順は [`ddl_diff_viz/README.md`](./ddl_diff_viz/README.md) を参照。
+この方式を使う場合、本ディレクトリの `ddl_diff.sql` の UDF は不要になる
+（必要なのは「1 View = 1 行、before/after の DDL カラム」だけ）。
 
 ### B. 外部ページへリンクする（工数小・現実的）
 
@@ -135,6 +138,6 @@ HYPERLINK(CONCAT("https://<cloud-run>/diff?view=", view_key), "差分を見る")
 | | 実装コスト | 見た目 | 動的切替 |
 |---|---|---|---|
 | 表グラフ + 条件付き書式（本手順） | 小 | 行単位まで | ○ |
-| コミュニティ ビジュアライゼーション | 大 | GitHub 同等 | ○ |
+| コミュニティ ビジュアライゼーション（`ddl_diff_viz/`） | 実装済み | GitHub 同等（単語単位） | ○ |
 | Cloud Run + HYPERLINK | 中 | GitHub 同等（別タブ） | ○ |
 | URL 埋め込み | 小 | GitHub 同等 | × |

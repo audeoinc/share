@@ -1,0 +1,132 @@
+{
+  "data": [
+    {
+      "id": "ddl",
+      "label": "DDL",
+      "elements": [
+        {
+          "id": "viewKey",
+          "label": "View 名（見出し用・任意）",
+          "type": "DIMENSION",
+          "options": { "min": 0, "max": 1 }
+        },
+        {
+          "id": "beforeDdl",
+          "label": "変更前 DDL",
+          "type": "DIMENSION",
+          "options": { "min": 1, "max": 1 }
+        },
+        {
+          "id": "afterDdl",
+          "label": "変更後 DDL",
+          "type": "DIMENSION",
+          "options": { "min": 1, "max": 1 }
+        }
+      ]
+    }
+  ],
+  "style": [
+    {
+      "id": "labels",
+      "label": "ラベル",
+      "elements": [
+        {
+          "id": "leftLabel",
+          "label": "左ペインの見出し",
+          "type": "TEXTINPUT",
+          "defaultValue": "before"
+        },
+        {
+          "id": "rightLabel",
+          "label": "右ペインの見出し",
+          "type": "TEXTINPUT",
+          "defaultValue": "after"
+        },
+        {
+          "id": "maxViews",
+          "label": "表示する View 数の上限",
+          "type": "TEXTINPUT",
+          "defaultValue": "10"
+        }
+      ]
+    },
+    {
+      "id": "typography",
+      "label": "フォント",
+      "elements": [
+        {
+          "id": "fontFamily",
+          "label": "フォント（空欄で Roboto Mono）",
+          "type": "FONT_FAMILY",
+          "defaultValue": ""
+        },
+        {
+          "id": "fontSize",
+          "label": "フォントサイズ",
+          "type": "FONT_SIZE",
+          "defaultValue": "12px"
+        },
+        {
+          "id": "lineHeight",
+          "label": "行の高さ",
+          "type": "TEXTINPUT",
+          "defaultValue": "1.35"
+        }
+      ]
+    },
+    {
+      "id": "diffColors",
+      "label": "差分の色",
+      "elements": [
+        {
+          "id": "baseColor",
+          "label": "変更前ペインの基本色",
+          "type": "FILL_COLOR",
+          "defaultValue": "#E17B7B"
+        },
+        {
+          "id": "afterColor",
+          "label": "変更後ペインの基本色",
+          "type": "FILL_COLOR",
+          "defaultValue": "#93AE68"
+        },
+        {
+          "id": "diffLineOpacity",
+          "label": "差分行の背景の濃さ",
+          "type": "OPACITY",
+          "defaultValue": 0.3
+        },
+        {
+          "id": "diffCharOpacity",
+          "label": "差分文字の濃さ",
+          "type": "OPACITY",
+          "defaultValue": 0.55
+        }
+      ]
+    },
+    {
+      "id": "syntax",
+      "label": "SQL シンタックス",
+      "elements": [
+        {
+          "id": "syntaxKeyword",
+          "label": "予約語",
+          "type": "FONT_COLOR",
+          "defaultValue": "#CF222E"
+        },
+        {
+          "id": "syntaxLiteral",
+          "label": "リテラル",
+          "type": "FONT_COLOR",
+          "defaultValue": "#098658"
+        },
+        {
+          "id": "syntaxComment",
+          "label": "コメント",
+          "type": "FONT_COLOR",
+          "defaultValue": "#6E7781"
+        }
+      ]
+    }
+  ]
+}

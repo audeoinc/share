@@ -1,0 +1,19 @@
+{
+  "name": "ddl-diff-viz",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Looker Studio community visualization: BigQuery View DDL diff (GitHub compare style)",
+  "scripts": {
+    "build": "esbuild src/index.js --bundle --format=iife --minify --target=es2017 --outfile=dist/index.js && node scripts/copy-assets.mjs",
+    "build:dev": "esbuild src/index.js --bundle --format=iife --target=es2017 --outfile=dist/index.js && node scripts/copy-assets.mjs",
+    "preview": "node scripts/preview.mjs",
+    "test": "node scripts/preview.mjs --check",
+    "deploy": "./deploy.sh"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  },
+  "dependencies": {
+    "@google/dscc": "^0.3.22"
+  }
+}
