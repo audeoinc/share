@@ -40,6 +40,21 @@
 
 
 -- ---------------------------------------------------------------------
+-- 0-2. (key, ddl) の 2 列に整える
+--
+--   key の作り方で比較の軸が決まる。
+--     同じ View の 2 時点   : 'mart.v_daily_sales @ 2026-08-01'
+--     本番と開発の同じ View : 'prod.mart.v_daily_sales' / 'dev.mart.v_daily_sales'
+--   ddl_diff_viz/ のコミュニティ ビジュアライゼーションが読むのもこのビュー。
+-- ---------------------------------------------------------------------
+-- CREATE OR REPLACE VIEW `PROJECT.DATASET.v_ddl_by_key` AS
+-- SELECT
+--   FORMAT('%s.%s @ %s', table_schema, table_name, CAST(snapshot_date AS STRING)) AS key,
+--   ddl
+-- FROM `PROJECT.DATASET.view_ddl_snapshot`;
+
+
+-- ---------------------------------------------------------------------
 -- 1. 行単位 diff UDF（LCS / git diff と同じ考え方）
 --
 --    戻り値 1 行 = 表示上の 1 行。
@@ -161,29 +176,30 @@ LANGUAGE js AS r"""
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE VIEW `PROJECT.DATASET.v_view_ddl_diff_split` AS
 WITH
--- ↓↓↓ ここを自分の「2つのデータ」に差し替える ↓↓↓
+-- ↓↓↓ ここを自分の環境に差し替える ↓↓↓
+-- (key, ddl) の 2 列を持つテーブル／ビューから、比較する 2 件を key で選ぶ。
+-- ddl_diff_viz/ を使う場合はこの選択をレポート側のプルダウンで行えるので、
+-- ここでの key 決め打ちは不要（そもそも UDF 自体が不要）。
 before_side AS (
-  SELECT
-    FORMAT('%s.%s.%s', table_catalog, table_schema, table_name) AS view_key,
-    ddl
-  FROM `PROJECT.DATASET.view_ddl_snapshot`
-  WHERE snapshot_date = DATE '2026-08-01'
+  SELECT key, ddl
+  FROM `PROJECT.DATASET.v_ddl_by_key`
+  WHERE key = 'mart.v_daily_sales @ 2026-08-01'
 ),
 after_side AS (
-  SELECT
-    FORMAT('%s.%s.%s', table_catalog, table_schema, table_name) AS view_key,
-    ddl
-  FROM `PROJECT.DATASET.view_ddl_snapshot`
-  WHERE snapshot_date = DATE '2026-08-17'
+  SELECT key, ddl
+  FROM `PROJECT.DATASET.v_ddl_by_key`
+  WHERE key = 'mart.v_daily_sales @ 2026-08-17'
 ),
 -- ↑↑↑ ここまで ↑↑↑
 pair AS (
+  -- 片側しか存在しない（新規作成・削除）ケースも拾うので FULL OUTER JOIN。
+  -- 1 行 × 1 行なので結合キーは定数。
   SELECT
-    COALESCE(b.view_key, a.view_key) AS view_key,
+    CONCAT(IFNULL(b.key, '(なし)'), ' → ', IFNULL(a.key, '(なし)')) AS view_key,
     b.ddl AS before_ddl,
     a.ddl AS after_ddl
-  FROM before_side b
-  FULL OUTER JOIN after_side a USING (view_key)
+  FROM (SELECT 1 AS j, key, ddl FROM before_side) b
+  FULL OUTER JOIN (SELECT 1 AS j, key, ddl FROM after_side) a USING (j)
 ),
 diffed AS (
   SELECT

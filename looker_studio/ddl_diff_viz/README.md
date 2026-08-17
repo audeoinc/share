@@ -1,21 +1,24 @@
 # DDL Diff — Looker Studio コミュニティ ビジュアライゼーション
 
-BigQuery View の DDL を 2 つ受け取り、**ブラウザ内で差分を計算して GitHub compare 風に
-左右 2 ペインで表示する** Looker Studio のコミュニティ ビジュアライゼーション。
+BigQuery に **`key` と `ddl` の 2 列**でデータを持ち、Looker Studio のフィルタで
+**key を 2 つ選ぶと、その 2 件の DDL を GitHub compare 風に左右比較する**
+コミュニティ ビジュアライゼーション。
 
 ![プレビュー](docs/preview.png)
 
 ## 設計
 
 ```
-BigQuery                    Looker Studio (viz の iframe 内)
-──────────────────────      ────────────────────────────────────────
-1 View = 1 行                dscc.subscribeToData
-  view_key                →   ↓
-  before_ddl              →  lib/diff.js   … LCS で行差分 + 行内の単語差分
-  after_ddl               →  lib/render.js … インライン CSS の HTML を生成
-                              ↓
-                             root.innerHTML = html
+BigQuery                Looker Studio
+─────────────────       ──────────────────────────────────────────────
+key   ddl               プルダウン（フィルタ操作）で key を 2 つ選択
+────  ────────                    ↓
+k1    CREATE VIEW…      viz に (key, ddl) が 2 行だけ渡る
+k2    CREATE VIEW…                ↓
+k3    CREATE VIEW…      lib/diff.js   … LCS で行差分 + 行内の単語差分
+k4    CREATE VIEW…      lib/render.js … インライン CSS の HTML を生成
+                                  ↓
+                        root.innerHTML = html
 ```
 
 **DDL をそのまま渡し、HTML はビジュアライゼーション側で作る。** 事前生成した HTML を
@@ -24,8 +27,8 @@ DB に持たせない理由は 2 つ:
 - インライン CSS の HTML は元の DDL の **約 21 倍**に膨らむ（実測: 200 行の DDL → 201KB）。
   一方レンダリングは **20〜80ms** しかかからないので、事前生成は「20ms の CPU を節約するために
   1 セル数百 KB を運ぶ」取引になる
-- 事前生成すると比較の組み合わせが固定される。DDL を渡す方式なら、レポート側のコントロールで
-  **任意の 2 スナップショットを比較**できる
+- 事前生成すると比較の組み合わせが固定される。DDL を渡す方式なら **任意の 2 key を
+  レポート上で選んで比較**できる（key が N 件あっても事前生成は不要）
 
 差分ロジックは `diff_html/` の VS Code 拡張（`lib/diff.js` / `lib/render.js`）をそのまま
 ベンダリングしている。外部依存ゼロ・`vscode` 非依存なのでブラウザにそのまま載る。
@@ -33,20 +36,93 @@ DB に持たせない理由は 2 つ:
 できないコミュニティ ビジュアライゼーションの sandbox と相性がいい（外部 CSS を読み込む
 diff2html だと CSS の同梱が別途必要になる）。
 
+## BigQuery 側のデータ
+
+必要なのは 2 列だけ。
+
+| 列 | 内容 |
+|---|---|
+| `key` | 比較対象を一意に識別する文字列。プルダウンにそのまま並ぶので、人が読んで選べる形にする |
+| `ddl` | その key の DDL 全文 |
+
+`key` の設計次第で比較の軸が決まる（**テーブル構造は変えずに使い分けられる**）:
+
+| やりたいこと | key の例 |
+|---|---|
+| 同じ View の 2 時点を比較 | `mart.v_daily_sales @ 2026-08-01` |
+| 本番と開発の同じ View を比較 | `prod.mart.v_daily_sales` / `dev.mart.v_daily_sales` |
+| 似た View 同士を比較 | `mart.v_daily_sales` / `mart.v_daily_sales_v2` |
+
+スナップショットを日次で貯めて「同じ View の 2 時点」を比較する場合の例:
+
+```sql
+CREATE OR REPLACE VIEW `PROJECT.DATASET.v_ddl_by_key` AS
+SELECT
+  FORMAT('%s.%s @ %s', table_schema, table_name, CAST(snapshot_date AS STRING)) AS key,
+  ddl
+FROM `PROJECT.DATASET.view_ddl_snapshot`;
+```
+
+スナップショット表の作り方は [`../ddl_diff.sql`](../ddl_diff.sql) の冒頭を参照。
+
+> `key` は一意にすること。同じ `key` に複数行あると先頭の 1 件だけが使われる。
+
+## Looker Studio での設定
+
+1. レポート編集画面 → **[追加] → [コミュニティ ビジュアリゼーションとコンポーネント]**
+   → **[+ 独自の作成物を追加]** に `gs://my-bucket/viz/ddl-diff` を貼り付ける
+2. フィールドを割り当てる
+
+   | 設定項目 | 割り当てるフィールド |
+   |---|---|
+   | key | `key` |
+   | DDL | `ddl` |
+
+3. **key を 2 つ選ぶための操作を置く**
+   - **[追加] → [コントロール] → [プルダウン リスト]** を配置
+   - 「コントロール フィールド」に `key` を指定
+   - データタブの **「単一選択にする」をオフ**（＝複数選択可）にする
+   - レポート上でそのプルダウンから **key を 2 つ選択**する
+4. 必要なら、ビジュアライゼーションの**スタイル**タブで左右を調整する（下表）
+
+### スタイル設定
+
+| 項目 | 既定 | 内容 |
+|---|---|---|
+| 変更前の key / 変更後の key | 空欄 | 空欄なら渡ってきた 1 件目 / 2 件目。key を完全一致で書くと左右を固定できる |
+| 左右を入れ替える | オフ | 1 件目・2 件目の並びが意図と逆のときに使う |
+| フォント / フォントサイズ / 行の高さ | Roboto Mono / 12px / 1.35 | |
+| 変更前・変更後ペインの基本色 | `#E17B7B` / `#93AE68` | 差分行・差分文字・カラーバー・ヘッダが連動する |
+| 差分行の背景の濃さ / 差分文字の濃さ | 0.30 / 0.55 | |
+| SQL シンタックス（予約語 / リテラル / コメント） | `#CF222E` / `#098658` / `#6E7781` | |
+
+ペインの見出しには `key` がそのまま出る。2 つの key の**差異部分だけがハイライト**されるので、
+`… @ 2026-08-01` と `… @ 2026-08-17` なら日付部分が光る。
+
+### 状態ごとの表示
+
+| 状況 | 挙動 |
+|---|---|
+| key が 2 件 | 比較して表示 |
+| key が 1 件以下 | 「2 つ選択してください」と案内 |
+| key が 3 件以上 | 先頭 2 件を比較し、どれを使ったか警告表示 |
+| 「変更前/後の key」に存在しない値 | 警告を出して自動選択にフォールバック |
+| 2 件の DDL が同一 | 「変更なし」バッジ |
+
 ## ディレクトリ
 
 ```
 src/
   index.js       dscc とのつなぎ込みだけ（購読 → innerHTML）
-  viz.js         HTML 生成の中核。DOM にも dscc にも依存しない純関数
+  viz.js         key ペアの決定と HTML 生成。DOM にも dscc にも依存しない純関数
   lib/diff.js    ベンダリング（差分ロジック）
   lib/render.js  ベンダリング（HTML レンダリング）
   index.json     データ / スタイル設定の定義（Looker Studio のプロパティパネル）
   index.css      iframe 側のスクロール領域だけ
   manifest.json  デプロイ時に GCS パスを埋め込むテンプレート
 scripts/
-  preview.mjs    ローカルプレビュー兼スモークテスト
-samples/         動作確認用の before/after SQL
+  preview.mjs    ローカルプレビュー兼スモークテスト（8 シナリオ / 14 アサーション）
+samples/         動作確認用の SQL
 deploy.sh        ビルド + GCS へアップロード
 ```
 
@@ -57,7 +133,7 @@ deploy.sh        ビルド + GCS へアップロード
 ```bash
 npm install
 npm test        # スモークテスト（HTML を生成せず検証だけ）
-npm run preview # dist/preview.html を生成 → ブラウザで開いて見た目を確認
+npm run preview # dist/preview.html を生成 → ブラウザで開いて全シナリオを確認
 npm run build   # dist/index.js（bundle, 約 25KB）+ index.json + index.css
 ```
 
@@ -75,66 +151,15 @@ GCS_BUCKET=my-bucket GCS_PREFIX=viz/ddl-diff ./deploy.sh
 DDL の中身がビジュアライゼーション経由で見えるので、`allUsers` ではなく
 `domain:` での限定を推奨。
 
-## BigQuery 側のデータソース
-
-**1 View = 1 行、DDL は文字列カラム**という形にするだけ。UDF は不要。
-
-```sql
-CREATE OR REPLACE VIEW `PROJECT.DATASET.v_ddl_pairs` AS
-WITH
-before_side AS (
-  SELECT FORMAT('%s.%s.%s', table_catalog, table_schema, table_name) AS view_key, ddl
-  FROM `PROJECT.DATASET.view_ddl_snapshot`
-  WHERE snapshot_date = @before_date
-),
-after_side AS (
-  SELECT FORMAT('%s.%s.%s', table_catalog, table_schema, table_name) AS view_key, ddl
-  FROM `PROJECT.DATASET.view_ddl_snapshot`
-  WHERE snapshot_date = @after_date
-)
-SELECT
-  COALESCE(b.view_key, a.view_key) AS view_key,
-  IFNULL(b.ddl, '')                AS before_ddl,
-  IFNULL(a.ddl, '')                AS after_ddl
-FROM before_side b
-FULL OUTER JOIN after_side a USING (view_key);
-```
-
-スナップショット表の作り方は [`../ddl_diff.sql`](../ddl_diff.sql) の冒頭を参照。
-比較日をレポートから切り替えたい場合は、Looker Studio の**パラメータ**を
-`@before_date` / `@after_date` にバインドする。
-
-## Looker Studio での設定
-
-1. レポート編集画面 → **[追加] → [コミュニティ ビジュアリゼーションとコンポーネント]**
-   → **[+ 独自の作成物を追加]** に `gs://my-bucket/viz/ddl-diff` を貼り付ける
-2. フィールドを割り当てる
-   | 設定項目 | 割り当てるフィールド | 必須 |
-   |---|---|---|
-   | View 名（見出し用） | `view_key` | 任意 |
-   | 変更前 DDL | `before_ddl` | 必須 |
-   | 変更後 DDL | `after_ddl` | 必須 |
-3. 変更のあった View だけ出したいならフィルタで `before_ddl != after_ddl` を条件にする
-4. 特定の View だけ見たいならコントロール（プルダウン）で `view_key` を絞る
-
-### スタイル設定
-
-| 項目 | 既定 | 内容 |
-|---|---|---|
-| 左ペインの見出し / 右ペインの見出し | `before` / `after` | 日付などを入れると差異部分がハイライトされる |
-| 表示する View 数の上限 | 10 | 超えた分は警告を出して切り捨てる |
-| フォント / フォントサイズ / 行の高さ | Roboto Mono / 12px / 1.35 | |
-| 変更前・変更後ペインの基本色 | `#E17B7B` / `#93AE68` | 差分行・差分文字・カラーバー・ヘッダが連動する |
-| 差分行の背景の濃さ / 差分文字の濃さ | 0.30 / 0.55 | |
-| SQL シンタックス（予約語 / リテラル / コメント） | `#CF222E` / `#098658` / `#6E7781` | |
-
 ## 制約・注意
 
+- **行の順序は保証されない。** Looker Studio が viz に渡す 2 行のどちらが先かは
+  ソート設定に依存する。左右が意図と逆になったら「左右を入れ替える」か、
+  「変更前/後の key」で明示指定する
 - **行数の上限**: LCS は O(旧行数 × 新行数)。約 2000 行 × 2000 行を超えると差分計算を中止して
   案内を表示する（`src/viz.js` の `MAX_CELLS`）。ブラウザ内で走るので上限は保守的にしてある
-- **Looker Studio が viz に渡す行数・セル長には上限がある。** 巨大な DDL を大量の View 分
-  一度に渡すと切り捨てが起きうるので、まずフィルタで対象を絞る運用を前提にすること。
-  実測して足りなければ、DDL を分割格納して `viz.js` 側で結合する形に拡張する
+- **Looker Studio が viz に渡すセル長には上限がある。** 極端に長い DDL では切り捨てが
+  起きうる。実測して足りなければ、DDL を分割格納して `viz.js` 側で結合する形に拡張する
 - **外部ネットワークにアクセスできない。** sandbox iframe 内で動くため、CDN もフォントの
   外部読み込みも不可。すべてバンドル済み
 - **`innerHTML` の安全性**: `render.js` は HTML エスケープ済みの文字列を出す。加えて

@@ -5,20 +5,14 @@
       "label": "DDL",
       "elements": [
         {
-          "id": "viewKey",
-          "label": "View 名（見出し用・任意）",
-          "type": "DIMENSION",
-          "options": { "min": 0, "max": 1 }
-        },
-        {
-          "id": "beforeDdl",
-          "label": "変更前 DDL",
+          "id": "key",
+          "label": "key（View 名・スナップショット日など）",
           "type": "DIMENSION",
           "options": { "min": 1, "max": 1 }
         },
         {
-          "id": "afterDdl",
-          "label": "変更後 DDL",
+          "id": "ddl",
+          "label": "DDL",
           "type": "DIMENSION",
           "options": { "min": 1, "max": 1 }
         }
@@ -27,26 +21,26 @@
   ],
   "style": [
     {
-      "id": "labels",
-      "label": "ラベル",
+      "id": "pair",
+      "label": "比較する 2 件",
       "elements": [
         {
-          "id": "leftLabel",
-          "label": "左ペインの見出し",
+          "id": "beforeKey",
+          "label": "変更前の key（空欄なら 1 件目）",
           "type": "TEXTINPUT",
-          "defaultValue": "before"
+          "defaultValue": ""
         },
         {
-          "id": "rightLabel",
-          "label": "右ペインの見出し",
+          "id": "afterKey",
+          "label": "変更後の key（空欄なら 2 件目）",
           "type": "TEXTINPUT",
-          "defaultValue": "after"
+          "defaultValue": ""
         },
         {
-          "id": "maxViews",
-          "label": "表示する View 数の上限",
-          "type": "TEXTINPUT",
-          "defaultValue": "10"
+          "id": "swap",
+          "label": "左右を入れ替える",
+          "type": "CHECKBOX",
+          "defaultValue": false
         }
       ]
     },

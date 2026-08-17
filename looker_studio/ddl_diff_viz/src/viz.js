@@ -5,6 +5,9 @@
  * 両方から同じコードパスで呼べる。
  *
  * 入口は buildHtml(rows, style) -> HTML 文字列。
+ *
+ * データモデル: BigQuery 側は (key, ddl) の 2 列だけ。
+ * レポートのフィルタ操作で key を 2 つ選ぶと、この 2 行が渡ってくるので突き合わせる。
  */
 
 const { splitLines, build2Way } = require('./lib/diff');
@@ -12,8 +15,6 @@ const { renderFragment2 } = require('./lib/render');
 
 // LCS は O(n*m)。ブラウザ内で走るので上限を設けて、超えたら描画せず案内を出す。
 const MAX_CELLS = 4000000; // 約 2000 行 x 2000 行
-// 1 チャートに積む View 数の既定上限（style の maxViews で変更可）。
-const DEFAULT_MAX_VIEWS = 10;
 
 /** dscc の objectTransform は各フィールドを配列で返す（1 concept に複数フィールドを置けるため）。 */
 function first(v) {
@@ -44,6 +45,11 @@ function styleVal(style, id, fallback) {
 function numStyle(style, id, fallback) {
   const n = parseFloat(String(styleVal(style, id, fallback)));
   return isFinite(n) ? n : fallback;
+}
+
+function boolStyle(style, id, fallback) {
+  const v = styleVal(style, id, fallback);
+  return v === true || v === 'true';
 }
 
 /** style → render.js の configure() が受け取る opts に変換。 */
@@ -87,8 +93,8 @@ function notice(text, kind) {
   );
 }
 
-/** View 名 + 増減行数の見出し（GitHub の Files changed ヘッダー相当）。 */
-function viewHeader(label, diffRows) {
+/** 増減行数のバッジ（GitHub の Files changed ヘッダー相当）。 */
+function summaryHeader(diffRows) {
   let added = 0, deleted = 0;
   for (const r of diffRows) {
     if (r.left && r.left.kind === 'del') deleted++;
@@ -99,8 +105,8 @@ function viewHeader(label, diffRows) {
     `font:600 12px/1.6 'Roboto','Segoe UI',system-ui,sans-serif;color:${fg};background:${bg}">${esc(txt)}</span>`;
   const same = added === 0 && deleted === 0;
   return (
-    `<div style="margin:14px 0 6px;display:flex;align-items:center;flex-wrap:wrap">` +
-    `<span style="font:600 13px/1.6 'Roboto','Segoe UI',system-ui,sans-serif;color:#1A1A1A">${esc(label)}</span>` +
+    `<div style="margin:10px 0 6px;display:flex;align-items:center;flex-wrap:wrap">` +
+    `<span style="font:600 13px/1.6 'Roboto','Segoe UI',system-ui,sans-serif;color:#1A1A1A">差分</span>` +
     (same ? badge('変更なし', '#57606A', '#EAEEF2')
           : badge('+' + added, '#1A7F37', '#DAFBE1') + badge('−' + deleted, '#B35900', '#FFEBE9')) +
     `</div>`
@@ -108,73 +114,104 @@ function viewHeader(label, diffRows) {
 }
 
 /**
- * 1 View 分の差分 HTML。
- * before/after のどちらかが空（View の新規作成・削除）でも動く。
+ * 渡された行から比較する 2 件を決める。
+ *
+ * - スタイル設定で「変更前の key」「変更後の key」が指定されていれば、それを完全一致で探す
+ * - 未指定の側は、まだ使っていない行を先頭から詰める
+ * - 「左右を入れ替え」がオンなら最後に入れ替える
+ *
+ * @returns {{before: Object|null, after: Object|null, warnings: string[]}}
  */
-function renderOne(beforeDdl, afterDdl, leftLabel, rightLabel, opts, showHeader, headerLabel) {
-  const a = beforeDdl ? splitLines(beforeDdl) : [];
-  const b = afterDdl ? splitLines(afterDdl) : [];
+function pickPair(rows, style) {
+  const items = rows.map((r) => ({ key: str(r.key), ddl: str(r.ddl) }));
+  const wantBefore = String(styleVal(style, 'beforeKey', '')).trim();
+  const wantAfter = String(styleVal(style, 'afterKey', '')).trim();
+  const warnings = [];
 
-  if (a.length === 0 && b.length === 0) {
-    return notice('DDL が空です。フィールドの割り当てを確認してください。');
+  const findIdx = (k) => items.findIndex((i) => i.key === k);
+
+  const usedIdx = new Set();
+  let beforeIdx = -1, afterIdx = -1;
+
+  if (wantBefore) {
+    beforeIdx = findIdx(wantBefore);
+    if (beforeIdx < 0) warnings.push(`「変更前の key」に指定された "${wantBefore}" が見つかりません。`);
+    else usedIdx.add(beforeIdx);
   }
-  if ((a.length + 1) * (b.length + 1) > MAX_CELLS) {
-    return notice(
-      `行数が多すぎるため差分計算を中止しました（${a.length} 行 × ${b.length} 行）。` +
-      'BigQuery 側で事前に差分を取るか、対象を絞ってください。',
-      'warn'
-    );
+  if (wantAfter) {
+    afterIdx = findIdx(wantAfter);
+    if (afterIdx < 0) warnings.push(`「変更後の key」に指定された "${wantAfter}" が見つかりません。`);
+    else if (afterIdx === beforeIdx) {
+      warnings.push('「変更前の key」と「変更後の key」に同じ値が指定されています。');
+      afterIdx = -1;
+    } else usedIdx.add(afterIdx);
   }
 
-  const diffRows = build2Way(a, b);
-  const head = showHeader ? viewHeader(headerLabel, diffRows) : '';
-  return head + renderFragment2(leftLabel, rightLabel, diffRows, opts);
+  // 未指定・未解決の側を、まだ使っていない行で先頭から埋める
+  for (let i = 0; i < items.length; i++) {
+    if (usedIdx.has(i)) continue;
+    if (beforeIdx < 0) { beforeIdx = i; usedIdx.add(i); continue; }
+    if (afterIdx < 0) { afterIdx = i; usedIdx.add(i); continue; }
+    break;
+  }
+
+  let before = beforeIdx >= 0 ? items[beforeIdx] : null;
+  let after = afterIdx >= 0 ? items[afterIdx] : null;
+
+  if (boolStyle(style, 'swap', false)) {
+    const t = before; before = after; after = t;
+  }
+  return { before, after, warnings, total: items.length };
 }
 
 /**
- * dscc の objectTransform 形式の行配列を受け取り、innerHTML に流し込む HTML を返す。
+ * dscc の objectTransform 形式の行配列（key, ddl の 2 列）を受け取り、
+ * innerHTML に流し込む HTML を返す。
  *
  * @param {Array<Object>} rows  data.tables.DEFAULT
  * @param {Object} style        data.style
  * @returns {string} HTML
  */
 function buildHtml(rows, style) {
-  const opts = toRenderOpts(style);
-  const leftLabel = String(styleVal(style, 'leftLabel', 'before'));
-  const rightLabel = String(styleVal(style, 'rightLabel', 'after'));
-  const maxViews = Math.max(1, Math.round(numStyle(style, 'maxViews', DEFAULT_MAX_VIEWS)));
-
   if (!rows || rows.length === 0) {
-    return notice('データがありません。「変更前 DDL」「変更後 DDL」にフィールドを割り当ててください。');
+    return notice('データがありません。「key」「DDL」にフィールドを割り当ててください。');
   }
 
-  const shown = rows.slice(0, maxViews);
-  const multi = rows.length > 1;
-  let out = '';
+  const { before, after, warnings, total } = pickPair(rows, style);
+  let out = warnings.map((w) => notice(w, 'warn')).join('');
 
-  if (rows.length > maxViews) {
+  if (!before || !after) {
+    return out + notice(
+      `比較対象が ${total} 件しかありません。フィルタ操作（プルダウン）で key を 2 つ選択してください。`,
+      'warn'
+    );
+  }
+  if (total > 2) {
     out += notice(
-      `${rows.length} 件のうち先頭 ${maxViews} 件を表示しています。` +
-      'スタイル設定の「表示する View 数の上限」を上げるか、フィルタで絞り込んでください。',
+      `key が ${total} 件選択されています。"${before.key}" と "${after.key}" を比較しています。` +
+      '対象を変えるにはフィルタで 2 件に絞るか、スタイル設定で key を明示してください。',
       'warn'
     );
   }
 
-  for (const row of shown) {
-    const before = str(row.beforeDdl);
-    const after = str(row.afterDdl);
-    const key = str(row.viewKey);
-    out += renderOne(
-      before,
-      after,
-      leftLabel,
-      rightLabel,
-      opts,
-      multi || key !== '',
-      key || '(View 名フィールド未設定)'
+  const a = before.ddl ? splitLines(before.ddl) : [];
+  const b = after.ddl ? splitLines(after.ddl) : [];
+
+  if (a.length === 0 && b.length === 0) {
+    return out + notice('DDL が空です。フィールドの割り当てを確認してください。');
+  }
+  if ((a.length + 1) * (b.length + 1) > MAX_CELLS) {
+    return out + notice(
+      `行数が多すぎるため差分計算を中止しました（${a.length} 行 × ${b.length} 行）。`,
+      'warn'
     );
   }
-  return out;
+
+  const opts = toRenderOpts(style);
+  const diffRows = build2Way(a, b);
+  // ペイン見出しには key をそのまま出す。render.js 側が 2 つの見出しの
+  // 差異部分（日付など）をハイライトしてくれる。
+  return out + summaryHeader(diffRows) + renderFragment2(before.key, after.key, diffRows, opts);
 }
 
-module.exports = { buildHtml, toRenderOpts, styleVal, MAX_CELLS };
+module.exports = { buildHtml, pickPair, toRenderOpts, styleVal, MAX_CELLS };
