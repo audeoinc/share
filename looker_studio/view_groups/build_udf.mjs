@@ -395,6 +395,11 @@ const sql = `-- ================================================================
 --   substitutable 同一ロジックとみなす際に置換を許すトークン種別
 --                 既定 ["ident","quoted"]。リテラル差も無視するなら
 --                 ["ident","quoted","number","string"]
+--   suffixAware   比較の前に自分の suffix を伏せ字にする（既定 true）。
+--                 リテラルに入った suffix でグループが割れるのを防ぐ
+--   includeUnmatched suffix を認識できなかった View を単独の base として
+--                 表示する（既定 true）。false で従来どおり除外
+--   stripOptions  OPTIONS( … ) 句を落としてから比較する（既定 true）
 --   layout        'auto'（既定・3 グループ以上はタブ）/ 'panes' / 'tabs'
 --   mode          'inline'（既定）/ 'class'（CSS は VIEW_GROUP_CSS へ）/ 'embed'
 --   fontSize / lineHeight / colors / diffLineOpacity / diffCharOpacity / syntax
