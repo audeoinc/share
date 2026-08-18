@@ -17,9 +17,8 @@ import { createRequire } from 'node:module';
 const here = dirname(fileURLToPath(import.meta.url));
 const libDir = join(here, '..', 'ddl_diff_viz', 'src', 'lib');
 
-// BigQuery のインライン コード ブロブは 32 KB が上限とされている
-// （レガシー SQL のドキュメントに明記。標準 SQL の永続 UDF に同じ値が効くかは
-// 未確認だが、またぐ大きさで出荷したくないので最小化して余裕を持たせる）。
+// BigQuery のインライン コード ブロブは 32 KB までに制限される（標準 SQL でも同じ）。
+// 余裕を持たせて 30 KB を閾値にし、超えたら生成を失敗させる。
 const SIZE_LIMIT = 30 * 1024;
 
 let esbuild = null;
@@ -277,7 +276,7 @@ const kb = (s) => (Buffer.byteLength(s) / 1024).toFixed(1) + ' KB';
 console.log(`
 ${checks.length - failed}/${checks.length} passed
 
-UDF 本体のサイズ（インライン上限 32 KB に対して）
+UDF 本体のサイズ（インライン上限 32 KB）
   DIFF_HTML  素 ${kb(htmlRaw)} → ${esbuild ? '最小化 ' + kb(htmlBody) : '最小化なし'}
   DIFF_CSS   素 ${kb(cssRaw)} → ${esbuild ? '最小化 ' + kb(cssBody) : '最小化なし'}
 
@@ -303,7 +302,7 @@ const header = `-- =============================================================
 --    元コードは diff_html/ の VS Code 拡張の lib/diff.js / lib/render.js。
 --    再生成: node looker_studio/templated_record/build_udf.mjs
 --    本体は esbuild で最小化してある（インラインのコード ブロブは
---    32 KB が上限とされているため）。
+--    32 KB までに制限されるため）。
 --
 -- PROJECT / DATASET は自分の環境に置換すること。
 -- =====================================================================

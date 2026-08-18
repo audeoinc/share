@@ -4,13 +4,18 @@
 //   node build_udf.mjs --check  -> 生成せず、Node 上で UDF 本体を実行して検証だけ
 //
 // 生成するのは 2 つ:
-//   VIEW_GROUP_HTML(views ARRAY<STRUCT<view_name STRING, ddl STRING>>, options_json STRING)
+//   VIEW_GROUP_INFO(views ARRAY<STRUCT<view_name STRING, ddl STRING>>, options_json STRING)
+//     -> STRUCT<view_count, group_count, group_labels, group_sizes, suffixes,
+//               unmatched_count, html>
 //   VIEW_GROUP_CSS(options_json STRING)
 //
+// HTML とメタデータ（グループ数・ラベル）を 1 回の呼び出しで返すのは、
+// 事前生成テーブルに両方入れたいため。分けると同じ解析を 2 回走らせることになる。
+// 数値を FLOAT64 で返しているのは JS UDF が INT64 を扱えないため。SQL 側で CAST する。
+//
 // サイズについて:
-//   BigQuery の UDF はインラインのコード ブロブに上限があり、レガシー SQL の
-//   ドキュメントには 32 KB と明記されている（標準 SQL の永続 UDF に同じ値が
-//   効くかは確認できていない）。素の連結は 45 KB あって上限をまたぐため、
+//   BigQuery の UDF はインラインのコード ブロブが 32 KB までに制限される
+//   （標準 SQL でも同じ）。素の連結は約 45 KB あって確実に弾かれるため、
 //   esbuild で最小化してから埋め込む。生成時に閾値を超えたら失敗させて、
 //   BigQuery に弾かれるものを出荷しないようにしている。
 import { readFile, writeFile } from 'node:fs/promises';
@@ -102,33 +107,63 @@ function __applyMode(html, mode) {
 }
 `.trim();
 
-// --- VIEW_GROUP_HTML のドライバ ----------------------------------------
-const htmlDriver = `
+// --- VIEW_GROUP_INFO のドライバ ----------------------------------------
+const infoDriver = `
+function __empty(msg) {
+  return {
+    view_count: 0, group_count: 0, group_labels: [], group_sizes: [],
+    suffixes: [], unmatched_count: 0, html: __notice(msg)
+  };
+}
+
 function __run(views, options_json) {
   var opts = __opts(options_json);
-  if (!views || views.length === 0) return __notice('View が渡されていません。');
+  if (!views || views.length === 0) return __empty('View が渡されていません。');
 
   var rows = [];
   for (var i = 0; i < views.length; i++) {
-    var v = views[i];
-    if (!v) continue;
-    rows.push({ view_name: v.view_name, ddl: v.ddl });
+    if (views[i]) rows.push({ view_name: views[i].view_name, ddl: views[i].ddl });
   }
 
   var res = analyze(rows, opts);
   if (res.bases.length === 0) {
-    return __notice(
-      views.length + ' 件すべて suffix を認識できませんでした。' +
+    var e = __empty(rows.length + ' 件すべて suffix を認識できませんでした。' +
       'suffixParts / suffixList / suffixPattern の指定を確認してください。');
+    e.unmatched_count = res.unmatched.length;
+    return e;
   }
 
-  // 呼び出し側で base ごとに束ねている前提だが、混ざっていても全部描く
+  // 呼び出し側で base ごとに束ねている前提。混ざっていても全部描く。
   var html = '';
-  for (var b = 0; b < res.bases.length; b++) html += renderBase(res.bases[b], opts);
+  var labels = [];
+  var sizes = [];
+  var sufs = [];
+  var viewCount = 0;
+  var groupCount = 0;
+  for (var b = 0; b < res.bases.length; b++) {
+    var bs = res.bases[b];
+    html += renderBase(bs, opts);
+    viewCount += bs.viewCount;
+    groupCount += bs.groupCount;
+    for (var g = 0; g < bs.groups.length; g++) {
+      labels.push(bs.groups[g].suffixes.join(', '));
+      sizes.push(bs.groups[g].members.length);
+      for (var k = 0; k < bs.groups[g].suffixes.length; k++) sufs.push(bs.groups[g].suffixes[k]);
+    }
+  }
   if (res.unmatched.length > 0) {
     html += __notice('suffix を認識できなかった View が ' + res.unmatched.length + ' 件あります。');
   }
-  return __applyMode(html, opts.mode || 'inline');
+
+  return {
+    view_count: viewCount,
+    group_count: groupCount,
+    group_labels: labels,
+    group_sizes: sizes,
+    suffixes: sufs.sort(),
+    unmatched_count: res.unmatched.length,
+    html: __applyMode(html, opts.mode || 'inline')
+  };
 }
 
 return __run(views, options_json);
@@ -198,19 +233,20 @@ function pack(driver, label) {
   return { code, raw: raw.length, min: code.length, label };
 }
 
-const htmlPack = pack(htmlDriver, 'VIEW_GROUP_HTML');
+const infoPack = pack(infoDriver, 'VIEW_GROUP_INFO');
 const cssPack = pack(cssDriver, 'VIEW_GROUP_CSS');
 
 // --- 検証: 最小化した本体をそのまま実行する -----------------------------
 const S = require(join(here, 'sample_views.js'));
-const VIEW_GROUP_HTML = new Function('views', 'options_json', htmlPack.code);
+const VIEW_GROUP_INFO = new Function('views', 'options_json', infoPack.code);
 const VIEW_GROUP_CSS = new Function('options_json', cssPack.code);
 
 const views = S.sampleRows().map((r) => ({ view_name: r.view_name, ddl: r.ddl }));
 const OPTS = JSON.stringify({ suffixParts: S.SUFFIX_PARTS });
-const html = VIEW_GROUP_HTML(views, OPTS);
-const classed = VIEW_GROUP_HTML(views, JSON.stringify({ suffixParts: S.SUFFIX_PARTS, mode: 'class' }));
-const embed = VIEW_GROUP_HTML(views, JSON.stringify({ suffixParts: S.SUFFIX_PARTS, mode: 'embed' }));
+const info = VIEW_GROUP_INFO(views, OPTS);
+const html = info.html;
+const classed = VIEW_GROUP_INFO(views, JSON.stringify({ suffixParts: S.SUFFIX_PARTS, mode: 'class' })).html;
+const embed = VIEW_GROUP_INFO(views, JSON.stringify({ suffixParts: S.SUFFIX_PARTS, mode: 'embed' })).html;
 const css = VIEW_GROUP_CSS(JSON.stringify({ suffixParts: S.SUFFIX_PARTS }));
 
 const text = html.replace(/<[^>]*>/g, '');
@@ -227,17 +263,25 @@ const checks = [
   ['VIEW_GROUP_CSS が markup の全クラスを網羅', used.every((c) => defined.has(c))],
   ['VIEW_GROUP_CSS に chrome の規則が入る', css.includes('.vg-tablist') && css.includes('.vg-r1:checked')],
   ['embed モードは style ブロックを含む', embed.includes('<style>') && embed.includes('.vg-panel')],
-  ['空入力で案内を返す', VIEW_GROUP_HTML([], OPTS).includes('View が渡されていません')],
+  ['メタデータ: View 数', info.view_count === 9],
+  ['メタデータ: グループ数', info.group_count === 3],
+  ['メタデータ: グループ ラベル',
+    info.group_labels.join(' | ') === 'abjp, abuk, abus | cdjp, cduk, cdus | efjp, efuk, efus'],
+  ['メタデータ: グループの規模', info.group_sizes.join(',') === '3,3,3'],
+  ['メタデータ: suffix 一覧', info.suffixes.length === 9 && info.suffixes[0] === 'abjp'],
+  ['メタデータ: 未認識は 0', info.unmatched_count === 0],
+  ['空入力で案内を返す',
+    VIEW_GROUP_INFO([], OPTS).html.includes('View が渡されていません')],
   ['suffix 不一致で案内を返す',
-    VIEW_GROUP_HTML([{ view_name: 'no_suffix_here', ddl: 'SELECT 1' }], OPTS)
-      .includes('suffix を認識できませんでした')],
+    VIEW_GROUP_INFO([{ view_name: 'no_suffix_here', ddl: 'SELECT 1' }], OPTS)
+      .html.includes('suffix を認識できませんでした')],
   ['壊れた options_json でも落ちない',
-    typeof VIEW_GROUP_HTML(views, '{ broken') === 'string'],
+    typeof VIEW_GROUP_INFO(views, '{ broken').html === 'string'],
   ['script タグを含まない', !/<script/i.test(html)],
 ];
 
 // サイズ検証
-for (const p of [htmlPack, cssPack]) {
+for (const p of [infoPack, cssPack]) {
   const size = Buffer.byteLength(p.code);
   checks.push([`${p.label} が ${(SIZE_LIMIT / 1024).toFixed(0)} KB 以内`, size <= SIZE_LIMIT]);
 }
@@ -250,8 +294,8 @@ for (const [name, ok] of checks) {
 
 const kb = (n) => (n / 1024).toFixed(1) + ' KB';
 console.log(`\n${checks.length - failed}/${checks.length} passed\n`);
-console.log('UDF 本体のサイズ（インライン上限 32 KB に対して）');
-for (const p of [htmlPack, cssPack]) {
+console.log('UDF 本体のサイズ（インライン上限 32 KB）');
+for (const p of [infoPack, cssPack]) {
   console.log(`  ${p.label.padEnd(17)} 素 ${kb(p.raw).padStart(8)} → ` +
     (p.min === null ? '最小化なし' : `最小化 ${kb(p.min).padStart(8)}`) +
     `  （上限比 ${(Buffer.byteLength(p.code) / SIZE_LIMIT * 100).toFixed(0)}%）`);
@@ -269,19 +313,29 @@ const sql = `-- ================================================================
 -- ※ このファイルは build_udf.mjs が生成する。直接編集しないこと。
 --    再生成: node looker_studio/view_groups/build_udf.mjs
 --    本体は esbuild で最小化してある（インラインのコード ブロブは
---    32 KB が上限とされているため。素の連結は約 45 KB で上限をまたぐ）。
+--    32 KB までに制限されるため。素の連結は約 45 KB で確実に弾かれる）。
 --
 -- PROJECT / DATASET は自分の環境に置換すること。
 -- =====================================================================
 
 
 -- ---------------------------------------------------------------------
--- VIEW_GROUP_HTML — base 1 件分の View 群を渡すと比較 HTML を返す
+-- VIEW_GROUP_INFO — base 1 件分の View 群を渡すと、比較 HTML とメタデータを返す
 --
 -- 引数:
 --   views         ARRAY<STRUCT<view_name STRING, ddl STRING>>
 --                 同じ base を持つ View を全部渡す
 --   options_json  NULL または '{}' で既定
+--
+-- 戻り値 STRUCT:
+--   view_count       FLOAT64        渡された View 数
+--   group_count      FLOAT64        ロジックのグループ数（1 なら全部同一＝正常）
+--   group_labels     ARRAY<STRING>  ["abjp, abuk, abus", …] ペイン見出し
+--   group_sizes      ARRAY<FLOAT64> 各グループの View 数
+--   suffixes         ARRAY<STRING>  認識した suffix 一覧
+--   unmatched_count  FLOAT64        suffix を認識できなかった数
+--   html             STRING         比較 HTML
+--   （数値が FLOAT64 なのは JS UDF が INT64 を扱えないため。SQL 側で CAST する）
 --
 -- options_json のキー:
 --   suffixParts   [["ab","cd","ef"],["jp","us","uk"]] のような区分の並び
@@ -293,19 +347,22 @@ const sql = `-- ================================================================
 --   layout        'auto'（既定・3 グループ以上はタブ）/ 'panes' / 'tabs'
 --   mode          'inline'（既定）/ 'class'（CSS は VIEW_GROUP_CSS へ）/ 'embed'
 --   fontSize / lineHeight / colors / diffLineOpacity / diffCharOpacity / syntax
---
--- 例:
---   VIEW_GROUP_HTML(
---     ARRAY_AGG(STRUCT(view_name, ddl) ORDER BY view_name),
---     '{"suffixParts":[["ab","cd","ef"],["jp","us","uk"]],"mode":"class"}')
 -- ---------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION \`PROJECT.DATASET.VIEW_GROUP_HTML\`(
+CREATE OR REPLACE FUNCTION \`PROJECT.DATASET.VIEW_GROUP_INFO\`(
   views ARRAY<STRUCT<view_name STRING, ddl STRING>>,
   options_json STRING
 )
-RETURNS STRING
+RETURNS STRUCT<
+  view_count      FLOAT64,
+  group_count     FLOAT64,
+  group_labels    ARRAY<STRING>,
+  group_sizes     ARRAY<FLOAT64>,
+  suffixes        ARRAY<STRING>,
+  unmatched_count FLOAT64,
+  html            STRING
+>
 LANGUAGE js AS r"""
-${htmlPack.code}
+${infoPack.code}
 """;
 
 

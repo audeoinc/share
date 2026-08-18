@@ -122,8 +122,59 @@ node preview.mjs          # dist/preview.html を生成して検証（19 アサ�
 node preview.mjs --check  # 生成せず検証だけ
 ```
 
+## BigQuery UDF（view_group_html.sql）
+
+```bash
+node build_udf.mjs          # 検証して view_group_html.sql を生成
+node build_udf.mjs --check  # 生成せず検証だけ（21 アサーション）
+```
+
+| 関数 | 戻り値 |
+|---|---|
+| `VIEW_GROUP_INFO(views, options_json)` | `STRUCT<view_count, group_count, group_labels, group_sizes, suffixes, unmatched_count, html>` |
+| `VIEW_GROUP_CSS(options_json)` | `mode='class'` でテンプレートに貼る CSS |
+
+HTML とメタデータを 1 回の呼び出しで返すのは、事前生成テーブルに両方入れたいため。
+分けると同じ解析を 2 回走らせることになる。数値が `FLOAT64` なのは JS UDF が
+`INT64` を扱えないから（SQL 側で `CAST`）。
+
+**インラインのコード ブロブは 32 KB までに制限される（標準 SQL でも同じ）。**
+素の連結は約 45 KB あって確実に弾かれるので、esbuild で最小化してから埋め込む。
+
+```
+VIEW_GROUP_INFO  素 41.7 KB → 最小化 24.6 KB（上限比 82%）
+VIEW_GROUP_CSS   素 41.5 KB → 最小化 24.3 KB（上限比 81%）
+```
+
+生成時に 30 KB を超えたら失敗させ、BigQuery に弾かれるものを出荷しない。
+最小化した本体はそのまま Node で実行して検証しているので、最小化で壊れていない
+ことも毎回確認できる。将来この枠に収まらなくなったら
+`OPTIONS(library=["gs://…"])` に切り替える（BigQuery はジョブの認証情報で読むので
+**非公開バケットで構わない**）。
+
+> esbuild の `transformSync` に `format` を渡すとラップされて未使用のトップレベル
+> 関数が落ちる（45 KB が 5.6 KB になり関数が消える）。`format` は指定しないこと。
+
+## 事前生成テーブル（build_table.sql）
+
+Looker の操作のたびに UDF を回すのは重いので、スケジュールドクエリで作り置きする。
+`INFORMATION_SCHEMA` の中身は View をデプロイしたときしか変わらない。
+
+```
+view_logic_diff  PARTITION BY snapshot_date CLUSTER BY base
+  base / view_count / group_count / has_multiple
+  group_labels / group_sizes / suffixes / unmatched_count / diff_html
+```
+
+Looker Studio は `v_view_logic_diff_latest` を読むだけ。`base` をプルダウンにして
+`diff_html` を Templated Record に渡す。パラメータもカスタムクエリも UDF も不要。
+
+パーティションに日付を積むので**履歴が残る**。「いつグループ構成が変わったか」を
+後から追えるので、ロジック逸脱の検知に使える（`build_table.sql` の末尾に例あり）。
+
+> `build_table.sql` の `REGEXP_EXTRACT` と UDF の `suffixParts` は**必ず揃える**こと。
+> ズレると base の束ね方と UDF の解析が食い違う。
+
 ## 未実装
 
-- BigQuery UDF 化（`templated_record/build_udf.mjs` と同じ生成方式）
-- `INFORMATION_SCHEMA` から事前生成テーブルを作る SQL
-- Looker Studio への配線
+- Looker Studio への配線（テーブルができれば読むだけ）
