@@ -113,6 +113,54 @@ checks.push(['OPTIONS の値に括弧や引用符があっても対応する ) �
     'CREATE VIEW `a` OPTIONS(x="a)b(c", y=[(1,2)]) AS SELECT 1'))
     .map((t) => t.text).join('') === 'CREATE VIEW `a` AS SELECT 1']);
 
+// suffix の伏せ字（suffixAware）
+// suffix はデータセット名・テーブル名・リテラルのどこにでも現れる。
+// 比較の前にその View 自身の suffix を伏せ字にすると、suffix 由来の差は消え、
+// 残った差＝本当のロジック差になる。
+const spread = S.allSuffixes().map((e) => ({
+  view_name: `v_spread_${e.suffix}`,
+  ddl: `SELECT id, '${e.suffix}' AS region\n` +
+       `FROM \`p.mart_${e.suffix}.orders_${e.suffix}\`\n` +
+       `WHERE src = 'load_${e.suffix}'`,
+}));
+checks.push(['suffix はデータセット・テーブル・リテラルのどこにあっても吸収する',
+  A.analyze(spread, OPTS).bases[0].groupCount === 1]);
+checks.push(['suffixAware:false なら suffix 入りリテラルで割れる',
+  A.analyze(spread, { ...OPTS, suffixAware: false }).bases[0].groupCount === 9]);
+
+// 伏せ字はロジック差まで消さない
+const literalLogic = [
+  { view_name: 'v_y_abjp', ddl: "SELECT a FROM t_abjp WHERE status = 'A'" },
+  { view_name: 'v_y_abus', ddl: "SELECT a FROM t_abus WHERE status = 'A'" },
+  { view_name: 'v_y_cdjp', ddl: "SELECT a FROM t_cdjp WHERE status = 'B'" },
+];
+const ll = A.analyze(literalLogic, OPTS).bases[0];
+checks.push(['suffix 以外のリテラル差はロジック差として残る', ll.groupCount === 2]);
+checks.push(['ロジックが同じ 2 本は同じグループに入る',
+  ll.groups.some((g) => g.suffixes.join(',') === 'abjp,abus')]);
+
+const masked = A.maskSuffix(A.tokenizeSql('SELECT x FROM t_abjp'), 'abjp');
+checks.push(['maskSuffix はトークン内の suffix だけを置き換える',
+  masked.map((t) => t.text).join('').includes('t_') &&
+  !masked.map((t) => t.text).join('').includes('abjp')]);
+checks.push(['maskSuffix は suffix を含まないトークンをそのまま返す',
+  masked.filter((t) => t.kind === 'keyword').every((t) => t.text === 'SELECT' || t.text === 'FROM')]);
+
+// SCHEMATA 由来の suffix 一覧（suffixSource: "schemata"）
+// 一覧が実行時に決まるだけで、抽出の意味は suffixParts と同じでなければならない。
+const listOpts = { suffixList: ['abjp', 'cduk', 'jp'] };
+checks.push(['suffixList でも base を切り出せる',
+  A.extractSuffix('v_daily_sales_abjp', listOpts).base === 'v_daily_sales']);
+checks.push(['suffixList は長い一致を優先する',
+  A.extractSuffix('v_x_cduk', listOpts).suffix === 'cduk']);
+checks.push(['suffixList にない末尾は対象外',
+  A.extractSuffix('v_daily_sales_efus', listOpts) === null]);
+checks.push(['suffixList でも suffixParts と同じグループ分けになる',
+  A.analyze(rows, { suffixList: A.expandSuffixParts(S.SUFFIX_PARTS) })
+    .bases.find((b) => b.base === S.BASE_VIEW)
+    .groups.map((g) => g.suffixes.join(',')).join('|') ===
+  sales.groups.map((g) => g.suffixes.join(',')).join('|')]);
+
 // トークナイザ
 const tk = A.tokenizeSql("SELECT `a.b_c`, 'x y', 12.5 -- memo\nFROM t");
 checks.push(['バッククォート識別子が 1 トークン',

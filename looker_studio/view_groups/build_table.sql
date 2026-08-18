@@ -14,6 +14,11 @@
 --
 -- 前提: view_group_html.sql で VIEW_GROUP_INFO / VIEW_GROUP_CSS を作成済み。
 -- PROJECT / DATASET / TARGET_DATASET は自分の環境に置換すること。
+--
+-- suffix の出どころ: INFORMATION_SCHEMA.SCHEMATA（データセット名）
+--   _([A-Za-z]{4})$ に一致したデータセット名の末尾を suffix として使う。
+--   View 名の切り分けも UDF に渡す一覧も、この結果から実行時に決まる。
+--   つまり suffix が増えても SQL の修正は要らない。
 -- =====================================================================
 
 
@@ -53,6 +58,31 @@ WHERE snapshot_date = CURRENT_DATE('Asia/Tokyo');
 
 INSERT INTO `PROJECT.DATASET.view_logic_diff`
 WITH
+-- データセット名から suffix を集める。手で一覧を持たないための CTE。
+--   mart_abjp / raw_cduk → abjp / cduk
+-- region は自分の環境に合わせる（region-us / region-asia-northeast1 など）。
+-- ここが 0 件だと base が全部 NULL になり、結果も 0 件になる。
+suffixes AS (
+  SELECT DISTINCT REGEXP_EXTRACT(schema_name, r'_([A-Za-z]{4})$') AS suffix
+  FROM `PROJECT.region-us.INFORMATION_SCHEMA.SCHEMATA`
+  WHERE REGEXP_CONTAINS(schema_name, r'_([A-Za-z]{4})$')
+),
+-- サンプル用: データセットを 1 つにまとめた環境で試すときは、上の suffixes を
+-- そのまま使うと 0 件になる。その場合だけ次で置き換える。
+-- suffixes AS (
+--   SELECT suffix FROM UNNEST(['abjp', 'abuk', 'abus', 'cdjp', 'cduk', 'cdus', 'efjp', 'efuk', 'efus']) AS suffix
+-- ),
+-- UDF に渡す設定。suffixList だけ実行時に決まる。
+opts AS (
+  SELECT CONCAT(
+    '{"suffixList":',
+    TO_JSON_STRING(ARRAY(SELECT suffix FROM suffixes ORDER BY suffix)),
+    -- ↓ suffix_config.json から生成
+    ',"mode":"class"',
+    '}'
+  ) AS options_json
+),
+
 -- ↓↓↓ 対象の View を集める。データセットが複数あるなら UNION ALL で足す ↓↓↓
 --
 -- TABLES.ddl ではなく VIEWS.view_definition を使う。
@@ -67,12 +97,19 @@ src AS (
 ),
 -- ↑↑↑ ここまで ↑↑↑
 keyed AS (
+  -- suffix 一覧との ENDS_WITH で base を切る。
+  -- 複数一致したら長いほうを採る（短い suffix が長い suffix の末尾に含まれる場合の対策）。
+  -- LEFT JOIN なので suffix の付かない View も 1 行残り、base は NULL になる。
   SELECT
-    view_name,
-    ddl,
-    -- suffix_config.json から生成。UDF に渡す設定と必ず一致する。
-    REGEXP_EXTRACT(view_name, r'^(.*)_(?:ab|cd|ef)(?:jp|us|uk)$') AS base
+    src.view_name,
+    src.ddl,
+    SUBSTR(src.view_name, 1, LENGTH(src.view_name) - LENGTH(s.suffix) - 1) AS base
   FROM src
+  LEFT JOIN suffixes AS s
+    ON ENDS_WITH(src.view_name, '_' || s.suffix)
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY src.view_name ORDER BY LENGTH(s.suffix) DESC
+  ) = 1
 )
 SELECT
   CURRENT_DATE('Asia/Tokyo')          AS snapshot_date,
@@ -90,22 +127,8 @@ FROM (
     base,
     `PROJECT.DATASET.VIEW_GROUP_INFO`(
       ARRAY_AGG(STRUCT(view_name, ddl) ORDER BY view_name),
-      -- suffix_config.json から生成
-      '''{
-          "suffixParts": [
-            [
-              "ab",
-              "cd",
-              "ef"
-            ],
-            [
-              "jp",
-              "us",
-              "uk"
-            ]
-          ],
-          "mode": "class"
-        }'''
+      -- suffixes CTE から組み立てた設定（全行で同じ値）
+      (SELECT options_json FROM opts)
     ) AS info
   FROM keyed
   WHERE base IS NOT NULL
@@ -128,18 +151,6 @@ WHERE snapshot_date = (
 -- 4. テンプレートに貼る CSS（1 回取れば十分。template_style.html と同じ）
 -- ---------------------------------------------------------------------
 -- SELECT `PROJECT.DATASET.VIEW_GROUP_CSS`('''{
-          "suffixParts": [
-            [
-              "ab",
-              "cd",
-              "ef"
-            ],
-            [
-              "jp",
-              "us",
-              "uk"
-            ]
-          ],
           "mode": "class"
         }''');
 
@@ -152,6 +163,11 @@ WHERE snapshot_date = (
 --        LENGTH(diff_html) AS html_len
 -- FROM `PROJECT.DATASET.v_view_logic_diff_latest`
 -- ORDER BY base;
+
+-- 認識した suffix の確認（0 件なら region か schemataPattern を疑う）
+-- SELECT schema_name, REGEXP_EXTRACT(schema_name, r'_([A-Za-z]{4})$') AS suffix
+-- FROM `PROJECT.region-us.INFORMATION_SCHEMA.SCHEMATA`
+-- ORDER BY schema_name;
 
 -- ロジックが割れている base だけ見る（＝要確認のもの）
 -- SELECT base, group_count, group_labels

@@ -6,7 +6,7 @@ SQL ロジックが同じもの同士でグループ化**する。グループ�
 
 ```
 v_daily_sales_abjp … v_daily_sales_efuk （9 本）
-        ↓ suffix 抽出   {ab,cd,ef} x {jp,us,uk}
+        ↓ suffix 抽出   データセット名の末尾から自動で拾う
   base = v_daily_sales / suffix = abjp …
         ↓ ロジックでグループ化（α 等価）
   [abjp, abuk, abus]   [cdjp, cduk, cdus]   [efjp, efuk, efus]
@@ -28,6 +28,32 @@ suffix の文字列置換に依存しないので、**参照テーブル以外�
 同じグループにまとまる。
 
 α 等価は推移的（全単射の合成）なので、グループ判定は代表 1 本との比較で足りる。
+
+### 比較の前に suffix を伏せ字にする（suffixAware・既定 on）
+
+suffix はいろいろな場所に現れる。データセット名（`mart_abjp`）、テーブル名
+（`orders_abjp`）、リテラル（`'abjp' AS region`）。識別子の差は α 等価が吸収するが、
+**リテラルの差は既定でロジック差として残す**ので、suffix 入りのリテラルがあると
+「本当は同じロジックなのに 9 本が 9 グループに割れる」ことになる。
+
+そこで比較の直前に、**その View 自身の suffix をトークン内で伏せ字**にする。
+suffix 由来の差は場所を問わず消え、**残った差＝本当のロジック差**になる。
+
+```
+v_x_abjp:  WHERE src = 'load_abjp'  →  WHERE src = 'load_␀'   ┐ 同じ
+v_x_abus:  WHERE src = 'load_abus'  →  WHERE src = 'load_␀'   ┘
+v_y_abjp:  WHERE status = 'A'                                 ┐ 違う
+v_y_cdjp:  WHERE status = 'B'                                 ┘
+```
+
+`substitutable` に `string` を足すのとは違う。あちらは**すべての**リテラル差を
+同一視してしまうので、`'A'` と `'B'` のロジック差まで消える。伏せ字は suffix に
+一致する部分だけを対象にするので、そこが残る。
+
+伏せ字は比較用のトークン列にだけ効く。パラメータ化と表示は元のテキストを使うので、
+`{{P1}}` の値には `orders_abjp` / `orders_abus` がそのまま並ぶ。
+
+`suffixAware: false` で無効化できる。
 
 ### 取得元は VIEWS.view_definition を使う
 
@@ -59,25 +85,67 @@ suffix の文字列置換に依存しないので、**参照テーブル以外�
 - **何をパラメータとみなしたかを必ず `params` で返す**。判定が正しいかを人が確認できる。
   ここを隠すと危ないので、画面にも出す前提
 
+## suffix はデータセット名から自動で拾う（既定）
+
+suffix の一覧を人が書いて維持するのは、**View が増えたときに黙って壊れる**種類の
+運用になる。幸い、**suffix として使われている文字列はデータセット名の末尾にも
+現れる**（`mart_abjp` / `raw_cduk`）。ここから拾えば手運用が要らなくなる。
+
+`suffix_config.json` の既定はこれ。
+
+```json
+{ "suffixSource": "schemata", "schemataPattern": "_([A-Za-z]{4})$" }
+```
+
+生成される SQL は `INFORMATION_SCHEMA.SCHEMATA` を舐めて suffix 一覧を作り、
+それを View 名との `ENDS_WITH` で突き合わせて base を切る。UDF に渡す
+`suffixList` も同じ一覧から組み立てるので、**suffix が増えても SQL の修正は不要**。
+
+```sql
+suffixes AS (
+  SELECT DISTINCT REGEXP_EXTRACT(schema_name, r'_([A-Za-z]{4})$') AS suffix
+  FROM `PROJECT.region-us.INFORMATION_SCHEMA.SCHEMATA`
+  WHERE REGEXP_CONTAINS(schema_name, r'_([A-Za-z]{4})$')
+)
+```
+
+`REGEXP_EXTRACT` で base を切らないのは、**BigQuery の `REGEXP_*` がパターンに
+定数を要求しうる**ため。実行時に決まる一覧から正規表現を組み立てるのは避けて、
+`ENDS_WITH` の結合にしてある（複数一致したら長いほうを採る）。
+
+注意点:
+
+- `region-us` は環境に合わせる（`region-asia-northeast1` など）。
+  ここを間違えると suffix が 0 件になり、結果も 0 件になる
+- **サンプルはデータセットを 1 つにまとめてある**ので、この CTE では 0 件になる。
+  `build_table.sql` に固定一覧へ差し替えるコメントを入れてあるので、
+  そちらを有効にして試す
+- `build_table.mjs` は書き出す前に、`ENDS_WITH` の切り出しと `analyze.js` の抽出が
+  同じ base を返すかを照合する
+- **無関係なデータセットも `_` + 4 文字英字で終われば拾われる**。害が出るのは
+  その文字列で終わる View 名がある場合だけだが、気になるなら `schemataPattern` を
+  絞る（例: `^mart_([A-Za-z]{4})$`）
+
+手で決めたい場合は `"suffixSource": "config"` にすると、下の 3 通りの指定に戻る。
+
 ## suffix パターンを変更する手順
 
 **設定は [`suffix_config.json`](./suffix_config.json) の 1 箇所だけ。**
-suffix 規則は SQL 側（base を出す `REGEXP_EXTRACT`）と UDF 側（`options_json`）の
+suffix 規則は SQL 側（base の切り出し）と UDF 側（`options_json`）の
 両方で必要になるが、手で 2 箇所書くとズレて base の束ね方と解析が食い違うので、
 1 つの設定から両方を生成する。
 
 ```bash
 # 1. suffix_config.json を直す
-# 2. SQL を作り直す（SQL の正規表現と analyze.js の抽出が一致するか検証してから書き出す）
+# 2. SQL を作り直す（SQL 側の切り出しと analyze.js の抽出が一致するか検証してから書き出す）
 node build_table.mjs
 
 # 3. 変更が UDF の既定値にも関わる場合は UDF も作り直す
 node build_udf.mjs
 ```
 
-`build_table.mjs` は書き出す前に、**生成した正規表現と `analyze.js` の抽出が
-同じ base を返すか**を全 suffix の組み合わせで照合する。食い違えば失敗して
-SQL は出力されない。
+`build_table.mjs` は書き出す前に、**SQL 側の切り出しと `analyze.js` の抽出が
+同じ base を返すか**を照合する。食い違えば失敗して SQL は出力されない。
 
 そのあと BigQuery で:
 
@@ -88,9 +156,11 @@ SQL は出力されない。
 > UDF は `options_json` を実行時に受け取るので、**suffix 規則を変えるだけなら
 > UDF の作り直しは不要**。`build_table.sql` の再実行だけでよい。
 
-### 3 通りの指定方法
+### 手で指定する場合（suffixSource: "config"）
 
-上から優先される。
+上から優先される。`suffixSource: "schemata"` のときは `suffixList` が実行時に
+入るので、ここの指定は使われない（`suffixParts` はサンプル用の固定一覧として
+コメントに残るだけ）。
 
 | 指定 | 用途 |
 |---|---|
@@ -109,7 +179,7 @@ BigQuery に実データを作って試せる。
 
 ```bash
 node build_sample_sql.mjs   # sample_data.sql / sample_teardown.sql を生成
-node test.mjs               # アナライザの検証（25 アサーション）
+node test.mjs               # アナライザの検証（40 アサーション）
 ```
 
 | ファイル | 内容 |
@@ -172,7 +242,7 @@ ORDER BY table_name;
 強力なので、当否を人が確認できるようにしておく。
 
 ```bash
-node preview.mjs          # dist/preview.html を生成して検証（19 アサーション）
+node preview.mjs          # dist/preview.html を生成して検証（21 アサーション）
 node preview.mjs --check  # 生成せず検証だけ
 ```
 
@@ -196,11 +266,11 @@ HTML とメタデータを 1 回の呼び出しで返すのは、事前生成テ
 素の連結は約 45 KB あって確実に弾かれるので、esbuild で最小化してから埋め込む。
 
 ```
-VIEW_GROUP_INFO  素 41.7 KB → 最小化 25.8 KB（上限比 86%）
-VIEW_GROUP_CSS   素 41.5 KB → 最小化 25.4 KB（上限比 85%）
+VIEW_GROUP_INFO  素 42.6 KB → 最小化 26.0 KB（上限比 87%）
+VIEW_GROUP_CSS   素 42.4 KB → 最小化 25.7 KB（上限比 86%）
 ```
 
-3-way 系を外して 28.1 KB → 25.8 KB になった。それでも枠は広くないので、
+3-way 系を外して 28.1 KB → 25.8 KB になった（suffix の伏せ字を足して 26.0 KB）。それでも枠は広くないので、
 大きく機能を足すときは `OPTIONS(library=["gs://…"])` への移行を検討する。
 
 生成時に 30 KB を超えたら失敗させ、BigQuery に弾かれるものを出荷しない。
@@ -231,8 +301,9 @@ Looker Studio は `v_view_logic_diff_latest` を読むだけ。`base` をプル�
 パーティションに日付を積むので**履歴が残る**。「いつグループ構成が変わったか」を
 後から追えるので、ロジック逸脱の検知に使える（`build_table.sql` の末尾に例あり）。
 
-`REGEXP_EXTRACT` と UDF の `options_json` は `suffix_config.json` から
-同時に生成されるので、揃っていることが保証される。
+base の切り出しと UDF の `options_json` は `suffix_config.json` から同時に
+生成されるので、揃っていることが保証される。既定（`suffixSource: "schemata"`）では
+どちらも `SCHEMATA` から取った同じ suffix 一覧を使う。
 
 ## Looker Studio への配線
 
@@ -249,9 +320,7 @@ CSS は **`template_style.html`**（`build_udf.mjs` の生成物）をそのま�
 BigQuery から取る。中身は同じ。
 
 ```sql
-SELECT `PROJECT.DATASET.VIEW_GROUP_CSS`(
-  '{"suffixParts": [["ab","cd","ef"],["jp","us","uk"]]}'
-);
+SELECT `PROJECT.DATASET.VIEW_GROUP_CSS`('{"mode": "class"}');
 ```
 
 `<style> … </style>` で囲んでテンプレートの先頭に置き、その下に

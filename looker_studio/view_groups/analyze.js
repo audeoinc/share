@@ -192,6 +192,30 @@ function extractSuffix(viewName, opts) {
 /** 既定で置換可能とみなす種類。リテラルは既定で含めない（意味の差である可能性が高いため）。 */
 const DEFAULT_SUBSTITUTABLE = ['ident', 'quoted'];
 
+/** suffix を伏せ字にするときの目印。SQL には現れない文字を使う。 */
+const SUFFIX_MARK = '\u0000';
+
+/**
+ * トークンの中に出てくる「その View 自身の suffix」を伏せ字にする。
+ *
+ * 参照先の識別子もデータセット名も、View と同じ suffix を持つ運用なら、
+ * 伏せ字にした時点で同じ文字列になる。つまり suffix 由来の差が
+ * 「差ではない」ものとして扱われ、残った差だけが本当のロジック差になる。
+ *
+ * 置換可能種別（substitutable）を緩めるのと違い、
+ * リテラルでも「suffix を含むから同じ」と「値そのものが違う」を区別できる。
+ * WHERE region = 'abjp' と 'abus' は同一視されるが、
+ * WHERE status = 'A' と 'B' はロジック差として残る。
+ */
+function maskSuffix(tokens, suffix) {
+  if (!suffix || String(suffix).length < 2) return tokens;
+  const s = String(suffix);
+  return tokens.map((t) => {
+    if (t.kind === 'space' || t.text.indexOf(s) < 0) return t;
+    return { kind: t.kind, text: t.text.split(s).join(SUFFIX_MARK) };
+  });
+}
+
 /**
  * 2 つのトークン列が「一貫した 1 対 1 置換で一致するか」を判定し、
  * 一致しない場合はどこで止まったかも返す。
@@ -282,12 +306,19 @@ function parameterize(members) {
  */
 function groupByLogic(views, opts) {
   const stripOpts = !(opts && opts.stripOptions === false);
+  const suffixAware = !(opts && opts.suffixAware === false);
   const prepared = views.map((v) => {
     let raw = tokenizeSql(v.ddl);
     // OPTIONS はメタデータ。既定で落とす（stripOptions: false で無効化）
     if (stripOpts) raw = stripOptionsClause(raw);
-    // tokens は比較用（空白を潰す）、raw は表示用（元の整形を保つ）
-    return { ...v, raw, tokens: normalizeSpace(raw) };
+    // raw は表示用（元の整形を保つ）、tokens は比較用
+    //   空白を潰し、さらに自分の suffix を伏せ字にする
+    const tokens = normalizeSpace(raw);
+    return {
+      ...v,
+      raw,
+      tokens: suffixAware ? maskSuffix(tokens, v.suffix) : tokens,
+    };
   });
 
   const groups = [];
@@ -349,8 +380,8 @@ function analyze(rows, opts) {
 }
 
 module.exports = {
-  tokenizeSql, normalizeSpace, stripOptionsClause, extractSuffix, expandSuffixParts,
-  alphaMap, alphaMapDetail,
+  tokenizeSql, normalizeSpace, stripOptionsClause, maskSuffix,
+  extractSuffix, expandSuffixParts, alphaMap, alphaMapDetail,
   parameterize, groupByLogic, analyze,
   DEFAULT_SUFFIX_RE, DEFAULT_SUBSTITUTABLE, KEYWORDS,
 };

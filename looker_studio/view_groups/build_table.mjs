@@ -2,9 +2,12 @@
 //
 //   node build_table.mjs
 //
-// suffix 規則は SQL 側（base を出す REGEXP_EXTRACT）と UDF 側（options_json）の
-// 両方で必要になる。手で 2 箇所書くとズレて base の束ね方と解析が食い違うので、
-// 1 つの設定から両方を作る。
+// suffix 規則は SQL 側（base の切り出し）と UDF 側（options_json）の両方で必要になる。
+// 手で 2 箇所書くとズレて base の束ね方と解析が食い違うので、1 つの設定から両方を作る。
+//
+// suffixSource: "schemata" なら suffix 一覧を持たず、データセット名から実行時に
+// 取り出す（手運用なし）。この場合 base は動的な正規表現ではなく ENDS_WITH の
+// 結合で切る。BigQuery の REGEXP_* はパターンを定数で要求しうるため。
 import { readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -47,9 +50,48 @@ function baseRegex(c) {
   throw new Error('suffixParts / suffixList / suffixPattern のいずれかを指定してください');
 }
 
-const regex = baseRegex(config);
+const dynamic = config.suffixSource === 'schemata';
+const regex = dynamic ? null : baseRegex(config);
+
+// UDF に渡す静的オプション（suffixList は動的モードでは SQL 側で足す）
+const staticOpts = Object.fromEntries(
+  Object.entries(config).filter(([k]) =>
+    !['suffixSource', 'schemataPattern'].includes(k) &&
+    !(dynamic && ['suffixParts', 'suffixList', 'suffixPattern'].includes(k)))
+);
+
+// --- 検証 --------------------------------------------------------------
+if (dynamic) {
+  // 動的モードは SQL 側が ENDS_WITH で切るので、同じ規則を JS で再現して照合する。
+  const schemataRe = new RegExp(config.schemataPattern);
+  const datasets = ['mart_abjp', 'mart_abus', 'raw_cduk', 'staging', 'mart_2024', 'x_efjp'];
+  const found = [...new Set(datasets
+    .map((d) => (d.match(schemataRe) || [])[1])
+    .filter(Boolean))].sort();
+  console.log(`  データセット名から抽出される suffix: [${found.join(', ')}]`);
+
+  const names = found.map((f) => 'v_daily_sales_' + f).concat(['v_daily_sales', 'v_x_zzzz']);
+  let bad = 0;
+  for (const name of names) {
+    // SQL 側: 一覧との ENDS_WITH で最長一致
+    const hit = found.filter((f) => name.endsWith('_' + f))
+      .sort((a, b) => b.length - a.length)[0];
+    const sqlBase = hit ? name.slice(0, -(hit.length + 1)) : null;
+    const ex = A.extractSuffix(name, { suffixList: found });
+    const udfBase = ex ? ex.base : null;
+    if (sqlBase !== udfBase) {
+      bad++;
+      console.log(`  FAIL  ${name}: SQL=${JSON.stringify(sqlBase)} UDF=${JSON.stringify(udfBase)}`);
+    }
+  }
+  console.log(bad === 0
+    ? `  PASS  ENDS_WITH の切り出しと analyze.js の抽出が一致（${names.length} 名で確認）`
+    : `  ${bad} 件で不一致`);
+  if (bad > 0) process.exit(1);
+}
 
 // --- 検証: SQL の正規表現と analyze.js の抽出が同じ base を返すか ---------
+if (!dynamic) {
 // ここが食い違うと、SQL が束ねた base と UDF の解析対象がズレる。
 const re = new RegExp(regex);
 const samples = [];
@@ -76,13 +118,86 @@ console.log(mismatch === 0
   ? `  PASS  SQL の正規表現と analyze.js の抽出が一致（${samples.length} 名で確認）`
   : `  ${mismatch} 件で不一致`);
 if (mismatch > 0) process.exit(1);
+}
 
-const optionsJson = JSON.stringify(config, null, 2)
+const optionsJson = JSON.stringify(staticOpts, null, 2)
   .split('\n').map((l, i) => (i === 0 ? l : '        ' + l)).join('\n');
 
-console.log(`\n  suffix 規則 : ${JSON.stringify(config.suffixParts || config.suffixList || config.suffixPattern)}`);
-console.log(`  base 正規表現: ${regex}`);
-console.log(`  UDF オプション: ${Object.keys(config).join(', ')}`);
+// --- モードごとの SQL 断片 ---------------------------------------------
+// 静的モード: suffix 一覧を焼き込んだ正規表現で base を切る。
+// 動的モード: データセット名から suffix を集め、ENDS_WITH の結合で base を切る。
+//             BigQuery の REGEXP_* はパターンに定数を要求しうるので、
+//             実行時に決まる suffix 一覧を正規表現に組み立てるのは避ける。
+
+// 動的モードの options_json は SQL 側で組み立てる。
+// suffixList だけが実行時に決まり、残りは suffix_config.json 由来で固定。
+const staticTail = Object.entries(staticOpts)
+  .map(([k, v]) => `${JSON.stringify(k)}:${JSON.stringify(v)}`).join(',');
+
+// 動的モードでも、サンプル（データセット 1 つ）で試せるよう固定一覧をコメントで残す。
+const sampleSuffixes = Array.isArray(config.suffixParts)
+  ? A.expandSuffixParts(config.suffixParts)
+  : (config.suffixList || []);
+
+const suffixCte = dynamic ? `
+-- データセット名から suffix を集める。手で一覧を持たないための CTE。
+--   mart_abjp / raw_cduk → abjp / cduk
+-- region は自分の環境に合わせる（region-us / region-asia-northeast1 など）。
+-- ここが 0 件だと base が全部 NULL になり、結果も 0 件になる。
+suffixes AS (
+  SELECT DISTINCT REGEXP_EXTRACT(schema_name, r'${config.schemataPattern}') AS suffix
+  FROM \`PROJECT.region-us.INFORMATION_SCHEMA.SCHEMATA\`
+  WHERE REGEXP_CONTAINS(schema_name, r'${config.schemataPattern}')
+),
+-- サンプル用: データセットを 1 つにまとめた環境で試すときは、上の suffixes を
+-- そのまま使うと 0 件になる。その場合だけ次で置き換える。
+-- suffixes AS (
+--   SELECT suffix FROM UNNEST([${sampleSuffixes.map((s) => `'${s}'`).join(', ')}]) AS suffix
+-- ),
+-- UDF に渡す設定。suffixList だけ実行時に決まる。
+opts AS (
+  SELECT CONCAT(
+    '{"suffixList":',
+    TO_JSON_STRING(ARRAY(SELECT suffix FROM suffixes ORDER BY suffix)),
+    -- ↓ suffix_config.json から生成
+    ${staticTail ? `',${staticTail}',\n    ` : ''}'}'
+  ) AS options_json
+),
+` : '';
+
+const keyedCte = dynamic ? `keyed AS (
+  -- suffix 一覧との ENDS_WITH で base を切る。
+  -- 複数一致したら長いほうを採る（短い suffix が長い suffix の末尾に含まれる場合の対策）。
+  -- LEFT JOIN なので suffix の付かない View も 1 行残り、base は NULL になる。
+  SELECT
+    src.view_name,
+    src.ddl,
+    SUBSTR(src.view_name, 1, LENGTH(src.view_name) - LENGTH(s.suffix) - 1) AS base
+  FROM src
+  LEFT JOIN suffixes AS s
+    ON ENDS_WITH(src.view_name, '_' || s.suffix)
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY src.view_name ORDER BY LENGTH(s.suffix) DESC
+  ) = 1
+)` : `keyed AS (
+  SELECT
+    view_name,
+    ddl,
+    -- suffix_config.json から生成。UDF に渡す設定と必ず一致する。
+    REGEXP_EXTRACT(view_name, r'${regex}') AS base
+  FROM src
+)`;
+
+const udfOptionsArg = dynamic
+  ? `      -- suffixes CTE から組み立てた設定（全行で同じ値）
+      (SELECT options_json FROM opts)`
+  : `      -- suffix_config.json から生成
+      '''${optionsJson}'''`;
+
+console.log(`\n  suffixSource : ${config.suffixSource || 'config'}`);
+if (dynamic) console.log(`  抽出パターン : ${config.schemataPattern}`);
+else console.log(`  base 正規表現: ${regex}`);
+console.log(`  UDF オプション: ${Object.keys(staticOpts).join(', ')}${dynamic ? ' + suffixList（実行時）' : ''}`);
 
 if (process.argv.includes('--check')) process.exit(0);
 
@@ -103,6 +218,13 @@ const sql = `-- ================================================================
 --
 -- 前提: view_group_html.sql で VIEW_GROUP_INFO / VIEW_GROUP_CSS を作成済み。
 -- PROJECT / DATASET / TARGET_DATASET は自分の環境に置換すること。
+--
+-- suffix の出どころ: ${dynamic
+  ? `INFORMATION_SCHEMA.SCHEMATA（データセット名）
+--   ${config.schemataPattern} に一致したデータセット名の末尾を suffix として使う。
+--   View 名の切り分けも UDF に渡す一覧も、この結果から実行時に決まる。
+--   つまり suffix が増えても SQL の修正は要らない。`
+  : `suffix_config.json（固定）`}
 -- =====================================================================
 
 
@@ -141,7 +263,7 @@ DELETE FROM \`PROJECT.DATASET.view_logic_diff\`
 WHERE snapshot_date = CURRENT_DATE('Asia/Tokyo');
 
 INSERT INTO \`PROJECT.DATASET.view_logic_diff\`
-WITH
+WITH${suffixCte}
 -- ↓↓↓ 対象の View を集める。データセットが複数あるなら UNION ALL で足す ↓↓↓
 --
 -- TABLES.ddl ではなく VIEWS.view_definition を使う。
@@ -155,14 +277,7 @@ src AS (
   FROM \`PROJECT.TARGET_DATASET.INFORMATION_SCHEMA.VIEWS\`
 ),
 -- ↑↑↑ ここまで ↑↑↑
-keyed AS (
-  SELECT
-    view_name,
-    ddl,
-    -- suffix_config.json から生成。UDF に渡す設定と必ず一致する。
-    REGEXP_EXTRACT(view_name, r'${regex}') AS base
-  FROM src
-)
+${keyedCte}
 SELECT
   CURRENT_DATE('Asia/Tokyo')          AS snapshot_date,
   base,
@@ -179,8 +294,7 @@ FROM (
     base,
     \`PROJECT.DATASET.VIEW_GROUP_INFO\`(
       ARRAY_AGG(STRUCT(view_name, ddl) ORDER BY view_name),
-      -- suffix_config.json から生成
-      '''${optionsJson}'''
+${udfOptionsArg}
     ) AS info
   FROM keyed
   WHERE base IS NOT NULL
@@ -214,7 +328,12 @@ WHERE snapshot_date = (
 -- FROM \`PROJECT.DATASET.v_view_logic_diff_latest\`
 -- ORDER BY base;
 
--- ロジックが割れている base だけ見る（＝要確認のもの）
+${dynamic ? `-- 認識した suffix の確認（0 件なら region か schemataPattern を疑う）
+-- SELECT schema_name, REGEXP_EXTRACT(schema_name, r'${config.schemataPattern}') AS suffix
+-- FROM \`PROJECT.region-us.INFORMATION_SCHEMA.SCHEMATA\`
+-- ORDER BY schema_name;
+
+` : ''}-- ロジックが割れている base だけ見る（＝要確認のもの）
 -- SELECT base, group_count, group_labels
 -- FROM \`PROJECT.DATASET.v_view_logic_diff_latest\`
 -- WHERE has_multiple
