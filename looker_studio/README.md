@@ -150,11 +150,14 @@ HYPERLINK(CONCAT("https://<cloud-run>/diff?view=", view_key), "差分を見る")
 
 | | 実装コスト | 見た目 | 動的切替 | 公開バケット |
 |---|---|---|---|---|
+| **Templated Record + UDF（[`templated_record/`](./templated_record/)）** | **小** | **GitHub 同等（単語単位）** | ○ | **不要** |
 | 表グラフ + カスタムクエリ（`ddl_diff.sql`） | 小 | 行単位まで | ○ | 不要 |
-| コミュニティ ビジュアライゼーション（`ddl_diff_viz/`） | 実装済み | GitHub 同等（単語単位） | ○ | **必須** |
+| 自作コミュニティ ビジュアライゼーション（`ddl_diff_viz/`） | 実装済み | GitHub 同等（単語単位） | ○ | **必須** |
 | Cloud Run + HYPERLINK | 中 | GitHub 同等（別タブ） | ○ | 不要 |
 | URL 埋め込み | 小 | GitHub 同等 | × | 不要 |
 
-公開バケットが禁止なら、選択肢は実質**表グラフ + カスタムクエリ**か
-**Cloud Run + HYPERLINK** の 2 つ。Cloud Run は IAM / IAP で社内限定にできるので
-ポリシーに抵触せず、`diff_html/` の `lib/` をサーバー側でそのまま使える。
+**推奨は [`templated_record/`](./templated_record/)。** ギャラリー掲載の
+[Templated Record](https://lookerstudio.google.com/reporting/fd0db9a6-2d6b-443a-adbc-f6a7c7a285a7/page/GUgQB)
+は公開元がホストしているのでバケットを公開する必要がなく、HTML を BigQuery の UDF で
+生成して渡すだけで単語単位ハイライトまで再現できる。自作ビジュアライゼーション
+（`ddl_diff_viz/`）は公開バケットが必須なので、それが禁止の組織では使えない。
