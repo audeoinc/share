@@ -9,19 +9,20 @@
  *
  * レイアウト:
  *   1 グループ  … 差分なしの案内
- *   2 グループ  … 2 ペイン（比較が 1 通りしかないのでタブにする意味がない）
+ *   2 グループ  … 2 ペイン（比較が 1 通りしかないので、タブ 1 枚は無駄）
  *   3 グループ〜… 最大グループを基準に、比較相手をタブで切り替える
  *                 （横に並べると 1 ペインが狭くなって読めないため）
- *   layout: 'auto'（既定） / 'panes' / 'tabs' で明示指定もできる。
- *   layout:'panes' を指定すれば 3 ペイン横並びにも戻せる。
+ *
+ * 3 ペイン横並び（renderFragment3）は使わない方針にしたので、
+ * build_udf.mjs で 3-way 系の関数ごと UDF から外している（サイズ削減）。
  *
  * タブは radio + :checked の CSS のみで動く（JavaScript は使えない）。
  * CSS セレクタは ID ではなくクラスで書いてある。ID はレコードごとに
  * 一意にする必要があるため、ID を参照すると CSS を静的にできない。
  */
 
-const { splitLines, build2Way, build3Way } = require('../ddl_diff_viz/src/lib/diff');
-const { renderFragment2, renderFragment3 } = require('../ddl_diff_viz/src/lib/render');
+const { splitLines, build2Way } = require('../ddl_diff_viz/src/lib/diff');
+const { renderFragment2 } = require('../ddl_diff_viz/src/lib/render');
 
 const MAX_TABS = 12; // 静的 CSS が面倒を見るタブ数の上限
 
@@ -184,7 +185,6 @@ function tabs(groups, opts, idPrefix) {
 /**
  * base 1 件分の HTML を返す。
  * @param {{base:string, viewCount:number, groupCount:number, groups:object[]}} b
- * @param {{layout?:'auto'|'panes'|'tabs'}} [opts]
  */
 function renderBase(b, opts) {
   const o = opts || {};
@@ -204,25 +204,11 @@ function renderBase(b, opts) {
         label(groups[0]), label(groups[0]),
         build2Way(splitLines(groups[0].sql), splitLines(groups[0].sql)), o),
         [paneSub(groups[0]), paneSub(groups[0])])}</div>`;
-  } else if (o.layout === 'tabs' || (o.layout !== 'panes' && n > 2)) {
-    body = tabs(groups, o, idPrefix);
   } else if (n === 2) {
+    // 比較が 1 通りしかないので、タブ 1 枚を出しても意味がない
     body = pair(groups[0], groups[1], o);
-  } else if (n === 3) {
-    body = relabelPanes(
-      renderFragment3(
-        groups.map(label),
-        build3Way(
-          splitLines(groups[0].sql),
-          splitLines(groups[1].sql),
-          splitLines(groups[2].sql)),
-        o
-      ),
-      [`基準 / ${paneSub(groups[0])}`, paneSub(groups[1]), paneSub(groups[2])]
-    );
   } else {
-    // layout: 'panes' を指定されたが 4 つ以上あるので、基準との 2 ペインを縦に積む
-    body = groups.slice(1).map((g) => pair(groups[0], g, o)).join('');
+    body = tabs(groups, o, idPrefix);
   }
 
   return `<div class="vg-root">` +

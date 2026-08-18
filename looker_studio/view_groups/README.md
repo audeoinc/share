@@ -117,13 +117,16 @@ ORDER BY table_name;
 
 `analyze()` の結果 1 base 分を HTML にする。`preview.mjs` で描き分けを確認できる。
 
-| グループ数 | 既定のレイアウト |
+| グループ数 | レイアウト |
 |---|---|
 | 1 | 差分なしの案内 |
-| 2 | 2 ペイン（比較が 1 通りしかないのでタブにしない） |
+| 2 | 2 ペイン（比較が 1 通りしかないので、タブ 1 枚は無駄） |
 | 3 以上 | 最大グループを基準に、比較相手を**タブ**で切り替える |
 
-`layout: 'panes'` を渡せば 3 ペイン横並びにも戻せる（`'tabs'` で常にタブ）。
+**3 ペイン横並びは廃止。** 使わない方針にしたので、`build_udf.mjs` の `UNUSED` で
+3-way 系の関数（`renderFragment3` / `build3Way` / `mapToBase` / `baseCell` /
+`segsText`）ごと UDF から外している。インラインの 32 KB 枠がぎりぎりなので、
+載せない分がそのまま余裕になる。
 
 タブは **radio + `:checked` の CSS のみ**で動く（Templated Record では JavaScript が
 使えないため）。CSS セレクタは ID ではなくクラスで書いてあるので、CSS を静的に保てる。
@@ -161,14 +164,12 @@ HTML とメタデータを 1 回の呼び出しで返すのは、事前生成テ
 素の連結は約 45 KB あって確実に弾かれるので、esbuild で最小化してから埋め込む。
 
 ```
-VIEW_GROUP_INFO  素 46.0 KB → 最小化 28.1 KB（上限比 94%）
-VIEW_GROUP_CSS   素 45.8 KB → 最小化 27.7 KB（上限比 92%）
+VIEW_GROUP_INFO  素 41.7 KB → 最小化 25.8 KB（上限比 86%）
+VIEW_GROUP_CSS   素 41.5 KB → 最小化 25.4 KB（上限比 85%）
 ```
 
-> **枠がほぼ埋まっている。** 次に機能を足すときは
-> `OPTIONS(library=["gs://…"])` への移行が必要。逃げ道として、
-> `layout:'panes'` を捨てて 3 ペイン描画（`renderFragment3` / `build3Way` /
-> `mapToBase`）を外せば数 KB 空く。
+3-way 系を外して 28.1 KB → 25.8 KB になった。それでも枠は広くないので、
+大きく機能を足すときは `OPTIONS(library=["gs://…"])` への移行を検討する。
 
 生成時に 30 KB を超えたら失敗させ、BigQuery に弾かれるものを出荷しない。
 最小化した本体はそのまま Node で実行して検証しているので、最小化で壊れていない

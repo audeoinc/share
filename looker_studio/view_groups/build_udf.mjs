@@ -36,6 +36,34 @@ const SOURCES = [
   ['render_groups.js', join(here, 'render_groups.js')],
 ];
 
+/**
+ * 使わないトップレベル関数を落とす。
+ *
+ * 3 ペイン横並びは使わない方針にしたので、3-way 系の関数を UDF から外す。
+ * インラインの 32 KB 枠がぎりぎりなので、載せない分だけ余裕になる。
+ *
+ * esbuild は format を指定しない限り未使用のトップレベル宣言を残す
+ * （指定するとラップされて必要なものまで落ちる）ため、ここで明示的に削る。
+ * 消しすぎればこの後の実行検証で必ず落ちるので、取り違えは検出できる。
+ */
+function dropFunctions(src, names) {
+  let out = src;
+  for (const name of names) {
+    // `function name(` から、列 0 の `}` までを 1 つの宣言とみなす
+    const re = new RegExp(`^function ${name}\\([\\s\\S]*?^\\}\\n`, 'm');
+    if (!re.test(out)) throw new Error(`dropFunctions: ${name} が見つかりません`);
+    out = out.replace(re, '');
+    if (new RegExp(`^function ${name}\\(`, 'm').test(out)) {
+      throw new Error(`dropFunctions: ${name} が残っています`);
+    }
+  }
+  return out;
+}
+
+// 3 ペイン横並びを使わないので不要になったもの。
+// build3Way / mapToBase / baseCell / segsText は 3-way 専用。
+const UNUSED = ['renderFragment3', 'build3Way', 'mapToBase', 'baseCell', 'segsText'];
+
 /** CommonJS の体裁を落として素の関数群にする。 */
 function strip(src, file) {
   const out = src
@@ -56,7 +84,7 @@ const libs = [];
 for (const [name, path] of SOURCES) {
   libs.push(strip(await readFile(path, 'utf8'), name));
 }
-const libSrc = libs.join('\n\n');
+const libSrc = dropFunctions(libs.join('\n\n'), UNUSED);
 
 // --- 共通ヘルパ（DIFF_HTML と同じ考え方） ------------------------------
 const shared = `

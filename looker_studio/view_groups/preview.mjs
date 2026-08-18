@@ -46,7 +46,6 @@ const baseMany = A.analyze(many, {
 
 const cases = [
   { title: '3 グループ（既定 = タブ）', b: base3, opts: {} },
-  { title: '3 グループを layout:"panes" で（3 ペイン横並び）', b: base3, opts: { layout: 'panes' } },
   { title: '2 グループ（2 ペイン）', b: base2, opts: {} },
   { title: '1 グループ（差分なし）', b: base1, opts: {} },
   { title: `${baseMany.groupCount} グループ（既定 = タブ）`, b: baseMany, opts: {} },
@@ -55,10 +54,9 @@ const cases = [
 const parts = cases.map((c) => ({ ...c, html: R.renderBase(c.b, c.opts) }));
 
 // --- 検証 --------------------------------------------------------------
-const h3 = parts[0].html;      // 既定 = タブ
-const hPanes = parts[1].html;  // layout:'panes' = 3 ペイン横並び
-const h1 = parts[3].html;
-const hMany = parts[4].html;
+const h3 = parts[0].html;
+const h1 = parts[2].html;
+const hMany = parts[3].html;
 
 const idsOf = (h) => [...h.matchAll(/id="([^"]+)"/g)].map((m) => m[1]);
 const checks = [
@@ -70,10 +68,8 @@ const checks = [
   ['タブ見出しに suffix が列記される',
     ['cdjp, cduk, cdus', 'efjp, efuk, efus']
       .every((s) => h3.replace(/<[^>]*>/g, '').includes(s))],
-  ['layout:"panes" なら 3 ペイン横並びに戻せる',
-    !hPanes.includes('vg-tablist') &&
-    ['abjp, abuk, abus', 'cdjp, cduk, cdus', 'efjp, efuk, efus']
-      .every((s) => hPanes.replace(/<[^>]*>/g, '').includes(s))],
+  ['3 ペイン横並びは出さない（タブのみ）',
+    !parts.map((p) => p.html).join('').includes('reference')],
   ['4 グループ以上もタブ', hMany.includes('vg-tablist') && baseMany.groupCount > 3],
   ['タブに基準グループの表示がある', hMany.includes('基準:')],
   ['1 グループは差分なしの案内', h1.includes('すべてが同一ロジック')],
@@ -93,7 +89,7 @@ const checks = [
     !/\((?:before|after|base|reference)\)/.test(parts.map((p) => p.html).join(''))],
   ['副題が View 数になっている', h3.includes('基準 / 3 View')],
   ['2 グループはタブにしない（比較が 1 通りのため）',
-    !parts[2].html.includes('vg-tablist')],
+    !parts[1].html.includes('vg-tablist')],
   ['なぜ別グループになったかを出す', h3.includes('なぜ別グループになったか')],
   ['リテラル差で割れたときは substitutable の指定を案内する',
     R.renderBase(A.analyze([
