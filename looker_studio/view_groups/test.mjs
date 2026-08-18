@@ -139,11 +139,11 @@ checks.push(['suffix 以外のリテラル差はロジック差として残る',
 checks.push(['ロジックが同じ 2 本は同じグループに入る',
   ll.groups.some((g) => g.suffixes.join(',') === 'abjp,abus')]);
 
-const masked = A.maskSuffix(A.tokenizeSql('SELECT x FROM t_abjp'), 'abjp');
-checks.push(['maskSuffix はトークン内の suffix だけを置き換える',
+const masked = A.maskTokens(A.tokenizeSql('SELECT x FROM t_abjp'), 'abjp');
+checks.push(['maskTokens はトークン内の suffix だけを置き換える',
   masked.map((t) => t.text).join('').includes('t_') &&
   !masked.map((t) => t.text).join('').includes('abjp')]);
-checks.push(['maskSuffix は suffix を含まないトークンをそのまま返す',
+checks.push(['maskTokens は suffix を含まないトークンをそのまま返す',
   masked.filter((t) => t.kind === 'keyword').every((t) => t.text === 'SELECT' || t.text === 'FROM')]);
 
 // SCHEMATA 由来の suffix 一覧（suffixSource: "schemata"）
@@ -188,10 +188,10 @@ checks.push(['連動する値だけ吸収して 2 本がまとまる',
 
 // 語の一部には効かせない（'label' の ab を巻き込まない）
 checks.push(['リテラルの語の一部は伏せ字にしない',
-  A.maskSuffix(A.tokenizeSql("SELECT 'label' AS x"), 'abjp')
+  A.maskTokens(A.tokenizeSql("SELECT 'label' AS x"), 'abjp')
     .map((t) => t.text).join('').includes("'label'")]);
 checks.push(['語全体が一致すれば伏せ字にする',
-  !A.maskSuffix(A.tokenizeSql("SELECT 'JP' AS x"), 'abjp')
+  !A.maskTokens(A.tokenizeSql("SELECT 'JP' AS x"), 'abjp')
     .map((t) => t.text).join('').includes("'JP'")]);
 checks.push(['語彙は suffix と区分',
   A.suffixWords('abjp').join(',') === 'abjp,ab,jp']);
@@ -199,6 +199,49 @@ checks.push(['suffixParts があればそちらを使う',
   A.suffixWords('abjp', ['ab', 'jp']).join(',') === 'abjp,ab,jp']);
 checks.push(['奇数長の suffix は分割しない',
   A.suffixWords('abc').join(',') === 'abc']);
+
+// 手で並べる同値リテラル（literalGroups）
+// suffix から導けない対応（'apac' ↔ 'amer' など）は人が並べるしかない。
+const manual = [
+  { view_name: 'v_m_abjp', ddl: "SELECT a FROM t_abjp WHERE zone = 'apac'" },
+  { view_name: 'v_m_abus', ddl: "SELECT a FROM t_abus WHERE zone = 'amer'" },
+  { view_name: 'v_m_abuk', ddl: "SELECT a FROM t_abuk WHERE zone = 'emea'" },
+];
+checks.push(['literalGroups なしでは連動が分からないので割れる',
+  A.analyze(manual, OPTS).bases[0].groupCount === 3]);
+checks.push(['literalGroups に並べれば同一視する',
+  A.analyze(manual, { ...OPTS, literalGroups: [['apac', 'amer', 'emea']] })
+    .bases[0].groupCount === 1]);
+checks.push(['1 段の配列も 1 組として受ける',
+  A.analyze(manual, { ...OPTS, literalGroups: ['apac', 'amer', 'emea'] })
+    .bases[0].groupCount === 1]);
+checks.push(['組が違えば同一視しない',
+  A.analyze(manual, { ...OPTS, literalGroups: [['apac'], ['amer'], ['emea']] })
+    .bases[0].groupCount === 3]);
+checks.push(['大文字小文字は無視する',
+  A.analyze([
+    { view_name: 'v_m_abjp', ddl: "SELECT a FROM t_abjp WHERE zone = 'APAC'" },
+    { view_name: 'v_m_abus', ddl: "SELECT a FROM t_abus WHERE zone = 'amer'" },
+  ], { ...OPTS, literalGroups: [['apac', 'amer']] }).bases[0].groupCount === 1]);
+checks.push(['並べていない値はロジック差のまま',
+  A.analyze([
+    { view_name: 'v_m_abjp', ddl: "SELECT a FROM t_abjp WHERE zone = 'apac'" },
+    { view_name: 'v_m_abus', ddl: "SELECT a FROM t_abus WHERE zone = 'zzz'" },
+  ], { ...OPTS, literalGroups: [['apac', 'amer', 'emea']] }).bases[0].groupCount === 2]);
+checks.push(['数値リテラルも並べれば同一視できる',
+  A.analyze([
+    { view_name: 'v_m_abjp', ddl: 'SELECT a FROM t_abjp WHERE region_id = 1' },
+    { view_name: 'v_m_abus', ddl: 'SELECT a FROM t_abus WHERE region_id = 2' },
+  ], { ...OPTS, literalGroups: [['1', '2']] }).bases[0].groupCount === 1]);
+checks.push(['語の一部には効かせない',
+  A.maskTokens(A.tokenizeSql("SELECT 'apacific' AS x"), null, null,
+    { literalGroups: [['apac']] })
+    .map((t) => t.text).join('').includes("'apacific'")]);
+checks.push(['literalGroups は suffix と独立に効く',
+  A.analyze(manual, { ...OPTS, suffixAware: false,
+    literalGroups: [['apac', 'amer', 'emea']] }).bases[0].groupCount === 1]);
+checks.push(['空の literalGroups は何もしない',
+  A.buildLiteralMap([]) === null && A.buildLiteralMap(undefined) === null]);
 
 // suffix を認識できなかった View
 // 出さないとソースが画面から消える。単独の base（1 View / 1 グループ）として並べる。

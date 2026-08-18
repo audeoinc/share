@@ -79,7 +79,7 @@ opts AS (
     '{"suffixList":',
     TO_JSON_STRING(ARRAY(SELECT suffix FROM suffixes ORDER BY suffix)),
     -- ↓ suffix_config.json から生成
-    ',"mode":"class"',
+    ',"literalGroups":[],"mode":"class"',
     '}'
   ) AS options_json
 ),
@@ -156,6 +156,7 @@ WHERE snapshot_date = (
 -- 4. テンプレートに貼る CSS（1 回取れば十分。template_style.html と同じ）
 -- ---------------------------------------------------------------------
 -- SELECT `PROJECT.DATASET.VIEW_GROUP_CSS`('''{
+          "literalGroups": [],
           "mode": "class"
         }''');
 

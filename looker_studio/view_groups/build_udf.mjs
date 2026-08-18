@@ -62,7 +62,9 @@ function dropFunctions(src, names) {
 
 // 3 ペイン横並びを使わないので不要になったもの。
 // build3Way / mapToBase / baseCell / segsText は 3-way 専用。
-const UNUSED = ['renderFragment3', 'build3Way', 'mapToBase', 'baseCell', 'segsText'];
+// alphaMap は alphaMapDetail の薄い包み。UDF は Detail 側しか呼ばない。
+const UNUSED = ['renderFragment3', 'build3Way', 'mapToBase', 'baseCell', 'segsText',
+  'alphaMap'];
 
 /** CommonJS の体裁を落として素の関数群にする。 */
 function strip(src, file) {
@@ -336,6 +338,18 @@ const checks = [
       { view_name: 'v_c_abjp', ddl: "SELECT a FROM t_abjp WHERE s = 'A'" },
       { view_name: 'v_c_abus', ddl: "SELECT a FROM t_abus WHERE s = 'B'" },
     ], OPTS).group_count === 2],
+  ['literalGroups で手動の同値リテラルを吸収する',
+    VIEW_GROUP_INFO([
+      { view_name: 'v_g_abjp', ddl: "SELECT a FROM t_abjp WHERE z = 'apac'" },
+      { view_name: 'v_g_abus', ddl: "SELECT a FROM t_abus WHERE z = 'amer'" },
+    ], JSON.stringify({ suffixParts: S.SUFFIX_PARTS,
+      literalGroups: [['apac', 'amer', 'emea']] })).group_count === 1],
+  ['literalGroups にない値は残す',
+    VIEW_GROUP_INFO([
+      { view_name: 'v_g_abjp', ddl: "SELECT a FROM t_abjp WHERE z = 'apac'" },
+      { view_name: 'v_g_abus', ddl: "SELECT a FROM t_abus WHERE z = 'zzz'" },
+    ], JSON.stringify({ suffixParts: S.SUFFIX_PARTS,
+      literalGroups: [['apac', 'amer', 'emea']] })).group_count === 2],
   ['壊れた options_json でも落ちない',
     typeof VIEW_GROUP_INFO(views, '{ broken').html === 'string'],
   ['script タグを含まない', !/<script/i.test(html)],
@@ -410,6 +424,9 @@ const sql = `-- ================================================================
 --   literalSuffixWords リテラルの中の語も suffix 語彙と照合する（既定 true）。
 --                 'JP' / 'US' のように suffix そのものではないが連動する値を
 --                 語単位・大文字小文字を無視して吸収する
+--   literalGroups suffix から導けない同値リテラルを手で並べる。
+--                 [["apac","amer","emea"], ["JPY","USD","GBP"]]
+--                 1 つの配列が 1 つの同値類。別の配列どうしは同一視しない
 --   includeUnmatched suffix を認識できなかった View を単独の base として
 --                 表示する（既定 true）。false で従来どおり除外
 --   stripOptions  OPTIONS( … ) 句を落としてから比較する（既定 true）

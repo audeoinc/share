@@ -77,8 +77,34 @@ WHERE country = 'US'   -- v_x_abus
   書いてあれば吸収されず差として残る（＝取り違えを見逃さない）
 - `'A'` と `'B'` のような連動しない値は従来どおりロジック差
 
-`literalSuffixWords: false` で無効化できる。すべてのリテラル差を無視したいなら
-`substitutable` に `string` / `number` を足す（そちらは `'A'` と `'B'` の差も消える）。
+`literalSuffixWords: false` で無効化できる。
+
+#### suffix から導けない対応は手で並べる（literalGroups）
+
+`'apac'` ↔ `'amer'` のように、**suffix とは別の語彙で連動している**値は
+機械的には導けない。数が多くないのなら、並べて持つのが確実で見通しもよい。
+
+```json
+"literalGroups": [
+  ["apac", "amer", "emea"],
+  ["JPY", "USD", "GBP"]
+]
+```
+
+- **1 つの配列が 1 つの同値類**。別の配列どうしは同一視しないので、
+  `'apac'` と `'JPY'` が意図せず同じになることはない
+- 照合は suffix 語彙と同じ規則。**文字列・バッククォート識別子・数値の中**を
+  語単位・大文字小文字を無視して見る。`'apacific'` の `apac` は巻き込まない
+- 1 段の配列（`["apac","amer"]`）も 1 組として受ける
+- 数値も並べられる（`["1","2","3"]`）
+- `suffixAware` とは独立に効く
+
+並べていない値は従来どおりロジック差として残る。
+**すべての**リテラル差を無視したいなら `substitutable` に `string` / `number` を
+足すが、そちらは `'A'` と `'B'` の差も消える。
+
+何を伏せ字にしたかは「なぜ別グループになったか」に
+`⟨suffix⟩` / `⟨literalGroups[1]⟩` として出るので、効きすぎていないか確かめられる。
 
 ### 取得元は VIEWS.view_definition を使う
 
@@ -225,7 +251,7 @@ BigQuery に実データを作って試せる。
 
 ```bash
 node build_sample_sql.mjs   # sample_data.sql / sample_teardown.sql を生成
-node test.mjs               # アナライザの検証（55 アサーション）
+node test.mjs               # アナライザの検証（65 アサーション）
 ```
 
 | ファイル | 内容 |
@@ -288,7 +314,7 @@ ORDER BY table_name;
 強力なので、当否を人が確認できるようにしておく。
 
 ```bash
-node preview.mjs          # dist/preview.html を生成して検証（27 アサーション）
+node preview.mjs          # dist/preview.html を生成して検証（28 アサーション）
 node preview.mjs --check  # 生成せず検証だけ
 ```
 
@@ -296,7 +322,7 @@ node preview.mjs --check  # 生成せず検証だけ
 
 ```bash
 node build_udf.mjs          # 検証して view_group_html.sql を生成
-node build_udf.mjs --check  # 生成せず検証だけ（25 アサーション）
+node build_udf.mjs --check  # 生成せず検証だけ（27 アサーション）
 ```
 
 | 関数 | 戻り値 |
@@ -312,11 +338,12 @@ HTML とメタデータを 1 回の呼び出しで返すのは、事前生成テ
 素の連結は約 45 KB あって確実に弾かれるので、esbuild で最小化してから埋め込む。
 
 ```
-VIEW_GROUP_INFO  素 45.5 KB → 最小化 27.7 KB（上限比 92%）
-VIEW_GROUP_CSS   素 45.2 KB → 最小化 27.3 KB（上限比 91%）
+VIEW_GROUP_INFO  素 46.7 KB → 最小化 28.3 KB（上限比 94%）
+VIEW_GROUP_CSS   素 46.4 KB → 最小化 28.0 KB（上限比 93%）
 ```
 
-3-way 系を外して 28.1 KB → 25.8 KB になった（suffix の伏せ字を足して 26.0 KB）。それでも枠は広くないので、
+3-way 系と `alphaMap` を外しているが、**残りは 32 KB に対して 3.7 KB ほど**。
+これ以上大きく機能を足すなら `OPTIONS(library=["gs://…"])` への移行を検討する。それでも枠は広くないので、
 大きく機能を足すときは `OPTIONS(library=["gs://…"])` への移行を検討する。
 
 生成時に 30 KB を超えたら失敗させ、BigQuery に弾かれるものを出荷しない。

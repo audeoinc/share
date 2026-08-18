@@ -195,18 +195,9 @@ const DEFAULT_SUBSTITUTABLE = ['ident', 'quoted'];
 /** suffix を伏せ字にするときの目印。SQL には現れない文字を使う。 */
 const SUFFIX_MARK = '\u0000';
 
-/**
- * トークンの中に出てくる「その View 自身の suffix」を伏せ字にする。
- *
- * 参照先の識別子もデータセット名も、View と同じ suffix を持つ運用なら、
- * 伏せ字にした時点で同じ文字列になる。つまり suffix 由来の差が
- * 「差ではない」ものとして扱われ、残った差だけが本当のロジック差になる。
- *
- * 置換可能種別（substitutable）を緩めるのと違い、
- * リテラルでも「suffix を含むから同じ」と「値そのものが違う」を区別できる。
- * WHERE region = 'abjp' と 'abus' は同一視されるが、
- * WHERE status = 'A' と 'B' はロジック差として残る。
- */
+/** 手で並べた同値リテラルの目印。組ごとに違う印にする。 */
+const LITERAL_MARK = '\u0001';
+
 /**
  * その View の suffix から作る「語彙」。リテラルの中の語と照合する。
  * suffix そのものに加えて、区分（abjp なら ab / jp）も含める。
@@ -232,23 +223,69 @@ function suffixWords(suffix, parts) {
 
 const WORD_RE = /[A-Za-z0-9]+/g;
 
-function maskSuffix(tokens, suffix, parts, opts) {
-  if (!suffix || String(suffix).length < 2) return tokens;
-  const s = String(suffix);
+/** 語を照合するトークン種別。識別子は substitutable が面倒を見るので入れない。 */
+const LITERAL_KINDS = { string: 1, quoted: 1, number: 1 };
+
+/**
+ * 手で管理する「同一視するリテラル」の並びから、語 → 目印の対応を作る。
+ *
+ * suffix から機械的に導ける語（'JP' / 'US' など）は suffixWords が拾うが、
+ * 導けないものは人が並べるしかない。組を分けて持つのは、
+ * 「同じ組の値どうしだけ同一視する」ためで、
+ * ['jp','us'] と ['apac','amer'] を混ぜて 'jp' = 'apac' にはしない。
+ *
+ * literalGroups: [['jp','us','uk'], ['apac','amer','emea']]
+ *                （1 段の配列 ['jp','us'] は 1 組として扱う）
+ */
+function buildLiteralMap(groups) {
+  if (!Array.isArray(groups) || groups.length === 0) return null;
+  const list = (typeof groups[0] === 'string') ? [groups] : groups;
+  const map = {};
+  let n = 0;
+  for (let i = 0; i < list.length; i++) {
+    if (!Array.isArray(list[i])) continue;
+    const mark = LITERAL_MARK + (i + 1) + LITERAL_MARK;
+    for (const w of list[i]) {
+      const k = String(w == null ? '' : w).toLowerCase();
+      if (k) { map[k] = mark; n++; }
+    }
+  }
+  return n > 0 ? map : null;
+}
+
+/**
+ * 比較用のトークン列から「差ではないと分かっている違い」を伏せ字にする。
+ *
+ * 1. その View 自身の suffix（文字列として、どのトークンでも）
+ *    参照先の識別子もデータセット名も View と同じ suffix を持つ運用なら、
+ *    伏せ字にした時点で同じ文字列になる。
+ * 2. リテラルの中の語（大文字小文字を無視、語全体が一致したときだけ）
+ *    a. その View の suffix 語彙 … 'JP' / 'US' のように suffix と連動する値
+ *    b. literalGroups の並び  … suffix から導けない、人が並べた同値リテラル
+ *
+ * 置換可能種別（substitutable）を緩めるのと違い、リテラルでも
+ * 「連動しているから同じ」と「値そのものが違う」を区別できる。
+ * WHERE region = 'abjp' と 'abus' は同一視されるが、
+ * WHERE status = 'A' と 'B' はロジック差として残る。
+ */
+function maskTokens(tokens, suffix, parts, opts) {
+  const s = String(suffix || '');
+  const useSuffix = s.length >= 2;
   // リテラル内の語照合。suffix と連動する国コードなどを吸収する。
-  const words = (opts && opts.literalSuffixWords === false)
-    ? [] : suffixWords(s, parts);
+  const words = (useSuffix && !(opts && opts.literalSuffixWords === false))
+    ? suffixWords(s, parts) : [];
+  const map = buildLiteralMap(opts && opts.literalGroups);
+  if (!useSuffix && words.length === 0 && !map) return tokens;
   return tokens.map((t) => {
     if (t.kind === 'space') return t;
     let text = t.text;
-    // 1. 文字列としての suffix。識別子でもデータセット名でもどこでも効く。
-    if (text.indexOf(s) >= 0) text = text.split(s).join(SUFFIX_MARK);
-    // 2. リテラルの中は語単位で照合する（大文字小文字を無視）。
-    //    'JP' / 'AB' のように suffix と同じ文字列でなくても連動していれば吸収する。
-    //    語全体が一致したときだけ置くので、'label' の ab のような巻き込みは起きない。
-    if (words.length > 0 && (t.kind === 'string' || t.kind === 'quoted')) {
-      text = text.replace(WORD_RE, (w) =>
-        (words.indexOf(w.toLowerCase()) >= 0 ? SUFFIX_MARK : w));
+    if (useSuffix && text.indexOf(s) >= 0) text = text.split(s).join(SUFFIX_MARK);
+    if ((words.length > 0 || map) && LITERAL_KINDS[t.kind]) {
+      text = text.replace(WORD_RE, (w) => {
+        const k = w.toLowerCase();
+        if (words.indexOf(k) >= 0) return SUFFIX_MARK;
+        return (map && map[k]) || w;
+      });
     }
     return text === t.text ? t : { kind: t.kind, text };
   });
@@ -355,7 +392,7 @@ function groupByLogic(views, opts) {
     return {
       ...v,
       raw,
-      tokens: suffixAware ? maskSuffix(tokens, v.suffix, v.parts, opts) : tokens,
+      tokens: maskTokens(tokens, suffixAware ? v.suffix : null, v.parts, opts),
     };
   });
 
@@ -439,7 +476,7 @@ function analyze(rows, opts) {
 }
 
 module.exports = {
-  tokenizeSql, normalizeSpace, stripOptionsClause, maskSuffix, suffixWords,
+  tokenizeSql, normalizeSpace, stripOptionsClause, maskTokens, suffixWords, buildLiteralMap,
   extractSuffix, expandSuffixParts, alphaMap, alphaMapDetail,
   parameterize, groupByLogic, analyze,
   DEFAULT_SUFFIX_RE, DEFAULT_SUBSTITUTABLE, KEYWORDS,

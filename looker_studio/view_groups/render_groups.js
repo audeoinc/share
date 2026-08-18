@@ -106,9 +106,11 @@ const REASON_TEXT = {
  * している」なのか本物の差なのかを、画面だけで切り分けられるようにする。
  */
 function missTable(groups) {
-  // 比較用トークンでは suffix が伏せ字（U+0000）になっている。そのまま出すと
-  // 消えて見えるので、伏せた場所が分かる表記に戻す。
-  const unmask = (s) => String(s == null ? '' : s).split('\u0000').join('⟨suffix⟩');
+  // 比較用トークンでは伏せ字が制御文字になっている。そのまま出すと消えて
+  // 見えるので、何を伏せたか分かる表記に戻す。
+  const unmask = (s) => String(s == null ? '' : s)
+    .split('\u0000').join('⟨suffix⟩')
+    .replace(/\u0001(\d+)\u0001/g, '⟨literalGroups[$1]⟩');
   const rows = groups.filter((g) => g.miss).map((g) => {
     const d = g.miss.detail;
     const what = d.reason === 'length'
@@ -132,7 +134,10 @@ function missTable(groups) {
       `options_json に ` +
       `<code class="vg-mcode">"substitutable": ["ident","quoted","number","string"]</code>` +
       ` を指定すると<b>すべての</b>リテラル差が無視されます` +
-      `（<code class="vg-mcode">'A'</code> と <code class="vg-mcode">'B'</code> の差も消えます）。</div>`
+      `（<code class="vg-mcode">'A'</code> と <code class="vg-mcode">'B'</code> の差も消えます）。` +
+      `<br>特定の値だけ同一視したいなら、` +
+      `<code class="vg-mcode">"literalGroups": [["apac","amer","emea"]]</code>` +
+      ` のように組で並べます。</div>`
     : '';
   return `<details class="vg-params vg-miss"><summary class="vg-psummary">` +
     `なぜ別グループになったか</summary>${hint}` +
