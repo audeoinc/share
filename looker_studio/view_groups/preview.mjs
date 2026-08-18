@@ -1,0 +1,116 @@
+// render_groups.js のプレビュー兼検証。
+//   node preview.mjs         dist/preview.html を生成して検証
+//   node preview.mjs --check 生成せず検証だけ
+//
+// サンプル（3 グループ）に加えて、2 / 1 / 5 グループのケースも作って
+// レイアウトの切り替わりを確認する。
+import { writeFile, mkdir } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
+const A = require(join(here, 'analyze.js'));
+const S = require(join(here, 'sample_views.js'));
+const R = require(join(here, 'render_groups.js'));
+
+const OPTS = { suffixParts: S.SUFFIX_PARTS };
+
+// --- ケースを組み立てる -------------------------------------------------
+const base3 = A.analyze(S.sampleRows(), OPTS).bases[0];              // 3 グループ
+
+const rows2 = S.sampleRows().filter((r) => !r.view_name.includes('_ef'));
+const base2 = A.analyze(rows2, OPTS).bases[0];                       // 2 グループ
+
+const rows1 = S.sampleRows().filter((r) => r.view_name.includes('_ab'));
+const base1 = A.analyze(rows1, OPTS).bases[0];                       // 1 グループ
+
+// 5 グループ: ab 系を土台に、WHERE 条件を少しずつ変えた系統を足す
+const many = S.sampleRows().slice();
+const tmpl = many.find((r) => r.view_name.endsWith('_abjp')).ddl;
+for (const [suf, extra] of [['cdjp', 'AND o.status = \'CONFIRMED\''],
+  ['cdus', 'AND o.status = \'CONFIRMED\''],
+  ['cduk', 'AND o.status = \'CONFIRMED\'']]) {
+  const i = many.findIndex((r) => r.view_name.endsWith('_' + suf));
+  many[i] = { view_name: many[i].view_name, ddl: tmpl.replace(/_abjp/g, '_' + suf) };
+}
+many.push(
+  { view_name: 'v_daily_sales_ghjp', ddl: tmpl.replace(/_abjp/g, '_ghjp').replace('GROUP BY o.order_date, o.region', 'GROUP BY o.order_date') },
+  { view_name: 'v_daily_sales_ghus', ddl: tmpl.replace(/_abjp/g, '_ghus').replace('GROUP BY o.order_date, o.region', 'GROUP BY o.order_date') },
+  { view_name: 'v_daily_sales_ijjp', ddl: tmpl.replace(/_abjp/g, '_ijjp').replace('COUNT(DISTINCT o.order_id)', 'COUNT(o.order_id)') },
+);
+const baseMany = A.analyze(many, {
+  suffixParts: [['ab', 'cd', 'ef', 'gh', 'ij'], ['jp', 'us', 'uk']],
+}).bases[0];
+
+const cases = [
+  { title: '3 グループ（既定 = 3 ペイン横並び）', b: base3, opts: {} },
+  { title: '3 グループを layout:"tabs" で', b: base3, opts: { layout: 'tabs' } },
+  { title: '2 グループ（2 ペイン）', b: base2, opts: {} },
+  { title: '1 グループ（差分なし）', b: base1, opts: {} },
+  { title: `${baseMany.groupCount} グループ（既定 = タブ）`, b: baseMany, opts: {} },
+];
+
+const parts = cases.map((c) => ({ ...c, html: R.renderBase(c.b, c.opts) }));
+
+// --- 検証 --------------------------------------------------------------
+const h3 = parts[0].html;
+const hTabs = parts[1].html;
+const h1 = parts[3].html;
+const hMany = parts[4].html;
+
+const idsOf = (h) => [...h.matchAll(/id="([^"]+)"/g)].map((m) => m[1]);
+const checks = [
+  ['タイトルが base 名', h3.includes('v_daily_sales')],
+  ['グループ数バッジが出る', h3.includes('3 グループ')],
+  ['ペイン見出しに suffix が列記される', h3.replace(/<[^>]*>/g, '').includes('abjp, abuk, abus')],
+  ['3 グループは既定で 3 ペイン（タブなし）', !h3.includes('vg-tablist')],
+  ['3 ペインに 3 つの見出しが出る',
+    ['abjp, abuk, abus', 'cdjp, cduk, cdus', 'efjp, efuk, efus']
+      .every((s) => h3.replace(/<[^>]*>/g, '').includes(s))],
+  ['layout:"tabs" ならタブになる', hTabs.includes('vg-tablist')],
+  ['4 グループ以上は既定でタブ', hMany.includes('vg-tablist') && baseMany.groupCount > 3],
+  ['タブに基準グループの表示がある', hMany.includes('基準:')],
+  ['1 グループは差分なしの案内', h1.includes('すべてが同一ロジック')],
+  ['パラメータ一覧が出る', h3.includes('パラメータ化した箇所')],
+  ['パラメータ値に suffix が並ぶ', h3.includes('vg-psuf')],
+  ['radio の id が base ごとに一意',
+    new Set(idsOf(hTabs)).size === idsOf(hTabs).length && idsOf(hTabs).length > 0],
+  // 宣言ブロックには 16 進カラーの # が入るので、セレクタ部分だけを見る
+  ['CSS が id を参照していない（静的に保てる）',
+    R.chromeCss().split('\n')
+      .map((line) => line.split('{')[0])
+      .every((sel) => !sel.includes('#'))],
+  ['タブ CSS が MAX_TABS 分ある',
+    (R.chromeCss().match(/\.vg-r\d+:checked ~ \.vg-panels/g) || []).length === R.MAX_TABS],
+  ['script タグを含まない', !/<script/i.test(parts.map((p) => p.html).join(''))],
+  ['誤解を招く副題 (after)/(reference) が残っていない',
+    !/\((?:before|after|base|reference)\)/.test(parts.map((p) => p.html).join(''))],
+  ['副題が View 数になっている', h3.includes('基準 / 3 View')],
+];
+
+let failed = 0;
+for (const [name, ok] of checks) {
+  if (!ok) failed++;
+  console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`);
+}
+console.log(`\n${checks.length - failed}/${checks.length} passed`);
+
+if (!process.argv.includes('--check')) {
+  const { chromeCss } = R;
+  // 差分表の CSS は render.js がインラインで出しているので、ここでは chrome だけ
+  const page = '<!doctype html>\n<html lang="ja">\n<head>\n<meta charset="utf-8">\n' +
+    '<title>view groups preview</title>\n<style>\nbody{margin:16px;background:#fff}\n' +
+    'h2{font:600 14px/1.6 Roboto,system-ui,sans-serif;color:#57606A;' +
+    'margin:32px 0 12px;padding-top:16px;border-top:1px solid #D0D7DE}\n' +
+    chromeCss() + '\n</style>\n</head>\n<body>\n' +
+    parts.map((p) => `<h2>${p.title}</h2>\n${p.html}`).join('\n') +
+    '\n</body>\n</html>\n';
+  await mkdir(join(here, 'dist'), { recursive: true });
+  const out = join(here, 'dist', 'preview.html');
+  await writeFile(out, page);
+  console.log(`wrote ${out}`);
+}
+
+process.exit(failed === 0 ? 0 : 1);
