@@ -143,7 +143,8 @@ const suffixCte = dynamic ? `
 -- データセット名から suffix を集める。手で一覧を持たないための CTE。
 --   mart_abjp / raw_cduk → abjp / cduk
 -- region は自分の環境に合わせる（region-us / region-asia-northeast1 など）。
--- ここが 0 件だと base が全部 NULL になり、結果も 0 件になる。
+-- ここが 0 件だと全 View が「suffix 未認識」になり、1 本ずつ単独で並ぶだけになる。
+-- 件数は下の確認クエリで見ておく。
 suffixes AS (
   SELECT DISTINCT REGEXP_EXTRACT(schema_name, r'${config.schemataPattern}') AS suffix
   FROM \`PROJECT.region-us.INFORMATION_SCHEMA.SCHEMATA\`
@@ -168,11 +169,16 @@ opts AS (
 const keyedCte = dynamic ? `keyed AS (
   -- suffix 一覧との ENDS_WITH で base を切る。
   -- 複数一致したら長いほうを採る（短い suffix が長い suffix の末尾に含まれる場合の対策）。
-  -- LEFT JOIN なので suffix の付かない View も 1 行残り、base は NULL になる。
+  -- LEFT JOIN なので suffix の付かない View も 1 行残る。
   SELECT
     src.view_name,
     src.ddl,
-    SUBSTR(src.view_name, 1, LENGTH(src.view_name) - LENGTH(s.suffix) - 1) AS base
+    -- suffix を認識できない View は自分の名前を base にする。
+    -- 束ねる相手がいないので 1 View / 1 グループとして単独で表示される。
+    COALESCE(
+      SUBSTR(src.view_name, 1, LENGTH(src.view_name) - LENGTH(s.suffix) - 1),
+      src.view_name
+    ) AS base
   FROM src
   LEFT JOIN suffixes AS s
     ON ENDS_WITH(src.view_name, '_' || s.suffix)
@@ -184,7 +190,8 @@ const keyedCte = dynamic ? `keyed AS (
     view_name,
     ddl,
     -- suffix_config.json から生成。UDF に渡す設定と必ず一致する。
-    REGEXP_EXTRACT(view_name, r'${regex}') AS base
+    -- 認識できない View は自分の名前を base にして、単独で表示させる。
+    COALESCE(REGEXP_EXTRACT(view_name, r'${regex}'), view_name) AS base
   FROM src
 )`;
 
@@ -234,14 +241,14 @@ const sql = `-- ================================================================
 CREATE TABLE IF NOT EXISTS \`PROJECT.DATASET.view_logic_diff\`
 (
   snapshot_date   DATE           OPTIONS (description = '生成日'),
-  base            STRING         OPTIONS (description = 'suffix を除いた View 名。Looker のキー'),
+  base            STRING         OPTIONS (description = 'suffix を除いた View 名。Looker のキー。suffix を認識できなかった View は View 名そのもの'),
   view_count      INT64          OPTIONS (description = 'この base に属する View 数'),
   group_count     INT64          OPTIONS (description = 'ロジックのグループ数。1 なら全部同一'),
   has_multiple    BOOL           OPTIONS (description = 'group_count > 1。ロジック逸脱の検知用'),
   group_labels    ARRAY<STRING>  OPTIONS (description = 'ペイン見出し（同一ロジックの suffix 列記）'),
   group_sizes     ARRAY<INT64>   OPTIONS (description = '各グループの View 数'),
   suffixes        ARRAY<STRING>  OPTIONS (description = '認識した suffix 一覧'),
-  unmatched_count INT64          OPTIONS (description = 'suffix を認識できなかった View 数'),
+  unmatched_count INT64          OPTIONS (description = 'suffix を認識できなかった View 数。1 ならこの行が単独表示の View'),
   diff_html       STRING         OPTIONS (description = '比較 HTML。Templated Record に渡す')
 )
 PARTITION BY snapshot_date
@@ -297,7 +304,6 @@ FROM (
 ${udfOptionsArg}
     ) AS info
   FROM keyed
-  WHERE base IS NOT NULL
   GROUP BY base
 );
 
@@ -333,7 +339,13 @@ ${dynamic ? `-- 認識した suffix の確認（0 件なら region か schemataP
 -- FROM \`PROJECT.region-us.INFORMATION_SCHEMA.SCHEMATA\`
 -- ORDER BY schema_name;
 
-` : ''}-- ロジックが割れている base だけ見る（＝要確認のもの）
+` : ''}-- suffix を認識できなかった View（単独で 1 行ずつ並ぶ）
+-- SELECT base, group_labels
+-- FROM \`PROJECT.DATASET.v_view_logic_diff_latest\`
+-- WHERE unmatched_count > 0
+-- ORDER BY base;
+
+-- ロジックが割れている base だけ見る（＝要確認のもの）
 -- SELECT base, group_count, group_labels
 -- FROM \`PROJECT.DATASET.v_view_logic_diff_latest\`
 -- WHERE has_multiple

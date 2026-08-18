@@ -116,7 +116,9 @@ suffixes AS (
 注意点:
 
 - `region-us` は環境に合わせる（`region-asia-northeast1` など）。
-  ここを間違えると suffix が 0 件になり、結果も 0 件になる
+  ここを間違えると suffix が 0 件になり、**全 View が「suffix 未認識」として
+  1 本ずつ単独で並ぶ**（0 件にはならないので気づきにくい）。
+  `unmatched_count > 0` の件数で確認する
 - **サンプルはデータセットを 1 つにまとめてある**ので、この CTE では 0 件になる。
   `build_table.sql` に固定一覧へ差し替えるコメントを入れてあるので、
   そちらを有効にして試す
@@ -168,10 +170,24 @@ node build_udf.mjs
 | `suffixList: ['abjp', 'abus', …]` | 既知の一覧を直接指定 |
 | `suffixPattern: '^(.*?)_([A-Za-z0-9]{1,6})$'` | 正規表現。既定は末尾の `_` + 1〜6 文字 |
 
-`v_daily_sales` のように suffix を持たない名前は対象外（`unmatched` に入る）。
+`v_daily_sales` のように suffix を持たない名前は `unmatched` に入る。
 
 `suffixPattern` を使う場合は `^(base)(suffix)$` の形で**キャプチャを 2 つ**持たせる。
 1 つ目が base、2 つ目が suffix になる。
+
+## suffix を認識できなかった View
+
+**除外せず、単独の base として並べる**（`base` = View 名 / 1 View / 1 グループ）。
+出さないとそのソースが画面から消えてしまい、**命名規則から外れた View ほど
+気づけなくなる**。表示は 1 グループのときと同じで、見出しには suffix の代わりに
+View 名が入り、`suffix 未認識` のバッジが付く。
+
+`unmatched_count` は従来どおり件数を返すので、Looker 側で
+`WHERE unmatched_count > 0` で拾える。`includeUnmatched: false` を渡すと
+従来どおり除外できる。
+
+`build_table.sql` 側も `COALESCE(<切り出した base>, view_name)` にしてあるので、
+suffix の付かない View も 1 行として保存される。
 
 ## 検証用サンプル
 
@@ -179,7 +195,7 @@ BigQuery に実データを作って試せる。
 
 ```bash
 node build_sample_sql.mjs   # sample_data.sql / sample_teardown.sql を生成
-node test.mjs               # アナライザの検証（40 アサーション）
+node test.mjs               # アナライザの検証（46 アサーション）
 ```
 
 | ファイル | 内容 |
@@ -221,7 +237,7 @@ ORDER BY table_name;
 
 | グループ数 | レイアウト |
 |---|---|
-| 1 | 差分なしの案内 |
+| 1 | 差分なしの案内（suffix 未認識の View もここ。単独で 1 View） |
 | 2 | 2 ペイン（比較が 1 通りしかないので、タブ 1 枚は無駄） |
 | 3 以上 | 最大グループを基準に、比較相手を**タブ**で切り替える |
 
@@ -242,7 +258,7 @@ ORDER BY table_name;
 強力なので、当否を人が確認できるようにしておく。
 
 ```bash
-node preview.mjs          # dist/preview.html を生成して検証（21 アサーション）
+node preview.mjs          # dist/preview.html を生成して検証（25 アサーション）
 node preview.mjs --check  # 生成せず検証だけ
 ```
 
@@ -250,7 +266,7 @@ node preview.mjs --check  # 生成せず検証だけ
 
 ```bash
 node build_udf.mjs          # 検証して view_group_html.sql を生成
-node build_udf.mjs --check  # 生成せず検証だけ（21 アサーション）
+node build_udf.mjs --check  # 生成せず検証だけ（23 アサーション）
 ```
 
 | 関数 | 戻り値 |
@@ -266,8 +282,8 @@ HTML とメタデータを 1 回の呼び出しで返すのは、事前生成テ
 素の連結は約 45 KB あって確実に弾かれるので、esbuild で最小化してから埋め込む。
 
 ```
-VIEW_GROUP_INFO  素 42.6 KB → 最小化 26.0 KB（上限比 87%）
-VIEW_GROUP_CSS   素 42.4 KB → 最小化 25.7 KB（上限比 86%）
+VIEW_GROUP_INFO  素 43.8 KB → 最小化 26.6 KB（上限比 89%）
+VIEW_GROUP_CSS   素 43.5 KB → 最小化 26.3 KB（上限比 88%）
 ```
 
 3-way 系を外して 28.1 KB → 25.8 KB になった（suffix の伏せ字を足して 26.0 KB）。それでも枠は広くないので、

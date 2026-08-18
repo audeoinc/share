@@ -161,6 +161,25 @@ checks.push(['suffixList でも suffixParts と同じグループ分けになる
     .groups.map((g) => g.suffixes.join(',')).join('|') ===
   sales.groups.map((g) => g.suffixes.join(',')).join('|')]);
 
+// suffix を認識できなかった View
+// 出さないとソースが画面から消える。単独の base（1 View / 1 グループ）として並べる。
+const withOdd = A.analyze(rows.concat([
+  { view_name: 'v_daily_sales', ddl: 'SELECT 1' },
+  { view_name: 'v_legacy_report', ddl: 'SELECT 2' },
+]), OPTS);
+const odd = withOdd.bases.find((b) => b.base === 'v_legacy_report');
+checks.push(['未認識の View も base として並ぶ', !!odd]);
+checks.push(['未認識は 1 View / 1 グループ',
+  odd.viewCount === 1 && odd.groupCount === 1 && odd.unmatched === true]);
+checks.push(['未認識でもソースを保持している',
+  odd.groups[0].members[0].ddl === 'SELECT 2']);
+checks.push(['unmatched は従来どおり件数を持つ', withOdd.unmatched.length === 2]);
+checks.push(['suffix 付きのグループ分けは変わらない',
+  withOdd.bases.find((b) => b.base === S.BASE_VIEW).groupCount === 3]);
+checks.push(['includeUnmatched:false なら従来どおり除外する',
+  A.analyze(rows.concat([{ view_name: 'v_legacy_report', ddl: 'SELECT 2' }]),
+    { ...OPTS, includeUnmatched: false }).bases.length === 1]);
+
 // トークナイザ
 const tk = A.tokenizeSql("SELECT `a.b_c`, 'x y', 12.5 -- memo\nFROM t");
 checks.push(['バッククォート識別子が 1 トークン',

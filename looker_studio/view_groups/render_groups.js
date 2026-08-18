@@ -41,7 +41,13 @@ function hashId(s) {
   return h.toString(36);
 }
 
-const label = (g) => `${g.suffixes.join(', ')}`;
+/**
+ * ペイン見出し。通常は同じロジックを持つ suffix の列記。
+ * suffix を認識できなかった View は suffix が null なので、View 名で出す。
+ */
+const label = (g) => g.suffixes
+  .map((s, i) => s || (g.members[i] && g.members[i].viewName) || '(suffix なし)')
+  .join(', ');
 
 /**
  * ペインの副題を差し替える。
@@ -67,7 +73,7 @@ function badge(txt, fg, bg) {
   return `<span class="vg-badge" style="color:${fg};background:${bg}">${esc(txt)}</span>`;
 }
 
-function header(base, viewCount, groupCount) {
+function header(base, viewCount, groupCount, unmatched) {
   const warn = groupCount > 1;
   return (
     `<div class="vg-header">` +
@@ -76,6 +82,8 @@ function header(base, viewCount, groupCount) {
     badge(`${groupCount} グループ`,
       warn ? '#9A6700' : '#1A7F37',
       warn ? '#FFF8C5' : '#DAFBE1') +
+    // 命名規則から外れていること自体が情報なので、一覧で拾えるようにする
+    (unmatched ? badge('suffix 未認識', '#9A6700', '#FFF8C5') : '') +
     `</div>`
   );
 }
@@ -199,7 +207,9 @@ function renderBase(b, opts) {
   if (n === 0) {
     body = notice('View が見つかりません。');
   } else if (n === 1) {
-    body = notice(`${b.viewCount} View すべてが同一ロジックです。`) +
+    body = notice(b.unmatched
+      ? 'suffix を認識できなかった View です。比較相手がないので単独で表示しています。'
+      : `${b.viewCount} View すべてが同一ロジックです。`) +
       `<div class="vg-single">${relabelPanes(renderFragment2(
         label(groups[0]), label(groups[0]),
         build2Way(splitLines(groups[0].sql), splitLines(groups[0].sql)), o),
@@ -212,7 +222,7 @@ function renderBase(b, opts) {
   }
 
   return `<div class="vg-root">` +
-    header(b.base, b.viewCount, n) +
+    header(b.base, b.viewCount, n, b.unmatched) +
     body +
     missTable(groups) +
     paramsTable(groups) +
@@ -276,4 +286,4 @@ function chromeCss() {
   return rules.join('\n');
 }
 
-module.exports = { renderBase, chromeCss, MAX_TABS, hashId };
+module.exports = { renderBase, chromeCss, MAX_TABS, hashId, label };

@@ -174,12 +174,17 @@ function __run(views, options_json) {
     viewCount += bs.viewCount;
     groupCount += bs.groupCount;
     for (var g = 0; g < bs.groups.length; g++) {
-      labels.push(bs.groups[g].suffixes.join(', '));
-      sizes.push(bs.groups[g].members.length);
-      for (var k = 0; k < bs.groups[g].suffixes.length; k++) sufs.push(bs.groups[g].suffixes[k]);
+      var grp = bs.groups[g];
+      // suffix が null（未認識）のときは View 名。表示の見出しと同じ規則にする。
+      labels.push(label(grp));
+      sizes.push(grp.members.length);
+      for (var k = 0; k < grp.suffixes.length; k++) {
+        sufs.push(grp.suffixes[k] || grp.members[k].viewName);
+      }
     }
   }
-  if (res.unmatched.length > 0) {
+  // 未認識の View は base として描いてある（includeUnmatched: false のときだけ案内を出す）
+  if (res.unmatched.length > 0 && opts.includeUnmatched === false) {
     html += __notice('suffix を認識できなかった View が ' + res.unmatched.length + ' 件あります。');
   }
 
@@ -225,6 +230,8 @@ function __fixtureRules(opts) {
   // 3 グループ以上（タブ）
   collect([mk('abjp', s(A, 'abjp')), mk('cdjp', s(B, 'cdjp')),
            mk('efjp', s(C, 'efjp')), mk('ghjp', s(D, 'ghjp'))]);
+  // suffix 未認識（単独表示。バッジが 1 つ増える）
+  collect([{ view_name: 'v_fixture_no_suffix', ddl: s(A, 'x') }]);
   // 3 ペイン横並び（layout:'panes'）
   var p = {}; for (var k in opts) p[k] = opts[k];
   p.layout = 'panes';
@@ -300,9 +307,25 @@ const checks = [
   ['メタデータ: 未認識は 0', info.unmatched_count === 0],
   ['空入力で案内を返す',
     VIEW_GROUP_INFO([], OPTS).html.includes('View が渡されていません')],
-  ['suffix 不一致で案内を返す',
-    VIEW_GROUP_INFO([{ view_name: 'no_suffix_here', ddl: 'SELECT 1' }], OPTS)
+  ['suffix 未認識でもソースを単独で描く',
+    (() => {
+      const r = VIEW_GROUP_INFO([{ view_name: 'no_suffix_here', ddl: 'SELECT 1' }], OPTS);
+      const t = r.html.replace(/<[^>]*>/g, '');
+      return r.view_count === 1 && r.group_count === 1 && r.unmatched_count === 1 &&
+        r.group_labels.join('') === 'no_suffix_here' &&
+        t.includes('no_suffix_here') && t.includes('suffix を認識できなかった View です');
+    })()],
+  ['suffix 未認識は includeUnmatched:false で従来どおり除外できる',
+    VIEW_GROUP_INFO([{ view_name: 'no_suffix_here', ddl: 'SELECT 1' }],
+      JSON.stringify({ suffixParts: S.SUFFIX_PARTS, includeUnmatched: false }))
       .html.includes('suffix を認識できませんでした')],
+  ['未認識の View は混在していても描かれる',
+    (() => {
+      const r = VIEW_GROUP_INFO(
+        S.sampleRows().concat([{ view_name: 'v_daily_sales_zzz', ddl: 'SELECT 1' }]), OPTS);
+      return r.view_count === 10 && r.unmatched_count === 1 &&
+        r.html.replace(/<[^>]*>/g, '').includes('v_daily_sales_zzz');
+    })()],
   ['壊れた options_json でも落ちない',
     typeof VIEW_GROUP_INFO(views, '{ broken').html === 'string'],
   ['script タグを含まない', !/<script/i.test(html)],

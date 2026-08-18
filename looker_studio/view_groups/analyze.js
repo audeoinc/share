@@ -357,9 +357,17 @@ function groupByLogic(views, opts) {
 
 /**
  * INFORMATION_SCHEMA 相当の行（view_name, ddl）を base 名ごとに束ねてグループ化する。
- * @returns {Array<{base: string, groupCount: number, groups: object[], unmatched: object[]}>}
+ *
+ * suffix を認識できなかった View も、既定では単独の base として並べる
+ * （base = View 名 / 1 グループ / 1 View）。出さないとソースが画面から消えてしまい、
+ * 命名規則から外れた View ほど気づけなくなる。`includeUnmatched: false` で従来どおり
+ * 除外できる。どちらの場合も `unmatched` には元の行が入るので、件数は数えられる。
+ *
+ * @returns {{bases: Array<{base: string, viewCount: number, groupCount: number,
+ *            groups: object[], unmatched?: boolean}>, unmatched: object[]}}
  */
 function analyze(rows, opts) {
+  const includeUnmatched = !(opts && opts.includeUnmatched === false);
   const byBase = new Map();
   const unmatched = [];
   for (const r of rows) {
@@ -374,6 +382,19 @@ function analyze(rows, opts) {
   for (const [base, views] of byBase) {
     const groups = groupByLogic(views, opts);
     out.push({ base, viewCount: views.length, groupCount: groups.length, groups });
+  }
+  if (includeUnmatched) {
+    for (const r of unmatched) {
+      // suffix は null。比較相手がいないので伏せ字もパラメータ化も働かない。
+      const views = [{ viewName: r.view_name, suffix: null, parts: null, ddl: r.ddl }];
+      out.push({
+        base: r.view_name,
+        viewCount: 1,
+        groupCount: 1,
+        groups: groupByLogic(views, opts),
+        unmatched: true,
+      });
+    }
   }
   out.sort((a, b) => b.groupCount - a.groupCount || a.base.localeCompare(b.base));
   return { bases: out, unmatched };

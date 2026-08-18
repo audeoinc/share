@@ -44,11 +44,18 @@ const baseMany = A.analyze(many, {
   suffixParts: [['ab', 'cd', 'ef', 'gh', 'ij'], ['jp', 'us', 'uk']],
 }).bases[0];
 
+// suffix を認識できなかった View（単独表示）
+const baseOdd = A.analyze([
+  { view_name: 'v_legacy_report',
+    ddl: 'SELECT\n  order_date,\n  SUM(amount) AS amount\nFROM `p.legacy.orders`\nGROUP BY order_date' },
+], OPTS).bases[0];
+
 const cases = [
   { title: '3 グループ（既定 = タブ）', b: base3, opts: {} },
   { title: '2 グループ（2 ペイン）', b: base2, opts: {} },
   { title: '1 グループ（差分なし）', b: base1, opts: {} },
   { title: `${baseMany.groupCount} グループ（既定 = タブ）`, b: baseMany, opts: {} },
+  { title: 'suffix 未認識（単独表示）', b: baseOdd, opts: {} },
 ];
 
 const parts = cases.map((c) => ({ ...c, html: R.renderBase(c.b, c.opts) }));
@@ -57,6 +64,7 @@ const parts = cases.map((c) => ({ ...c, html: R.renderBase(c.b, c.opts) }));
 const h3 = parts[0].html;
 const h1 = parts[2].html;
 const hMany = parts[3].html;
+const hOdd = parts[4].html;
 
 const idsOf = (h) => [...h.matchAll(/id="([^"]+)"/g)].map((m) => m[1]);
 const checks = [
@@ -91,6 +99,11 @@ const checks = [
   ['2 グループはタブにしない（比較が 1 通りのため）',
     !parts[1].html.includes('vg-tablist')],
   ['なぜ別グループになったかを出す', h3.includes('なぜ別グループになったか')],
+  ['未認識の View はタイトルが View 名', hOdd.includes('v_legacy_report')],
+  ['未認識の View にバッジが付く', hOdd.includes('suffix 未認識')],
+  ['未認識の View もソースを描く', hOdd.replace(/<[^>]*>/g, '').includes('legacy')],
+  ['未認識の見出しは空にならない',
+    !hOdd.includes('<div class="vg-plabel"></div>')],
   ['リテラル差で割れたときは substitutable の指定を案内する',
     R.renderBase(A.analyze([
       { view_name: 'v_x_abjp', ddl: "SELECT a FROM t_abjp WHERE c = 'JP'" },
