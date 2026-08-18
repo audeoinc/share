@@ -83,6 +83,46 @@ function notice(text) {
   return `<div class="vg-notice">${esc(text)}</div>`;
 }
 
+const REASON_TEXT = {
+  'length': 'トークン数が違う（構造そのものが別）',
+  'kind': 'トークンの種類が違う',
+  'not-substitutable': '置換対象外のトークンが違う（既定ではリテラルもここに入る）',
+  'inconsistent': '同じトークンが別の値に対応していて一貫しない',
+  'not-injective': '別々のトークンが同じ値に対応していて 1 対 1 にならない',
+};
+
+/**
+ * なぜ別グループになったかを出す。
+ * グループが想定より細かく割れたとき、原因が「リテラル差を既定でロジック差に
+ * している」なのか本物の差なのかを、画面だけで切り分けられるようにする。
+ */
+function missTable(groups) {
+  const rows = groups.filter((g) => g.miss).map((g) => {
+    const d = g.miss.detail;
+    const what = d.reason === 'length'
+      ? `${d.aLen} 対 ${d.bLen}`
+      : `<code class="vg-mcode">${esc(d.aText)}</code> ↔ ` +
+        `<code class="vg-mcode">${esc(d.bText)}</code>` +
+        `<span class="vg-mkind">${esc(d.kind)}</span>`;
+    return `<tr><th class="vg-mname">${esc(label(g))}</th>` +
+      `<td class="vg-mvs">vs ${esc(g.miss.vs)}</td>` +
+      `<td class="vg-mreason">${esc(REASON_TEXT[d.reason] || d.reason)}<br>${what}</td></tr>`;
+  }).join('');
+  if (!rows) return '';
+  const literal = groups.some((g) => g.miss &&
+    g.miss.detail.reason === 'not-substitutable' &&
+    (g.miss.detail.kind === 'string' || g.miss.detail.kind === 'number'));
+  const hint = literal
+    ? `<div class="vg-mhint">リテラルの違いで割れています。国コードのように` +
+      `「値が違うだけで同じロジック」なら、options_json の ` +
+      `<code class="vg-mcode">"substitutable": ["ident","quoted","number","string"]</code>` +
+      ` を指定すると同一グループにまとまります。</div>`
+    : '';
+  return `<details class="vg-params vg-miss"><summary class="vg-psummary">` +
+    `なぜ別グループになったか</summary>${hint}` +
+    `<div class="vg-pblock"><table class="vg-ptable">${rows}</table></div></details>`;
+}
+
 /** 何をパラメータ化したかの一覧。判定の当否を人が確認できるようにする。 */
 function paramsTable(groups) {
   const blocks = groups.map((g) => {
@@ -188,6 +228,7 @@ function renderBase(b, opts) {
   return `<div class="vg-root">` +
     header(b.base, b.viewCount, n) +
     body +
+    missTable(groups) +
     paramsTable(groups) +
     `</div>`;
 }
@@ -228,6 +269,16 @@ function chromeCss() {
     `.vg-pvals{padding:3px 0}`,
     `.vg-pv{font:11px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;color:#57606A;word-break:break-all}`,
     `.vg-psuf{display:inline-block;min-width:44px;color:#24292F;font-weight:600}`,
+    // 「なぜ別グループになったか」
+    `.vg-miss{background:#FFF8C5;border-color:#D4A72C}`,
+    `.vg-mhint{padding:0 12px 8px;color:#54470A;font-size:12px}`,
+    `.vg-mname{text-align:left;vertical-align:top;padding:3px 10px 3px 0;` +
+      `font:600 12px/1.6 inherit;color:#24292F;white-space:nowrap}`,
+    `.vg-mvs{vertical-align:top;padding:3px 10px 3px 0;color:#57606A;font-size:12px;white-space:nowrap}`,
+    `.vg-mreason{padding:3px 0;color:#54470A;font-size:12px}`,
+    `.vg-mcode{padding:1px 5px;border-radius:3px;background:#FFEBE9;color:#82071E;` +
+      `font:11px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace}`,
+    `.vg-mkind{margin-left:6px;color:#8250DF;font-size:11px}`,
   ];
   // タブ本体。ID ではなくクラスで書くので、CSS を静的に保てる。
   for (let i = 1; i <= MAX_TABS; i++) {

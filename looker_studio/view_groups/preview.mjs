@@ -94,6 +94,13 @@ const checks = [
   ['副題が View 数になっている', h3.includes('基準 / 3 View')],
   ['2 グループはタブにしない（比較が 1 通りのため）',
     !parts[2].html.includes('vg-tablist')],
+  ['なぜ別グループになったかを出す', h3.includes('なぜ別グループになったか')],
+  ['リテラル差で割れたときは substitutable の指定を案内する',
+    R.renderBase(A.analyze([
+      { view_name: 'v_x_abjp', ddl: "SELECT a FROM t_abjp WHERE c = 'JP'" },
+      { view_name: 'v_x_abus', ddl: "SELECT a FROM t_abus WHERE c = 'US'" },
+    ], { suffixParts: [['ab'], ['jp', 'us']] }).bases[0], {})
+      .includes('substitutable')],
 ];
 
 let failed = 0;

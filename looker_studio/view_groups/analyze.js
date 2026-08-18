@@ -152,25 +152,44 @@ function extractSuffix(viewName, opts) {
 const DEFAULT_SUBSTITUTABLE = ['ident', 'quoted'];
 
 /**
- * 2 つのトークン列が「一貫した 1 対 1 置換で一致するか」を判定する。
- * @returns {{fwd: Map, rev: Map} | null}  一致しなければ null
+ * 2 つのトークン列が「一貫した 1 対 1 置換で一致するか」を判定し、
+ * 一致しない場合はどこで止まったかも返す。
+ *
+ * グループが想定より細かく割れたとき、原因が
+ * 「リテラル差を既定でロジック差にしている」なのか本物の差なのかを
+ * 切り分けられないと詰まるので、理由を出せるようにしている。
+ *
+ * @returns {{ok:true, fwd:Map, rev:Map} | {ok:false, reason:string, ...}}
  */
-function alphaMap(a, b, opts) {
-  if (a.length !== b.length) return null;
+function alphaMapDetail(a, b, opts) {
+  if (a.length !== b.length) {
+    return { ok: false, reason: 'length', aLen: a.length, bLen: b.length };
+  }
   const sub = new Set((opts && opts.substitutable) || DEFAULT_SUBSTITUTABLE);
   const fwd = new Map();
   const rev = new Map();
   for (let i = 0; i < a.length; i++) {
     const x = a[i], y = b[i];
-    if (x.kind !== y.kind) return null;
+    const at = (r) => ({ ok: false, reason: r, index: i, kind: x.kind,
+      otherKind: y.kind, aText: x.text, bText: y.text });
+    if (x.kind !== y.kind) return at('kind');
     if (x.text === y.text) continue;
-    if (!sub.has(x.kind)) return null;         // 予約語・記号の違いはロジック差
-    if (fwd.has(x.text) && fwd.get(x.text) !== y.text) return null;  // 一貫性
-    if (rev.has(y.text) && rev.get(y.text) !== x.text) return null;  // 単射性
+    // 予約語・記号の違いはロジック差。既定ではリテラルもここで弾く。
+    if (!sub.has(x.kind)) return at('not-substitutable');
+    if (fwd.has(x.text) && fwd.get(x.text) !== y.text) return at('inconsistent');
+    if (rev.has(y.text) && rev.get(y.text) !== x.text) return at('not-injective');
     fwd.set(x.text, y.text);
     rev.set(y.text, x.text);
   }
-  return { fwd, rev };
+  return { ok: true, fwd, rev };
+}
+
+/**
+ * @returns {{fwd: Map, rev: Map} | null}  一致しなければ null
+ */
+function alphaMap(a, b, opts) {
+  const d = alphaMapDetail(a, b, opts);
+  return d.ok ? { fwd: d.fwd, rev: d.rev } : null;
 }
 
 // ---------------------------------------------------------------------
@@ -230,9 +249,15 @@ function groupByLogic(views, opts) {
   const groups = [];
   for (const v of prepared) {
     // α 等価は推移的（全単射の合成）なので、代表 1 本と比べれば足りる
-    const hit = groups.find((g) => alphaMap(g.members[0].tokens, v.tokens, opts) !== null);
+    let hit = null;
+    let firstMiss = null;
+    for (const g of groups) {
+      const d = alphaMapDetail(g.members[0].tokens, v.tokens, opts);
+      if (d.ok) { hit = g; break; }
+      if (!firstMiss) firstMiss = { vs: g.members[0].suffix, detail: d };
+    }
     if (hit) hit.members.push(v);
-    else groups.push({ members: [v] });
+    else groups.push({ members: [v], miss: firstMiss });
   }
 
   // 大きいグループを先頭に（比較の基準に使う）
@@ -249,6 +274,8 @@ function groupByLogic(views, opts) {
       members,
       sql: p.sql,
       params: p.params,
+      // 先頭グループ以外は「なぜ別グループになったか」を持つ
+      miss: g.miss || null,
     };
   });
 }
@@ -278,7 +305,7 @@ function analyze(rows, opts) {
 }
 
 module.exports = {
-  tokenizeSql, normalizeSpace, extractSuffix, expandSuffixParts, alphaMap,
+  tokenizeSql, normalizeSpace, extractSuffix, expandSuffixParts, alphaMap, alphaMapDetail,
   parameterize, groupByLogic, analyze,
   DEFAULT_SUFFIX_RE, DEFAULT_SUBSTITUTABLE, KEYWORDS,
 };
