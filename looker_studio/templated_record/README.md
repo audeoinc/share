@@ -65,14 +65,50 @@ Templated Record を配置し、**表示対象のカラムに `diff_html` を指
 `PROJECT.DATASET.DIFF_HTML`(before_ddl, after_ddl, 'v1', 'v2', '{"contextLines": 3}')
 ```
 
-## サイズに注意
+## サイズ対策：CSS をテンプレートに分離する
 
 インライン CSS の HTML は **元の DDL の約 21 倍**に膨らむ（実測: 200 行の DDL → 約 200KB）。
-1 セルに載せる文字列としては大きいので、次の順で対処する。
+Templated Record は `<style>` が使えるので、**CSS をテンプレート側に固定で置き、
+カラムには markup だけ載せる**と、カラムに載る文字列が約半分になる。
 
-1. `contextLines` を指定して変更箇所だけにする
-2. 比較対象を 1 組に絞る（`query.sql` の A パターンはもともと 1 行）
-3. それでも切り捨てられるなら、DDL 側を分割して複数行で渡す設計に変える
+`node build_samples.mjs` の実測:
+
+| DDL 行数 | インライン | class markup | 削減 |
+|---:|---:|---:|---:|
+| 50 | 54 KB | 25 KB | 54% |
+| 200 | 201 KB | 94 KB | 53% |
+| 500 | 497 KB | 233 KB | 53% |
+| 1000 | 991 KB | 465 KB | 53% |
+
+共通 CSS は 26 規則・約 3KB で**固定長**。テンプレートに 1 回貼るだけで、
+差分の内容が変わっても書き換え不要。
+
+見た目は変わらない。インライン版と class 版を実ブラウザで描画して
+**スクリーンショットがバイト単位で完全一致**することを確認済み。
+
+クラス名は `style` 属性の中身のハッシュから決めているので、
+**内容や出現順に依存せず、同じ宣言には必ず同じクラス名が付く**。
+これがないとテンプレート側の固定 CSS と markup 側のクラス名がズレる。
+
+さらに小さくしたいときは `contextLines` を併用する。
+
+### 検証用サンプル
+
+[`samples/`](./samples/) に生成済み（`node build_samples.mjs` で再生成）。
+
+| ファイル | 用途 |
+|---|---|
+| `01_style_test.html` | `<style>` と子要素セレクタが効くかだけを見る最小サンプル |
+| `02_diff_inline.html` | 現行 `DIFF_HTML` の出力（インライン CSS・単体で表示可能） |
+| `03_diff_classed.html` | `<style>` + class 版（単体で表示可能・02 と見た目が同一） |
+| `04_template_style.html` | **テンプレートに貼る CSS**（固定） |
+| `05_column_markup.html` | **カラムに入る markup**（BigQuery が返す文字列そのもの） |
+
+`04` をテンプレートに貼り、その下にフィールドを差し込む。`05` の中身を
+そのままカラムの値として流し込めば、`03` と同じ表示になるはず。
+
+> 分離方式が確認できたら、`DIFF_HTML` にも markup だけを返すモードを追加する。
+> 現状の UDF はインライン CSS 版（単体で完結するので、まずはこちらで動作確認する）。
 
 ## 制約
 
@@ -93,6 +129,7 @@ Templated Record を配置し、**表示対象のカラムに `diff_html` を指
 ```bash
 node build_udf.mjs          # 検証して ddl_diff_html.sql を生成
 node build_udf.mjs --check  # 生成せず検証だけ
+node build_samples.mjs      # samples/ を再生成し、サイズを実測
 ```
 
 元コードは `diff_html/` の VS Code 拡張の `lib/diff.js` / `lib/render.js`
