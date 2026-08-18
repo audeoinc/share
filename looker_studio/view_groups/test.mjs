@@ -92,6 +92,27 @@ const uniform = A.analyze(
   })), OPTS).bases[0];
 checks.push(['全 suffix 同一ロジックなら 1 グループ', uniform.groupCount === 1]);
 
+// OPTIONS 句（BigQuery が返す DDL に description や作成タイムスタンプが入る）
+const withOptions = S.sampleRows().map((r, i) => ({
+  view_name: r.view_name,
+  ddl: r.ddl.replace(/ AS\n/, `\nOPTIONS(\n  description="auto",\n` +
+    `  labels=[("created", "2026-08-18T0${i}:11:22Z")]\n)\nAS `),
+}));
+const wo = A.analyze(withOptions, OPTS).bases[0];
+checks.push(['OPTIONS 句は既定で無視する（メタデータでロジックではない）',
+  wo.groupCount === 3]);
+checks.push(['OPTIONS を無視してもグループ分けは同じ',
+  wo.groups.map((g) => g.suffixes.join(',')).join('|') ===
+  sales.groups.map((g) => g.suffixes.join(',')).join('|')]);
+checks.push(['パラメータ化 SQL に OPTIONS が残らない',
+  !/OPTIONS/.test(wo.groups[0].sql)]);
+checks.push(['stripOptions:false なら従来どおり割れる',
+  A.analyze(withOptions, { ...OPTS, stripOptions: false }).bases[0].groupCount === 9]);
+checks.push(['OPTIONS の値に括弧や引用符があっても対応する ) を見つける',
+  A.stripOptionsClause(A.tokenizeSql(
+    'CREATE VIEW `a` OPTIONS(x="a)b(c", y=[(1,2)]) AS SELECT 1'))
+    .map((t) => t.text).join('') === 'CREATE VIEW `a` AS SELECT 1']);
+
 // トークナイザ
 const tk = A.tokenizeSql("SELECT `a.b_c`, 'x y', 12.5 -- memo\nFROM t");
 checks.push(['バッククォート識別子が 1 トークン',

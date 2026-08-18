@@ -68,6 +68,47 @@ function tokenizeSql(sql) {
   return out;
 }
 
+/**
+ * CREATE VIEW … OPTIONS( … ) AS … の OPTIONS 句を落とす。
+ *
+ * BigQuery が返す DDL には description や作成タイムスタンプなどが OPTIONS に
+ * 入ることがある。これはメタデータであってロジックではないのに、View ごとに
+ * 値が違うので、そのままだと全部が別グループに割れる。
+ * ビュー側を書き換えるのではなく、解析側で無視する。
+ *
+ * 正規表現ではなくトークン列で処理するのは、OPTIONS の値に括弧や引用符が
+ * 入っていても対応する ')' を正しく見つけるため。
+ */
+function stripOptionsClause(tokens) {
+  const out = [];
+  let i = 0;
+  while (i < tokens.length) {
+    const t = tokens[i];
+    if (t.kind === 'keyword' && t.text.toUpperCase() === 'OPTIONS') {
+      let j = i + 1;
+      while (j < tokens.length && tokens[j].kind === 'space') j++;
+      if (j < tokens.length && tokens[j].text === '(') {
+        let depth = 0;
+        let k = j;
+        for (; k < tokens.length; k++) {
+          if (tokens[k].text === '(') depth++;
+          else if (tokens[k].text === ')') {
+            depth--;
+            if (depth === 0) { k++; break; }
+          }
+        }
+        // OPTIONS の直前の空白も落として、残りの整形を自然に保つ
+        while (out.length > 0 && out[out.length - 1].kind === 'space') out.pop();
+        i = k;
+        continue;
+      }
+    }
+    out.push(t);
+    i++;
+  }
+  return out;
+}
+
 /** 比較用に空白を 1 個へ潰す（整形の違いでロジック差と誤認しないため）。 */
 function normalizeSpace(tokens) {
   return tokens.map((t) => (t.kind === 'space' ? { kind: 'space', text: ' ' } : t));
@@ -240,8 +281,11 @@ function parameterize(members) {
  * @returns {Array<{suffixes: string[], members: object[], sql: string, params: object[]}>}
  */
 function groupByLogic(views, opts) {
+  const stripOpts = !(opts && opts.stripOptions === false);
   const prepared = views.map((v) => {
-    const raw = tokenizeSql(v.ddl);
+    let raw = tokenizeSql(v.ddl);
+    // OPTIONS はメタデータ。既定で落とす（stripOptions: false で無効化）
+    if (stripOpts) raw = stripOptionsClause(raw);
     // tokens は比較用（空白を潰す）、raw は表示用（元の整形を保つ）
     return { ...v, raw, tokens: normalizeSpace(raw) };
   });
@@ -305,7 +349,8 @@ function analyze(rows, opts) {
 }
 
 module.exports = {
-  tokenizeSql, normalizeSpace, extractSuffix, expandSuffixParts, alphaMap, alphaMapDetail,
+  tokenizeSql, normalizeSpace, stripOptionsClause, extractSuffix, expandSuffixParts,
+  alphaMap, alphaMapDetail,
   parameterize, groupByLogic, analyze,
   DEFAULT_SUFFIX_RE, DEFAULT_SUBSTITUTABLE, KEYWORDS,
 };
