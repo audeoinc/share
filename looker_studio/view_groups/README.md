@@ -94,7 +94,11 @@ suffix の一覧を人が書いて維持するのは、**View が増えたとき
 `suffix_config.json` の既定はこれ。
 
 ```json
-{ "suffixSource": "schemata", "schemataPattern": "_([A-Za-z]{4})$" }
+{
+  "suffixSource": "schemata",
+  "schemataPattern": "_([A-Za-z]{4})$",
+  "region": "asia-northeast1"
+}
 ```
 
 生成される SQL は `INFORMATION_SCHEMA.SCHEMATA` を舐めて suffix 一覧を作り、
@@ -104,7 +108,7 @@ suffix の一覧を人が書いて維持するのは、**View が増えたとき
 ```sql
 suffixes AS (
   SELECT DISTINCT REGEXP_EXTRACT(schema_name, r'_([A-Za-z]{4})$') AS suffix
-  FROM `PROJECT.region-us.INFORMATION_SCHEMA.SCHEMATA`
+  FROM `PROJECT.region-asia-northeast1.INFORMATION_SCHEMA.SCHEMATA`
   WHERE REGEXP_CONTAINS(schema_name, r'_([A-Za-z]{4})$')
 )
 ```
@@ -115,10 +119,10 @@ suffixes AS (
 
 注意点:
 
-- `region-us` は環境に合わせる（`region-asia-northeast1` など）。
-  ここを間違えると suffix が 0 件になり、**全 View が「suffix 未認識」として
-  1 本ずつ単独で並ぶ**（0 件にはならないので気づきにくい）。
-  `unmatched_count > 0` の件数で確認する
+- リージョンは `suffix_config.json` の `region`（既定 `asia-northeast1`）から生成する。
+  **データセットのロケーションと揃える**こと。ここを間違えると suffix が 0 件になり、
+  **全 View が「suffix 未認識」として 1 本ずつ単独で並ぶ**
+  （0 件にはならないので気づきにくい）。`unmatched_count > 0` の件数で確認する
 - **サンプルはデータセットを 1 つにまとめてある**ので、この CTE では 0 件になる。
   `build_table.sql` に固定一覧へ差し替えるコメントを入れてあるので、
   そちらを有効にして試す

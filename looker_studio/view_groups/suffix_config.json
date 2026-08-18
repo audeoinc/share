@@ -9,6 +9,10 @@
     "                View 名は suffix 一覧との ENDS_WITH で base に割る。",
     "  \"config\"   … 下の suffixParts / suffixList / suffixPattern を使う",
     "",
+    "region:",
+    "  SCHEMATA を読むリージョン。データセットのロケーションと揃える。",
+    "  SQL には `PROJECT.region-<region>.INFORMATION_SCHEMA.SCHEMATA` として出る。",
+    "",
     "suffixAware（既定 true）:",
     "  比較の前に、その View 自身の suffix をトークン内で伏せ字にする。",
     "  データセット名・テーブル名・リテラルのどこに出ていても suffix 由来の差は",
@@ -22,6 +26,7 @@
   ],
   "suffixSource": "schemata",
   "schemataPattern": "_([A-Za-z]{4})$",
+  "region": "asia-northeast1",
   "suffixParts": [
     [
       "ab",

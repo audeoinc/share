@@ -51,12 +51,14 @@ function baseRegex(c) {
 }
 
 const dynamic = config.suffixSource === 'schemata';
+// SCHEMATA はリージョン修飾が要る。データセットのロケーションと揃えること。
+const region = config.region || 'asia-northeast1';
 const regex = dynamic ? null : baseRegex(config);
 
 // UDF に渡す静的オプション（suffixList は動的モードでは SQL 側で足す）
 const staticOpts = Object.fromEntries(
   Object.entries(config).filter(([k]) =>
-    !['suffixSource', 'schemataPattern'].includes(k) &&
+    !['suffixSource', 'schemataPattern', 'region'].includes(k) &&
     !(dynamic && ['suffixParts', 'suffixList', 'suffixPattern'].includes(k)))
 );
 
@@ -142,12 +144,12 @@ const sampleSuffixes = Array.isArray(config.suffixParts)
 const suffixCte = dynamic ? `
 -- データセット名から suffix を集める。手で一覧を持たないための CTE。
 --   mart_abjp / raw_cduk → abjp / cduk
--- region は自分の環境に合わせる（region-us / region-asia-northeast1 など）。
+-- リージョンは suffix_config.json の region から生成（データセットのロケーション）。
 -- ここが 0 件だと全 View が「suffix 未認識」になり、1 本ずつ単独で並ぶだけになる。
 -- 件数は下の確認クエリで見ておく。
 suffixes AS (
   SELECT DISTINCT REGEXP_EXTRACT(schema_name, r'${config.schemataPattern}') AS suffix
-  FROM \`PROJECT.region-us.INFORMATION_SCHEMA.SCHEMATA\`
+  FROM \`PROJECT.region-${region}.INFORMATION_SCHEMA.SCHEMATA\`
   WHERE REGEXP_CONTAINS(schema_name, r'${config.schemataPattern}')
 ),
 -- サンプル用: データセットを 1 つにまとめた環境で試すときは、上の suffixes を
@@ -202,7 +204,7 @@ const udfOptionsArg = dynamic
       '''${optionsJson}'''`;
 
 console.log(`\n  suffixSource : ${config.suffixSource || 'config'}`);
-if (dynamic) console.log(`  抽出パターン : ${config.schemataPattern}`);
+if (dynamic) console.log(`  抽出パターン : ${config.schemataPattern}（region-${region}）`);
 else console.log(`  base 正規表現: ${regex}`);
 console.log(`  UDF オプション: ${Object.keys(staticOpts).join(', ')}${dynamic ? ' + suffixList（実行時）' : ''}`);
 
@@ -336,7 +338,7 @@ WHERE snapshot_date = (
 
 ${dynamic ? `-- 認識した suffix の確認（0 件なら region か schemataPattern を疑う）
 -- SELECT schema_name, REGEXP_EXTRACT(schema_name, r'${config.schemataPattern}') AS suffix
--- FROM \`PROJECT.region-us.INFORMATION_SCHEMA.SCHEMATA\`
+-- FROM \`PROJECT.region-${region}.INFORMATION_SCHEMA.SCHEMATA\`
 -- ORDER BY schema_name;
 
 ` : ''}-- suffix を認識できなかった View（単独で 1 行ずつ並ぶ）
