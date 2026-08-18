@@ -1,0 +1,32 @@
+{
+  "_comment": [
+    "suffix 規則と解析オプションの単一の置き場所。",
+    "ここを直して `node build_table.mjs` を実行すると build_table.sql が作り直される。",
+    "SQL 側の REGEXP_EXTRACT も同じ定義から生成されるので、UDF に渡す設定とズレない。",
+    "",
+    "suffix の指定は 3 通り。上から優先される。",
+    "  suffixParts   区分の組み合わせ。規則が最もはっきりする",
+    "  suffixList    既知の suffix を直接列挙",
+    "  suffixPattern 正規表現。^(base)(suffix)$ の形で 2 つのキャプチャを持たせる",
+    "",
+    "substitutable: 同一ロジックとみなす際に置換を許すトークン種別。",
+    "  既定は ident と quoted（リテラル差はロジック差として残す）。",
+    "  国コードのように値が違うだけで同じロジックなら number と string を足す。"
+  ],
+
+  "suffixParts": [["ab", "cd", "ef"], ["jp", "us", "uk"]],
+
+  "mode": "class",
+
+  "_examples": {
+    "リテラル差も無視したい場合": {
+      "substitutable": ["ident", "quoted", "number", "string"]
+    },
+    "既知の suffix を列挙する場合": {
+      "suffixList": ["abjp", "abus", "abuk", "cdjp", "cdus", "cduk"]
+    },
+    "正規表現で指定する場合": {
+      "suffixPattern": "^(.*?)_([A-Za-z0-9]{4})$"
+    }
+  }
+}

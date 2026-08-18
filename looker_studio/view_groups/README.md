@@ -59,9 +59,38 @@ suffix の文字列置換に依存しないので、**参照テーブル以外�
 - **何をパラメータとみなしたかを必ず `params` で返す**。判定が正しいかを人が確認できる。
   ここを隠すと危ないので、画面にも出す前提
 
-## suffix の抽出
+## suffix パターンを変更する手順
 
-3 通りの指定方法があり、上から優先される。
+**設定は [`suffix_config.json`](./suffix_config.json) の 1 箇所だけ。**
+suffix 規則は SQL 側（base を出す `REGEXP_EXTRACT`）と UDF 側（`options_json`）の
+両方で必要になるが、手で 2 箇所書くとズレて base の束ね方と解析が食い違うので、
+1 つの設定から両方を生成する。
+
+```bash
+# 1. suffix_config.json を直す
+# 2. SQL を作り直す（SQL の正規表現と analyze.js の抽出が一致するか検証してから書き出す）
+node build_table.mjs
+
+# 3. 変更が UDF の既定値にも関わる場合は UDF も作り直す
+node build_udf.mjs
+```
+
+`build_table.mjs` は書き出す前に、**生成した正規表現と `analyze.js` の抽出が
+同じ base を返すか**を全 suffix の組み合わせで照合する。食い違えば失敗して
+SQL は出力されない。
+
+そのあと BigQuery で:
+
+1. `view_group_html.sql`（UDF を作り直した場合のみ）
+2. `build_table.sql`
+3. 表示が変わる設定を触ったら `template_style.html` も貼り直す
+
+> UDF は `options_json` を実行時に受け取るので、**suffix 規則を変えるだけなら
+> UDF の作り直しは不要**。`build_table.sql` の再実行だけでよい。
+
+### 3 通りの指定方法
+
+上から優先される。
 
 | 指定 | 用途 |
 |---|---|
@@ -70,6 +99,9 @@ suffix の文字列置換に依存しないので、**参照テーブル以外�
 | `suffixPattern: '^(.*?)_([A-Za-z0-9]{1,6})$'` | 正規表現。既定は末尾の `_` + 1〜6 文字 |
 
 `v_daily_sales` のように suffix を持たない名前は対象外（`unmatched` に入る）。
+
+`suffixPattern` を使う場合は `^(base)(suffix)$` の形で**キャプチャを 2 つ**持たせる。
+1 つ目が base、2 つ目が suffix になる。
 
 ## 検証用サンプル
 
@@ -182,6 +214,8 @@ VIEW_GROUP_CSS   素 41.5 KB → 最小化 25.4 KB（上限比 85%）
 
 ## 事前生成テーブル（build_table.sql）
 
+`build_table.sql` は `build_table.mjs` の生成物。直接編集しない。
+
 Looker の操作のたびに UDF を回すのは重いので、スケジュールドクエリで作り置きする。
 `INFORMATION_SCHEMA` の中身は View をデプロイしたときしか変わらない。
 
@@ -197,8 +231,8 @@ Looker Studio は `v_view_logic_diff_latest` を読むだけ。`base` をプル�
 パーティションに日付を積むので**履歴が残る**。「いつグループ構成が変わったか」を
 後から追えるので、ロジック逸脱の検知に使える（`build_table.sql` の末尾に例あり）。
 
-> `build_table.sql` の `REGEXP_EXTRACT` と UDF の `suffixParts` は**必ず揃える**こと。
-> ズレると base の束ね方と UDF の解析が食い違う。
+`REGEXP_EXTRACT` と UDF の `options_json` は `suffix_config.json` から
+同時に生成されるので、揃っていることが保証される。
 
 ## Looker Studio への配線
 

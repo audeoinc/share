@@ -1,4 +1,93 @@
--- =====================================================================
+// suffix_config.json から build_table.sql を生成する。
+//
+//   node build_table.mjs
+//
+// suffix 規則は SQL 側（base を出す REGEXP_EXTRACT）と UDF 側（options_json）の
+// 両方で必要になる。手で 2 箇所書くとズレて base の束ね方と解析が食い違うので、
+// 1 つの設定から両方を作る。
+import { readFile, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
+const A = require(join(here, 'analyze.js'));
+
+const raw = JSON.parse(await readFile(join(here, 'suffix_config.json'), 'utf8'));
+// _ で始まるキーは説明用。UDF には渡さない。
+const config = Object.fromEntries(
+  Object.entries(raw).filter(([k]) => !k.startsWith('_'))
+);
+
+const reEscape = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * 設定から「base を取り出す BigQuery の正規表現」を作る。
+ * analyze.js の抽出規則と同じ意味になるようにする。
+ */
+function baseRegex(c) {
+  if (Array.isArray(c.suffixParts) && c.suffixParts.length > 0) {
+    const groups = c.suffixParts
+      .map((part) => `(?:${part.map(reEscape).join('|')})`)
+      .join('');
+    return `^(.*)_${groups}$`;
+  }
+  if (Array.isArray(c.suffixList) && c.suffixList.length > 0) {
+    // 長いものを先に並べる（短い suffix が長い suffix の前半に一致する場合の対策）
+    const alts = c.suffixList.slice()
+      .sort((a, b) => b.length - a.length || a.localeCompare(b))
+      .map(reEscape).join('|');
+    return `^(.*)_(?:${alts})$`;
+  }
+  if (c.suffixPattern) {
+    // 2 つ目のキャプチャ（suffix）を非キャプチャに変えて base だけ取る
+    return c.suffixPattern;
+  }
+  throw new Error('suffixParts / suffixList / suffixPattern のいずれかを指定してください');
+}
+
+const regex = baseRegex(config);
+
+// --- 検証: SQL の正規表現と analyze.js の抽出が同じ base を返すか ---------
+// ここが食い違うと、SQL が束ねた base と UDF の解析対象がズレる。
+const re = new RegExp(regex);
+const samples = [];
+if (Array.isArray(config.suffixParts)) {
+  for (const suf of A.expandSuffixParts(config.suffixParts)) {
+    samples.push('v_daily_sales_' + suf, 'v_other_' + suf);
+  }
+} else if (Array.isArray(config.suffixList)) {
+  for (const suf of config.suffixList) samples.push('v_daily_sales_' + suf);
+}
+samples.push('v_daily_sales', 'no_suffix', 'v_x_zzzz');
+
+let mismatch = 0;
+for (const name of samples) {
+  const sqlBase = (name.match(re) || [])[1] ?? null;
+  const ex = A.extractSuffix(name, { ...config });
+  const udfBase = ex ? ex.base : null;
+  if (sqlBase !== udfBase) {
+    mismatch++;
+    console.log(`  FAIL  ${name}: SQL=${JSON.stringify(sqlBase)} UDF=${JSON.stringify(udfBase)}`);
+  }
+}
+console.log(mismatch === 0
+  ? `  PASS  SQL の正規表現と analyze.js の抽出が一致（${samples.length} 名で確認）`
+  : `  ${mismatch} 件で不一致`);
+if (mismatch > 0) process.exit(1);
+
+const optionsJson = JSON.stringify(config, null, 2)
+  .split('\n').map((l, i) => (i === 0 ? l : '        ' + l)).join('\n');
+
+console.log(`\n  suffix 規則 : ${JSON.stringify(config.suffixParts || config.suffixList || config.suffixPattern)}`);
+console.log(`  base 正規表現: ${regex}`);
+console.log(`  UDF オプション: ${Object.keys(config).join(', ')}`);
+
+if (process.argv.includes('--check')) process.exit(0);
+
+// --- SQL を書き出す ----------------------------------------------------
+const sql = `-- =====================================================================
 -- suffix 違い View のロジック グループ比較を事前生成してテーブルに持つ
 --
 -- ※ このファイルは build_table.mjs が生成する。直接編集しないこと。
@@ -20,7 +109,7 @@
 -- ---------------------------------------------------------------------
 -- 1. 格納先（初回のみ）
 -- ---------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS `PROJECT.DATASET.view_logic_diff`
+CREATE TABLE IF NOT EXISTS \`PROJECT.DATASET.view_logic_diff\`
 (
   snapshot_date   DATE           OPTIONS (description = '生成日'),
   base            STRING         OPTIONS (description = 'suffix を除いた View 名。Looker のキー'),
@@ -48,10 +137,10 @@ OPTIONS (
 --    同じ日に何度実行しても結果が同じになるよう、当日分を消してから入れる。
 --    MERGE より DELETE + INSERT のほうが単純で、パーティション単位なので安い。
 -- ---------------------------------------------------------------------
-DELETE FROM `PROJECT.DATASET.view_logic_diff`
+DELETE FROM \`PROJECT.DATASET.view_logic_diff\`
 WHERE snapshot_date = CURRENT_DATE('Asia/Tokyo');
 
-INSERT INTO `PROJECT.DATASET.view_logic_diff`
+INSERT INTO \`PROJECT.DATASET.view_logic_diff\`
 WITH
 -- ↓↓↓ 対象の View を集める。データセットが複数あるなら UNION ALL で足す ↓↓↓
 --
@@ -63,7 +152,7 @@ WITH
 -- View 自身の名前も入らないため、パラメータには参照先の差だけが残る。
 src AS (
   SELECT table_name AS view_name, view_definition AS ddl
-  FROM `PROJECT.TARGET_DATASET.INFORMATION_SCHEMA.VIEWS`
+  FROM \`PROJECT.TARGET_DATASET.INFORMATION_SCHEMA.VIEWS\`
 ),
 -- ↑↑↑ ここまで ↑↑↑
 keyed AS (
@@ -71,7 +160,7 @@ keyed AS (
     view_name,
     ddl,
     -- suffix_config.json から生成。UDF に渡す設定と必ず一致する。
-    REGEXP_EXTRACT(view_name, r'^(.*)_(?:ab|cd|ef)(?:jp|us|uk)$') AS base
+    REGEXP_EXTRACT(view_name, r'${regex}') AS base
   FROM src
 )
 SELECT
@@ -88,24 +177,10 @@ SELECT
 FROM (
   SELECT
     base,
-    `PROJECT.DATASET.VIEW_GROUP_INFO`(
+    \`PROJECT.DATASET.VIEW_GROUP_INFO\`(
       ARRAY_AGG(STRUCT(view_name, ddl) ORDER BY view_name),
       -- suffix_config.json から生成
-      '''{
-          "suffixParts": [
-            [
-              "ab",
-              "cd",
-              "ef"
-            ],
-            [
-              "jp",
-              "us",
-              "uk"
-            ]
-          ],
-          "mode": "class"
-        }'''
+      '''${optionsJson}'''
     ) AS info
   FROM keyed
   WHERE base IS NOT NULL
@@ -116,32 +191,18 @@ FROM (
 -- ---------------------------------------------------------------------
 -- 3. Looker Studio が読むビュー（最新スナップショットだけ）
 -- ---------------------------------------------------------------------
-CREATE OR REPLACE VIEW `PROJECT.DATASET.v_view_logic_diff_latest` AS
+CREATE OR REPLACE VIEW \`PROJECT.DATASET.v_view_logic_diff_latest\` AS
 SELECT *
-FROM `PROJECT.DATASET.view_logic_diff`
+FROM \`PROJECT.DATASET.view_logic_diff\`
 WHERE snapshot_date = (
-  SELECT MAX(snapshot_date) FROM `PROJECT.DATASET.view_logic_diff`
+  SELECT MAX(snapshot_date) FROM \`PROJECT.DATASET.view_logic_diff\`
 );
 
 
 -- ---------------------------------------------------------------------
 -- 4. テンプレートに貼る CSS（1 回取れば十分。template_style.html と同じ）
 -- ---------------------------------------------------------------------
--- SELECT `PROJECT.DATASET.VIEW_GROUP_CSS`('''{
-          "suffixParts": [
-            [
-              "ab",
-              "cd",
-              "ef"
-            ],
-            [
-              "jp",
-              "us",
-              "uk"
-            ]
-          ],
-          "mode": "class"
-        }''');
+-- SELECT \`PROJECT.DATASET.VIEW_GROUP_CSS\`('''${optionsJson}''');
 
 
 -- ---------------------------------------------------------------------
@@ -150,12 +211,12 @@ WHERE snapshot_date = (
 -- 中身の確認
 -- SELECT base, view_count, group_count, group_labels, unmatched_count,
 --        LENGTH(diff_html) AS html_len
--- FROM `PROJECT.DATASET.v_view_logic_diff_latest`
+-- FROM \`PROJECT.DATASET.v_view_logic_diff_latest\`
 -- ORDER BY base;
 
 -- ロジックが割れている base だけ見る（＝要確認のもの）
 -- SELECT base, group_count, group_labels
--- FROM `PROJECT.DATASET.v_view_logic_diff_latest`
+-- FROM \`PROJECT.DATASET.v_view_logic_diff_latest\`
 -- WHERE has_multiple
 -- ORDER BY group_count DESC, base;
 
@@ -165,8 +226,13 @@ WHERE snapshot_date = (
 --   SELECT *,
 --     LAG(TO_JSON_STRING(group_labels)) OVER w AS prev_labels,
 --     TO_JSON_STRING(group_labels)      AS curr_labels
---   FROM `PROJECT.DATASET.view_logic_diff`
+--   FROM \`PROJECT.DATASET.view_logic_diff\`
 --   WINDOW w AS (PARTITION BY base ORDER BY snapshot_date)
 -- )
 -- WHERE prev_labels IS NOT NULL AND prev_labels != curr_labels
 -- ORDER BY snapshot_date DESC, base;
+`;
+
+const out = join(here, 'build_table.sql');
+await writeFile(out, sql);
+console.log(`\nwrote ${out}`);
