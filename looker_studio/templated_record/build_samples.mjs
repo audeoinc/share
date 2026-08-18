@@ -117,5 +117,6 @@ ${css}
 await writeFile(join(outDir, '05_column_markup.html'), classed);
 await writeFile(join(outDir, '06_diff_embed.html'), page('diff (mode=embed)', '', embed));
 
-console.log(`\nwrote ${outDir}/01 … 06`);
+// 07_radio_tabs_test.html は手書きの静的サンプル（このスクリプトは触らない）。
+console.log(`\nwrote ${outDir}/01 … 06（07 は静的サンプルのため対象外）`);
 process.exit(failed === 0 ? 0 : 1);
