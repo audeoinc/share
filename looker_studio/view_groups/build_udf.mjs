@@ -389,3 +389,26 @@ ${cssPack.code}
 const outPath = join(here, 'view_group_html.sql');
 await writeFile(outPath, sql);
 console.log(`\nwrote ${outPath} (${kb(Buffer.byteLength(sql))})`);
+
+// テンプレートに貼る CSS も書き出しておく。中身は
+// SELECT VIEW_GROUP_CSS(...) の出力そのものなので、BigQuery を叩かずに
+// 貼り付けたいときはこのファイルを使える（内容は同じ）。
+const cssPath = join(here, 'template_style.html');
+await writeFile(cssPath,
+  `<!--
+  Templated Record のテンプレートに貼る CSS（mode='class' のとき）。
+  中身は SELECT \`PROJECT.DATASET.VIEW_GROUP_CSS\`(...) の出力そのもの。
+  このファイルは build_udf.mjs が生成する。直接編集しないこと。
+
+  ここは固定。差分の内容が変わっても書き換え不要。
+  この下にフィールド（diff_html）を差し込む。
+
+  注意: templated_record/samples/04_template_style.html とは別物。
+  あちらは DIFF_CSS の出力で、見出し・タブ・パラメータ表の .vg-* 規則を
+  含まないため、こちらの表示には使えない（タブが動かない）。
+-->
+<style>
+${css}
+</style>
+`);
+console.log(`wrote ${cssPath} (${kb(Buffer.byteLength(css))} の CSS)`);

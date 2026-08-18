@@ -186,14 +186,21 @@ Looker Studio は `v_view_logic_diff_latest` を読むだけ。`base` をプル�
    **「単一選択にする」をオン**（1 レコード＝1 base を表示するため）
 4. `mode='class'` で生成した場合は、テンプレートに CSS を貼る
 
+CSS は **`template_style.html`**（`build_udf.mjs` の生成物）をそのまま貼るか、
+BigQuery から取る。中身は同じ。
+
 ```sql
 SELECT `PROJECT.DATASET.VIEW_GROUP_CSS`(
   '{"suffixParts": [["ab","cd","ef"],["jp","us","uk"]]}'
 );
 ```
 
-結果を `<style> … </style>` で囲んでテンプレートの先頭に置き、その下に
+`<style> … </style>` で囲んでテンプレートの先頭に置き、その下に
 `diff_html` のフィールドを差し込む。
+
+> **`templated_record/samples/04_template_style.html` は使えない。**
+> あちらは 2 者比較用の `DIFF_CSS` の出力で、見出し・タブ・パラメータ表の
+> `.vg-*` 規則を含まないため、タブが動かない。
 
 補助として、`has_multiple` でフィルタした表を並べると「要確認の base」の一覧になる。
 
