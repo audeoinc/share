@@ -85,10 +85,50 @@ function normalizeSpace(tokens) {
 const DEFAULT_SUFFIX_RE = /^(.*?)_([A-Za-z0-9]{1,6})$/;
 
 /**
- * @returns {{base: string, suffix: string} | null}
+ * suffixParts（[['ab','cd','ef'], ['jp','us','uk']] のような区分の並び）から
+ * 取りうる suffix を全部作る。長いものから試すため長さ降順・辞書順で返す。
+ */
+function expandSuffixParts(parts) {
+  let acc = [''];
+  for (const part of parts) {
+    const next = [];
+    for (const a of acc) for (const b of part) next.push(a + b);
+    acc = next;
+  }
+  return acc.sort((x, y) => y.length - x.length || x.localeCompare(y));
+}
+
+/**
+ * @returns {{base: string, suffix: string, parts?: string[]} | null}
  */
 function extractSuffix(viewName, opts) {
   const o = opts || {};
+
+  // 区分の組み合わせで決まる場合（例: {ab,cd,ef} × {jp,us,uk} の 4 文字）。
+  // 規則が最もはっきりするので、これが使えるなら最優先。
+  if (Array.isArray(o.suffixParts) && o.suffixParts.length > 0) {
+    const list = o._expanded || (o._expanded = expandSuffixParts(o.suffixParts));
+    for (const suf of list) {
+      if (viewName.length > suf.length + 1 && viewName.endsWith('_' + suf)) {
+        // どの区分の値だったかも返す（ペイン見出しや集計に使える）
+        const parts = [];
+        let rest = suf;
+        for (const part of o.suffixParts) {
+          const hit = part.find((v) => rest.startsWith(v));
+          if (hit === undefined) { parts.length = 0; break; }
+          parts.push(hit);
+          rest = rest.slice(hit.length);
+        }
+        return {
+          base: viewName.slice(0, -(suf.length + 1)),
+          suffix: suf,
+          parts: parts.length ? parts : undefined,
+        };
+      }
+    }
+    return null;
+  }
+
   if (Array.isArray(o.suffixList) && o.suffixList.length > 0) {
     // 既知の suffix 一覧がある場合は突き合わせが最も確実
     for (const suf of o.suffixList) {
@@ -224,7 +264,9 @@ function analyze(rows, opts) {
     const ex = extractSuffix(r.view_name, opts);
     if (!ex) { unmatched.push(r); continue; }
     if (!byBase.has(ex.base)) byBase.set(ex.base, []);
-    byBase.get(ex.base).push({ viewName: r.view_name, suffix: ex.suffix, ddl: r.ddl });
+    byBase.get(ex.base).push({
+      viewName: r.view_name, suffix: ex.suffix, parts: ex.parts, ddl: r.ddl,
+    });
   }
   const out = [];
   for (const [base, views] of byBase) {
@@ -236,7 +278,7 @@ function analyze(rows, opts) {
 }
 
 module.exports = {
-  tokenizeSql, normalizeSpace, extractSuffix, alphaMap,
+  tokenizeSql, normalizeSpace, extractSuffix, expandSuffixParts, alphaMap,
   parameterize, groupByLogic, analyze,
   DEFAULT_SUFFIX_RE, DEFAULT_SUBSTITUTABLE, KEYWORDS,
 };
