@@ -50,11 +50,26 @@ WHERE snapshot_date = CURRENT_DATE('Asia/Tokyo');
 INSERT INTO `PROJECT.DATASET.view_logic_diff`
 WITH
 -- ↓↓↓ 対象の View を集める。データセットが複数あるなら UNION ALL で足す ↓↓↓
+--
+-- TABLES.ddl ではなく VIEWS.view_definition を使う。
+-- TABLES.ddl は BigQuery が組み立てた CREATE VIEW 文で、OPTIONS に
+-- description や作成タイムスタンプが自動で入る。View ごとに値が違うので、
+-- そのまま比較すると全部が別グループに割れる。
+-- view_definition はクエリ本体だけなので、ヘッダも OPTIONS も付いてこない。
+-- View 自身の名前も入らないため、パラメータには参照先の差だけが残る。
+--
+-- （UDF 側でも OPTIONS は既定で落とすので、TABLES.ddl のままでも動く。
+--   その場合は下のコメントアウトを使う。）
 src AS (
-  SELECT table_name AS view_name, ddl
-  FROM `PROJECT.TARGET_DATASET.INFORMATION_SCHEMA.TABLES`
-  WHERE table_type = 'VIEW'
+  SELECT table_name AS view_name, view_definition AS ddl
+  FROM `PROJECT.TARGET_DATASET.INFORMATION_SCHEMA.VIEWS`
 ),
+-- TABLES.ddl を使う場合:
+-- src AS (
+--   SELECT table_name AS view_name, ddl
+--   FROM `PROJECT.TARGET_DATASET.INFORMATION_SCHEMA.TABLES`
+--   WHERE table_type = 'VIEW'
+-- ),
 -- ↑↑↑ ここまで ↑↑↑
 keyed AS (
   SELECT

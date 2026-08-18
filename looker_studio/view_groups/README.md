@@ -29,12 +29,22 @@ suffix の文字列置換に依存しないので、**参照テーブル以外�
 
 α 等価は推移的（全単射の合成）なので、グループ判定は代表 1 本との比較で足りる。
 
+### 取得元は VIEWS.view_definition を使う
+
+`INFORMATION_SCHEMA.TABLES.ddl` は BigQuery が組み立てた `CREATE VIEW` 文で、
+**`OPTIONS` に description や作成タイムスタンプが自動で入る**。View ごとに値が
+違うので、そのまま比較すると全部が別グループに割れる（9 View なら 9 グループ）。
+
+`INFORMATION_SCHEMA.VIEWS.view_definition` はクエリ本体だけを返すので、
+ヘッダも `OPTIONS` も付いてこない。View 自身の名前も入らないため、
+パラメータには**参照先の差だけ**が残る。`build_table.sql` はこちらを使う。
+
 ### 比較の前に落とすもの
 
-**`OPTIONS( … )` 句は既定で無視する。** BigQuery が返す DDL には `description` や
-作成タイムスタンプが `OPTIONS` に入ることがあり、これはメタデータであって
-ロジックではないのに View ごとに値が違うため、そのままだと**全部が別グループに
-割れる**（9 View なら 9 グループ）。ビュー側を書き換えるのではなく解析側で無視する。
+`TABLES.ddl` を使う場合に備えて、**`OPTIONS( … )` 句は既定で無視する。** BigQuery が返す DDL には `description` や
+作成タイムスタンプが `OPTIONS` に入る。これはメタデータであってロジックでは
+ないのに View ごとに値が違うため、そのままだと全部が別グループに割れる。
+ビュー側を書き換えるのではなく解析側で無視する。
 
 正規表現ではなくトークン列で処理しているので、`OPTIONS` の値に括弧や引用符が
 入っていても対応する `)` を正しく見つける。`stripOptions: false` で無効化できる。
@@ -93,9 +103,8 @@ node test.mjs               # アナライザの検証（25 アサーション�
 作成後、アナライザに渡す入力はこれで取れる。
 
 ```sql
-SELECT table_name AS view_name, ddl
-FROM `PROJECT.sample_mart.INFORMATION_SCHEMA.TABLES`
-WHERE table_type = 'VIEW'
+SELECT table_name AS view_name, view_definition AS ddl
+FROM `PROJECT.sample_mart.INFORMATION_SCHEMA.VIEWS`
 ORDER BY table_name;
 ```
 
