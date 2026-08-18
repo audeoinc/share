@@ -175,6 +175,41 @@ Looker Studio は `v_view_logic_diff_latest` を読むだけ。`base` をプル�
 > `build_table.sql` の `REGEXP_EXTRACT` と UDF の `suffixParts` は**必ず揃える**こと。
 > ズレると base の束ね方と UDF の解析が食い違う。
 
-## 未実装
+## Looker Studio への配線
 
-- Looker Studio への配線（テーブルができれば読むだけ）
+事前生成テーブルができていれば、あとは読むだけ。
+
+1. **データを追加 → BigQuery** で `v_view_logic_diff_latest` を選ぶ
+   （カスタムクエリではなくテーブル選択でよい）
+2. **Templated Record** を配置し、表示対象のカラムに `diff_html` を指定
+3. **コントロール → プルダウン リスト**を置き、コントロール フィールドに `base`。
+   **「単一選択にする」をオン**（1 レコード＝1 base を表示するため）
+4. `mode='class'` で生成した場合は、テンプレートに CSS を貼る
+
+```sql
+SELECT `PROJECT.DATASET.VIEW_GROUP_CSS`(
+  '{"suffixParts": [["ab","cd","ef"],["jp","us","uk"]]}'
+);
+```
+
+結果を `<style> … </style>` で囲んでテンプレートの先頭に置き、その下に
+`diff_html` のフィールドを差し込む。
+
+補助として、`has_multiple` でフィルタした表を並べると「要確認の base」の一覧になる。
+
+### 確認クエリ
+
+配線の前に、テーブルの中身が期待どおりか見ておく。
+
+```sql
+SELECT base, view_count, group_count, group_labels, unmatched_count,
+       LENGTH(diff_html) AS html_len
+FROM `PROJECT.DATASET.v_view_logic_diff_latest`
+ORDER BY base;
+```
+
+サンプルなら `v_daily_sales / 9 / 3 / [abjp, abuk, abus | …] / 0` になる。
+
+> `group_count` が想定より多い場合は、BigQuery が返す DDL が投入したテキストと
+> 違う（整形が正規化される、`OPTIONS` が付く等）可能性がある。
+> `diff_html` を見れば何が差分として残ったか分かる。
