@@ -18,10 +18,10 @@ BigQuery                                  Looker Studio
 (key, ddl) の 2 列
         ↓
 DIFF_HTML(before, after, …)  ← JS UDF     Templated Record
-  lib/diff.js   LCS 行差分 + 単語差分      表示対象カラム = diff_html
-  lib/render.js インライン CSS の HTML             ↓
-        ↓                                  そのまま HTML として描画
-1 行 1 カラムの HTML 文字列
+  lib/diff.js   LCS 行差分 + 単語差分      テンプレート = DIFF_CSS() の <style>
+  lib/render.js HTML を生成                 表示対象カラム = diff_html
+        ↓                                          ↓
+1 行 1 カラムの HTML 文字列                そのまま HTML として描画
 ```
 
 **HTML の生成を BigQuery 側に寄せる**のがこの構成の要点。ビジュアライゼーション側は
@@ -55,60 +55,70 @@ Templated Record を配置し、**表示対象のカラムに `diff_html` を指
 
 | キー | 既定 | 内容 |
 |---|---|---|
-| `contextLines` | なし（全行） | 変更行の前後 N 行だけ描画する。**HTML を小さくする主手段** |
+| `mode` | `inline` | `inline` すべてインライン CSS・単体で完結／`class` markup のみ（CSS は `DIFF_CSS()` をテンプレートに貼る。**最小**）／`embed` `<style>` 同梱の自己完結版 |
+| `contextLines` | なし（全行） | 変更行の前後 N 行だけ描画する |
 | `fontSize` / `lineHeight` | 12 / 1.35 | |
 | `colors.baseColor` / `colors.afterColor` | `#E17B7B` / `#93AE68` | 差分行・差分文字・カラーバー・ヘッダが連動 |
 | `diffLineOpacity` / `diffCharOpacity` | 0.30 / 0.55 | |
 | `syntax.keyword` / `.literal` / `.comment` | `#CF222E` / `#098658` / `#6E7781` | |
 
 ```sql
-`PROJECT.DATASET.DIFF_HTML`(before_ddl, after_ddl, 'v1', 'v2', '{"contextLines": 3}')
+DIFF_HTML(before_ddl, after_ddl, 'v1', 'v2', '{"mode":"class","contextLines":3}')
 ```
+
+`mode='class'` のときは、テンプレートに貼る CSS を `DIFF_CSS()` で取る。
+
+```sql
+SELECT `PROJECT.DATASET.DIFF_CSS`(NULL);
+```
+
+出力を `<style> … </style>` で囲んでテンプレートに貼る。**色やフォントを変えた場合は、
+`DIFF_CSS()` にも同じ `options_json` を渡して CSS を作り直すこと。**
 
 ## サイズ対策：CSS をテンプレートに分離する
 
-インライン CSS の HTML は **元の DDL の約 21 倍**に膨らむ（実測: 200 行の DDL → 約 200KB）。
-Templated Record は `<style>` が使えるので、**CSS をテンプレート側に固定で置き、
-カラムには markup だけ載せる**と、カラムに載る文字列が約半分になる。
+インライン CSS の HTML は元の DDL の約 21 倍に膨らむ。Templated Record は
+`<style>` が使えるので、**CSS をテンプレート側に固定で置き、カラムには markup だけ
+載せる**（`mode='class'`）と、カラムに載る文字列が約半分になる。
 
-`node build_samples.mjs` の実測:
+`node build_samples.mjs` の実測（カラムに載る文字列）:
 
-| DDL 行数 | インライン | class markup | 削減 |
-|---:|---:|---:|---:|
-| 50 | 54 KB | 25 KB | 54% |
-| 200 | 201 KB | 94 KB | 53% |
-| 500 | 497 KB | 233 KB | 53% |
-| 1000 | 991 KB | 465 KB | 53% |
+| DDL 行数 | `inline` | `embed` | `class` | class の削減 |
+|---:|---:|---:|---:|---:|
+| 50 | 54 KB | 27 KB | 25 KB | 54% |
+| 200 | 201 KB | 96 KB | 94 KB | 53% |
+| 500 | 497 KB | 235 KB | 233 KB | 53% |
+| 1000 | 991 KB | 467 KB | 465 KB | 53% |
 
-共通 CSS は 26 規則・約 3KB で**固定長**。テンプレートに 1 回貼るだけで、
+`DIFF_CSS()` は 26 規則・約 3KB で**固定長**。テンプレートに 1 回貼るだけで、
 差分の内容が変わっても書き換え不要。
 
-見た目は変わらない。インライン版と class 版を実ブラウザで描画して
-**スクリーンショットがバイト単位で完全一致**することを確認済み。
+`embed` は `class` とほぼ同じ大きさで、しかも自己完結する（テンプレートを触らなくてよい）。
+テンプレート編集を避けたいなら `embed`、最小にしたいなら `class`。
 
-クラス名は `style` 属性の中身のハッシュから決めているので、
-**内容や出現順に依存せず、同じ宣言には必ず同じクラス名が付く**。
-これがないとテンプレート側の固定 CSS と markup 側のクラス名がズレる。
+**3 モードとも見た目は同一。** 実ブラウザで描画してスクリーンショットが
+バイト単位で完全一致することを確認済み。
+
+クラス名は `style` 属性の中身のハッシュから決めているので、**内容や出現順に依存せず、
+同じ宣言には必ず同じクラス名が付く**。これがないとテンプレート側の固定 CSS と
+markup 側のクラス名がズレる。`DIFF_CSS()` は markup と同じコードから CSS を作るので、
+両者が食い違うことはない。
 
 さらに小さくしたいときは `contextLines` を併用する。
 
 ### 検証用サンプル
 
 [`samples/`](./samples/) に生成済み（`node build_samples.mjs` で再生成）。
+中身は **UDF 本体を実行して得た文字列そのもの**なので、BigQuery が返すものと一致する。
 
 | ファイル | 用途 |
 |---|---|
 | `01_style_test.html` | `<style>` と子要素セレクタが効くかだけを見る最小サンプル |
-| `02_diff_inline.html` | 現行 `DIFF_HTML` の出力（インライン CSS・単体で表示可能） |
-| `03_diff_classed.html` | `<style>` + class 版（単体で表示可能・02 と見た目が同一） |
-| `04_template_style.html` | **テンプレートに貼る CSS**（固定） |
-| `05_column_markup.html` | **カラムに入る markup**（BigQuery が返す文字列そのもの） |
-
-`04` をテンプレートに貼り、その下にフィールドを差し込む。`05` の中身を
-そのままカラムの値として流し込めば、`03` と同じ表示になるはず。
-
-> 分離方式が確認できたら、`DIFF_HTML` にも markup だけを返すモードを追加する。
-> 現状の UDF はインライン CSS 版（単体で完結するので、まずはこちらで動作確認する）。
+| `02_diff_inline.html` | `mode='inline'` の出力 |
+| `03_diff_classed.html` | `mode='class'` + `DIFF_CSS()`（単体で表示可能） |
+| `04_template_style.html` | **テンプレートに貼る CSS**（`DIFF_CSS(NULL)` の出力） |
+| `05_column_markup.html` | **カラムに入る markup**（`mode='class'` の出力） |
+| `06_diff_embed.html` | `mode='embed'` の出力 |
 
 ## 制約
 

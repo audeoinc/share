@@ -20,6 +20,9 @@
 --      「レポート編集者と閲覧者が値を変更できるようにする」を有効にする
 --   4. レポートにパラメータ用のコントロールを 2 つ置く
 --   5. Templated Record を配置し、表示対象のカラムに diff_html を指定する
+--   6. mode='class' の場合は、テンプレートに CSS を貼る:
+--        SELECT `PROJECT.DATASET.DIFF_CSS`(NULL);
+--      の結果を <style> ... </style> で囲んでテンプレートの先頭に置く
 --
 --   VIEW ではなくカスタムクエリにするのは、VIEW に @パラメータを書けないため。
 --   UDF は永続関数なのでカスタムクエリからも呼べる。
@@ -32,9 +35,10 @@ SELECT
     (SELECT ddl FROM `PROJECT.DATASET.v_ddl_by_key` WHERE key = @after_key  LIMIT 1),
     @before_key,
     @after_key,
-    -- HTML が大きすぎる場合は contextLines を入れて変更箇所だけにする
-    -- '{"contextLines": 3}'
-    NULL
+    -- mode='class' なら CSS はテンプレート側（DIFF_CSS の出力）に置く。
+    -- テンプレートを触りたくないなら 'embed'、単体完結の従来どおりなら NULL。
+    -- contextLines を足すと変更箇所だけになりさらに小さくなる。
+    '{"mode":"class"}'
   ) AS diff_html;
 
 
@@ -70,7 +74,7 @@ SELECT
 --     prev_ddl, ddl,
 --     CAST(prev_date     AS STRING),
 --     CAST(snapshot_date AS STRING),
---     '{"contextLines": 3}'
+--     '{"mode":"class","contextLines":3}'
 --   ) AS diff_html
 -- FROM latest
 -- WHERE prev_ddl IS NOT NULL;
