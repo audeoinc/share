@@ -12,9 +12,28 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const libDir = join(here, '..', 'ddl_diff_viz', 'src', 'lib');
+
+// BigQuery のインライン コード ブロブは 32 KB が上限とされている
+// （レガシー SQL のドキュメントに明記。標準 SQL の永続 UDF に同じ値が効くかは
+// 未確認だが、またぐ大きさで出荷したくないので最小化して余裕を持たせる）。
+const SIZE_LIMIT = 30 * 1024;
+
+let esbuild = null;
+try {
+  esbuild = createRequire(join(here, '..', 'ddl_diff_viz', 'package.json'))('esbuild');
+} catch {
+  console.warn('WARN: esbuild が見つからないため最小化をスキップします');
+}
+
+/** format を指定するとラップされて未使用の関数が落ちるので、指定しない。 */
+function minify(src) {
+  if (!esbuild) return src;
+  return esbuild.transformSync(src, { loader: 'js', minify: true, target: 'es2017' }).code;
+}
 
 /** CommonJS の体裁（'use strict' / require / module.exports）を落として素の関数群にする。 */
 function strip(src, file) {
@@ -193,8 +212,10 @@ function __fixtureCss(opts) {
 return __fixtureCss(__opts(options_json));
 `.trim();
 
-const htmlBody = [diffJs, '', renderJs, '', shared, '', htmlDriver].join('\n');
-const cssBody = [diffJs, '', renderJs, '', shared, '', cssDriver].join('\n');
+const htmlRaw = [diffJs, '', renderJs, '', shared, '', htmlDriver].join('\n');
+const cssRaw = [diffJs, '', renderJs, '', shared, '', cssDriver].join('\n');
+const htmlBody = minify(htmlRaw);
+const cssBody = minify(cssRaw);
 
 // --- 生成した本体を Node 上で実行して検証する ---------------------------
 const diffHtml = new Function(
@@ -242,6 +263,8 @@ const checks = [
   ['両方空なら案内を返す', empty.includes('DDL が空です')],
   ['片側だけでも描画できる', oneSide.includes('SELECT') && oneSide.includes('<table')],
   ['壊れた options_json でも落ちない', badOpts.includes('<table')],
+  [`DIFF_HTML が ${(SIZE_LIMIT / 1024).toFixed(0)} KB 以内`, Buffer.byteLength(htmlBody) <= SIZE_LIMIT],
+  [`DIFF_CSS が ${(SIZE_LIMIT / 1024).toFixed(0)} KB 以内`, Buffer.byteLength(cssBody) <= SIZE_LIMIT],
 ];
 
 let failed = 0;
@@ -253,6 +276,10 @@ for (const [name, ok] of checks) {
 const kb = (s) => (Buffer.byteLength(s) / 1024).toFixed(1) + ' KB';
 console.log(`
 ${checks.length - failed}/${checks.length} passed
+
+UDF 本体のサイズ（インライン上限 32 KB に対して）
+  DIFF_HTML  素 ${kb(htmlRaw)} → ${esbuild ? '最小化 ' + kb(htmlBody) : '最小化なし'}
+  DIFF_CSS   素 ${kb(cssRaw)} → ${esbuild ? '最小化 ' + kb(cssBody) : '最小化なし'}
 
 カラムに載る文字列（サンプル: ${ddlA.split('\n').length} 行 → ${ddlB.split('\n').length} 行）
   inline （既定・自己完結）     ${kb(inline)}
@@ -275,6 +302,8 @@ const header = `-- =============================================================
 -- ※ このファイルは build_udf.mjs が生成する。直接編集しないこと。
 --    元コードは diff_html/ の VS Code 拡張の lib/diff.js / lib/render.js。
 --    再生成: node looker_studio/templated_record/build_udf.mjs
+--    本体は esbuild で最小化してある（インラインのコード ブロブは
+--    32 KB が上限とされているため）。
 --
 -- PROJECT / DATASET は自分の環境に置換すること。
 -- =====================================================================
