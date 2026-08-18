@@ -104,12 +104,24 @@ const checks = [
   ['未認識の View もソースを描く', hOdd.replace(/<[^>]*>/g, '').includes('legacy')],
   ['未認識の見出しは空にならない',
     !hOdd.includes('<div class="vg-plabel"></div>')],
+  // suffix と連動する 'JP'/'US' は吸収されるので、連動しない値で割る
   ['リテラル差で割れたときは substitutable の指定を案内する',
     R.renderBase(A.analyze([
-      { view_name: 'v_x_abjp', ddl: "SELECT a FROM t_abjp WHERE c = 'JP'" },
-      { view_name: 'v_x_abus', ddl: "SELECT a FROM t_abus WHERE c = 'US'" },
+      { view_name: 'v_x_abjp', ddl: "SELECT a FROM t_abjp WHERE s = 'A'" },
+      { view_name: 'v_x_abus', ddl: "SELECT a FROM t_abus WHERE s = 'B'" },
     ], { suffixParts: [['ab'], ['jp', 'us']] }).bases[0], {})
       .includes('substitutable')],
+  ['suffix と連動するリテラルは割らない',
+    A.analyze([
+      { view_name: 'v_x_abjp', ddl: "SELECT a FROM t_abjp WHERE c = 'JP'" },
+      { view_name: 'v_x_abus', ddl: "SELECT a FROM t_abus WHERE c = 'US'" },
+    ], { suffixParts: [['ab'], ['jp', 'us']] }).bases[0].groupCount === 1],
+  ['伏せ字は診断で見える表記に戻す',
+    R.renderBase(A.analyze([
+      { view_name: 'v_w_abjp', ddl: "SELECT a FROM t WHERE c = 'abjp'" },
+      { view_name: 'v_w_abus', ddl: "SELECT a FROM t WHERE c = 'zz'" },
+    ], { suffixParts: [['ab'], ['jp', 'us']] }).bases[0], {})
+      .includes('\u27e8suffix\u27e9')],
 ];
 
 let failed = 0;

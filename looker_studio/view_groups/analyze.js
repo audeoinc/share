@@ -207,12 +207,50 @@ const SUFFIX_MARK = '\u0000';
  * WHERE region = 'abjp' と 'abus' は同一視されるが、
  * WHERE status = 'A' と 'B' はロジック差として残る。
  */
-function maskSuffix(tokens, suffix) {
+/**
+ * その View の suffix から作る「語彙」。リテラルの中の語と照合する。
+ * suffix そのものに加えて、区分（abjp なら ab / jp）も含める。
+ * 区分は suffixParts があればそれ、なければ長さが偶数のときの前後半。
+ */
+function suffixWords(suffix, parts) {
+  const s = String(suffix || '');
+  if (s.length < 2) return [];
+  const words = [s];
+  if (Array.isArray(parts) && parts.length > 0) {
+    for (const p of parts) if (String(p).length >= 2) words.push(String(p));
+  } else if (s.length % 2 === 0) {
+    words.push(s.slice(0, s.length / 2), s.slice(s.length / 2));
+  }
+  const seen = {};
+  const out = [];
+  for (const w of words) {
+    const k = w.toLowerCase();
+    if (!seen[k]) { seen[k] = 1; out.push(k); }
+  }
+  return out;
+}
+
+const WORD_RE = /[A-Za-z0-9]+/g;
+
+function maskSuffix(tokens, suffix, parts, opts) {
   if (!suffix || String(suffix).length < 2) return tokens;
   const s = String(suffix);
+  // リテラル内の語照合。suffix と連動する国コードなどを吸収する。
+  const words = (opts && opts.literalSuffixWords === false)
+    ? [] : suffixWords(s, parts);
   return tokens.map((t) => {
-    if (t.kind === 'space' || t.text.indexOf(s) < 0) return t;
-    return { kind: t.kind, text: t.text.split(s).join(SUFFIX_MARK) };
+    if (t.kind === 'space') return t;
+    let text = t.text;
+    // 1. 文字列としての suffix。識別子でもデータセット名でもどこでも効く。
+    if (text.indexOf(s) >= 0) text = text.split(s).join(SUFFIX_MARK);
+    // 2. リテラルの中は語単位で照合する（大文字小文字を無視）。
+    //    'JP' / 'AB' のように suffix と同じ文字列でなくても連動していれば吸収する。
+    //    語全体が一致したときだけ置くので、'label' の ab のような巻き込みは起きない。
+    if (words.length > 0 && (t.kind === 'string' || t.kind === 'quoted')) {
+      text = text.replace(WORD_RE, (w) =>
+        (words.indexOf(w.toLowerCase()) >= 0 ? SUFFIX_MARK : w));
+    }
+    return text === t.text ? t : { kind: t.kind, text };
   });
 }
 
@@ -317,7 +355,7 @@ function groupByLogic(views, opts) {
     return {
       ...v,
       raw,
-      tokens: suffixAware ? maskSuffix(tokens, v.suffix) : tokens,
+      tokens: suffixAware ? maskSuffix(tokens, v.suffix, v.parts, opts) : tokens,
     };
   });
 
@@ -401,7 +439,7 @@ function analyze(rows, opts) {
 }
 
 module.exports = {
-  tokenizeSql, normalizeSpace, stripOptionsClause, maskSuffix,
+  tokenizeSql, normalizeSpace, stripOptionsClause, maskSuffix, suffixWords,
   extractSuffix, expandSuffixParts, alphaMap, alphaMapDetail,
   parameterize, groupByLogic, analyze,
   DEFAULT_SUFFIX_RE, DEFAULT_SUBSTITUTABLE, KEYWORDS,

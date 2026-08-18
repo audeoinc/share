@@ -55,6 +55,31 @@ v_y_cdjp:  WHERE status = 'B'                                 ┘
 
 `suffixAware: false` で無効化できる。
 
+#### リテラルの中は語単位でも照合する
+
+リテラルには `'abjp'` そのものではなく、**suffix と連動した別表記**が入ることが多い。
+
+```sql
+WHERE country = 'JP'   -- v_x_abjp
+WHERE country = 'US'   -- v_x_abus
+```
+
+これは文字列としての suffix と一致しないので、上の伏せ字だけでは吸収できず、
+リテラル差＝ロジック差として別グループに割れてしまう。
+
+そこで**文字列・バッククォート識別子の中だけ**、語（`[A-Za-z0-9]+` の並び）単位で
+その View の**suffix 語彙**と照合する。語彙は suffix 自身とその区分
+（`abjp` なら `ab` / `jp`）で、大文字小文字は無視する。
+
+- 語**全体**が一致したときだけ置き換える。`'label'` の `ab` は巻き込まない
+- 区分は `suffixParts` があればそれ、なければ長さが偶数のときの前後半
+- 照合するのは**その View 自身の**語彙だけ。`abus` の View に `'JP'` が
+  書いてあれば吸収されず差として残る（＝取り違えを見逃さない）
+- `'A'` と `'B'` のような連動しない値は従来どおりロジック差
+
+`literalSuffixWords: false` で無効化できる。すべてのリテラル差を無視したいなら
+`substitutable` に `string` / `number` を足す（そちらは `'A'` と `'B'` の差も消える）。
+
 ### 取得元は VIEWS.view_definition を使う
 
 `INFORMATION_SCHEMA.TABLES.ddl` は BigQuery が組み立てた `CREATE VIEW` 文で、
@@ -81,7 +106,8 @@ v_y_cdjp:  WHERE status = 'B'                                 ┘
 
 - **置換可能なのは識別子とバッククォート識別子だけ**。予約語や記号の差はロジック差
 - **リテラル差は既定でロジック差として残す**。`WHERE x = 1` と `WHERE x = 2` は別グループ。
-  同一視したい場合だけ `substitutable` に `number` / `string` を足す
+  例外は suffix と連動する値（下記）。同一視したい場合だけ `substitutable` に
+  `number` / `string` を足す
 - **何をパラメータとみなしたかを必ず `params` で返す**。判定が正しいかを人が確認できる。
   ここを隠すと危ないので、画面にも出す前提
 
@@ -199,7 +225,7 @@ BigQuery に実データを作って試せる。
 
 ```bash
 node build_sample_sql.mjs   # sample_data.sql / sample_teardown.sql を生成
-node test.mjs               # アナライザの検証（46 アサーション）
+node test.mjs               # アナライザの検証（55 アサーション）
 ```
 
 | ファイル | 内容 |
@@ -262,7 +288,7 @@ ORDER BY table_name;
 強力なので、当否を人が確認できるようにしておく。
 
 ```bash
-node preview.mjs          # dist/preview.html を生成して検証（25 アサーション）
+node preview.mjs          # dist/preview.html を生成して検証（27 アサーション）
 node preview.mjs --check  # 生成せず検証だけ
 ```
 
@@ -270,7 +296,7 @@ node preview.mjs --check  # 生成せず検証だけ
 
 ```bash
 node build_udf.mjs          # 検証して view_group_html.sql を生成
-node build_udf.mjs --check  # 生成せず検証だけ（23 アサーション）
+node build_udf.mjs --check  # 生成せず検証だけ（25 アサーション）
 ```
 
 | 関数 | 戻り値 |
@@ -286,8 +312,8 @@ HTML とメタデータを 1 回の呼び出しで返すのは、事前生成テ
 素の連結は約 45 KB あって確実に弾かれるので、esbuild で最小化してから埋め込む。
 
 ```
-VIEW_GROUP_INFO  素 43.8 KB → 最小化 26.6 KB（上限比 89%）
-VIEW_GROUP_CSS   素 43.5 KB → 最小化 26.3 KB（上限比 88%）
+VIEW_GROUP_INFO  素 45.5 KB → 最小化 27.7 KB（上限比 92%）
+VIEW_GROUP_CSS   素 45.2 KB → 最小化 27.3 KB（上限比 91%）
 ```
 
 3-way 系を外して 28.1 KB → 25.8 KB になった（suffix の伏せ字を足して 26.0 KB）。それでも枠は広くないので、

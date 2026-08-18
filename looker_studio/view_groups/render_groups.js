@@ -106,12 +106,15 @@ const REASON_TEXT = {
  * している」なのか本物の差なのかを、画面だけで切り分けられるようにする。
  */
 function missTable(groups) {
+  // 比較用トークンでは suffix が伏せ字（U+0000）になっている。そのまま出すと
+  // 消えて見えるので、伏せた場所が分かる表記に戻す。
+  const unmask = (s) => String(s == null ? '' : s).split('\u0000').join('⟨suffix⟩');
   const rows = groups.filter((g) => g.miss).map((g) => {
     const d = g.miss.detail;
     const what = d.reason === 'length'
       ? `${d.aLen} 対 ${d.bLen}`
-      : `<code class="vg-mcode">${esc(d.aText)}</code> ↔ ` +
-        `<code class="vg-mcode">${esc(d.bText)}</code>` +
+      : `<code class="vg-mcode">${esc(unmask(d.aText))}</code> ↔ ` +
+        `<code class="vg-mcode">${esc(unmask(d.bText))}</code>` +
         `<span class="vg-mkind">${esc(d.kind)}</span>`;
     return `<tr><th class="vg-mname">${esc(label(g))}</th>` +
       `<td class="vg-mvs">vs ${esc(g.miss.vs)}</td>` +
@@ -122,10 +125,14 @@ function missTable(groups) {
     g.miss.detail.reason === 'not-substitutable' &&
     (g.miss.detail.kind === 'string' || g.miss.detail.kind === 'number'));
   const hint = literal
-    ? `<div class="vg-mhint">リテラルの違いで割れています。国コードのように` +
-      `「値が違うだけで同じロジック」なら、options_json の ` +
+    ? `<div class="vg-mhint">リテラルの違いで割れています。` +
+      `suffix と連動する値（<code class="vg-mcode">'JP'</code> / ` +
+      `<code class="vg-mcode">'US'</code> など）は既定で吸収するので、` +
+      `ここに残っているのは連動していない値です。それでも同一視したいなら、` +
+      `options_json に ` +
       `<code class="vg-mcode">"substitutable": ["ident","quoted","number","string"]</code>` +
-      ` を指定すると同一グループにまとまります。</div>`
+      ` を指定すると<b>すべての</b>リテラル差が無視されます` +
+      `（<code class="vg-mcode">'A'</code> と <code class="vg-mcode">'B'</code> の差も消えます）。</div>`
     : '';
   return `<details class="vg-params vg-miss"><summary class="vg-psummary">` +
     `なぜ別グループになったか</summary>${hint}` +

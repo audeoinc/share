@@ -326,6 +326,16 @@ const checks = [
       return r.view_count === 10 && r.unmatched_count === 1 &&
         r.html.replace(/<[^>]*>/g, '').includes('v_daily_sales_zzz');
     })()],
+  ['リテラルの suffix 連動コードを吸収する',
+    VIEW_GROUP_INFO([
+      { view_name: 'v_c_abjp', ddl: "SELECT a FROM t_abjp WHERE c = 'JP'" },
+      { view_name: 'v_c_abus', ddl: "SELECT a FROM t_abus WHERE c = 'US'" },
+    ], OPTS).group_count === 1],
+  ['連動しないリテラル差は残す',
+    VIEW_GROUP_INFO([
+      { view_name: 'v_c_abjp', ddl: "SELECT a FROM t_abjp WHERE s = 'A'" },
+      { view_name: 'v_c_abus', ddl: "SELECT a FROM t_abus WHERE s = 'B'" },
+    ], OPTS).group_count === 2],
   ['壊れた options_json でも落ちない',
     typeof VIEW_GROUP_INFO(views, '{ broken').html === 'string'],
   ['script タグを含まない', !/<script/i.test(html)],
@@ -397,6 +407,9 @@ const sql = `-- ================================================================
 --                 ["ident","quoted","number","string"]
 --   suffixAware   比較の前に自分の suffix を伏せ字にする（既定 true）。
 --                 リテラルに入った suffix でグループが割れるのを防ぐ
+--   literalSuffixWords リテラルの中の語も suffix 語彙と照合する（既定 true）。
+--                 'JP' / 'US' のように suffix そのものではないが連動する値を
+--                 語単位・大文字小文字を無視して吸収する
 --   includeUnmatched suffix を認識できなかった View を単独の base として
 --                 表示する（既定 true）。false で従来どおり除外
 --   stripOptions  OPTIONS( … ) 句を落としてから比較する（既定 true）

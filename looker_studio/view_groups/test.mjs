@@ -161,6 +161,45 @@ checks.push(['suffixList でも suffixParts と同じグループ分けになる
     .groups.map((g) => g.suffixes.join(',')).join('|') ===
   sales.groups.map((g) => g.suffixes.join(',')).join('|')]);
 
+// リテラルの中の suffix 連動コード
+// 'JP' / 'US' のように suffix そのものではないが suffix と連動する値は、
+// 語単位・大文字小文字を無視して伏せ字にする。SQL に手を入れずに吸収したい。
+const codes = S.allSuffixes().map((e) => ({
+  view_name: `v_code_${e.suffix}`,
+  ddl: `SELECT id\nFROM \`p.mart_${e.suffix}.orders\`\n` +
+       `WHERE country = '${e.suffix.slice(2).toUpperCase()}'\n` +
+       `  AND line = '${e.suffix.slice(0, 2)}'`,
+}));
+checks.push(['リテラルの国コードは suffix と連動していれば吸収する',
+  A.analyze(codes, OPTS).bases[0].groupCount === 1]);
+checks.push(['literalSuffixWords:false なら従来どおり割れる',
+  A.analyze(codes, { ...OPTS, literalSuffixWords: false }).bases[0].groupCount === 9]);
+
+// 連動していないリテラルは残す
+const notCodes = [
+  { view_name: 'v_z_abjp', ddl: "SELECT a FROM t_abjp WHERE country = 'JP' AND s = 'A'" },
+  { view_name: 'v_z_abus', ddl: "SELECT a FROM t_abus WHERE country = 'US' AND s = 'A'" },
+  { view_name: 'v_z_cdjp', ddl: "SELECT a FROM t_cdjp WHERE country = 'JP' AND s = 'B'" },
+];
+const nc = A.analyze(notCodes, OPTS).bases[0];
+checks.push(['連動しないリテラル差はロジック差として残る', nc.groupCount === 2]);
+checks.push(['連動する値だけ吸収して 2 本がまとまる',
+  nc.groups.some((g) => g.suffixes.join(',') === 'abjp,abus')]);
+
+// 語の一部には効かせない（'label' の ab を巻き込まない）
+checks.push(['リテラルの語の一部は伏せ字にしない',
+  A.maskSuffix(A.tokenizeSql("SELECT 'label' AS x"), 'abjp')
+    .map((t) => t.text).join('').includes("'label'")]);
+checks.push(['語全体が一致すれば伏せ字にする',
+  !A.maskSuffix(A.tokenizeSql("SELECT 'JP' AS x"), 'abjp')
+    .map((t) => t.text).join('').includes("'JP'")]);
+checks.push(['語彙は suffix と区分',
+  A.suffixWords('abjp').join(',') === 'abjp,ab,jp']);
+checks.push(['suffixParts があればそちらを使う',
+  A.suffixWords('abjp', ['ab', 'jp']).join(',') === 'abjp,ab,jp']);
+checks.push(['奇数長の suffix は分割しない',
+  A.suffixWords('abc').join(',') === 'abc']);
+
 // suffix を認識できなかった View
 // 出さないとソースが画面から消える。単独の base（1 View / 1 グループ）として並べる。
 const withOdd = A.analyze(rows.concat([
