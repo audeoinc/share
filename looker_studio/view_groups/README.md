@@ -13,7 +13,7 @@ v_daily_sales_abjp … v_daily_sales_efuk （9 本）
         ↓ グループ内の差を {{P1}} … に置換
   パラメータ化 SQL 3 本
         ↓
-  Looker Studio に 3 ペインで表示
+  Looker Studio にタブで表示
     全体タイトル : v_daily_sales
     ペイン見出し : "abjp, abuk, abus" など
 ```
@@ -94,8 +94,36 @@ ORDER BY table_name;
 **グループ数が 1 なら「全 suffix が同一ロジック＝正常」**という健全性チェックになる。
 グループが増えていれば、意図しない差異が入った疑いとして検知できる。
 
+## 表示（render_groups.js）
+
+`analyze()` の結果 1 base 分を HTML にする。`preview.mjs` で描き分けを確認できる。
+
+| グループ数 | 既定のレイアウト |
+|---|---|
+| 1 | 差分なしの案内 |
+| 2 | 2 ペイン（比較が 1 通りしかないのでタブにしない） |
+| 3 以上 | 最大グループを基準に、比較相手を**タブ**で切り替える |
+
+`layout: 'panes'` を渡せば 3 ペイン横並びにも戻せる（`'tabs'` で常にタブ）。
+
+タブは **radio + `:checked` の CSS のみ**で動く（Templated Record では JavaScript が
+使えないため）。CSS セレクタは ID ではなくクラスで書いてあるので、CSS を静的に保てる。
+`MAX_TABS = 12` まで規則を用意し、超過分は件数を明示して切り捨てる。
+
+ペイン副題は View 数（`基準 / 3 View`）。ベンダリングした `render.js` は
+`(after)` / `(reference)` を出すが、ロジック系統の間に時間的な前後関係も優劣も
+ないため誤解を招く。`render.js` は書き換えず、出力側で置換している。
+
+**何をパラメータ化したかの一覧を常時添付**する（折りたたみ）。α 等価の判定は
+強力なので、当否を人が確認できるようにしておく。
+
+```bash
+node preview.mjs          # dist/preview.html を生成して検証（19 アサーション）
+node preview.mjs --check  # 生成せず検証だけ
+```
+
 ## 未実装
 
-- N ペイン描画（既存の `renderFragment3` は 3 ペイン固定。グループ数は 4 以上になりうる）
 - BigQuery UDF 化（`templated_record/build_udf.mjs` と同じ生成方式）
+- `INFORMATION_SCHEMA` から事前生成テーブルを作る SQL
 - Looker Studio への配線

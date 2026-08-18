@@ -9,11 +9,11 @@
  *
  * レイアウト:
  *   1 グループ  … 差分なしの案内
- *   2 グループ  … 2 ペイン
- *   3 グループ  … 3 ペイン横並び（当初の要望どおり全ロジックを一度に見る）
- *   4 グループ〜… 最大グループを基準に、比較相手をタブで切り替える
+ *   2 グループ  … 2 ペイン（比較が 1 通りしかないのでタブにする意味がない）
+ *   3 グループ〜… 最大グループを基準に、比較相手をタブで切り替える
  *                 （横に並べると 1 ペインが狭くなって読めないため）
  *   layout: 'auto'（既定） / 'panes' / 'tabs' で明示指定もできる。
+ *   layout:'panes' を指定すれば 3 ペイン横並びにも戻せる。
  *
  * タブは radio + :checked の CSS のみで動く（JavaScript は使えない）。
  * CSS セレクタは ID ではなくクラスで書いてある。ID はレコードごとに
@@ -164,7 +164,7 @@ function renderBase(b, opts) {
         label(groups[0]), label(groups[0]),
         build2Way(splitLines(groups[0].sql), splitLines(groups[0].sql)), o),
         [paneSub(groups[0]), paneSub(groups[0])])}</div>`;
-  } else if (o.layout === 'tabs' || (o.layout !== 'panes' && n > 3)) {
+  } else if (o.layout === 'tabs' || (o.layout !== 'panes' && n > 2)) {
     body = tabs(groups, o, idPrefix);
   } else if (n === 2) {
     body = pair(groups[0], groups[1], o);

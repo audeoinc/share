@@ -45,8 +45,8 @@ const baseMany = A.analyze(many, {
 }).bases[0];
 
 const cases = [
-  { title: '3 グループ（既定 = 3 ペイン横並び）', b: base3, opts: {} },
-  { title: '3 グループを layout:"tabs" で', b: base3, opts: { layout: 'tabs' } },
+  { title: '3 グループ（既定 = タブ）', b: base3, opts: {} },
+  { title: '3 グループを layout:"panes" で（3 ペイン横並び）', b: base3, opts: { layout: 'panes' } },
   { title: '2 グループ（2 ペイン）', b: base2, opts: {} },
   { title: '1 グループ（差分なし）', b: base1, opts: {} },
   { title: `${baseMany.groupCount} グループ（既定 = タブ）`, b: baseMany, opts: {} },
@@ -55,8 +55,8 @@ const cases = [
 const parts = cases.map((c) => ({ ...c, html: R.renderBase(c.b, c.opts) }));
 
 // --- 検証 --------------------------------------------------------------
-const h3 = parts[0].html;
-const hTabs = parts[1].html;
+const h3 = parts[0].html;      // 既定 = タブ
+const hPanes = parts[1].html;  // layout:'panes' = 3 ペイン横並び
 const h1 = parts[3].html;
 const hMany = parts[4].html;
 
@@ -65,18 +65,22 @@ const checks = [
   ['タイトルが base 名', h3.includes('v_daily_sales')],
   ['グループ数バッジが出る', h3.includes('3 グループ')],
   ['ペイン見出しに suffix が列記される', h3.replace(/<[^>]*>/g, '').includes('abjp, abuk, abus')],
-  ['3 グループは既定で 3 ペイン（タブなし）', !h3.includes('vg-tablist')],
-  ['3 ペインに 3 つの見出しが出る',
-    ['abjp, abuk, abus', 'cdjp, cduk, cdus', 'efjp, efuk, efus']
+  ['3 グループは既定でタブ', h3.includes('vg-tablist')],
+  ['タブは基準を除いた 2 枚', (h3.match(/class="vg-tab /g) || []).length === 2],
+  ['タブ見出しに suffix が列記される',
+    ['cdjp, cduk, cdus', 'efjp, efuk, efus']
       .every((s) => h3.replace(/<[^>]*>/g, '').includes(s))],
-  ['layout:"tabs" ならタブになる', hTabs.includes('vg-tablist')],
-  ['4 グループ以上は既定でタブ', hMany.includes('vg-tablist') && baseMany.groupCount > 3],
+  ['layout:"panes" なら 3 ペイン横並びに戻せる',
+    !hPanes.includes('vg-tablist') &&
+    ['abjp, abuk, abus', 'cdjp, cduk, cdus', 'efjp, efuk, efus']
+      .every((s) => hPanes.replace(/<[^>]*>/g, '').includes(s))],
+  ['4 グループ以上もタブ', hMany.includes('vg-tablist') && baseMany.groupCount > 3],
   ['タブに基準グループの表示がある', hMany.includes('基準:')],
   ['1 グループは差分なしの案内', h1.includes('すべてが同一ロジック')],
   ['パラメータ一覧が出る', h3.includes('パラメータ化した箇所')],
   ['パラメータ値に suffix が並ぶ', h3.includes('vg-psuf')],
-  ['radio の id が base ごとに一意',
-    new Set(idsOf(hTabs)).size === idsOf(hTabs).length && idsOf(hTabs).length > 0],
+  ['radio の id が一意',
+    new Set(idsOf(h3)).size === idsOf(h3).length && idsOf(h3).length > 0],
   // 宣言ブロックには 16 進カラーの # が入るので、セレクタ部分だけを見る
   ['CSS が id を参照していない（静的に保てる）',
     R.chromeCss().split('\n')
@@ -88,6 +92,8 @@ const checks = [
   ['誤解を招く副題 (after)/(reference) が残っていない',
     !/\((?:before|after|base|reference)\)/.test(parts.map((p) => p.html).join(''))],
   ['副題が View 数になっている', h3.includes('基準 / 3 View')],
+  ['2 グループはタブにしない（比較が 1 通りのため）',
+    !parts[2].html.includes('vg-tablist')],
 ];
 
 let failed = 0;
