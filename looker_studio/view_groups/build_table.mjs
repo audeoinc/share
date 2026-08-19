@@ -50,6 +50,27 @@ function baseRegex(c) {
   throw new Error('suffixParts / suffixList / suffixPattern のいずれかを指定してください');
 }
 
+// suffix_config.json に置けるキー。ここと _comment と実装がズレると、
+// 綴り違いのキーが黙って無視されて「設定したのに効かない」になる。
+// SQL の生成だけに使うもの
+const SQL_KEYS = ['suffixSource', 'schemataPattern', 'region'];
+// そのまま options_json に入って UDF のオプションになるもの
+const UDF_KEYS = [
+  'suffixParts', 'suffixList', 'suffixPattern',
+  'suffixAware', 'literalSuffixWords', 'literalGroups',
+  'includeUnmatched', 'stripOptions', 'substitutable',
+  'layout', 'mode',
+  'fontSize', 'lineHeight', 'fontFamily', 'colors',
+  'diffLineOpacity', 'diffCharOpacity', 'syntax',
+];
+const unknown = Object.keys(config).filter(
+  (k) => !SQL_KEYS.includes(k) && !UDF_KEYS.includes(k));
+if (unknown.length > 0) {
+  console.log(`  FAIL  suffix_config.json に知らないキーがあります: ${unknown.join(', ')}`);
+  console.log('        綴りを確認するか、build_table.mjs の UDF_KEYS に足してください。');
+  process.exit(1);
+}
+
 const dynamic = config.suffixSource === 'schemata';
 // SCHEMATA はリージョン修飾が要る。データセットのロケーションと揃えること。
 const region = config.region || 'asia-northeast1';
@@ -58,7 +79,7 @@ const regex = dynamic ? null : baseRegex(config);
 // UDF に渡す静的オプション（suffixList は動的モードでは SQL 側で足す）
 const staticOpts = Object.fromEntries(
   Object.entries(config).filter(([k]) =>
-    !['suffixSource', 'schemataPattern', 'region'].includes(k) &&
+    !SQL_KEYS.includes(k) &&
     !(dynamic && ['suffixParts', 'suffixList', 'suffixPattern'].includes(k)))
 );
 
@@ -152,11 +173,12 @@ suffixes AS (
   FROM \`PROJECT.region-${region}.INFORMATION_SCHEMA.SCHEMATA\`
   WHERE REGEXP_CONTAINS(schema_name, r'${config.schemataPattern}')
 ),
--- サンプル用: データセットを 1 つにまとめた環境で試すときは、上の suffixes を
+${sampleSuffixes.length > 0 ? `-- サンプル用: データセットを 1 つにまとめた環境で試すときは、上の suffixes を
 -- そのまま使うと 0 件になる。その場合だけ次で置き換える。
 -- suffixes AS (
 --   SELECT suffix FROM UNNEST([${sampleSuffixes.map((s) => `'${s}'`).join(', ')}]) AS suffix
 -- ),
+` : ''}
 -- UDF に渡す設定。suffixList だけ実行時に決まる。
 opts AS (
   SELECT CONCAT(

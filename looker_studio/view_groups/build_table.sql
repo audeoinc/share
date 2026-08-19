@@ -73,6 +73,7 @@ suffixes AS (
 -- suffixes AS (
 --   SELECT suffix FROM UNNEST(['abjp', 'abuk', 'abus', 'cdjp', 'cduk', 'cdus', 'efjp', 'efuk', 'efus']) AS suffix
 -- ),
+
 -- UDF に渡す設定。suffixList だけ実行時に決まる。
 opts AS (
   SELECT CONCAT(
