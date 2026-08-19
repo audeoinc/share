@@ -160,28 +160,12 @@ const optionsJsonInline = JSON.stringify(staticOpts);
 const staticTail = Object.entries(staticOpts)
   .map(([k, v]) => `${JSON.stringify(k)}:${JSON.stringify(v)}`).join(',');
 
-// 動的モードでも、サンプル（データセット 1 つ）で試せるよう固定一覧をコメントで残す。
-const sampleSuffixes = Array.isArray(config.suffixParts)
-  ? A.expandSuffixParts(config.suffixParts)
-  : (config.suffixList || []);
-
 const suffixCte = dynamic ? `
--- データセット名から suffix を集める。手で一覧を持たないための CTE。
---   mart_abjp / raw_cduk → abjp / cduk
--- リージョンはセクション 0 の region から入る（データセットのロケーションと揃える）。
--- ここが 0 件だと全 View が「suffix 未認識」になり、1 本ずつ単独で並ぶだけになる。
--- 件数は下の確認クエリで見ておく。
+-- セクション 0 が拾った suffix 一覧。データセットの走査は 1 回だけで、
+-- 対象 View の集め方（src）と同じ結果から作っているのでズレない。
 suffixes AS (
-  SELECT DISTINCT REGEXP_EXTRACT(schema_name, r'${config.schemataPattern}') AS suffix
-  FROM \`@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA\`
-  WHERE REGEXP_CONTAINS(schema_name, r'${config.schemataPattern}')
+  SELECT suffix FROM UNNEST([@@SUFFIXES@@]) AS suffix
 ),
-${sampleSuffixes.length > 0 ? `-- サンプル用: データセットを 1 つにまとめた環境で試すときは、上の suffixes を
--- そのまま使うと 0 件になる。その場合だけ次で置き換える。
--- suffixes AS (
---   SELECT suffix FROM UNNEST([${sampleSuffixes.map((s) => `'${s}'`).join(', ')}]) AS suffix
--- ),
-` : ''}
 -- UDF に渡す設定。suffixList だけ実行時に決まる。
 opts AS (
   SELECT CONCAT(
@@ -236,6 +220,98 @@ console.log(`  UDF オプション: ${Object.keys(staticOpts).join(', ')}${dynam
 if (process.argv.includes('--check')) process.exit(0);
 
 // --- SQL を書き出す ----------------------------------------------------
+// --- セクション 0（設定）はモードで変わる ------------------------------
+// 動的モード: リージョン内のデータセットを 1 回読み、対象 View も suffix 一覧も
+//             そこから作る。両者が同じ集合から出るのでズレない。
+// 静的モード: suffix は設定に焼き込んであるので、対象データセットだけ明示する。
+const configBlock = dynamic ? `DECLARE project_id   STRING DEFAULT 'my-project';
+DECLARE udf_dataset  STRING DEFAULT 'ops_meta';    -- VIEW_GROUP_INFO / VIEW_GROUP_CSS の置き場所
+DECLARE work_dataset STRING DEFAULT 'ops_meta';    -- view_logic_diff の置き場所
+DECLARE region       STRING DEFAULT '${region}';   -- 読むリージョン
+DECLARE tz           STRING DEFAULT 'Asia/Tokyo';  -- snapshot_date の基準
+
+-- 比較対象のデータセット。
+-- 既定は「リージョン内で suffix の条件（${config.schemataPattern}）に一致するもの全部」。
+-- 対象 View も suffix 一覧も同じ 1 回の走査から作るので、両者がズレない。
+DECLARE dataset_filter  STRING        DEFAULT '';  -- 追加の絞り込み正規表現。'' なら絞らない（テスト用）
+DECLARE source_datasets ARRAY<STRING> DEFAULT [];  -- 空でなければこの一覧だけを使う（自動検出をやめる）
+DECLARE suffix_override ARRAY<STRING> DEFAULT [];  -- 空でなければ suffix はこれを使う（サンプル環境用）
+
+DECLARE datasets    ARRAY<STRING>;
+DECLARE suffix_list ARRAY<STRING>;
+DECLARE src_sql     STRING;
+DECLARE suffix_sql  STRING;` : `DECLARE project_id   STRING DEFAULT 'my-project';
+DECLARE udf_dataset  STRING DEFAULT 'ops_meta';   -- VIEW_GROUP_INFO / VIEW_GROUP_CSS の置き場所
+DECLARE work_dataset STRING DEFAULT 'ops_meta';   -- view_logic_diff の置き場所
+DECLARE region       STRING DEFAULT '${region}';
+DECLARE tz           STRING DEFAULT 'Asia/Tokyo'; -- snapshot_date の基準
+
+-- 比較対象の View があるデータセット（複数可）。
+-- suffix は suffix_config.json に焼き込んであるので、ここは明示する。
+DECLARE source_datasets ARRAY<STRING> DEFAULT ['mart'];
+
+DECLARE datasets ARRAY<STRING>;
+DECLARE src_sql  STRING;`;
+
+// 対象データセットと suffix 一覧を決める部分。
+const discoverBlock = dynamic ? `
+-- 対象データセットを決める。
+-- source_datasets が空なら、リージョン内で条件に一致するものを拾う。
+-- 識別子はテキスト置換、値（正規表現）は USING のパラメータで渡す。
+IF ARRAY_LENGTH(source_datasets) = 0 THEN
+  EXECUTE IMMEDIATE fill(r"""
+SELECT ARRAY_AGG(schema_name ORDER BY schema_name)
+FROM \`@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA\`
+WHERE REGEXP_CONTAINS(schema_name, r'${config.schemataPattern}')
+  AND (? = '' OR REGEXP_CONTAINS(schema_name, ?))
+""", project_id, udf_dataset, work_dataset, region, tz)
+  INTO datasets
+  USING dataset_filter, dataset_filter;
+ELSE
+  SET datasets = source_datasets;
+END IF;
+
+IF datasets IS NULL OR ARRAY_LENGTH(datasets) = 0 THEN
+  RAISE USING MESSAGE = '対象データセットが 0 件です。region / dataset_filter / source_datasets を確認してください。';
+END IF;
+
+-- suffix 一覧は同じデータセット集合から作る。
+IF ARRAY_LENGTH(suffix_override) > 0 THEN
+  SET suffix_list = suffix_override;
+ELSE
+  SET suffix_list = (
+    SELECT ARRAY_AGG(DISTINCT suffix ORDER BY suffix)
+    FROM (
+      SELECT REGEXP_EXTRACT(d, r'${config.schemataPattern}') AS suffix
+      FROM UNNEST(datasets) AS d
+    )
+    WHERE suffix IS NOT NULL
+  );
+END IF;
+
+SET suffix_sql = (SELECT STRING_AGG(FORMAT("'%s'", s), ', ') FROM UNNEST(suffix_list) AS s);
+IF suffix_sql IS NULL THEN
+  RAISE USING MESSAGE = 'suffix が 1 つも取れませんでした。schemataPattern / dataset_filter / suffix_override を確認してください。';
+END IF;
+` : `
+SET datasets = source_datasets;
+IF ARRAY_LENGTH(datasets) = 0 THEN
+  RAISE USING MESSAGE = 'source_datasets が空です。比較対象の View があるデータセットを指定してください。';
+END IF;
+`;
+
+// INSERT は中身が SQL になるものを fill() のあとで最後に埋める。
+const insertOpen = dynamic ? 'REPLACE(REPLACE(fill(r"""' : 'REPLACE(fill(r"""';
+const insertClose = dynamic
+  ? `""", project_id, udf_dataset, work_dataset, region, tz),
+  -- 埋めた中身がさらに置換されないよう、SQL になるものは最後に回す
+  '@@SUFFIXES@@', suffix_sql),
+  '@@SRC@@',      src_sql);`
+  : `""", project_id, udf_dataset, work_dataset, region, tz),
+  -- 埋めた中身がさらに置換されないよう、SQL になるものは最後に回す
+  '@@SRC@@', src_sql);`;
+
+// --- SQL を書き出す ----------------------------------------------------
 const sql = `-- =====================================================================
 -- suffix 違い View のロジック グループ比較を事前生成してテーブルに持つ
 --
@@ -256,8 +332,8 @@ const sql = `-- ================================================================
 -- suffix の出どころ: ${dynamic
   ? `INFORMATION_SCHEMA.SCHEMATA（データセット名）
 --   ${config.schemataPattern} に一致したデータセット名の末尾を suffix として使う。
---   View 名の切り分けも UDF に渡す一覧も、この結果から実行時に決まる。
---   つまり suffix が増えても SQL の修正は要らない。`
+--   同じ走査の結果から対象 View も決めるので、suffix と対象がズレない。
+--   つまりデータセットが増えても SQL の修正は要らない。`
   : `suffix_config.json（固定）`}
 -- =====================================================================
 
@@ -268,36 +344,27 @@ const sql = `-- ================================================================
 --    BigQuery は識別子（プロジェクト・データセット・関数名）をクエリ
 --    パラメータにできない。@param が使えるのは値だけ。
 --    そこでスクリプト変数に持ち、EXECUTE IMMEDIATE でテキスト置換する。
---    本文の @@PROJECT@@ などが置換される目印。
+--    本文の @@PROJECT@@ などが置換される目印。値は USING で渡す。
 --
 --    スケジュールドクエリには セクション 0 と 2 を登録する
 --    （1 と 3 は初回だけ実行すればよい）。
 -- ---------------------------------------------------------------------
-DECLARE project_id      STRING        DEFAULT 'my-project';
-DECLARE udf_dataset     STRING        DEFAULT 'ops_meta';   -- VIEW_GROUP_INFO / VIEW_GROUP_CSS の置き場所
-DECLARE work_dataset    STRING        DEFAULT 'ops_meta';   -- view_logic_diff の置き場所
-DECLARE source_datasets ARRAY<STRING> DEFAULT ['mart'];     -- 比較対象の View があるデータセット（複数可）
-DECLARE region          STRING        DEFAULT '${region}';  -- SCHEMATA を読むリージョン
-DECLARE tz              STRING        DEFAULT 'Asia/Tokyo'; -- snapshot_date の基準
-
-DECLARE src_sql STRING;
+${configBlock}
 
 -- @@…@@ を実際の値に置き換える。EXECUTE IMMEDIATE のたびに通す。
--- @@SRC@@ を最後にするのは、埋め込んだ中身がさらに置換されないようにするため。
 CREATE TEMP FUNCTION fill(
   sql STRING, project STRING, udf_ds STRING, work_ds STRING,
-  reg STRING, zone STRING, src STRING
+  reg STRING, zone STRING
 ) AS (
-  REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(sql,
+  REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(sql,
     '@@PROJECT@@', project),
     '@@UDF@@',     udf_ds),
     '@@WORK@@',    work_ds),
     '@@REGION@@',  reg),
-    '@@TZ@@',      zone),
-    '@@SRC@@',     src)
+    '@@TZ@@',      zone)
 );
-
--- 対象 View を集める部分を source_datasets から組み立てる。
+${discoverBlock}
+-- 対象 View を集める部分を組み立てる。
 --
 -- TABLES.ddl ではなく VIEWS.view_definition を使う。
 -- TABLES.ddl は BigQuery が組み立てた CREATE VIEW 文で、OPTIONS に
@@ -311,11 +378,11 @@ SET src_sql = (
       "SELECT table_name AS view_name, view_definition AS ddl FROM \`%s.%s.INFORMATION_SCHEMA.VIEWS\`",
       project_id, d),
     "\\n  UNION ALL\\n  ")
-  FROM UNNEST(source_datasets) AS d
+  FROM UNNEST(datasets) AS d
 );
-IF src_sql IS NULL THEN
-  RAISE USING MESSAGE = 'source_datasets が空です。比較対象の View があるデータセットを指定してください。';
-END IF;
+
+-- 何を対象にしたか見たいときは、ここで一度確認する。
+-- SELECT datasets${dynamic ? ', suffix_list' : ''};
 
 
 -- ---------------------------------------------------------------------
@@ -341,7 +408,7 @@ OPTIONS (
   description = 'suffix 違い View のロジック グループ比較（事前生成）',
   partition_expiration_days = 400
 )
-""", project_id, udf_dataset, work_dataset, region, tz, src_sql);
+""", project_id, udf_dataset, work_dataset, region, tz);
 
 
 -- ---------------------------------------------------------------------
@@ -353,9 +420,9 @@ OPTIONS (
 EXECUTE IMMEDIATE fill(r"""
 DELETE FROM \`@@PROJECT@@.@@WORK@@.view_logic_diff\`
 WHERE snapshot_date = CURRENT_DATE('@@TZ@@')
-""", project_id, udf_dataset, work_dataset, region, tz, src_sql);
+""", project_id, udf_dataset, work_dataset, region, tz);
 
-EXECUTE IMMEDIATE fill(r"""
+EXECUTE IMMEDIATE ${insertOpen}
 INSERT INTO \`@@PROJECT@@.@@WORK@@.view_logic_diff\`
 WITH${suffixCte}
 src AS (
@@ -383,7 +450,7 @@ ${udfOptionsArg}
   FROM keyed
   GROUP BY base
 )
-""", project_id, udf_dataset, work_dataset, region, tz, src_sql);
+${insertClose}
 
 
 -- ---------------------------------------------------------------------
@@ -396,7 +463,7 @@ FROM \`@@PROJECT@@.@@WORK@@.view_logic_diff\`
 WHERE snapshot_date = (
   SELECT MAX(snapshot_date) FROM \`@@PROJECT@@.@@WORK@@.view_logic_diff\`
 )
-""", project_id, udf_dataset, work_dataset, region, tz, src_sql);
+""", project_id, udf_dataset, work_dataset, region, tz);
 
 
 -- ---------------------------------------------------------------------
@@ -418,42 +485,22 @@ WHERE snapshot_date = (
 -- FROM \`@@PROJECT@@.@@WORK@@.v_view_logic_diff_latest\`
 -- ORDER BY base;
 
-${dynamic ? `-- SCHEMATA から取れた suffix 一覧（suffixes CTE が返すものと同じ）
--- 0 件なら region か schemataPattern を疑う。
+${dynamic ? `-- 対象データセットと suffix（セクション 0 が拾うものと同じ）
+-- 0 件なら region か dataset_filter を疑う。
 -- SELECT
---   suffix,
+--   REGEXP_EXTRACT(schema_name, r'${config.schemataPattern}') AS suffix,
 --   COUNT(*) AS dataset_count,
 --   STRING_AGG(schema_name, ', ' ORDER BY schema_name) AS datasets
--- FROM (
---   SELECT schema_name, REGEXP_EXTRACT(schema_name, r'${config.schemataPattern}') AS suffix
---   FROM \`@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA\`
--- )
--- WHERE suffix IS NOT NULL
+-- FROM \`@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA\`
+-- WHERE REGEXP_CONTAINS(schema_name, r'${config.schemataPattern}')
 -- GROUP BY suffix
 -- ORDER BY suffix;
 
--- 拾えなかったデータセット（suffix 付きのつもりのものが混ざっていないか）
+-- 拾えなかったデータセット（対象のつもりのものが落ちていないか）
 -- SELECT schema_name
 -- FROM \`@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA\`
 -- WHERE NOT REGEXP_CONTAINS(schema_name, r'${config.schemataPattern}')
 -- ORDER BY schema_name;
-
--- suffix ごとに何本の View が割り当たったか。
--- 0 本の suffix は、無関係なデータセット名から拾ったもの（実害はない）。
--- 抜けている suffix があれば、そのデータセットが source_datasets に入っていない。
--- WITH suffixes AS (
---   SELECT DISTINCT REGEXP_EXTRACT(schema_name, r'${config.schemataPattern}') AS suffix
---   FROM \`@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA\`
---   WHERE REGEXP_CONTAINS(schema_name, r'${config.schemataPattern}')
--- ), src AS (
---   SELECT table_name AS view_name
---   FROM \`@@PROJECT@@.<source_dataset>.INFORMATION_SCHEMA.VIEWS\`
--- )
--- SELECT s.suffix, COUNT(src.view_name) AS view_count
--- FROM suffixes AS s
--- LEFT JOIN src ON ENDS_WITH(src.view_name, '_' || s.suffix)
--- GROUP BY s.suffix
--- ORDER BY s.suffix;
 
 ` : ''}-- 生成後: UDF が実際に認識した suffix（テーブルに入っている値）
 -- SELECT s AS suffix, COUNT(DISTINCT base) AS base_count
@@ -506,7 +553,8 @@ for (const line of sql.split('\n')) {
   }
 }
 
-const KNOWN_TOKENS = ['@@PROJECT@@', '@@UDF@@', '@@WORK@@', '@@REGION@@', '@@TZ@@', '@@SRC@@'];
+const KNOWN_TOKENS = ['@@PROJECT@@', '@@UDF@@', '@@WORK@@', '@@REGION@@', '@@TZ@@',
+  '@@SUFFIXES@@', '@@SRC@@'];
 for (const m of sql.match(/@@[A-Z_]+@@/g) || []) {
   if (!KNOWN_TOKENS.includes(m)) {
     console.log(`  FAIL  知らない置換トークンがあります: ${m}`);

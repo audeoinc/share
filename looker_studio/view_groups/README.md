@@ -175,9 +175,9 @@ suffixes AS (
   **データセットのロケーションと揃える**こと。ここを間違えると suffix が 0 件になり、
   **全 View が「suffix 未認識」として 1 本ずつ単独で並ぶ**
   （0 件にはならないので気づきにくい）。`unmatched_count > 0` の件数で確認する
-- **サンプルはデータセットを 1 つにまとめてある**ので、この CTE では 0 件になる。
-  `build_table.sql` に固定一覧へ差し替えるコメントを入れてあるので、
-  そちらを有効にして試す
+- **サンプルは View を 1 つのデータセット（`sample_mart`）にまとめてある**ので、
+  自動検出では拾えない。`source_datasets = ['sample_mart']` と
+  `suffix_override = ['abjp', 'abuk', …]` を指定して試す
 - `build_table.mjs` は書き出す前に、`ENDS_WITH` の切り出しと `analyze.js` の抽出が
   同じ base を返すかを照合する
 - **無関係なデータセットも `_` + 4 文字英字で終われば拾われる**。害が出るのは
@@ -366,12 +366,15 @@ DECLARE project_id  STRING DEFAULT 'my-project';
 DECLARE udf_dataset STRING DEFAULT 'ops_meta';
 
 -- build_table.sql
-DECLARE project_id      STRING        DEFAULT 'my-project';
-DECLARE udf_dataset     STRING        DEFAULT 'ops_meta';   -- UDF の置き場所
-DECLARE work_dataset    STRING        DEFAULT 'ops_meta';   -- view_logic_diff の置き場所
-DECLARE source_datasets ARRAY<STRING> DEFAULT ['mart'];     -- 比較対象の View（複数可）
-DECLARE region          STRING        DEFAULT 'asia-northeast1';
-DECLARE tz              STRING        DEFAULT 'Asia/Tokyo';
+DECLARE project_id   STRING DEFAULT 'my-project';
+DECLARE udf_dataset  STRING DEFAULT 'ops_meta';   -- UDF の置き場所
+DECLARE work_dataset STRING DEFAULT 'ops_meta';   -- view_logic_diff の置き場所
+DECLARE region       STRING DEFAULT 'asia-northeast1';
+DECLARE tz           STRING DEFAULT 'Asia/Tokyo';
+
+DECLARE dataset_filter  STRING        DEFAULT '';  -- 追加の絞り込み正規表現（テスト用）
+DECLARE source_datasets ARRAY<STRING> DEFAULT [];  -- 空でなければこの一覧だけを使う
+DECLARE suffix_override ARRAY<STRING> DEFAULT [];  -- 空でなければ suffix はこれを使う
 ```
 
 **BigQuery は識別子をクエリ パラメータにできない。** `@param` が使えるのは値だけで、
@@ -392,9 +395,8 @@ INSERT INTO `@@PROJECT@@.@@WORK@@.view_logic_diff` …
 置換対象を最後に埋めるのは、埋めた中身がさらに置換されないようにするため
 （`@@SRC@@` と `@@JS@@` が該当）。
 
-- **対象データセットは配列で持つ。** `source_datasets` から `UNION ALL` を
-  組み立てるので、データセットが増えても SQL の編集は要らない。
-  空なら `RAISE` で止まる
+- **対象データセットはリージョン内から自動で拾う。** 既定は
+  「suffix の条件に一致するデータセット全部」（下記）
 - **UDF 本体は `DECLARE js_info STRING DEFAULT r""" … """` に置く。**
   本体は `r""" """` で囲む必要があり、それをさらに `EXECUTE IMMEDIATE` の
   文字列に入れ子にできないため。埋めるときは `TO_JSON_STRING` で SQL の
@@ -409,6 +411,48 @@ INSERT INTO `@@PROJECT@@.@@WORK@@.view_logic_diff` …
 
 > 最小化した JS には `'\u0001'` が**生の制御文字**として出る。そのまま埋めると
 > 生成物に見えない文字が混ざるので、埋め込み時に `\uXXXX` へ戻している。
+
+### 対象データセットはリージョン内から自動で拾う
+
+suffix を出すデータセットと、比較対象の View があるデータセットは**同じ集合**なので、
+別々に持つ意味がない。セクション 0 で `SCHEMATA` を 1 回だけ走査し、
+**対象 View の集め方（`src`）と suffix 一覧の両方をその結果から作る**。
+1 つの走査から出るので、両者がズレようがない。
+
+```sql
+IF ARRAY_LENGTH(source_datasets) = 0 THEN
+  EXECUTE IMMEDIATE fill(r"""
+SELECT ARRAY_AGG(schema_name ORDER BY schema_name)
+FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA`
+WHERE REGEXP_CONTAINS(schema_name, r'_([A-Za-z]{4})$')
+  AND (? = '' OR REGEXP_CONTAINS(schema_name, ?))
+""", …) INTO datasets USING dataset_filter, dataset_filter;
+END IF;
+```
+
+**識別子はテキスト置換、値は `USING` のパラメータ**という使い分けになる。
+`dataset_filter` は値なので `?` で渡せる。
+
+絞り込みの手段は 3 つ。上から順に「普段」「テスト」「例外」。
+
+| 変数 | 既定 | 用途 |
+|---|---|---|
+| （なし） | — | リージョン内で条件に一致するデータセット全部 |
+| `dataset_filter` | `''` | 追加の正規表現で絞る。`'^sample_'` のようにテスト時だけ狭める |
+| `source_datasets` | `[]` | 自動検出をやめて一覧を直接指定する |
+| `suffix_override` | `[]` | suffix だけ直接指定する（View が suffix 無しのデータセットにある場合） |
+
+0 件になったら `RAISE` で止まる。黙って空のテーブルを作るより、
+`region` や `dataset_filter` の間違いに気づけるほうがよい。
+
+注意しておくこと:
+
+- **条件に一致するが無関係な View を持つデータセットも対象に入る。**
+  base ごとに束ねるので混ざりはしないが、走査量は増え、
+  1 View だけの base が並ぶ。`dataset_filter` で絞れる
+- データセット数が多いと `src` の `UNION ALL` が長くなる。数百規模なら
+  `dataset_filter` で分割するか、リージョン単位の `INFORMATION_SCHEMA.VIEWS`
+  が使えるか確かめる
 
 ## 事前生成テーブル（build_table.sql）
 
