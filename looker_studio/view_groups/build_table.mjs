@@ -228,6 +228,21 @@ console.log(`  UDF オプション: ${Object.keys(staticOpts).join(', ')}${dynam
 
 if (process.argv.includes('--check')) process.exit(0);
 
+// @@…@@ をスクリプト変数で置き換える断片。
+//
+// 以前は CREATE TEMP FUNCTION にまとめていたが、一時 UDF がスコープにあると
+// BigQuery が CREATE VIEW を拒む（Creating views with temporary user defined
+// functions is not supported）。永続 UDF にすると今度はその関数名自身が
+// EXECUTE IMMEDIATE の外に出るため、プロジェクト・データセットを
+// 置き換えられなくなる。呼び出しごとに展開するのがいちばん単純で確実。
+const FILL_OPEN = 'REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""';
+const FILL_CLOSE = `""",
+  '@@PROJECT@@', project_id),
+  '@@UDF@@',     udf_dataset),
+  '@@WORK@@',    work_dataset),
+  '@@REGION@@',  region),
+  '@@TZ@@',      tz)`;
+
 // --- SQL を書き出す ----------------------------------------------------
 // --- セクション 0（設定）と対象の絞り込み ------------------------------
 // リージョン単位の INFORMATION_SCHEMA が使えるので、データセットごとの
@@ -272,7 +287,7 @@ const viewFilter = dynamic ? `IF(ARRAY_LENGTH(@source_datasets) > 0,
 // 事前チェック。0 件のまま進むと空のテーブルができて気づけない。
 const precheck = dynamic ? `
 -- 事前チェック。0 件のまま進むと空のテーブルができ、設定の間違いに気づけない。
-EXECUTE IMMEDIATE fill(r"""
+EXECUTE IMMEDIATE ${FILL_OPEN}
 SELECT
   (SELECT COUNT(*)
    FROM \`@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA\`
@@ -281,7 +296,7 @@ SELECT
   (SELECT COUNT(*)
    FROM \`@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.VIEWS\`
    WHERE ${viewFilter})
-""", project_id, udf_dataset, work_dataset, region, tz)
+${FILL_CLOSE}
 INTO n_datasets, n_views
 USING dataset_filter AS dataset_filter, source_datasets AS source_datasets;
 
@@ -293,11 +308,11 @@ IF n_datasets = 0 AND ARRAY_LENGTH(suffix_override) = 0 THEN
 END IF;
 ` : `
 -- 事前チェック。0 件のまま進むと空のテーブルができ、設定の間違いに気づけない。
-EXECUTE IMMEDIATE fill(r"""
+EXECUTE IMMEDIATE ${FILL_OPEN}
 SELECT COUNT(*)
 FROM \`@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.VIEWS\`
 WHERE ${viewFilter}
-""", project_id, udf_dataset, work_dataset, region, tz)
+${FILL_CLOSE}
 INTO n_views
 USING dataset_filter AS dataset_filter, source_datasets AS source_datasets;
 
@@ -349,6 +364,12 @@ const sql = `-- ================================================================
 --    そこで識別子はスクリプト変数からテキスト置換し（本文の @@PROJECT@@ など）、
 --    値は EXECUTE IMMEDIATE の USING で渡す（@dataset_filter など）。
 --
+--    置換の REPLACE を呼び出しごとに展開しているのは、一時 UDF にまとめると
+--    セクション 3 の CREATE VIEW が
+--    「Creating views with temporary user defined functions is not supported」
+--    で落ちるため。永続 UDF にすると今度はその関数名自身が EXECUTE IMMEDIATE の
+--    外に出て、プロジェクト・データセットを置き換えられなくなる。
+--
 --    SET @@location は DECLARE より前に置く。本文の参照はすべて
 --    EXECUTE IMMEDIATE の中にあり、ロケーションを推測できるテーブル参照が
 --    無いため、指定しないと既定のロケーションで実行される。
@@ -361,24 +382,12 @@ SET @@location = '${region}';
 
 ${configBlock}
 
--- @@…@@ を実際の値に置き換える。EXECUTE IMMEDIATE のたびに通す。
-CREATE TEMP FUNCTION fill(
-  sql STRING, project STRING, udf_ds STRING, work_ds STRING,
-  reg STRING, zone STRING
-) AS (
-  REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(sql,
-    '@@PROJECT@@', project),
-    '@@UDF@@',     udf_ds),
-    '@@WORK@@',    work_ds),
-    '@@REGION@@',  reg),
-    '@@TZ@@',      zone)
-);
 ${precheck}
 
 -- ---------------------------------------------------------------------
 -- 1. 格納先（初回のみ）
 -- ---------------------------------------------------------------------
-EXECUTE IMMEDIATE fill(r"""
+EXECUTE IMMEDIATE ${FILL_OPEN}
 CREATE TABLE IF NOT EXISTS \`@@PROJECT@@.@@WORK@@.view_logic_diff\`
 (
   snapshot_date   DATE           OPTIONS (description = '生成日'),
@@ -398,7 +407,7 @@ OPTIONS (
   description = 'suffix 違い View のロジック グループ比較（事前生成）',
   partition_expiration_days = 400
 )
-""", project_id, udf_dataset, work_dataset, region, tz);
+${FILL_CLOSE};
 
 
 -- ---------------------------------------------------------------------
@@ -407,12 +416,12 @@ OPTIONS (
 --    同じ日に何度実行しても結果が同じになるよう、当日分を消してから入れる。
 --    MERGE より DELETE + INSERT のほうが単純で、パーティション単位なので安い。
 -- ---------------------------------------------------------------------
-EXECUTE IMMEDIATE fill(r"""
+EXECUTE IMMEDIATE ${FILL_OPEN}
 DELETE FROM \`@@PROJECT@@.@@WORK@@.view_logic_diff\`
 WHERE snapshot_date = CURRENT_DATE('@@TZ@@')
-""", project_id, udf_dataset, work_dataset, region, tz);
+${FILL_CLOSE};
 
-EXECUTE IMMEDIATE fill(r"""
+EXECUTE IMMEDIATE ${FILL_OPEN}
 INSERT INTO \`@@PROJECT@@.@@WORK@@.view_logic_diff\`
 WITH${suffixCte}
 -- 対象 View。リージョン単位の INFORMATION_SCHEMA を使うので、
@@ -451,21 +460,21 @@ ${udfOptionsArg}
   FROM keyed
   GROUP BY base
 )
-""", project_id, udf_dataset, work_dataset, region, tz)
+${FILL_CLOSE}
 ${insertUsing}
 
 
 -- ---------------------------------------------------------------------
 -- 3. Looker Studio が読むビュー（最新スナップショットだけ・初回のみ）
 -- ---------------------------------------------------------------------
-EXECUTE IMMEDIATE fill(r"""
+EXECUTE IMMEDIATE ${FILL_OPEN}
 CREATE OR REPLACE VIEW \`@@PROJECT@@.@@WORK@@.v_view_logic_diff_latest\` AS
 SELECT *
 FROM \`@@PROJECT@@.@@WORK@@.view_logic_diff\`
 WHERE snapshot_date = (
   SELECT MAX(snapshot_date) FROM \`@@PROJECT@@.@@WORK@@.view_logic_diff\`
 )
-""", project_id, udf_dataset, work_dataset, region, tz);
+${FILL_CLOSE};
 
 
 -- ---------------------------------------------------------------------
@@ -543,7 +552,7 @@ ${dynamic ? `-- 対象データセットと suffix（セクション 0 と同じ
 `;
 
 // 生成物の検証。
-// 置換トークンは fill() が知っているものだけ、かつ旧いプレースホルダが
+// 置換トークンは既知のものだけ、かつ旧いプレースホルダが
 // 残っていないこと。EXECUTE IMMEDIATE を通す本文と、手で置換するコメントの
 // どちらも同じ綴りにしておく。
 // EXECUTE IMMEDIATE の本文は r""" """ で囲む。本文の中に """ が現れると

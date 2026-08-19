@@ -387,14 +387,22 @@ DECLARE suffix_override ARRAY<STRING> DEFAULT [];  -- 空でなければ suffix 
 `@@WORK@@` / `@@REGION@@` / `@@TZ@@` / `@@SRC@@` が置換される目印。
 
 ```sql
-CREATE TEMP FUNCTION fill(sql STRING, project STRING, …) AS (
-  REPLACE(REPLACE(… sql, '@@PROJECT@@', project), '@@UDF@@', udf_ds) …
-);
-
-EXECUTE IMMEDIATE fill(r"""
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
 INSERT INTO `@@PROJECT@@.@@WORK@@.view_logic_diff` …
-""", project_id, udf_dataset, work_dataset, region, tz, src_sql);
+""",
+  '@@PROJECT@@', project_id),
+  '@@UDF@@',     udf_dataset),
+  '@@WORK@@',    work_dataset),
+  '@@REGION@@',  region),
+  '@@TZ@@',      tz);
 ```
+
+**この `REPLACE` の連鎖は一時 UDF にまとめてはいけない。** まとめると
+セクション 3 の `CREATE OR REPLACE VIEW` が
+`Creating views with temporary user defined functions is not supported` で落ちる。
+永続 UDF にすると今度は**その関数名自身が `EXECUTE IMMEDIATE` の外に出る**ので、
+プロジェクトとデータセットを置き換えられなくなる。呼び出しごとに展開するのが
+いちばん単純で確実。
 
 置換対象を最後に埋めるのは、埋めた中身がさらに置換されないようにするため
 （`@@JS@@` が該当）。
@@ -445,7 +453,7 @@ src AS (
 `dataset_filter` も `source_datasets` も値なので、名前付きパラメータで渡せる。
 
 ```sql
-EXECUTE IMMEDIATE fill(r""" … """, project_id, …)
+EXECUTE IMMEDIATE REPLACE(… r""" … """ …)
 USING dataset_filter AS dataset_filter,
       source_datasets AS source_datasets,
       suffix_override AS suffix_override;

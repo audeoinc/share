@@ -30,6 +30,12 @@
 --    そこで識別子はスクリプト変数からテキスト置換し（本文の @@PROJECT@@ など）、
 --    値は EXECUTE IMMEDIATE の USING で渡す（@dataset_filter など）。
 --
+--    置換の REPLACE を呼び出しごとに展開しているのは、一時 UDF にまとめると
+--    セクション 3 の CREATE VIEW が
+--    「Creating views with temporary user defined functions is not supported」
+--    で落ちるため。永続 UDF にすると今度はその関数名自身が EXECUTE IMMEDIATE の
+--    外に出て、プロジェクト・データセットを置き換えられなくなる。
+--
 --    SET @@location は DECLARE より前に置く。本文の参照はすべて
 --    EXECUTE IMMEDIATE の中にあり、ロケーションを推測できるテーブル参照が
 --    無いため、指定しないと既定のロケーションで実行される。
@@ -56,21 +62,9 @@ DECLARE suffix_override ARRAY<STRING> DEFAULT [];  -- 空でなければ suffix 
 DECLARE n_datasets INT64;
 DECLARE n_views    INT64;
 
--- @@…@@ を実際の値に置き換える。EXECUTE IMMEDIATE のたびに通す。
-CREATE TEMP FUNCTION fill(
-  sql STRING, project STRING, udf_ds STRING, work_ds STRING,
-  reg STRING, zone STRING
-) AS (
-  REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(sql,
-    '@@PROJECT@@', project),
-    '@@UDF@@',     udf_ds),
-    '@@WORK@@',    work_ds),
-    '@@REGION@@',  reg),
-    '@@TZ@@',      zone)
-);
 
 -- 事前チェック。0 件のまま進むと空のテーブルができ、設定の間違いに気づけない。
-EXECUTE IMMEDIATE fill(r"""
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
 SELECT
   (SELECT COUNT(*)
    FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA`
@@ -82,7 +76,12 @@ SELECT
        table_schema IN UNNEST(@source_datasets),
        REGEXP_CONTAINS(table_schema, r'_([A-Za-z]{4})$')
          AND (@dataset_filter = '' OR REGEXP_CONTAINS(table_schema, @dataset_filter))))
-""", project_id, udf_dataset, work_dataset, region, tz)
+""",
+  '@@PROJECT@@', project_id),
+  '@@UDF@@',     udf_dataset),
+  '@@WORK@@',    work_dataset),
+  '@@REGION@@',  region),
+  '@@TZ@@',      tz)
 INTO n_datasets, n_views
 USING dataset_filter AS dataset_filter, source_datasets AS source_datasets;
 
@@ -97,7 +96,7 @@ END IF;
 -- ---------------------------------------------------------------------
 -- 1. 格納先（初回のみ）
 -- ---------------------------------------------------------------------
-EXECUTE IMMEDIATE fill(r"""
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
 CREATE TABLE IF NOT EXISTS `@@PROJECT@@.@@WORK@@.view_logic_diff`
 (
   snapshot_date   DATE           OPTIONS (description = '生成日'),
@@ -117,7 +116,12 @@ OPTIONS (
   description = 'suffix 違い View のロジック グループ比較（事前生成）',
   partition_expiration_days = 400
 )
-""", project_id, udf_dataset, work_dataset, region, tz);
+""",
+  '@@PROJECT@@', project_id),
+  '@@UDF@@',     udf_dataset),
+  '@@WORK@@',    work_dataset),
+  '@@REGION@@',  region),
+  '@@TZ@@',      tz);
 
 
 -- ---------------------------------------------------------------------
@@ -126,12 +130,17 @@ OPTIONS (
 --    同じ日に何度実行しても結果が同じになるよう、当日分を消してから入れる。
 --    MERGE より DELETE + INSERT のほうが単純で、パーティション単位なので安い。
 -- ---------------------------------------------------------------------
-EXECUTE IMMEDIATE fill(r"""
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
 DELETE FROM `@@PROJECT@@.@@WORK@@.view_logic_diff`
 WHERE snapshot_date = CURRENT_DATE('@@TZ@@')
-""", project_id, udf_dataset, work_dataset, region, tz);
+""",
+  '@@PROJECT@@', project_id),
+  '@@UDF@@',     udf_dataset),
+  '@@WORK@@',    work_dataset),
+  '@@REGION@@',  region),
+  '@@TZ@@',      tz);
 
-EXECUTE IMMEDIATE fill(r"""
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
 INSERT INTO `@@PROJECT@@.@@WORK@@.view_logic_diff`
 WITH
 -- suffix 一覧。対象 View と同じ条件でデータセット名から拾う。
@@ -218,7 +227,12 @@ FROM (
   FROM keyed
   GROUP BY base
 )
-""", project_id, udf_dataset, work_dataset, region, tz)
+""",
+  '@@PROJECT@@', project_id),
+  '@@UDF@@',     udf_dataset),
+  '@@WORK@@',    work_dataset),
+  '@@REGION@@',  region),
+  '@@TZ@@',      tz)
 USING dataset_filter AS dataset_filter,
       source_datasets AS source_datasets,
       suffix_override AS suffix_override;
@@ -227,14 +241,19 @@ USING dataset_filter AS dataset_filter,
 -- ---------------------------------------------------------------------
 -- 3. Looker Studio が読むビュー（最新スナップショットだけ・初回のみ）
 -- ---------------------------------------------------------------------
-EXECUTE IMMEDIATE fill(r"""
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
 CREATE OR REPLACE VIEW `@@PROJECT@@.@@WORK@@.v_view_logic_diff_latest` AS
 SELECT *
 FROM `@@PROJECT@@.@@WORK@@.view_logic_diff`
 WHERE snapshot_date = (
   SELECT MAX(snapshot_date) FROM `@@PROJECT@@.@@WORK@@.view_logic_diff`
 )
-""", project_id, udf_dataset, work_dataset, region, tz);
+""",
+  '@@PROJECT@@', project_id),
+  '@@UDF@@',     udf_dataset),
+  '@@WORK@@',    work_dataset),
+  '@@REGION@@',  region),
+  '@@TZ@@',      tz);
 
 
 -- ---------------------------------------------------------------------
