@@ -358,12 +358,50 @@ WHERE snapshot_date = (
 -- FROM \`PROJECT.DATASET.v_view_logic_diff_latest\`
 -- ORDER BY base;
 
-${dynamic ? `-- 認識した suffix の確認（0 件なら region か schemataPattern を疑う）
--- SELECT schema_name, REGEXP_EXTRACT(schema_name, r'${config.schemataPattern}') AS suffix
+${dynamic ? `-- SCHEMATA から取れた suffix 一覧（suffixes CTE が返すものと同じ）
+-- 0 件なら region か schemataPattern を疑う。
+-- SELECT
+--   suffix,
+--   COUNT(*) AS dataset_count,
+--   STRING_AGG(schema_name, ', ' ORDER BY schema_name) AS datasets
+-- FROM (
+--   SELECT schema_name, REGEXP_EXTRACT(schema_name, r'${config.schemataPattern}') AS suffix
+--   FROM \`PROJECT.region-${region}.INFORMATION_SCHEMA.SCHEMATA\`
+-- )
+-- WHERE suffix IS NOT NULL
+-- GROUP BY suffix
+-- ORDER BY suffix;
+
+-- 拾えなかったデータセット（suffix 付きのつもりのものが混ざっていないか）
+-- SELECT schema_name
 -- FROM \`PROJECT.region-${region}.INFORMATION_SCHEMA.SCHEMATA\`
+-- WHERE NOT REGEXP_CONTAINS(schema_name, r'${config.schemataPattern}')
 -- ORDER BY schema_name;
 
-` : ''}-- suffix を認識できなかった View（単独で 1 行ずつ並ぶ）
+-- suffix ごとに何本の View が割り当たったか。
+-- 0 本の suffix は、無関係なデータセット名から拾ったもの（実害はない）。
+-- 抜けている suffix があれば、そのデータセットが src に入っていない。
+-- WITH suffixes AS (
+--   SELECT DISTINCT REGEXP_EXTRACT(schema_name, r'${config.schemataPattern}') AS suffix
+--   FROM \`PROJECT.region-${region}.INFORMATION_SCHEMA.SCHEMATA\`
+--   WHERE REGEXP_CONTAINS(schema_name, r'${config.schemataPattern}')
+-- ), src AS (
+--   SELECT table_name AS view_name
+--   FROM \`PROJECT.TARGET_DATASET.INFORMATION_SCHEMA.VIEWS\`
+-- )
+-- SELECT s.suffix, COUNT(src.view_name) AS view_count
+-- FROM suffixes AS s
+-- LEFT JOIN src ON ENDS_WITH(src.view_name, '_' || s.suffix)
+-- GROUP BY s.suffix
+-- ORDER BY s.suffix;
+
+` : ''}-- 生成後: UDF が実際に認識した suffix（テーブルに入っている値）
+-- SELECT s AS suffix, COUNT(DISTINCT base) AS base_count
+-- FROM \`PROJECT.DATASET.v_view_logic_diff_latest\`, UNNEST(suffixes) AS s
+-- GROUP BY s
+-- ORDER BY s;
+
+-- suffix を認識できなかった View（単独で 1 行ずつ並ぶ）
 -- SELECT base, group_labels
 -- FROM \`PROJECT.DATASET.v_view_logic_diff_latest\`
 -- WHERE unmatched_count > 0
