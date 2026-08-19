@@ -42,7 +42,7 @@
 --    下の region と同じ値にすること（どちらも suffix_config.json から生成）。
 --
 --    スケジュールドクエリには セクション 0 と 2 を登録する
---    （1 と 3 は初回だけ実行すればよい）。
+--    （1 と 3 は初回だけ、5 は確認用なので不要）。
 -- ---------------------------------------------------------------------
 SET @@location = 'asia-northeast1';
 
@@ -264,72 +264,131 @@ WHERE snapshot_date = (
 -- ---------------------------------------------------------------------
 -- 4. テンプレートに貼る CSS（1 回取れば十分。template_style.html と同じ）
 --
---    ここから下のコメントは単体で実行するクエリ。
---    @@PROJECT@@ / @@UDF@@ / @@WORK@@ / @@REGION@@ は実際の値に置き換えること
---    （EXECUTE IMMEDIATE を通らないので自動では置換されない）。
+--    これだけはコメントのまま。毎回 8 KB の CSS を返しても邪魔なので、
+--    必要なときに @@PROJECT@@ / @@UDF@@ を置き換えて実行する。
 -- ---------------------------------------------------------------------
 -- SELECT `@@PROJECT@@.@@UDF@@.VIEW_GROUP_CSS`('''{"literalGroups":[],"mode":"class"}''');
 
 
 -- ---------------------------------------------------------------------
--- 5. 確認と使い方
+-- 5. 確認（ここから下は実行される）
+--
+--    それぞれ 1 文ずつ結果が出る。上から順に
+--      5-1 生成結果の中身
+--      5-2 ロジックが割れている base（＝要確認）
+--      5-3 suffix を認識できなかった View
+--      5-4 対象データセットと suffix
+--      5-5 データセット別の対象 View 数
+--      5-6 条件から外れたデータセット
+--      5-7 グループ構成が変わった日
 -- ---------------------------------------------------------------------
--- 中身の確認
--- SELECT base, view_count, group_count, group_labels, unmatched_count,
---        LENGTH(diff_html) AS html_len
--- FROM `@@PROJECT@@.@@WORK@@.v_view_logic_diff_latest`
--- ORDER BY base;
 
--- 対象データセットと suffix（セクション 0 と同じ条件）
--- 0 件なら region か dataset_filter を疑う。
--- SELECT
---   REGEXP_EXTRACT(schema_name, r'_([A-Za-z]{4})$') AS suffix,
---   COUNT(*) AS dataset_count,
---   STRING_AGG(schema_name, ', ' ORDER BY schema_name) AS datasets
--- FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA`
--- WHERE REGEXP_CONTAINS(schema_name, r'_([A-Za-z]{4})$')
--- GROUP BY suffix
--- ORDER BY suffix;
+-- 5-1 生成結果の中身
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
+SELECT base, view_count, group_count, group_labels, unmatched_count,
+       LENGTH(diff_html) AS html_len
+FROM `@@PROJECT@@.@@WORK@@.v_view_logic_diff_latest`
+ORDER BY base
+""",
+  '@@PROJECT@@', project_id),
+  '@@UDF@@',     udf_dataset),
+  '@@WORK@@',    work_dataset),
+  '@@REGION@@',  region),
+  '@@TZ@@',      tz);
 
--- 対象になる View の数をデータセット別に見る
--- SELECT table_schema, COUNT(*) AS view_count
--- FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.VIEWS`
--- WHERE REGEXP_CONTAINS(table_schema, r'_([A-Za-z]{4})$')
--- GROUP BY table_schema
--- ORDER BY table_schema;
+-- 5-2 ロジックが割れている base（＝要確認のもの）
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
+SELECT base, group_count, group_labels
+FROM `@@PROJECT@@.@@WORK@@.v_view_logic_diff_latest`
+WHERE has_multiple
+ORDER BY group_count DESC, base
+""",
+  '@@PROJECT@@', project_id),
+  '@@UDF@@',     udf_dataset),
+  '@@WORK@@',    work_dataset),
+  '@@REGION@@',  region),
+  '@@TZ@@',      tz);
 
--- 拾えなかったデータセット（対象のつもりのものが落ちていないか）
--- SELECT schema_name
--- FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA`
--- WHERE NOT REGEXP_CONTAINS(schema_name, r'_([A-Za-z]{4})$')
--- ORDER BY schema_name;
+-- 5-3 suffix を認識できなかった View（単独で 1 行ずつ並ぶ）
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
+SELECT base, group_labels
+FROM `@@PROJECT@@.@@WORK@@.v_view_logic_diff_latest`
+WHERE unmatched_count > 0
+ORDER BY base
+""",
+  '@@PROJECT@@', project_id),
+  '@@UDF@@',     udf_dataset),
+  '@@WORK@@',    work_dataset),
+  '@@REGION@@',  region),
+  '@@TZ@@',      tz);
 
--- 生成後: UDF が実際に認識した suffix（テーブルに入っている値）
--- SELECT s AS suffix, COUNT(DISTINCT base) AS base_count
--- FROM `@@PROJECT@@.@@WORK@@.v_view_logic_diff_latest`, UNNEST(suffixes) AS s
--- GROUP BY s
--- ORDER BY s;
+-- 5-4 対象データセットと suffix（セクション 0 と同じ条件）
+--     0 件ならここまで来ていないはず（セクション 0 で止まる）。
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
+SELECT
+  REGEXP_EXTRACT(schema_name, r'_([A-Za-z]{4})$') AS suffix,
+  COUNT(*) AS dataset_count,
+  STRING_AGG(schema_name, ', ' ORDER BY schema_name) AS datasets
+FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA`
+WHERE REGEXP_CONTAINS(schema_name, r'_([A-Za-z]{4})$')
+  AND (@dataset_filter = '' OR REGEXP_CONTAINS(schema_name, @dataset_filter))
+GROUP BY suffix
+ORDER BY suffix
+""",
+  '@@PROJECT@@', project_id),
+  '@@UDF@@',     udf_dataset),
+  '@@WORK@@',    work_dataset),
+  '@@REGION@@',  region),
+  '@@TZ@@',      tz)
+USING dataset_filter AS dataset_filter;
 
--- suffix を認識できなかった View（単独で 1 行ずつ並ぶ）
--- SELECT base, group_labels
--- FROM `@@PROJECT@@.@@WORK@@.v_view_logic_diff_latest`
--- WHERE unmatched_count > 0
--- ORDER BY base;
+-- 5-5 データセット別の対象 View 数
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
+SELECT table_schema, COUNT(*) AS view_count
+FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.VIEWS`
+WHERE IF(ARRAY_LENGTH(@source_datasets) > 0,
+       table_schema IN UNNEST(@source_datasets),
+       REGEXP_CONTAINS(table_schema, r'_([A-Za-z]{4})$')
+         AND (@dataset_filter = '' OR REGEXP_CONTAINS(table_schema, @dataset_filter)))
+GROUP BY table_schema
+ORDER BY table_schema
+""",
+  '@@PROJECT@@', project_id),
+  '@@UDF@@',     udf_dataset),
+  '@@WORK@@',    work_dataset),
+  '@@REGION@@',  region),
+  '@@TZ@@',      tz)
+USING dataset_filter AS dataset_filter, source_datasets AS source_datasets;
 
--- ロジックが割れている base だけ見る（＝要確認のもの）
--- SELECT base, group_count, group_labels
--- FROM `@@PROJECT@@.@@WORK@@.v_view_logic_diff_latest`
--- WHERE has_multiple
--- ORDER BY group_count DESC, base;
+-- 5-6 条件から外れたデータセット（対象のつもりのものが落ちていないか）
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
+SELECT schema_name
+FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA`
+WHERE NOT REGEXP_CONTAINS(schema_name, r'_([A-Za-z]{4})$')
+ORDER BY schema_name
+""",
+  '@@PROJECT@@', project_id),
+  '@@UDF@@',     udf_dataset),
+  '@@WORK@@',    work_dataset),
+  '@@REGION@@',  region),
+  '@@TZ@@',      tz);
 
--- グループ構成が変わった日を探す（ロジック逸脱がいつ入ったか）
--- SELECT base, snapshot_date, group_count, group_labels
--- FROM (
---   SELECT *,
---     LAG(TO_JSON_STRING(group_labels)) OVER w AS prev_labels,
---     TO_JSON_STRING(group_labels)      AS curr_labels
---   FROM `@@PROJECT@@.@@WORK@@.view_logic_diff`
---   WINDOW w AS (PARTITION BY base ORDER BY snapshot_date)
--- )
--- WHERE prev_labels IS NOT NULL AND prev_labels != curr_labels
--- ORDER BY snapshot_date DESC, base;
+-- 5-7 グループ構成が変わった日（ロジック逸脱がいつ入ったか）
+--     履歴が 1 日分しかなければ 0 件。
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
+SELECT base, snapshot_date, group_count, group_labels
+FROM (
+  SELECT *,
+    LAG(TO_JSON_STRING(group_labels)) OVER w AS prev_labels,
+    TO_JSON_STRING(group_labels)      AS curr_labels
+  FROM `@@PROJECT@@.@@WORK@@.view_logic_diff`
+  WINDOW w AS (PARTITION BY base ORDER BY snapshot_date)
+)
+WHERE prev_labels IS NOT NULL AND prev_labels != curr_labels
+ORDER BY snapshot_date DESC, base
+""",
+  '@@PROJECT@@', project_id),
+  '@@UDF@@',     udf_dataset),
+  '@@WORK@@',    work_dataset),
+  '@@REGION@@',  region),
+  '@@TZ@@',      tz);
