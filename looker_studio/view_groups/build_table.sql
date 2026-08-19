@@ -17,7 +17,7 @@
 --
 -- suffix の出どころ: INFORMATION_SCHEMA.SCHEMATA（データセット名）
 --   _([A-Za-z]{4})$ に一致したデータセット名の末尾を suffix として使う。
---   同じ走査の結果から対象 View も決めるので、suffix と対象がズレない。
+--   対象 View も同じ条件で選ぶので、suffix と対象がズレない。
 --   つまりデータセットが増えても SQL の修正は要らない。
 -- =====================================================================
 
@@ -27,8 +27,8 @@
 --
 --    BigQuery は識別子（プロジェクト・データセット・関数名）をクエリ
 --    パラメータにできない。@param が使えるのは値だけ。
---    そこでスクリプト変数に持ち、EXECUTE IMMEDIATE でテキスト置換する。
---    本文の @@PROJECT@@ などが置換される目印。値は USING で渡す。
+--    そこで識別子はスクリプト変数からテキスト置換し（本文の @@PROJECT@@ など）、
+--    値は EXECUTE IMMEDIATE の USING で渡す（@dataset_filter など）。
 --
 --    スケジュールドクエリには セクション 0 と 2 を登録する
 --    （1 と 3 は初回だけ実行すればよい）。
@@ -41,15 +41,13 @@ DECLARE tz           STRING DEFAULT 'Asia/Tokyo';  -- snapshot_date の基準
 
 -- 比較対象のデータセット。
 -- 既定は「リージョン内で suffix の条件（_([A-Za-z]{4})$）に一致するもの全部」。
--- 対象 View も suffix 一覧も同じ 1 回の走査から作るので、両者がズレない。
+-- 対象 View も suffix 一覧も同じ条件から引くので、両者がズレない。
 DECLARE dataset_filter  STRING        DEFAULT '';  -- 追加の絞り込み正規表現。'' なら絞らない（テスト用）
-DECLARE source_datasets ARRAY<STRING> DEFAULT [];  -- 空でなければこの一覧だけを使う（自動検出をやめる）
+DECLARE source_datasets ARRAY<STRING> DEFAULT [];  -- 空でなければこの一覧だけを対象にする
 DECLARE suffix_override ARRAY<STRING> DEFAULT [];  -- 空でなければ suffix はこれを使う（サンプル環境用）
 
-DECLARE datasets    ARRAY<STRING>;
-DECLARE suffix_list ARRAY<STRING>;
-DECLARE src_sql     STRING;
-DECLARE suffix_sql  STRING;
+DECLARE n_datasets INT64;
+DECLARE n_views    INT64;
 
 -- @@…@@ を実際の値に置き換える。EXECUTE IMMEDIATE のたびに通す。
 CREATE TEMP FUNCTION fill(
@@ -64,64 +62,29 @@ CREATE TEMP FUNCTION fill(
     '@@TZ@@',      zone)
 );
 
--- 対象データセットを決める。
--- source_datasets が空なら、リージョン内で条件に一致するものを拾う。
--- 識別子はテキスト置換、値（正規表現）は USING のパラメータで渡す。
-IF ARRAY_LENGTH(source_datasets) = 0 THEN
-  EXECUTE IMMEDIATE fill(r"""
-SELECT ARRAY_AGG(schema_name ORDER BY schema_name)
-FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA`
-WHERE REGEXP_CONTAINS(schema_name, r'_([A-Za-z]{4})$')
-  AND (? = '' OR REGEXP_CONTAINS(schema_name, ?))
+-- 事前チェック。0 件のまま進むと空のテーブルができ、設定の間違いに気づけない。
+EXECUTE IMMEDIATE fill(r"""
+SELECT
+  (SELECT COUNT(*)
+   FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA`
+   WHERE REGEXP_CONTAINS(schema_name, r'_([A-Za-z]{4})$')
+     AND (@dataset_filter = '' OR REGEXP_CONTAINS(schema_name, @dataset_filter))),
+  (SELECT COUNT(*)
+   FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.VIEWS`
+   WHERE IF(ARRAY_LENGTH(@source_datasets) > 0,
+       table_schema IN UNNEST(@source_datasets),
+       REGEXP_CONTAINS(table_schema, r'_([A-Za-z]{4})$')
+         AND (@dataset_filter = '' OR REGEXP_CONTAINS(table_schema, @dataset_filter))))
 """, project_id, udf_dataset, work_dataset, region, tz)
-  INTO datasets
-  USING dataset_filter, dataset_filter;
-ELSE
-  SET datasets = source_datasets;
+INTO n_datasets, n_views
+USING dataset_filter AS dataset_filter, source_datasets AS source_datasets;
+
+IF n_views = 0 THEN
+  RAISE USING MESSAGE = '対象の View が 0 件です。region / dataset_filter / source_datasets を確認してください。';
 END IF;
-
-IF datasets IS NULL OR ARRAY_LENGTH(datasets) = 0 THEN
-  RAISE USING MESSAGE = '対象データセットが 0 件です。region / dataset_filter / source_datasets を確認してください。';
+IF n_datasets = 0 AND ARRAY_LENGTH(suffix_override) = 0 THEN
+  RAISE USING MESSAGE = 'suffix を持つデータセットが 0 件です。region / dataset_filter を確認してください。';
 END IF;
-
--- suffix 一覧は同じデータセット集合から作る。
-IF ARRAY_LENGTH(suffix_override) > 0 THEN
-  SET suffix_list = suffix_override;
-ELSE
-  SET suffix_list = (
-    SELECT ARRAY_AGG(DISTINCT suffix ORDER BY suffix)
-    FROM (
-      SELECT REGEXP_EXTRACT(d, r'_([A-Za-z]{4})$') AS suffix
-      FROM UNNEST(datasets) AS d
-    )
-    WHERE suffix IS NOT NULL
-  );
-END IF;
-
-SET suffix_sql = (SELECT STRING_AGG(FORMAT("'%s'", s), ', ') FROM UNNEST(suffix_list) AS s);
-IF suffix_sql IS NULL THEN
-  RAISE USING MESSAGE = 'suffix が 1 つも取れませんでした。schemataPattern / dataset_filter / suffix_override を確認してください。';
-END IF;
-
--- 対象 View を集める部分を組み立てる。
---
--- TABLES.ddl ではなく VIEWS.view_definition を使う。
--- TABLES.ddl は BigQuery が組み立てた CREATE VIEW 文で、OPTIONS に
--- description や作成タイムスタンプが自動で入る。View ごとに値が違うので、
--- そのまま比較すると全部が別グループに割れる。
--- view_definition はクエリ本体だけなので、ヘッダも OPTIONS も付いてこない。
--- View 自身の名前も入らないため、パラメータには参照先の差だけが残る。
-SET src_sql = (
-  SELECT STRING_AGG(
-    FORMAT(
-      "SELECT table_name AS view_name, view_definition AS ddl FROM `%s.%s.INFORMATION_SCHEMA.VIEWS`",
-      project_id, d),
-    "\n  UNION ALL\n  ")
-  FROM UNNEST(datasets) AS d
-);
-
--- 何を対象にしたか見たいときは、ここで一度確認する。
--- SELECT datasets, suffix_list;
 
 
 -- ---------------------------------------------------------------------
@@ -161,13 +124,22 @@ DELETE FROM `@@PROJECT@@.@@WORK@@.view_logic_diff`
 WHERE snapshot_date = CURRENT_DATE('@@TZ@@')
 """, project_id, udf_dataset, work_dataset, region, tz);
 
-EXECUTE IMMEDIATE REPLACE(REPLACE(fill(r"""
+EXECUTE IMMEDIATE fill(r"""
 INSERT INTO `@@PROJECT@@.@@WORK@@.view_logic_diff`
 WITH
--- セクション 0 が拾った suffix 一覧。データセットの走査は 1 回だけで、
--- 対象 View の集め方（src）と同じ結果から作っているのでズレない。
+-- suffix 一覧。対象 View と同じ条件でデータセット名から拾う。
+-- suffix_override を渡したときだけそちらを使う（サンプル環境用）。
 suffixes AS (
-  SELECT suffix FROM UNNEST([@@SUFFIXES@@]) AS suffix
+  SELECT suffix FROM UNNEST(
+    IF(ARRAY_LENGTH(@suffix_override) > 0,
+       @suffix_override,
+       ARRAY(
+         SELECT DISTINCT REGEXP_EXTRACT(schema_name, r'_([A-Za-z]{4})$')
+         FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA`
+         WHERE REGEXP_CONTAINS(schema_name, r'_([A-Za-z]{4})$')
+           AND (@dataset_filter = '' OR REGEXP_CONTAINS(schema_name, @dataset_filter))
+       ))
+  ) AS suffix
 ),
 -- UDF に渡す設定。suffixList だけ実行時に決まる。
 opts AS (
@@ -180,8 +152,22 @@ opts AS (
   ) AS options_json
 ),
 
+-- 対象 View。リージョン単位の INFORMATION_SCHEMA を使うので、
+-- データセットごとの UNION ALL は要らない。
+--
+-- TABLES.ddl ではなく VIEWS.view_definition を使う。
+-- TABLES.ddl は BigQuery が組み立てた CREATE VIEW 文で、OPTIONS に
+-- description や作成タイムスタンプが自動で入る。View ごとに値が違うので、
+-- そのまま比較すると全部が別グループに割れる。
+-- view_definition はクエリ本体だけなので、ヘッダも OPTIONS も付いてこない。
+-- View 自身の名前も入らないため、パラメータには参照先の差だけが残る。
 src AS (
-  @@SRC@@
+  SELECT table_name AS view_name, view_definition AS ddl
+  FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.VIEWS`
+  WHERE IF(ARRAY_LENGTH(@source_datasets) > 0,
+       table_schema IN UNNEST(@source_datasets),
+       REGEXP_CONTAINS(table_schema, r'_([A-Za-z]{4})$')
+         AND (@dataset_filter = '' OR REGEXP_CONTAINS(table_schema, @dataset_filter)))
 ),
 keyed AS (
   -- suffix 一覧との ENDS_WITH で base を切る。
@@ -225,10 +211,10 @@ FROM (
   FROM keyed
   GROUP BY base
 )
-""", project_id, udf_dataset, work_dataset, region, tz),
-  -- 埋めた中身がさらに置換されないよう、SQL になるものは最後に回す
-  '@@SUFFIXES@@', suffix_sql),
-  '@@SRC@@',      src_sql);
+""", project_id, udf_dataset, work_dataset, region, tz)
+USING dataset_filter AS dataset_filter,
+      source_datasets AS source_datasets,
+      suffix_override AS suffix_override;
 
 
 -- ---------------------------------------------------------------------
@@ -263,7 +249,7 @@ WHERE snapshot_date = (
 -- FROM `@@PROJECT@@.@@WORK@@.v_view_logic_diff_latest`
 -- ORDER BY base;
 
--- 対象データセットと suffix（セクション 0 が拾うものと同じ）
+-- 対象データセットと suffix（セクション 0 と同じ条件）
 -- 0 件なら region か dataset_filter を疑う。
 -- SELECT
 --   REGEXP_EXTRACT(schema_name, r'_([A-Za-z]{4})$') AS suffix,
@@ -273,6 +259,13 @@ WHERE snapshot_date = (
 -- WHERE REGEXP_CONTAINS(schema_name, r'_([A-Za-z]{4})$')
 -- GROUP BY suffix
 -- ORDER BY suffix;
+
+-- 対象になる View の数をデータセット別に見る
+-- SELECT table_schema, COUNT(*) AS view_count
+-- FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.VIEWS`
+-- WHERE REGEXP_CONTAINS(table_schema, r'_([A-Za-z]{4})$')
+-- GROUP BY table_schema
+-- ORDER BY table_schema;
 
 -- 拾えなかったデータセット（対象のつもりのものが落ちていないか）
 -- SELECT schema_name

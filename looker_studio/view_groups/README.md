@@ -396,7 +396,8 @@ INSERT INTO `@@PROJECT@@.@@WORK@@.view_logic_diff` …
 （`@@SRC@@` と `@@JS@@` が該当）。
 
 - **対象データセットはリージョン内から自動で拾う。** 既定は
-  「suffix の条件に一致するデータセット全部」（下記）
+  「suffix の条件に一致するデータセット全部」（下記）。
+  リージョン単位の `INFORMATION_SCHEMA` を使うので `UNION ALL` は要らない
 - **UDF 本体は `DECLARE js_info STRING DEFAULT r""" … """` に置く。**
   本体は `r""" """` で囲む必要があり、それをさらに `EXECUTE IMMEDIATE` の
   文字列に入れ子にできないため。埋めるときは `TO_JSON_STRING` で SQL の
@@ -415,23 +416,30 @@ INSERT INTO `@@PROJECT@@.@@WORK@@.view_logic_diff` …
 ### 対象データセットはリージョン内から自動で拾う
 
 suffix を出すデータセットと、比較対象の View があるデータセットは**同じ集合**なので、
-別々に持つ意味がない。セクション 0 で `SCHEMATA` を 1 回だけ走査し、
-**対象 View の集め方（`src`）と suffix 一覧の両方をその結果から作る**。
-1 つの走査から出るので、両者がズレようがない。
+別々に持つ意味がない。**リージョン単位の `INFORMATION_SCHEMA` が使える**ので、
+データセットごとの `UNION ALL` を組み立てる必要もない。
+1 つの `INSERT` の中で、同じ条件から両方を引く。
 
 ```sql
-IF ARRAY_LENGTH(source_datasets) = 0 THEN
-  EXECUTE IMMEDIATE fill(r"""
-SELECT ARRAY_AGG(schema_name ORDER BY schema_name)
-FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA`
-WHERE REGEXP_CONTAINS(schema_name, r'_([A-Za-z]{4})$')
-  AND (? = '' OR REGEXP_CONTAINS(schema_name, ?))
-""", …) INTO datasets USING dataset_filter, dataset_filter;
-END IF;
+src AS (
+  SELECT table_name AS view_name, view_definition AS ddl
+  FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.VIEWS`
+  WHERE IF(ARRAY_LENGTH(@source_datasets) > 0,
+           table_schema IN UNNEST(@source_datasets),
+           REGEXP_CONTAINS(table_schema, r'_([A-Za-z]{4})$')
+             AND (@dataset_filter = '' OR REGEXP_CONTAINS(table_schema, @dataset_filter)))
+),
 ```
 
-**識別子はテキスト置換、値は `USING` のパラメータ**という使い分けになる。
-`dataset_filter` は値なので `?` で渡せる。
+**識別子はテキスト置換、値は `EXECUTE IMMEDIATE` の `USING`** という使い分けになる。
+`dataset_filter` も `source_datasets` も値なので、名前付きパラメータで渡せる。
+
+```sql
+EXECUTE IMMEDIATE fill(r""" … """, project_id, …)
+USING dataset_filter AS dataset_filter,
+      source_datasets AS source_datasets,
+      suffix_override AS suffix_override;
+```
 
 絞り込みの手段は 3 つ。上から順に「普段」「テスト」「例外」。
 
@@ -442,17 +450,17 @@ END IF;
 | `source_datasets` | `[]` | 自動検出をやめて一覧を直接指定する |
 | `suffix_override` | `[]` | suffix だけ直接指定する（View が suffix 無しのデータセットにある場合） |
 
-0 件になったら `RAISE` で止まる。黙って空のテーブルを作るより、
-`region` や `dataset_filter` の間違いに気づけるほうがよい。
+**セクション 0 に事前チェックを置いてある。** 対象 View が 0 件、または suffix を持つ
+データセットが 0 件なら `RAISE` で止まる。黙って空のテーブルを作ると
+`region` や `dataset_filter` の間違いに気づけないため。
 
 注意しておくこと:
 
 - **条件に一致するが無関係な View を持つデータセットも対象に入る。**
-  base ごとに束ねるので混ざりはしないが、走査量は増え、
-  1 View だけの base が並ぶ。`dataset_filter` で絞れる
-- データセット数が多いと `src` の `UNION ALL` が長くなる。数百規模なら
-  `dataset_filter` で分割するか、リージョン単位の `INFORMATION_SCHEMA.VIEWS`
-  が使えるか確かめる
+  base ごとに束ねるので混ざりはしないが、1 View だけの base が並ぶ。
+  `dataset_filter` で絞れる
+- `INFORMATION_SCHEMA.VIEWS` はリージョン単位で読むので、**そのリージョンの
+  View 定義をすべて読む権限が要る**
 
 ## 事前生成テーブル（build_table.sql）
 
