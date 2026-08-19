@@ -385,10 +385,15 @@ ${configBlock}
 ${precheck}
 
 -- ---------------------------------------------------------------------
--- 1. 格納先（初回のみ）
+-- 1. 格納先（初回とスキーマを変えたときだけ）
+--
+--    CREATE OR REPLACE なので、実行すると既存の行はすべて消える。
+--    パーティションに積んだ履歴（いつグループ構成が変わったか）も一緒に消える。
+--    スケジュールドクエリに登録するのはセクション 0 と 2 だけなので、
+--    日次の生成でここが動くことはない。
 -- ---------------------------------------------------------------------
 EXECUTE IMMEDIATE ${FILL_OPEN}
-CREATE TABLE IF NOT EXISTS \`@@PROJECT@@.@@WORK@@.view_logic_diff\`
+CREATE OR REPLACE TABLE \`@@PROJECT@@.@@WORK@@.view_logic_diff\`
 (
   snapshot_date   DATE           OPTIONS (description = '生成日'),
   base            STRING         OPTIONS (description = 'suffix を除いた View 名。Looker のキー。suffix を認識できなかった View は View 名そのもの'),
