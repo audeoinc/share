@@ -26,6 +26,11 @@ import { createRequire } from 'node:module';
 const here = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 
+// ロケーションは suffix_config.json と揃える。build_table.sql と同じ値でないと、
+// 作った UDF と呼び出し側が別リージョンになって参照できない。
+const cfg = JSON.parse(await readFile(join(here, 'suffix_config.json'), 'utf8'));
+const region = cfg.region || 'asia-northeast1';
+
 // インラインで埋め込んでよい上限。32 KB に対して余裕を持たせる。
 const SIZE_LIMIT = 30 * 1024;
 
@@ -407,7 +412,14 @@ const sql = `-- ================================================================
 
 -- ---------------------------------------------------------------------
 -- 0. 設定（書き換えるのはここだけ）
+--
+--    SET @@location は DECLARE より前に置く。
+--    このスクリプトは EXECUTE IMMEDIATE で DDL を投げるだけで、
+--    ロケーションを推測できるテーブル参照が無い。指定しないと既定の
+--    ロケーションで実行され、目的のデータセットに作れない。
 -- ---------------------------------------------------------------------
+SET @@location = '${region}';
+
 DECLARE project_id  STRING DEFAULT 'my-project';
 DECLARE udf_dataset STRING DEFAULT 'ops_meta';
 

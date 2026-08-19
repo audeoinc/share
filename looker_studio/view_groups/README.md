@@ -362,10 +362,14 @@ VIEW_GROUP_CSS   素 46.4 KB → 最小化 28.0 KB（上限比 93%）
 
 ```sql
 -- view_group_html.sql
+SET @@location = 'asia-northeast1';   -- DECLARE より前に置く
+
 DECLARE project_id  STRING DEFAULT 'my-project';
 DECLARE udf_dataset STRING DEFAULT 'ops_meta';
 
 -- build_table.sql
+SET @@location = 'asia-northeast1';   -- DECLARE より前。region と同じ値にする
+
 DECLARE project_id   STRING DEFAULT 'my-project';
 DECLARE udf_dataset  STRING DEFAULT 'ops_meta';   -- UDF の置き場所
 DECLARE work_dataset STRING DEFAULT 'ops_meta';   -- view_logic_diff の置き場所
@@ -393,7 +397,13 @@ INSERT INTO `@@PROJECT@@.@@WORK@@.view_logic_diff` …
 ```
 
 置換対象を最後に埋めるのは、埋めた中身がさらに置換されないようにするため
-（`@@SRC@@` と `@@JS@@` が該当）。
+（`@@JS@@` が該当）。
+
+**`SET @@location` は `DECLARE` より前に置く。** どちらのスクリプトも、参照は
+すべて `EXECUTE IMMEDIATE` の中にあり、BigQuery がロケーションを推測できる
+テーブル参照が無い。指定しないと既定のロケーションで実行され、目的の
+データセットに作れない。`build_table.sql` では下の `region` と同じ値にする
+（どちらも `suffix_config.json` の `region` から生成される）。
 
 - **対象データセットはリージョン内から自動で拾う。** 既定は
   「suffix の条件に一致するデータセット全部」（下記）。

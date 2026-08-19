@@ -17,7 +17,14 @@
 
 -- ---------------------------------------------------------------------
 -- 0. 設定（書き換えるのはここだけ）
+--
+--    SET @@location は DECLARE より前に置く。
+--    このスクリプトは EXECUTE IMMEDIATE で DDL を投げるだけで、
+--    ロケーションを推測できるテーブル参照が無い。指定しないと既定の
+--    ロケーションで実行され、目的のデータセットに作れない。
 -- ---------------------------------------------------------------------
+SET @@location = 'asia-northeast1';
+
 DECLARE project_id  STRING DEFAULT 'my-project';
 DECLARE udf_dataset STRING DEFAULT 'ops_meta';
 

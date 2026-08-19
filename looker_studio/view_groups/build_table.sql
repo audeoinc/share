@@ -30,9 +30,16 @@
 --    そこで識別子はスクリプト変数からテキスト置換し（本文の @@PROJECT@@ など）、
 --    値は EXECUTE IMMEDIATE の USING で渡す（@dataset_filter など）。
 --
+--    SET @@location は DECLARE より前に置く。本文の参照はすべて
+--    EXECUTE IMMEDIATE の中にあり、ロケーションを推測できるテーブル参照が
+--    無いため、指定しないと既定のロケーションで実行される。
+--    下の region と同じ値にすること（どちらも suffix_config.json から生成）。
+--
 --    スケジュールドクエリには セクション 0 と 2 を登録する
 --    （1 と 3 は初回だけ実行すればよい）。
 -- ---------------------------------------------------------------------
+SET @@location = 'asia-northeast1';
+
 DECLARE project_id   STRING DEFAULT 'my-project';
 DECLARE udf_dataset  STRING DEFAULT 'ops_meta';    -- VIEW_GROUP_INFO / VIEW_GROUP_CSS の置き場所
 DECLARE work_dataset STRING DEFAULT 'ops_meta';    -- view_logic_diff の置き場所
