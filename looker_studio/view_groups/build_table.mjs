@@ -145,6 +145,9 @@ if (mismatch > 0) process.exit(1);
 
 const optionsJson = JSON.stringify(staticOpts, null, 2)
   .split('\n').map((l, i) => (i === 0 ? l : '        ' + l)).join('\n');
+// コメント行に埋めるほうは 1 行にする。整形して複数行にすると 2 行目以降が
+// -- で始まらず、スクリプトとして流したときに構文エラーになる。
+const optionsJsonInline = JSON.stringify(staticOpts);
 
 // --- モードごとの SQL 断片 ---------------------------------------------
 // 静的モード: suffix 一覧を焼き込んだ正規表現で base を切る。
@@ -165,12 +168,12 @@ const sampleSuffixes = Array.isArray(config.suffixParts)
 const suffixCte = dynamic ? `
 -- データセット名から suffix を集める。手で一覧を持たないための CTE。
 --   mart_abjp / raw_cduk → abjp / cduk
--- リージョンは suffix_config.json の region から生成（データセットのロケーション）。
+-- リージョンはセクション 0 の region から入る（データセットのロケーションと揃える）。
 -- ここが 0 件だと全 View が「suffix 未認識」になり、1 本ずつ単独で並ぶだけになる。
 -- 件数は下の確認クエリで見ておく。
 suffixes AS (
   SELECT DISTINCT REGEXP_EXTRACT(schema_name, r'${config.schemataPattern}') AS suffix
-  FROM \`PROJECT.region-${region}.INFORMATION_SCHEMA.SCHEMATA\`
+  FROM \`@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA\`
   WHERE REGEXP_CONTAINS(schema_name, r'${config.schemataPattern}')
 ),
 ${sampleSuffixes.length > 0 ? `-- サンプル用: データセットを 1 つにまとめた環境で試すときは、上の suffixes を
@@ -248,7 +251,7 @@ const sql = `-- ================================================================
 -- 「いつグループ構成が変わったか」を後から追える＝ロジック逸脱の検知に使える。
 --
 -- 前提: view_group_html.sql で VIEW_GROUP_INFO / VIEW_GROUP_CSS を作成済み。
--- PROJECT / DATASET / TARGET_DATASET は自分の環境に置換すること。
+-- 環境に合わせるのはセクション 0 の DECLARE だけ。本文の書き換えは要らない。
 --
 -- suffix の出どころ: ${dynamic
   ? `INFORMATION_SCHEMA.SCHEMATA（データセット名）
@@ -260,9 +263,66 @@ const sql = `-- ================================================================
 
 
 -- ---------------------------------------------------------------------
+-- 0. 設定（書き換えるのはここだけ）
+--
+--    BigQuery は識別子（プロジェクト・データセット・関数名）をクエリ
+--    パラメータにできない。@param が使えるのは値だけ。
+--    そこでスクリプト変数に持ち、EXECUTE IMMEDIATE でテキスト置換する。
+--    本文の @@PROJECT@@ などが置換される目印。
+--
+--    スケジュールドクエリには セクション 0 と 2 を登録する
+--    （1 と 3 は初回だけ実行すればよい）。
+-- ---------------------------------------------------------------------
+DECLARE project_id      STRING        DEFAULT 'my-project';
+DECLARE udf_dataset     STRING        DEFAULT 'ops_meta';   -- VIEW_GROUP_INFO / VIEW_GROUP_CSS の置き場所
+DECLARE work_dataset    STRING        DEFAULT 'ops_meta';   -- view_logic_diff の置き場所
+DECLARE source_datasets ARRAY<STRING> DEFAULT ['mart'];     -- 比較対象の View があるデータセット（複数可）
+DECLARE region          STRING        DEFAULT '${region}';  -- SCHEMATA を読むリージョン
+DECLARE tz              STRING        DEFAULT 'Asia/Tokyo'; -- snapshot_date の基準
+
+DECLARE src_sql STRING;
+
+-- @@…@@ を実際の値に置き換える。EXECUTE IMMEDIATE のたびに通す。
+-- @@SRC@@ を最後にするのは、埋め込んだ中身がさらに置換されないようにするため。
+CREATE TEMP FUNCTION fill(
+  sql STRING, project STRING, udf_ds STRING, work_ds STRING,
+  reg STRING, zone STRING, src STRING
+) AS (
+  REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(sql,
+    '@@PROJECT@@', project),
+    '@@UDF@@',     udf_ds),
+    '@@WORK@@',    work_ds),
+    '@@REGION@@',  reg),
+    '@@TZ@@',      zone),
+    '@@SRC@@',     src)
+);
+
+-- 対象 View を集める部分を source_datasets から組み立てる。
+--
+-- TABLES.ddl ではなく VIEWS.view_definition を使う。
+-- TABLES.ddl は BigQuery が組み立てた CREATE VIEW 文で、OPTIONS に
+-- description や作成タイムスタンプが自動で入る。View ごとに値が違うので、
+-- そのまま比較すると全部が別グループに割れる。
+-- view_definition はクエリ本体だけなので、ヘッダも OPTIONS も付いてこない。
+-- View 自身の名前も入らないため、パラメータには参照先の差だけが残る。
+SET src_sql = (
+  SELECT STRING_AGG(
+    FORMAT(
+      "SELECT table_name AS view_name, view_definition AS ddl FROM \`%s.%s.INFORMATION_SCHEMA.VIEWS\`",
+      project_id, d),
+    "\\n  UNION ALL\\n  ")
+  FROM UNNEST(source_datasets) AS d
+);
+IF src_sql IS NULL THEN
+  RAISE USING MESSAGE = 'source_datasets が空です。比較対象の View があるデータセットを指定してください。';
+END IF;
+
+
+-- ---------------------------------------------------------------------
 -- 1. 格納先（初回のみ）
 -- ---------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS \`PROJECT.DATASET.view_logic_diff\`
+EXECUTE IMMEDIATE fill(r"""
+CREATE TABLE IF NOT EXISTS \`@@PROJECT@@.@@WORK@@.view_logic_diff\`
 (
   snapshot_date   DATE           OPTIONS (description = '生成日'),
   base            STRING         OPTIONS (description = 'suffix を除いた View 名。Looker のキー。suffix を認識できなかった View は View 名そのもの'),
@@ -279,9 +339,9 @@ PARTITION BY snapshot_date
 CLUSTER BY base
 OPTIONS (
   description = 'suffix 違い View のロジック グループ比較（事前生成）',
-  -- 履歴を無期限に持ちたくなければ調整する
   partition_expiration_days = 400
-);
+)
+""", project_id, udf_dataset, work_dataset, region, tz, src_sql);
 
 
 -- ---------------------------------------------------------------------
@@ -290,27 +350,20 @@ OPTIONS (
 --    同じ日に何度実行しても結果が同じになるよう、当日分を消してから入れる。
 --    MERGE より DELETE + INSERT のほうが単純で、パーティション単位なので安い。
 -- ---------------------------------------------------------------------
-DELETE FROM \`PROJECT.DATASET.view_logic_diff\`
-WHERE snapshot_date = CURRENT_DATE('Asia/Tokyo');
+EXECUTE IMMEDIATE fill(r"""
+DELETE FROM \`@@PROJECT@@.@@WORK@@.view_logic_diff\`
+WHERE snapshot_date = CURRENT_DATE('@@TZ@@')
+""", project_id, udf_dataset, work_dataset, region, tz, src_sql);
 
-INSERT INTO \`PROJECT.DATASET.view_logic_diff\`
+EXECUTE IMMEDIATE fill(r"""
+INSERT INTO \`@@PROJECT@@.@@WORK@@.view_logic_diff\`
 WITH${suffixCte}
--- ↓↓↓ 対象の View を集める。データセットが複数あるなら UNION ALL で足す ↓↓↓
---
--- TABLES.ddl ではなく VIEWS.view_definition を使う。
--- TABLES.ddl は BigQuery が組み立てた CREATE VIEW 文で、OPTIONS に
--- description や作成タイムスタンプが自動で入る。View ごとに値が違うので、
--- そのまま比較すると全部が別グループに割れる。
--- view_definition はクエリ本体だけなので、ヘッダも OPTIONS も付いてこない。
--- View 自身の名前も入らないため、パラメータには参照先の差だけが残る。
 src AS (
-  SELECT table_name AS view_name, view_definition AS ddl
-  FROM \`PROJECT.TARGET_DATASET.INFORMATION_SCHEMA.VIEWS\`
+  @@SRC@@
 ),
--- ↑↑↑ ここまで ↑↑↑
 ${keyedCte}
 SELECT
-  CURRENT_DATE('Asia/Tokyo')          AS snapshot_date,
+  CURRENT_DATE('@@TZ@@')              AS snapshot_date,
   base,
   CAST(info.view_count      AS INT64) AS view_count,
   CAST(info.group_count     AS INT64) AS group_count,
@@ -323,30 +376,37 @@ SELECT
 FROM (
   SELECT
     base,
-    \`PROJECT.DATASET.VIEW_GROUP_INFO\`(
+    \`@@PROJECT@@.@@UDF@@.VIEW_GROUP_INFO\`(
       ARRAY_AGG(STRUCT(view_name, ddl) ORDER BY view_name),
 ${udfOptionsArg}
     ) AS info
   FROM keyed
   GROUP BY base
-);
+)
+""", project_id, udf_dataset, work_dataset, region, tz, src_sql);
 
 
 -- ---------------------------------------------------------------------
--- 3. Looker Studio が読むビュー（最新スナップショットだけ）
+-- 3. Looker Studio が読むビュー（最新スナップショットだけ・初回のみ）
 -- ---------------------------------------------------------------------
-CREATE OR REPLACE VIEW \`PROJECT.DATASET.v_view_logic_diff_latest\` AS
+EXECUTE IMMEDIATE fill(r"""
+CREATE OR REPLACE VIEW \`@@PROJECT@@.@@WORK@@.v_view_logic_diff_latest\` AS
 SELECT *
-FROM \`PROJECT.DATASET.view_logic_diff\`
+FROM \`@@PROJECT@@.@@WORK@@.view_logic_diff\`
 WHERE snapshot_date = (
-  SELECT MAX(snapshot_date) FROM \`PROJECT.DATASET.view_logic_diff\`
-);
+  SELECT MAX(snapshot_date) FROM \`@@PROJECT@@.@@WORK@@.view_logic_diff\`
+)
+""", project_id, udf_dataset, work_dataset, region, tz, src_sql);
 
 
 -- ---------------------------------------------------------------------
 -- 4. テンプレートに貼る CSS（1 回取れば十分。template_style.html と同じ）
+--
+--    ここから下のコメントは単体で実行するクエリ。
+--    @@PROJECT@@ / @@UDF@@ / @@WORK@@ / @@REGION@@ は実際の値に置き換えること
+--    （EXECUTE IMMEDIATE を通らないので自動では置換されない）。
 -- ---------------------------------------------------------------------
--- SELECT \`PROJECT.DATASET.VIEW_GROUP_CSS\`('''${optionsJson}''');
+-- SELECT \`@@PROJECT@@.@@UDF@@.VIEW_GROUP_CSS\`('''${optionsJsonInline}''');
 
 
 -- ---------------------------------------------------------------------
@@ -355,7 +415,7 @@ WHERE snapshot_date = (
 -- 中身の確認
 -- SELECT base, view_count, group_count, group_labels, unmatched_count,
 --        LENGTH(diff_html) AS html_len
--- FROM \`PROJECT.DATASET.v_view_logic_diff_latest\`
+-- FROM \`@@PROJECT@@.@@WORK@@.v_view_logic_diff_latest\`
 -- ORDER BY base;
 
 ${dynamic ? `-- SCHEMATA から取れた suffix 一覧（suffixes CTE が返すものと同じ）
@@ -366,7 +426,7 @@ ${dynamic ? `-- SCHEMATA から取れた suffix 一覧（suffixes CTE が返す�
 --   STRING_AGG(schema_name, ', ' ORDER BY schema_name) AS datasets
 -- FROM (
 --   SELECT schema_name, REGEXP_EXTRACT(schema_name, r'${config.schemataPattern}') AS suffix
---   FROM \`PROJECT.region-${region}.INFORMATION_SCHEMA.SCHEMATA\`
+--   FROM \`@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA\`
 -- )
 -- WHERE suffix IS NOT NULL
 -- GROUP BY suffix
@@ -374,20 +434,20 @@ ${dynamic ? `-- SCHEMATA から取れた suffix 一覧（suffixes CTE が返す�
 
 -- 拾えなかったデータセット（suffix 付きのつもりのものが混ざっていないか）
 -- SELECT schema_name
--- FROM \`PROJECT.region-${region}.INFORMATION_SCHEMA.SCHEMATA\`
+-- FROM \`@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA\`
 -- WHERE NOT REGEXP_CONTAINS(schema_name, r'${config.schemataPattern}')
 -- ORDER BY schema_name;
 
 -- suffix ごとに何本の View が割り当たったか。
 -- 0 本の suffix は、無関係なデータセット名から拾ったもの（実害はない）。
--- 抜けている suffix があれば、そのデータセットが src に入っていない。
+-- 抜けている suffix があれば、そのデータセットが source_datasets に入っていない。
 -- WITH suffixes AS (
 --   SELECT DISTINCT REGEXP_EXTRACT(schema_name, r'${config.schemataPattern}') AS suffix
---   FROM \`PROJECT.region-${region}.INFORMATION_SCHEMA.SCHEMATA\`
+--   FROM \`@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA\`
 --   WHERE REGEXP_CONTAINS(schema_name, r'${config.schemataPattern}')
 -- ), src AS (
 --   SELECT table_name AS view_name
---   FROM \`PROJECT.TARGET_DATASET.INFORMATION_SCHEMA.VIEWS\`
+--   FROM \`@@PROJECT@@.<source_dataset>.INFORMATION_SCHEMA.VIEWS\`
 -- )
 -- SELECT s.suffix, COUNT(src.view_name) AS view_count
 -- FROM suffixes AS s
@@ -397,19 +457,19 @@ ${dynamic ? `-- SCHEMATA から取れた suffix 一覧（suffixes CTE が返す�
 
 ` : ''}-- 生成後: UDF が実際に認識した suffix（テーブルに入っている値）
 -- SELECT s AS suffix, COUNT(DISTINCT base) AS base_count
--- FROM \`PROJECT.DATASET.v_view_logic_diff_latest\`, UNNEST(suffixes) AS s
+-- FROM \`@@PROJECT@@.@@WORK@@.v_view_logic_diff_latest\`, UNNEST(suffixes) AS s
 -- GROUP BY s
 -- ORDER BY s;
 
 -- suffix を認識できなかった View（単独で 1 行ずつ並ぶ）
 -- SELECT base, group_labels
--- FROM \`PROJECT.DATASET.v_view_logic_diff_latest\`
+-- FROM \`@@PROJECT@@.@@WORK@@.v_view_logic_diff_latest\`
 -- WHERE unmatched_count > 0
 -- ORDER BY base;
 
 -- ロジックが割れている base だけ見る（＝要確認のもの）
 -- SELECT base, group_count, group_labels
--- FROM \`PROJECT.DATASET.v_view_logic_diff_latest\`
+-- FROM \`@@PROJECT@@.@@WORK@@.v_view_logic_diff_latest\`
 -- WHERE has_multiple
 -- ORDER BY group_count DESC, base;
 
@@ -419,12 +479,46 @@ ${dynamic ? `-- SCHEMATA から取れた suffix 一覧（suffixes CTE が返す�
 --   SELECT *,
 --     LAG(TO_JSON_STRING(group_labels)) OVER w AS prev_labels,
 --     TO_JSON_STRING(group_labels)      AS curr_labels
---   FROM \`PROJECT.DATASET.view_logic_diff\`
+--   FROM \`@@PROJECT@@.@@WORK@@.view_logic_diff\`
 --   WINDOW w AS (PARTITION BY base ORDER BY snapshot_date)
 -- )
 -- WHERE prev_labels IS NOT NULL AND prev_labels != curr_labels
 -- ORDER BY snapshot_date DESC, base;
 `;
+
+// 生成物の検証。
+// 置換トークンは fill() が知っているものだけ、かつ旧いプレースホルダが
+// 残っていないこと。EXECUTE IMMEDIATE を通す本文と、手で置換するコメントの
+// どちらも同じ綴りにしておく。
+// EXECUTE IMMEDIATE の本文は r""" """ で囲む。本文の中に """ が現れると
+// そこで文字列が切れるので、区切り以外に出ていないことを確かめる。
+const opens = (sql.match(/r"""/g) || []).length;
+const triples = (sql.match(/"""/g) || []).length;
+if (triples !== opens * 2) {
+  console.log(`  FAIL  三重引用符の数が合いません（開始 ${opens} 個に対して ${triples} 個）`);
+  process.exit(1);
+}
+// コメント行以外が -- で始まらないまま埋まっていないか（セクション 4/5 の事故防止）
+for (const line of sql.split('\n')) {
+  if (/^\s+"[a-zA-Z]+":/.test(line)) {
+    console.log(`  FAIL  コメントに入れ損ねた JSON の行があります: ${line.trim()}`);
+    process.exit(1);
+  }
+}
+
+const KNOWN_TOKENS = ['@@PROJECT@@', '@@UDF@@', '@@WORK@@', '@@REGION@@', '@@TZ@@', '@@SRC@@'];
+for (const m of sql.match(/@@[A-Z_]+@@/g) || []) {
+  if (!KNOWN_TOKENS.includes(m)) {
+    console.log(`  FAIL  知らない置換トークンがあります: ${m}`);
+    process.exit(1);
+  }
+}
+const stale = sql.match(/`PROJECT\.|\.DATASET\.|TARGET_DATASET/);
+if (stale) {
+  console.log(`  FAIL  旧いプレースホルダが残っています: ${stale[0]}`);
+  process.exit(1);
+}
+console.log(`  PASS  置換トークンは ${KNOWN_TOKENS.join(' / ')} のみ`);
 
 const out = join(here, 'build_table.sql');
 await writeFile(out, sql);

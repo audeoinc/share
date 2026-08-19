@@ -266,7 +266,13 @@ function pack(driver, label) {
   const raw = [libSrc, '', shared, '', driver].join('\n');
   if (!esbuild) return { code: raw, raw: raw.length, min: null, label };
   // format を指定するとラップされて未使用の関数が落ちるので、指定しない
-  const code = esbuild.transformSync(raw, { loader: 'js', minify: true, target: 'es2017' }).code;
+  const min = esbuild.transformSync(raw, { loader: 'js', minify: true, target: 'es2017' }).code;
+  // 最小化器は '\u0001' のような文字列を生の制御文字として書き出す。
+  // そのまま SQL に埋めると、生成物に見えない文字が混ざり、エディタでも
+  // BigQuery のエラーでも追えなくなる。JS のエスケープに戻してから埋める。
+  // 制御文字が出るのは文字列・正規表現リテラルの中だけなので、置換して等価。
+  const code = min.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g,
+    (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
   return { code, raw: raw.length, min: code.length, label };
 }
 
@@ -390,8 +396,33 @@ const sql = `-- ================================================================
 --    本体は esbuild で最小化してある（インラインのコード ブロブは
 --    32 KB までに制限されるため。素の連結は約 45 KB で確実に弾かれる）。
 --
--- PROJECT / DATASET は自分の環境に置換すること。
+-- 環境に合わせるのは先頭の DECLARE だけ。本文の書き換えは要らない。
+--
+-- BigQuery は識別子（プロジェクト・データセット・関数名）をクエリ
+-- パラメータにできない。@param が使えるのは値だけ。
+-- そこでスクリプト変数に持ち、EXECUTE IMMEDIATE でテキスト置換する。
+-- @@PROJECT@@ / @@UDF@@ が置換される目印。
 -- =====================================================================
+
+
+-- ---------------------------------------------------------------------
+-- 0. 設定（書き換えるのはここだけ）
+-- ---------------------------------------------------------------------
+DECLARE project_id  STRING DEFAULT 'my-project';
+DECLARE udf_dataset STRING DEFAULT 'ops_meta';
+
+-- 関数の本体（JavaScript）。ここは触らない。
+-- SQL 文に直接埋めず変数に置くのは、本体を r\"\"\" \"\"\" で囲む必要があり、
+-- それをさらに EXECUTE IMMEDIATE の文字列に入れ子にできないため。
+-- 埋め込むときは TO_JSON_STRING で SQL の文字列リテラルに変換する
+-- （JSON のエスケープは BigQuery の文字列リテラルと互換）。
+DECLARE js_info STRING DEFAULT r"""
+${infoPack.code}
+""";
+
+DECLARE js_css STRING DEFAULT r"""
+${cssPack.code}
+""";
 
 
 -- ---------------------------------------------------------------------
@@ -434,7 +465,8 @@ const sql = `-- ================================================================
 --   mode          'inline'（既定）/ 'class'（CSS は VIEW_GROUP_CSS へ）/ 'embed'
 --   fontSize / lineHeight / colors / diffLineOpacity / diffCharOpacity / syntax
 -- ---------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION \`PROJECT.DATASET.VIEW_GROUP_INFO\`(
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(r"""
+CREATE OR REPLACE FUNCTION \`@@PROJECT@@.@@UDF@@.VIEW_GROUP_INFO\`(
   views ARRAY<STRUCT<view_name STRING, ddl STRING>>,
   options_json STRING
 )
@@ -447,15 +479,18 @@ RETURNS STRUCT<
   unmatched_count FLOAT64,
   html            STRING
 >
-LANGUAGE js AS r"""
-${infoPack.code}
-""";
+LANGUAGE js AS @@JS@@
+""",
+  '@@PROJECT@@', project_id),
+  '@@UDF@@',     udf_dataset),
+  -- @@JS@@ を最後にするのは、本体の中身がさらに置換されないようにするため
+  '@@JS@@',      TO_JSON_STRING(js_info));
 
 
 -- ---------------------------------------------------------------------
 -- VIEW_GROUP_CSS — mode='class' のときテンプレートへ貼る CSS を返す
 --
---   SELECT \`PROJECT.DATASET.VIEW_GROUP_CSS\`(NULL);
+--   SELECT \`<project>.<udf_dataset>.VIEW_GROUP_CSS\`(NULL);
 --
 -- 結果を <style> … </style> で囲んで Templated Record のテンプレートに貼る。
 -- 見出し・タブ・パラメータ表の規則と、差分表の規則の両方を含む。
@@ -465,12 +500,31 @@ ${infoPack.code}
 -- options_json は VIEW_GROUP_HTML と同じものを渡すこと。色やフォントを
 -- 変えた場合、CSS 側も同じ設定で作り直す必要がある。
 -- ---------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION \`PROJECT.DATASET.VIEW_GROUP_CSS\`(options_json STRING)
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(r"""
+CREATE OR REPLACE FUNCTION \`@@PROJECT@@.@@UDF@@.VIEW_GROUP_CSS\`(options_json STRING)
 RETURNS STRING
-LANGUAGE js AS r"""
-${cssPack.code}
-""";
+LANGUAGE js AS @@JS@@
+""",
+  '@@PROJECT@@', project_id),
+  '@@UDF@@',     udf_dataset),
+  '@@JS@@',      TO_JSON_STRING(js_css));
 `;
+
+// 生成物の検証。r""" """ の中に """ が現れると文字列がそこで切れる。
+{
+  const opens = (sql.match(/r"""/g) || []).length;
+  const triples = (sql.match(/"""/g) || []).length;
+  if (triples !== opens * 2) {
+    console.log(`  FAIL  三重引用符の数が合いません（開始 ${opens} 個に対して ${triples} 個）`);
+    process.exit(1);
+  }
+  const stale = sql.match(/`PROJECT\.|\.DATASET\./);
+  if (stale) {
+    console.log(`  FAIL  旧いプレースホルダが残っています: ${stale[0]}`);
+    process.exit(1);
+  }
+  console.log('\n  PASS  置換トークンは @@PROJECT@@ / @@UDF@@ / @@JS@@ のみ');
+}
 
 const outPath = join(here, 'view_group_html.sql');
 await writeFile(outPath, sql);
@@ -483,7 +537,7 @@ const cssPath = join(here, 'template_style.html');
 await writeFile(cssPath,
   `<!--
   Templated Record のテンプレートに貼る CSS（mode='class' のとき）。
-  中身は SELECT \`PROJECT.DATASET.VIEW_GROUP_CSS\`(...) の出力そのもの。
+  中身は SELECT \`<project>.<udf_dataset>.VIEW_GROUP_CSS\`(...) の出力そのもの。
   このファイルは build_udf.mjs が生成する。直接編集しないこと。
 
   ここは固定。差分の内容が変わっても書き換え不要。

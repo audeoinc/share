@@ -355,6 +355,61 @@ VIEW_GROUP_CSS   素 46.4 KB → 最小化 28.0 KB（上限比 93%）
 > esbuild の `transformSync` に `format` を渡すとラップされて未使用のトップレベル
 > 関数が落ちる（45 KB が 5.6 KB になり関数が消える）。`format` は指定しないこと。
 
+## 環境の指定はスクリプト変数（両ファイル共通）
+
+`view_group_html.sql` も `build_table.sql` も、**先頭の `DECLARE` を書き換えるだけ**で
+配置先が決まる。本文に置換は要らない。
+
+```sql
+-- view_group_html.sql
+DECLARE project_id  STRING DEFAULT 'my-project';
+DECLARE udf_dataset STRING DEFAULT 'ops_meta';
+
+-- build_table.sql
+DECLARE project_id      STRING        DEFAULT 'my-project';
+DECLARE udf_dataset     STRING        DEFAULT 'ops_meta';   -- UDF の置き場所
+DECLARE work_dataset    STRING        DEFAULT 'ops_meta';   -- view_logic_diff の置き場所
+DECLARE source_datasets ARRAY<STRING> DEFAULT ['mart'];     -- 比較対象の View（複数可）
+DECLARE region          STRING        DEFAULT 'asia-northeast1';
+DECLARE tz              STRING        DEFAULT 'Asia/Tokyo';
+```
+
+**BigQuery は識別子をクエリ パラメータにできない。** `@param` が使えるのは値だけで、
+プロジェクト・データセット・関数名は渡せない。そこでスクリプト変数に持ち、
+`EXECUTE IMMEDIATE` に渡す前にテキスト置換する。`@@PROJECT@@` / `@@UDF@@` /
+`@@WORK@@` / `@@REGION@@` / `@@TZ@@` / `@@SRC@@` が置換される目印。
+
+```sql
+CREATE TEMP FUNCTION fill(sql STRING, project STRING, …) AS (
+  REPLACE(REPLACE(… sql, '@@PROJECT@@', project), '@@UDF@@', udf_ds) …
+);
+
+EXECUTE IMMEDIATE fill(r"""
+INSERT INTO `@@PROJECT@@.@@WORK@@.view_logic_diff` …
+""", project_id, udf_dataset, work_dataset, region, tz, src_sql);
+```
+
+置換対象を最後に埋めるのは、埋めた中身がさらに置換されないようにするため
+（`@@SRC@@` と `@@JS@@` が該当）。
+
+- **対象データセットは配列で持つ。** `source_datasets` から `UNION ALL` を
+  組み立てるので、データセットが増えても SQL の編集は要らない。
+  空なら `RAISE` で止まる
+- **UDF 本体は `DECLARE js_info STRING DEFAULT r""" … """` に置く。**
+  本体は `r""" """` で囲む必要があり、それをさらに `EXECUTE IMMEDIATE` の
+  文字列に入れ子にできないため。埋めるときは `TO_JSON_STRING` で SQL の
+  文字列リテラルに変換する（JSON のエスケープは BigQuery の文字列リテラルと互換）
+- **スケジュールドクエリには セクション 0 と 2 を登録する。** 設定ブロックが
+  無いと変数が未定義になる。1 と 3 は初回だけ
+- 生成器は書き出す前に、`@@…@@` が既知のものだけか、`r"""` の対応が取れているか、
+  旧いプレースホルダが残っていないかを検査する
+
+> `EXECUTE IMMEDIATE` に渡す本文は `r""" """` の生文字列。中に `"""` が出ると
+> そこで切れるので、生成器が個数を数えて検査している。
+
+> 最小化した JS には `'\u0001'` が**生の制御文字**として出る。そのまま埋めると
+> 生成物に見えない文字が混ざるので、埋め込み時に `\uXXXX` へ戻している。
+
 ## 事前生成テーブル（build_table.sql）
 
 `build_table.sql` は `build_table.mjs` の生成物。直接編集しない。
@@ -393,7 +448,7 @@ CSS は **`template_style.html`**（`build_udf.mjs` の生成物）をそのま�
 BigQuery から取る。中身は同じ。
 
 ```sql
-SELECT `PROJECT.DATASET.VIEW_GROUP_CSS`('{"mode": "class"}');
+SELECT `<project>.<udf_dataset>.VIEW_GROUP_CSS`('{"mode": "class"}');
 ```
 
 `<style> … </style>` で囲んでテンプレートの先頭に置き、その下に
@@ -412,7 +467,7 @@ SELECT `PROJECT.DATASET.VIEW_GROUP_CSS`('{"mode": "class"}');
 ```sql
 SELECT base, view_count, group_count, group_labels, unmatched_count,
        LENGTH(diff_html) AS html_len
-FROM `PROJECT.DATASET.v_view_logic_diff_latest`
+FROM `<project>.<work_dataset>.v_view_logic_diff_latest`
 ORDER BY base;
 ```
 

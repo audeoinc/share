@@ -192,7 +192,9 @@ function extractSuffix(viewName, opts) {
 /** 既定で置換可能とみなす種類。リテラルは既定で含めない（意味の差である可能性が高いため）。 */
 const DEFAULT_SUBSTITUTABLE = ['ident', 'quoted'];
 
-/** suffix を伏せ字にするときの目印。SQL には現れない文字を使う。 */
+// 伏せ字の目印。SQL には現れない制御文字を使う。
+// 最小化するとソースに生の制御文字が出るので、UDF に埋めるときは
+// build_udf.mjs が \\uXXXX に戻す（生成 SQL に見えない文字を混ぜないため）。
 const SUFFIX_MARK = '\u0000';
 
 /** 手で並べた同値リテラルの目印。組ごとに違う印にする。 */
