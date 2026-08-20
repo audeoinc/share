@@ -273,7 +273,8 @@ WHERE snapshot_date = (
 -- ---------------------------------------------------------------------
 -- 5. 確認（ここから下は実行される）
 --
---    それぞれ 1 文ずつ結果が出る。上から順に
+--    それぞれ 1 文ずつ結果が出る。BigQuery の結果タブは番号しか出ないので、
+--    どのクエリの結果かが分かるよう先頭に check_name を付けてある。上から順に
 --      5-1 生成結果の中身
 --      5-2 ロジックが割れている base（＝要確認）
 --      5-3 suffix を認識できなかった View
@@ -285,30 +286,44 @@ WHERE snapshot_date = (
 
 -- 5-1 生成結果の中身
 EXECUTE IMMEDIATE REPLACE(REPLACE(r"""
-SELECT base, view_count, group_count, group_labels, unmatched_count,
-       LENGTH(diff_html) AS html_len
+SELECT
+  '5-1 生成結果の中身'                AS check_name,
+  base                              AS base_view_name,
+  view_count                        AS views_in_base,
+  group_count                       AS logic_group_count,
+  group_labels                      AS logic_groups_by_suffix,
+  unmatched_count                   AS suffix_unrecognized_views,
+  LENGTH(diff_html)                 AS diff_html_length_chars
 FROM `@@PROJECT@@.@@WORK@@.v_view_logic_diff_latest`
-ORDER BY base
+ORDER BY base_view_name
 """,
   '@@PROJECT@@', project_id),
   '@@WORK@@',    work_dataset);
 
 -- 5-2 ロジックが割れている base（＝要確認のもの）
 EXECUTE IMMEDIATE REPLACE(REPLACE(r"""
-SELECT base, group_count, group_labels
+SELECT
+  '5-2 ロジックが割れている base'      AS check_name,
+  base                              AS base_view_name,
+  view_count                        AS views_in_base,
+  group_count                       AS logic_group_count,
+  group_labels                      AS logic_groups_by_suffix
 FROM `@@PROJECT@@.@@WORK@@.v_view_logic_diff_latest`
 WHERE has_multiple
-ORDER BY group_count DESC, base
+ORDER BY logic_group_count DESC, base_view_name
 """,
   '@@PROJECT@@', project_id),
   '@@WORK@@',    work_dataset);
 
 -- 5-3 suffix を認識できなかった View（単独で 1 行ずつ並ぶ）
 EXECUTE IMMEDIATE REPLACE(REPLACE(r"""
-SELECT base, group_labels
+SELECT
+  '5-3 suffix を認識できなかった View' AS check_name,
+  base                              AS unrecognized_view_name,
+  LENGTH(diff_html)                 AS diff_html_length_chars
 FROM `@@PROJECT@@.@@WORK@@.v_view_logic_diff_latest`
 WHERE unmatched_count > 0
-ORDER BY base
+ORDER BY unrecognized_view_name
 """,
   '@@PROJECT@@', project_id),
   '@@WORK@@',    work_dataset);
@@ -316,13 +331,14 @@ ORDER BY base
 -- 5-4 対象データセットと suffix（セクション 0 と同じ条件）
 EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(r"""
 SELECT
-  REGEXP_EXTRACT(schema_name, r'@@SUFFIX_PATTERN@@') AS suffix,
-  COUNT(*) AS dataset_count,
-  STRING_AGG(schema_name, ', ' ORDER BY schema_name) AS datasets
+  '5-4 対象データセットと suffix'      AS check_name,
+  REGEXP_EXTRACT(schema_name, r'@@SUFFIX_PATTERN@@')  AS extracted_suffix,
+  COUNT(*)                                            AS dataset_count,
+  STRING_AGG(schema_name, ', ' ORDER BY schema_name)  AS dataset_names
 FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA`
 WHERE REGEXP_CONTAINS(schema_name, r'@@SUFFIX_PATTERN@@') AND (@@SCHEMA_COND@@)
-GROUP BY suffix
-ORDER BY suffix
+GROUP BY check_name, extracted_suffix
+ORDER BY extracted_suffix
 """,
   '@@PROJECT@@',        project_id),
   '@@REGION@@',         region),
@@ -331,11 +347,14 @@ ORDER BY suffix
 
 -- 5-5 データセット別の対象 View 数
 EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(r"""
-SELECT table_schema, COUNT(*) AS view_count
+SELECT
+  '5-5 データセット別の対象 View 数'   AS check_name,
+  table_schema                      AS dataset_name,
+  COUNT(*)                          AS target_view_count
 FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.VIEWS`
 WHERE @@VIEW_COND@@
-GROUP BY table_schema
-ORDER BY table_schema
+GROUP BY check_name, dataset_name
+ORDER BY dataset_name
 """,
   '@@PROJECT@@',   project_id),
   '@@REGION@@',    region),
@@ -343,10 +362,12 @@ ORDER BY table_schema
 
 -- 5-6 条件から外れたデータセット（対象のつもりのものが落ちていないか）
 EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(r"""
-SELECT schema_name
+SELECT
+  '5-6 条件から外れたデータセット'     AS check_name,
+  schema_name                       AS excluded_dataset_name
 FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA`
 WHERE NOT (@@SCHEMA_COND@@)
-ORDER BY schema_name
+ORDER BY excluded_dataset_name
 """,
   '@@PROJECT@@',     project_id),
   '@@REGION@@',      region),
@@ -355,7 +376,13 @@ ORDER BY schema_name
 -- 5-7 グループ構成が変わった日（ロジック逸脱がいつ入ったか）
 --     履歴が 1 日分しかなければ 0 件。
 EXECUTE IMMEDIATE REPLACE(REPLACE(r"""
-SELECT base, snapshot_date, group_count, group_labels
+SELECT
+  '5-7 グループ構成が変わった日'       AS check_name,
+  base                              AS base_view_name,
+  snapshot_date                     AS changed_on,
+  group_count                       AS logic_group_count_after,
+  prev_labels                       AS logic_groups_before_json,
+  curr_labels                       AS logic_groups_after_json
 FROM (
   SELECT *,
     LAG(TO_JSON_STRING(group_labels)) OVER w AS prev_labels,
@@ -364,7 +391,7 @@ FROM (
   WINDOW w AS (PARTITION BY base ORDER BY snapshot_date)
 )
 WHERE prev_labels IS NOT NULL AND prev_labels != curr_labels
-ORDER BY snapshot_date DESC, base
+ORDER BY changed_on DESC, base_view_name
 """,
   '@@PROJECT@@', project_id),
   '@@WORK@@',    work_dataset);
