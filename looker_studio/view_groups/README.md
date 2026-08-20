@@ -172,12 +172,11 @@ suffixes AS (
 注意点:
 
 - リージョンは `suffix_config.json` の `region`（既定 `asia-northeast1`）から生成する。
-  **データセットのロケーションと揃える**こと。ここを間違えると suffix が 0 件になり、
-  **全 View が「suffix 未認識」として 1 本ずつ単独で並ぶ**
-  （0 件にはならないので気づきにくい）。`unmatched_count > 0` の件数で確認する
+  **データセットのロケーションと揃える**こと。ここを間違えるとセクション 0 の
+  事前チェックで止まる
 - **サンプルは View を 1 つのデータセット（`sample_mart`）にまとめてある**ので、
-  自動検出では拾えない。`source_datasets = ['sample_mart']` と
-  `suffix_override = ['abjp', 'abuk', …]` を指定して試す
+  自動検出では拾えない。`dataset_patterns = [r'^sample_mart$']` と
+  `suffix_list = ['abjp', 'abuk', …]` を指定して試す
 - `build_table.mjs` は書き出す前に、`ENDS_WITH` の切り出しと `analyze.js` の抽出が
   同じ base を返すかを照合する
 - **無関係なデータセットも `_` + 4 文字英字で終われば拾われる**。害が出るのは
@@ -375,11 +374,45 @@ DECLARE udf_dataset  STRING DEFAULT 'ops_meta';   -- UDF の置き場所
 DECLARE work_dataset STRING DEFAULT 'ops_meta';   -- view_logic_diff の置き場所
 DECLARE region       STRING DEFAULT 'asia-northeast1';
 DECLARE tz           STRING DEFAULT 'Asia/Tokyo';
+DECLARE partition_expiration_days INT64 DEFAULT 400;
 
-DECLARE dataset_filter  STRING        DEFAULT '';  -- 追加の絞り込み正規表現（テスト用）
-DECLARE source_datasets ARRAY<STRING> DEFAULT [];  -- 空でなければこの一覧だけを使う
-DECLARE suffix_override ARRAY<STRING> DEFAULT [];  -- 空でなければ suffix はこれを使う
+DECLARE dataset_patterns ARRAY<STRING> DEFAULT [r'_([A-Za-z]{4})$'];
+DECLARE suffix_pattern   STRING        DEFAULT r'_([A-Za-z]{4})$';
+DECLARE suffix_list      ARRAY<STRING> DEFAULT [];
+DECLARE analyze_options  STRING        DEFAULT '{"literalGroups":[],"mode":"class"}';
 ```
+
+`build_table.sql` の設定は次のとおり。**既定値は `suffix_config.json` から生成される**
+ので、恒久的に変えるなら設定ファイルを直して再生成する。一度だけ試すなら
+`DECLARE` を直接書き換えればよい。
+
+| 変数 | 役割 |
+|---|---|
+| `dataset_patterns` | 対象データセット。**いずれか**の正規表現に一致するものが対象。空配列ならリージョン内すべて |
+| `suffix_pattern` | データセット名から suffix を切り出す正規表現（1 つ目のキャプチャ） |
+| `suffix_list` | suffix 一覧。空なら `suffix_pattern` で自動抽出。データセット名から導けないときだけ並べる |
+| `analyze_options` | UDF に渡す解析オプション（JSON）。`literalGroups` をここで足せば再生成が要らない |
+| `partition_expiration_days` | 履歴の保持日数 |
+
+`dataset_patterns` は複数書ける。1 本に詰め込む必要はない。
+
+```sql
+DECLARE dataset_patterns ARRAY<STRING> DEFAULT [r'^mart_', r'^dwh_'];
+-- 特定のデータセットだけ試す
+DECLARE dataset_patterns ARRAY<STRING> DEFAULT [r'^mart_abjp$', r'^mart_abus$'];
+```
+
+配列は `OR` でつないだ条件文に組み立てられ、`SCHEMATA` と `VIEWS` の両方に
+同じ条件が効く（列名が違うので条件文は 2 本作る）。
+
+**`suffix_list` が要るのはどういうときか。** 通常 suffix はデータセット名から
+取れるが、View が suffix を持たないデータセットに置いてある構成
+（同梱のサンプルがこれ。View は `sample_mart` にあり、suffix は
+`sample_src_apac` など別のデータセットにある）だと導けない。
+そのときだけ手で並べる。
+
+**逆に、対象データセットを一覧で指定する変数は要らない。**
+`dataset_patterns` に `^名前$` を並べれば同じことができる。
 
 **BigQuery は識別子をクエリ パラメータにできない。** `@param` が使えるのは値だけで、
 プロジェクト・データセット・関数名は渡せない。そこでスクリプト変数に持ち、
@@ -448,41 +481,33 @@ suffix を出すデータセットと、比較対象の View があるデータ�
 src AS (
   SELECT table_name AS view_name, view_definition AS ddl
   FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.VIEWS`
-  WHERE IF(ARRAY_LENGTH(@source_datasets) > 0,
-           table_schema IN UNNEST(@source_datasets),
-           REGEXP_CONTAINS(table_schema, r'_([A-Za-z]{4})$')
-             AND (@dataset_filter = '' OR REGEXP_CONTAINS(table_schema, @dataset_filter)))
+  WHERE @@VIEW_COND@@   -- dataset_patterns から組み立てた OR の並び
 ),
 ```
 
-**識別子はテキスト置換、値は `EXECUTE IMMEDIATE` の `USING`** という使い分けになる。
-`dataset_filter` も `source_datasets` も値なので、名前付きパラメータで渡せる。
+**識別子と正規表現はテキスト置換、配列と JSON は `USING` のパラメータ**という
+使い分けになる。正規表現をパラメータで渡さないのは、BigQuery の `REGEXP_*` が
+パターンに定数を要求しうるため。
 
 ```sql
 EXECUTE IMMEDIATE REPLACE(… r""" … """ …)
-USING dataset_filter AS dataset_filter,
-      source_datasets AS source_datasets,
-      suffix_override AS suffix_override;
+USING suffix_list AS suffix_list, analyze_options AS analyze_options;
 ```
 
 絞り込みの手段は 3 つ。上から順に「普段」「テスト」「例外」。
 
-| 変数 | 既定 | 用途 |
-|---|---|---|
-| （なし） | — | リージョン内で条件に一致するデータセット全部 |
-| `dataset_filter` | `''` | 追加の正規表現で絞る。`'^sample_'` のようにテスト時だけ狭める |
-| `source_datasets` | `[]` | 自動検出をやめて一覧を直接指定する |
-| `suffix_override` | `[]` | suffix だけ直接指定する（View が suffix 無しのデータセットにある場合） |
+絞り込みはすべて `dataset_patterns` に集約してある（上の表を参照）。
 
 **セクション 0 に事前チェックを置いてある。** 対象 View が 0 件、または suffix を持つ
 データセットが 0 件なら `RAISE` で止まる。黙って空のテーブルを作ると
-`region` や `dataset_filter` の間違いに気づけないため。
+`region` や `dataset_patterns` の間違いに気づけないため。
+`analyze_options` が JSON オブジェクトの形をしていない場合も止まる。
 
 注意しておくこと:
 
 - **条件に一致するが無関係な View を持つデータセットも対象に入る。**
   base ごとに束ねるので混ざりはしないが、1 View だけの base が並ぶ。
-  `dataset_filter` で絞れる
+  `dataset_patterns` で絞れる
 - `INFORMATION_SCHEMA.VIEWS` はリージョン単位で読むので、**そのリージョンの
   View 定義をすべて読む権限が要る**
 

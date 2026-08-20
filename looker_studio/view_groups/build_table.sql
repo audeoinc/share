@@ -2,8 +2,9 @@
 -- suffix 違い View のロジック グループ比較を事前生成してテーブルに持つ
 --
 -- ※ このファイルは build_table.mjs が生成する。直接編集しないこと。
---    suffix 規則や解析オプションは suffix_config.json を直して再生成する。
---    再生成: node looker_studio/view_groups/build_table.mjs
+--    既定値は suffix_config.json から生成している。恒久的に変えるなら
+--    そちらを直して再生成する: node looker_studio/view_groups/build_table.mjs
+--    一度だけ変えたいならセクション 0 の DECLARE を書き換えればよい。
 --
 -- Looker Studio の操作のたびに UDF を回すのは重い（DDL をトークン化 →
 -- α 等価判定 → パラメータ化 → 差分 → HTML 生成）。INFORMATION_SCHEMA の中身は
@@ -13,83 +14,92 @@
 -- 「いつグループ構成が変わったか」を後から追える＝ロジック逸脱の検知に使える。
 --
 -- 前提: view_group_html.sql で VIEW_GROUP_INFO / VIEW_GROUP_CSS を作成済み。
--- 環境に合わせるのはセクション 0 の DECLARE だけ。本文の書き換えは要らない。
---
--- suffix の出どころ: INFORMATION_SCHEMA.SCHEMATA（データセット名）
---   _([A-Za-z]{4})$ に一致したデータセット名の末尾を suffix として使う。
---   対象 View も同じ条件で選ぶので、suffix と対象がズレない。
---   つまりデータセットが増えても SQL の修正は要らない。
 -- =====================================================================
 
 
 -- ---------------------------------------------------------------------
 -- 0. 設定（書き換えるのはここだけ）
 --
---    BigQuery は識別子（プロジェクト・データセット・関数名）をクエリ
---    パラメータにできない。@param が使えるのは値だけ。
---    そこで識別子はスクリプト変数からテキスト置換し（本文の @@PROJECT@@ など）、
---    値は EXECUTE IMMEDIATE の USING で渡す（@dataset_filter など）。
---
---    置換の REPLACE を呼び出しごとに展開しているのは、一時 UDF にまとめると
---    セクション 3 の CREATE VIEW が
---    「Creating views with temporary user defined functions is not supported」
---    で落ちるため。永続 UDF にすると今度はその関数名自身が EXECUTE IMMEDIATE の
---    外に出て、プロジェクト・データセットを置き換えられなくなる。
---
 --    SET @@location は DECLARE より前に置く。本文の参照はすべて
 --    EXECUTE IMMEDIATE の中にあり、ロケーションを推測できるテーブル参照が
 --    無いため、指定しないと既定のロケーションで実行される。
---    下の region と同じ値にすること（どちらも suffix_config.json から生成）。
+--    下の region と同じ値にすること。
+--
+--    識別子（プロジェクト・データセット・正規表現）は本文の @@…@@ を
+--    置き換えて渡す。BigQuery は識別子をクエリ パラメータにできないため。
+--    配列や JSON は値なので USING のパラメータで渡す。
 --
 --    スケジュールドクエリには セクション 0 と 2 を登録する
 --    （1 と 3 は初回だけ、5 は確認用なので不要）。
 -- ---------------------------------------------------------------------
 SET @@location = 'asia-northeast1';
 
+-- 置き場所
 DECLARE project_id   STRING DEFAULT 'my-project';
-DECLARE udf_dataset  STRING DEFAULT 'ops_meta';    -- VIEW_GROUP_INFO / VIEW_GROUP_CSS の置き場所
-DECLARE work_dataset STRING DEFAULT 'ops_meta';    -- view_logic_diff の置き場所
-DECLARE region       STRING DEFAULT 'asia-northeast1';   -- 読むリージョン
-DECLARE tz           STRING DEFAULT 'Asia/Tokyo';  -- snapshot_date の基準
+DECLARE udf_dataset  STRING DEFAULT 'ops_meta';   -- VIEW_GROUP_INFO / VIEW_GROUP_CSS
+DECLARE work_dataset STRING DEFAULT 'ops_meta';   -- view_logic_diff の置き場所
+DECLARE region       STRING DEFAULT 'asia-northeast1';  -- 読むリージョン（上の @@location と揃える）
+DECLARE tz           STRING DEFAULT 'Asia/Tokyo'; -- snapshot_date の基準
+DECLARE partition_expiration_days INT64 DEFAULT 400;  -- 履歴の保持日数
 
--- 比較対象のデータセット。
--- 既定は「リージョン内で suffix の条件（_([A-Za-z]{4})$）に一致するもの全部」。
--- 対象 View も suffix 一覧も同じ条件から引くので、両者がズレない。
-DECLARE dataset_filter  STRING        DEFAULT '';  -- 追加の絞り込み正規表現。'' なら絞らない（テスト用）
-DECLARE source_datasets ARRAY<STRING> DEFAULT [];  -- 空でなければこの一覧だけを対象にする
-DECLARE suffix_override ARRAY<STRING> DEFAULT [];  -- 空でなければ suffix はこれを使う（サンプル環境用）
+-- 対象データセット。**いずれか**の正規表現に一致するものを対象にする。
+-- 空配列にするとリージョン内のすべてのデータセットが対象になる。
+--   絞る例: [r'^mart_']            mart_ で始まるものだけ
+--   並べる例: [r'^mart_abjp$', r'^mart_abus$']
+DECLARE dataset_patterns ARRAY<STRING> DEFAULT [r'_([A-Za-z]{4})$'];
 
-DECLARE n_datasets INT64;
-DECLARE n_views    INT64;
+-- suffix の切り出し。1 つ目のキャプチャが suffix になる。
+DECLARE suffix_pattern STRING DEFAULT r'_([A-Za-z]{4})$';
 
+-- suffix 一覧。空ならデータセット名から suffix_pattern で自動抽出する。
+-- View が suffix を持たないデータセットに置いてある場合など、
+-- データセット名から導けないときだけ並べる。
+DECLARE suffix_list ARRAY<STRING> DEFAULT [];
+
+-- UDF に渡す解析オプション（JSON）。suffix_config.json から生成。
+-- literalGroups をここで足せば、再生成せずに同値リテラルを増やせる。
+-- 1 つ以上のキーを持つ JSON オブジェクトにすること。
+DECLARE analyze_options STRING DEFAULT '{"literalGroups":[],"mode":"class"}';
+
+DECLARE schema_cond STRING;   -- dataset_patterns から組み立てる（SCHEMATA 用）
+DECLARE view_cond   STRING;   -- 同上（VIEWS 用。列名が違うので 2 本作る）
+DECLARE n_datasets  INT64;
+DECLARE n_views     INT64;
+
+IF NOT REGEXP_CONTAINS(TRIM(analyze_options), r'^\{\s*"') THEN
+  RAISE USING MESSAGE = 'analyze_options は 1 つ以上のキーを持つ JSON オブジェクトにしてください（例: {"mode":"class"}）。';
+END IF;
+
+-- dataset_patterns を OR でつないだ条件文にする。空なら TRUE（＝全件）。
+SET schema_cond = IF(ARRAY_LENGTH(dataset_patterns) = 0, 'TRUE',
+  (SELECT STRING_AGG(FORMAT("REGEXP_CONTAINS(schema_name, r'%s')", p), ' OR ')
+   FROM UNNEST(dataset_patterns) AS p));
+SET view_cond = IF(ARRAY_LENGTH(dataset_patterns) = 0, 'TRUE',
+  (SELECT STRING_AGG(FORMAT("REGEXP_CONTAINS(table_schema, r'%s')", p), ' OR ')
+   FROM UNNEST(dataset_patterns) AS p));
 
 -- 事前チェック。0 件のまま進むと空のテーブルができ、設定の間違いに気づけない。
 EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
 SELECT
   (SELECT COUNT(*)
    FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA`
-   WHERE REGEXP_CONTAINS(schema_name, r'_([A-Za-z]{4})$')
-     AND (@dataset_filter = '' OR REGEXP_CONTAINS(schema_name, @dataset_filter))),
+   WHERE REGEXP_CONTAINS(schema_name, r'@@SUFFIX_PATTERN@@') AND (@@SCHEMA_COND@@)),
   (SELECT COUNT(*)
    FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.VIEWS`
-   WHERE IF(ARRAY_LENGTH(@source_datasets) > 0,
-       table_schema IN UNNEST(@source_datasets),
-       REGEXP_CONTAINS(table_schema, r'_([A-Za-z]{4})$')
-         AND (@dataset_filter = '' OR REGEXP_CONTAINS(table_schema, @dataset_filter))))
+   WHERE @@VIEW_COND@@)
 """,
-  '@@PROJECT@@', project_id),
-  '@@UDF@@',     udf_dataset),
-  '@@WORK@@',    work_dataset),
-  '@@REGION@@',  region),
-  '@@TZ@@',      tz)
-INTO n_datasets, n_views
-USING dataset_filter AS dataset_filter, source_datasets AS source_datasets;
+  '@@PROJECT@@',        project_id),
+  '@@REGION@@',         region),
+  '@@SUFFIX_PATTERN@@', suffix_pattern),
+  '@@SCHEMA_COND@@',    schema_cond),
+  '@@VIEW_COND@@',      view_cond)
+INTO n_datasets, n_views;
 
 IF n_views = 0 THEN
-  RAISE USING MESSAGE = '対象の View が 0 件です。region / dataset_filter / source_datasets を確認してください。';
+  RAISE USING MESSAGE = '対象の View が 0 件です。region / dataset_patterns を確認してください。';
 END IF;
-IF n_datasets = 0 AND ARRAY_LENGTH(suffix_override) = 0 THEN
-  RAISE USING MESSAGE = 'suffix を持つデータセットが 0 件です。region / dataset_filter を確認してください。';
+IF n_datasets = 0 AND ARRAY_LENGTH(suffix_list) = 0 THEN
+  RAISE USING MESSAGE = 'suffix を持つデータセットが 0 件です。suffix_pattern / dataset_patterns を確認するか、suffix_list に直接並べてください。';
 END IF;
 
 
@@ -101,7 +111,7 @@ END IF;
 --    スケジュールドクエリに登録するのはセクション 0 と 2 だけなので、
 --    日次の生成でここが動くことはない。
 -- ---------------------------------------------------------------------
-EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(r"""
 CREATE OR REPLACE TABLE `@@PROJECT@@.@@WORK@@.view_logic_diff`
 (
   snapshot_date   DATE           OPTIONS (description = '生成日'),
@@ -119,14 +129,12 @@ PARTITION BY snapshot_date
 CLUSTER BY base
 OPTIONS (
   description = 'suffix 違い View のロジック グループ比較（事前生成）',
-  partition_expiration_days = 400
+  partition_expiration_days = @@RETENTION@@
 )
 """,
-  '@@PROJECT@@', project_id),
-  '@@UDF@@',     udf_dataset),
-  '@@WORK@@',    work_dataset),
-  '@@REGION@@',  region),
-  '@@TZ@@',      tz);
+  '@@PROJECT@@',   project_id),
+  '@@WORK@@',      work_dataset),
+  '@@RETENTION@@', CAST(partition_expiration_days AS STRING));
 
 
 -- ---------------------------------------------------------------------
@@ -135,41 +143,37 @@ OPTIONS (
 --    同じ日に何度実行しても結果が同じになるよう、当日分を消してから入れる。
 --    MERGE より DELETE + INSERT のほうが単純で、パーティション単位なので安い。
 -- ---------------------------------------------------------------------
-EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(r"""
 DELETE FROM `@@PROJECT@@.@@WORK@@.view_logic_diff`
 WHERE snapshot_date = CURRENT_DATE('@@TZ@@')
 """,
   '@@PROJECT@@', project_id),
-  '@@UDF@@',     udf_dataset),
   '@@WORK@@',    work_dataset),
-  '@@REGION@@',  region),
   '@@TZ@@',      tz);
 
-EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
 INSERT INTO `@@PROJECT@@.@@WORK@@.view_logic_diff`
 WITH
--- suffix 一覧。対象 View と同じ条件でデータセット名から拾う。
--- suffix_override を渡したときだけそちらを使う（サンプル環境用）。
+-- suffix 一覧。suffix_list が空なら、対象データセットの名前から切り出す。
 suffixes AS (
   SELECT suffix FROM UNNEST(
-    IF(ARRAY_LENGTH(@suffix_override) > 0,
-       @suffix_override,
+    IF(ARRAY_LENGTH(@suffix_list) > 0,
+       @suffix_list,
        ARRAY(
-         SELECT DISTINCT REGEXP_EXTRACT(schema_name, r'_([A-Za-z]{4})$')
+         SELECT DISTINCT REGEXP_EXTRACT(schema_name, r'@@SUFFIX_PATTERN@@')
          FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA`
-         WHERE REGEXP_CONTAINS(schema_name, r'_([A-Za-z]{4})$')
-           AND (@dataset_filter = '' OR REGEXP_CONTAINS(schema_name, @dataset_filter))
+         WHERE REGEXP_CONTAINS(schema_name, r'@@SUFFIX_PATTERN@@')
+           AND (@@SCHEMA_COND@@)
        ))
   ) AS suffix
 ),
--- UDF に渡す設定。suffixList だけ実行時に決まる。
+-- UDF に渡す設定。suffixList だけ実行時に決まるので、analyze_options に足す。
 opts AS (
   SELECT CONCAT(
     '{"suffixList":',
     TO_JSON_STRING(ARRAY(SELECT suffix FROM suffixes ORDER BY suffix)),
-    -- ↓ suffix_config.json から生成
-    ',"literalGroups":[],"mode":"class"',
-    '}'
+    ',',
+    SUBSTR(TRIM(@analyze_options), 2)
   ) AS options_json
 ),
 
@@ -185,14 +189,12 @@ opts AS (
 src AS (
   SELECT table_name AS view_name, view_definition AS ddl
   FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.VIEWS`
-  WHERE IF(ARRAY_LENGTH(@source_datasets) > 0,
-       table_schema IN UNNEST(@source_datasets),
-       REGEXP_CONTAINS(table_schema, r'_([A-Za-z]{4})$')
-         AND (@dataset_filter = '' OR REGEXP_CONTAINS(table_schema, @dataset_filter)))
+  WHERE @@VIEW_COND@@
 ),
 keyed AS (
-  -- suffix 一覧との ENDS_WITH で base を切る。
-  -- 複数一致したら長いほうを採る（短い suffix が長い suffix の末尾に含まれる場合の対策）。
+  -- suffix 一覧との ENDS_WITH で base を切る。区切りは '_' 固定
+  -- （UDF 側の抽出も '_' 前提なので、片方だけ変えると食い違う）。
+  -- 複数一致したら長いほうを採る。
   -- LEFT JOIN なので suffix の付かない View も 1 行残る。
   SELECT
     src.view_name,
@@ -226,27 +228,28 @@ FROM (
     base,
     `@@PROJECT@@.@@UDF@@.VIEW_GROUP_INFO`(
       ARRAY_AGG(STRUCT(view_name, ddl) ORDER BY view_name),
-      -- suffixes CTE から組み立てた設定（全行で同じ値）
+      -- suffixes から組み立てた設定（全行で同じ値）
       (SELECT options_json FROM opts)
     ) AS info
   FROM keyed
   GROUP BY base
 )
 """,
-  '@@PROJECT@@', project_id),
-  '@@UDF@@',     udf_dataset),
-  '@@WORK@@',    work_dataset),
-  '@@REGION@@',  region),
-  '@@TZ@@',      tz)
-USING dataset_filter AS dataset_filter,
-      source_datasets AS source_datasets,
-      suffix_override AS suffix_override;
+  '@@PROJECT@@',        project_id),
+  '@@UDF@@',            udf_dataset),
+  '@@WORK@@',           work_dataset),
+  '@@REGION@@',         region),
+  '@@TZ@@',             tz),
+  '@@SUFFIX_PATTERN@@', suffix_pattern),
+  '@@SCHEMA_COND@@',    schema_cond),
+  '@@VIEW_COND@@',      view_cond)
+USING suffix_list AS suffix_list, analyze_options AS analyze_options;
 
 
 -- ---------------------------------------------------------------------
 -- 3. Looker Studio が読むビュー（最新スナップショットだけ・初回のみ）
 -- ---------------------------------------------------------------------
-EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
+EXECUTE IMMEDIATE REPLACE(REPLACE(r"""
 CREATE OR REPLACE VIEW `@@PROJECT@@.@@WORK@@.v_view_logic_diff_latest` AS
 SELECT *
 FROM `@@PROJECT@@.@@WORK@@.view_logic_diff`
@@ -255,10 +258,7 @@ WHERE snapshot_date = (
 )
 """,
   '@@PROJECT@@', project_id),
-  '@@UDF@@',     udf_dataset),
-  '@@WORK@@',    work_dataset),
-  '@@REGION@@',  region),
-  '@@TZ@@',      tz);
+  '@@WORK@@',    work_dataset);
 
 
 -- ---------------------------------------------------------------------
@@ -267,7 +267,7 @@ WHERE snapshot_date = (
 --    これだけはコメントのまま。毎回 8 KB の CSS を返しても邪魔なので、
 --    必要なときに @@PROJECT@@ / @@UDF@@ を置き換えて実行する。
 -- ---------------------------------------------------------------------
--- SELECT `@@PROJECT@@.@@UDF@@.VIEW_GROUP_CSS`('''{"literalGroups":[],"mode":"class"}''');
+-- SELECT `@@PROJECT@@.@@UDF@@.VIEW_GROUP_CSS`(@analyze_options);
 
 
 -- ---------------------------------------------------------------------
@@ -284,98 +284,77 @@ WHERE snapshot_date = (
 -- ---------------------------------------------------------------------
 
 -- 5-1 生成結果の中身
-EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
+EXECUTE IMMEDIATE REPLACE(REPLACE(r"""
 SELECT base, view_count, group_count, group_labels, unmatched_count,
        LENGTH(diff_html) AS html_len
 FROM `@@PROJECT@@.@@WORK@@.v_view_logic_diff_latest`
 ORDER BY base
 """,
   '@@PROJECT@@', project_id),
-  '@@UDF@@',     udf_dataset),
-  '@@WORK@@',    work_dataset),
-  '@@REGION@@',  region),
-  '@@TZ@@',      tz);
+  '@@WORK@@',    work_dataset);
 
 -- 5-2 ロジックが割れている base（＝要確認のもの）
-EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
+EXECUTE IMMEDIATE REPLACE(REPLACE(r"""
 SELECT base, group_count, group_labels
 FROM `@@PROJECT@@.@@WORK@@.v_view_logic_diff_latest`
 WHERE has_multiple
 ORDER BY group_count DESC, base
 """,
   '@@PROJECT@@', project_id),
-  '@@UDF@@',     udf_dataset),
-  '@@WORK@@',    work_dataset),
-  '@@REGION@@',  region),
-  '@@TZ@@',      tz);
+  '@@WORK@@',    work_dataset);
 
 -- 5-3 suffix を認識できなかった View（単独で 1 行ずつ並ぶ）
-EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
+EXECUTE IMMEDIATE REPLACE(REPLACE(r"""
 SELECT base, group_labels
 FROM `@@PROJECT@@.@@WORK@@.v_view_logic_diff_latest`
 WHERE unmatched_count > 0
 ORDER BY base
 """,
   '@@PROJECT@@', project_id),
-  '@@UDF@@',     udf_dataset),
-  '@@WORK@@',    work_dataset),
-  '@@REGION@@',  region),
-  '@@TZ@@',      tz);
+  '@@WORK@@',    work_dataset);
 
 -- 5-4 対象データセットと suffix（セクション 0 と同じ条件）
---     0 件ならここまで来ていないはず（セクション 0 で止まる）。
-EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(r"""
 SELECT
-  REGEXP_EXTRACT(schema_name, r'_([A-Za-z]{4})$') AS suffix,
+  REGEXP_EXTRACT(schema_name, r'@@SUFFIX_PATTERN@@') AS suffix,
   COUNT(*) AS dataset_count,
   STRING_AGG(schema_name, ', ' ORDER BY schema_name) AS datasets
 FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA`
-WHERE REGEXP_CONTAINS(schema_name, r'_([A-Za-z]{4})$')
-  AND (@dataset_filter = '' OR REGEXP_CONTAINS(schema_name, @dataset_filter))
+WHERE REGEXP_CONTAINS(schema_name, r'@@SUFFIX_PATTERN@@') AND (@@SCHEMA_COND@@)
 GROUP BY suffix
 ORDER BY suffix
 """,
-  '@@PROJECT@@', project_id),
-  '@@UDF@@',     udf_dataset),
-  '@@WORK@@',    work_dataset),
-  '@@REGION@@',  region),
-  '@@TZ@@',      tz)
-USING dataset_filter AS dataset_filter;
+  '@@PROJECT@@',        project_id),
+  '@@REGION@@',         region),
+  '@@SUFFIX_PATTERN@@', suffix_pattern),
+  '@@SCHEMA_COND@@',    schema_cond);
 
 -- 5-5 データセット別の対象 View 数
-EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(r"""
 SELECT table_schema, COUNT(*) AS view_count
 FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.VIEWS`
-WHERE IF(ARRAY_LENGTH(@source_datasets) > 0,
-       table_schema IN UNNEST(@source_datasets),
-       REGEXP_CONTAINS(table_schema, r'_([A-Za-z]{4})$')
-         AND (@dataset_filter = '' OR REGEXP_CONTAINS(table_schema, @dataset_filter)))
+WHERE @@VIEW_COND@@
 GROUP BY table_schema
 ORDER BY table_schema
 """,
-  '@@PROJECT@@', project_id),
-  '@@UDF@@',     udf_dataset),
-  '@@WORK@@',    work_dataset),
-  '@@REGION@@',  region),
-  '@@TZ@@',      tz)
-USING dataset_filter AS dataset_filter, source_datasets AS source_datasets;
+  '@@PROJECT@@',   project_id),
+  '@@REGION@@',    region),
+  '@@VIEW_COND@@', view_cond);
 
 -- 5-6 条件から外れたデータセット（対象のつもりのものが落ちていないか）
-EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(r"""
 SELECT schema_name
 FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA`
-WHERE NOT REGEXP_CONTAINS(schema_name, r'_([A-Za-z]{4})$')
+WHERE NOT (@@SCHEMA_COND@@)
 ORDER BY schema_name
 """,
-  '@@PROJECT@@', project_id),
-  '@@UDF@@',     udf_dataset),
-  '@@WORK@@',    work_dataset),
-  '@@REGION@@',  region),
-  '@@TZ@@',      tz);
+  '@@PROJECT@@',     project_id),
+  '@@REGION@@',      region),
+  '@@SCHEMA_COND@@', schema_cond);
 
 -- 5-7 グループ構成が変わった日（ロジック逸脱がいつ入ったか）
 --     履歴が 1 日分しかなければ 0 件。
-EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
+EXECUTE IMMEDIATE REPLACE(REPLACE(r"""
 SELECT base, snapshot_date, group_count, group_labels
 FROM (
   SELECT *,
@@ -388,7 +367,4 @@ WHERE prev_labels IS NOT NULL AND prev_labels != curr_labels
 ORDER BY snapshot_date DESC, base
 """,
   '@@PROJECT@@', project_id),
-  '@@UDF@@',     udf_dataset),
-  '@@WORK@@',    work_dataset),
-  '@@REGION@@',  region),
-  '@@TZ@@',      tz);
+  '@@WORK@@',    work_dataset);
