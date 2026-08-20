@@ -1,10 +1,8 @@
 -- =====================================================================
 -- suffix 違い View のロジック グループ比較を事前生成してテーブルに持つ
 --
--- ※ このファイルは build_table.mjs が生成する。直接編集しないこと。
---    既定値は suffix_config.json から生成している。恒久的に変えるなら
---    そちらを直して再生成する: node looker_studio/view_groups/build_table.mjs
---    一度だけ変えたいならセクション 0 の DECLARE を書き換えればよい。
+-- ※ このファイルを直接編集する。生成物ではない。
+--    設定はセクション 0 の DECLARE だけ。ほかに設定を置く場所はない。
 --
 -- Looker Studio の操作のたびに UDF を回すのは重い（DDL をトークン化 →
 -- α 等価判定 → パラメータ化 → 差分 → HTML 生成）。INFORMATION_SCHEMA の中身は
@@ -56,9 +54,11 @@ DECLARE suffix_pattern STRING DEFAULT r'_([A-Za-z]{4})$';
 -- データセット名から導けないときだけ並べる。
 DECLARE suffix_list ARRAY<STRING> DEFAULT [];
 
--- UDF に渡す解析オプション（JSON）。suffix_config.json から生成。
--- literalGroups をここで足せば、再生成せずに同値リテラルを増やせる。
--- 1 つ以上のキーを持つ JSON オブジェクトにすること。
+-- UDF に渡す解析オプション（JSON）。1 つ以上のキーを持つオブジェクトにすること。
+-- 指定できるキーは view_group_html.sql の冒頭に一覧がある。
+--   suffixAware / literalSuffixWords / literalGroups / includeUnmatched /
+--   stripOptions / substitutable / layout / mode / 表示の調整
+-- suffixList は下の suffixes から自動で入るので、ここには書かない。
 DECLARE analyze_options STRING DEFAULT '{"literalGroups":[],"mode":"class"}';
 
 DECLARE schema_cond STRING;   -- dataset_patterns から組み立てる（SCHEMATA 用）

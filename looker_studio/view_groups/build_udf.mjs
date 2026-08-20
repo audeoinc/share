@@ -26,10 +26,10 @@ import { createRequire } from 'node:module';
 const here = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 
-// ロケーションは suffix_config.json と揃える。build_table.sql と同じ値でないと、
-// 作った UDF と呼び出し側が別リージョンになって参照できない。
-const cfg = JSON.parse(await readFile(join(here, 'suffix_config.json'), 'utf8'));
-const region = cfg.region || 'asia-northeast1';
+// 生成する SQL の DECLARE / SET @@location に入れる既定値。
+// 実際の値は生成後の view_group_html.sql の先頭で書き換える。
+// build_table.sql と同じロケーションにしないと、作った UDF を参照できない。
+const region = 'asia-northeast1';
 
 // インラインで埋め込んでよい上限。32 KB に対して余裕を持たせる。
 const SIZE_LIMIT = 30 * 1024;

@@ -137,98 +137,80 @@ WHERE country = 'US'   -- v_x_abus
 - **何をパラメータとみなしたかを必ず `params` で返す**。判定が正しいかを人が確認できる。
   ここを隠すと危ないので、画面にも出す前提
 
+## 設定は build_table.sql の DECLARE だけ
+
+**設定ファイルは持たない。** 開発中に設定の置き場所が複数あると、期待どおりの
+値でテストできているのかを毎回確かめる羽目になり、不具合の切り分けが遅くなる。
+`build_table.sql` は生成物ではなく、**直接編集するファイル**。
+
+`analyze.js` / `render_groups.js` から作るのは `view_group_html.sql`（UDF 本体）
+だけで、そちらの設定も先頭の `DECLARE` にある。
+
+| ファイル | 位置づけ |
+|---|---|
+| `build_table.sql` | 手で編集する。設定はセクション 0 の `DECLARE` |
+| `view_group_html.sql` | `build_udf.mjs` の生成物。JS を最小化して埋めるため。設定は先頭の `DECLARE` |
+| `template_style.html` | `build_udf.mjs` の生成物（CSS） |
+
 ## suffix はデータセット名から自動で拾う（既定）
 
 suffix の一覧を人が書いて維持するのは、**View が増えたときに黙って壊れる**種類の
 運用になる。幸い、**suffix として使われている文字列はデータセット名の末尾にも
 現れる**（`mart_abjp` / `raw_cduk`）。ここから拾えば手運用が要らなくなる。
 
-`suffix_config.json` の既定はこれ。
-
-```json
-{
-  "suffixSource": "schemata",
-  "schemataPattern": "_([A-Za-z]{4})$",
-  "region": "asia-northeast1"
-}
-```
-
-生成される SQL は `INFORMATION_SCHEMA.SCHEMATA` を舐めて suffix 一覧を作り、
-それを View 名との `ENDS_WITH` で突き合わせて base を切る。UDF に渡す
-`suffixList` も同じ一覧から組み立てるので、**suffix が増えても SQL の修正は不要**。
-
 ```sql
 suffixes AS (
-  SELECT DISTINCT REGEXP_EXTRACT(schema_name, r'_([A-Za-z]{4})$') AS suffix
-  FROM `PROJECT.region-asia-northeast1.INFORMATION_SCHEMA.SCHEMATA`
-  WHERE REGEXP_CONTAINS(schema_name, r'_([A-Za-z]{4})$')
-)
+  SELECT suffix FROM UNNEST(
+    IF(ARRAY_LENGTH(@suffix_list) > 0,
+       @suffix_list,
+       ARRAY(
+         SELECT DISTINCT REGEXP_EXTRACT(schema_name, r'@@SUFFIX_PATTERN@@')
+         FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA`
+         WHERE REGEXP_CONTAINS(schema_name, r'@@SUFFIX_PATTERN@@')
+           AND (@@SCHEMA_COND@@)
+       ))
+  ) AS suffix
+),
 ```
+
+この一覧を View 名との `ENDS_WITH` で突き合わせて base を切り、UDF に渡す
+`suffixList` も同じ一覧から作る。**suffix が増えても SQL の修正は要らない。**
 
 `REGEXP_EXTRACT` で base を切らないのは、**BigQuery の `REGEXP_*` がパターンに
 定数を要求しうる**ため。実行時に決まる一覧から正規表現を組み立てるのは避けて、
-`ENDS_WITH` の結合にしてある（複数一致したら長いほうを採る）。
+`ENDS_WITH` の結合にしてある（複数一致したら長いほうを採る）。区切りの `_` は
+SQL 側も UDF 側も固定なので、片方だけ変えると食い違う。
 
 注意点:
 
-- リージョンは `suffix_config.json` の `region`（既定 `asia-northeast1`）から生成する。
-  **データセットのロケーションと揃える**こと。ここを間違えるとセクション 0 の
-  事前チェックで止まる
+- `region` は**データセットのロケーションと揃える**こと。`SET @@location` も
+  同じ値にする。間違えるとセクション 0 の事前チェックで止まる
 - **サンプルは View を 1 つのデータセット（`sample_mart`）にまとめてある**ので、
   自動検出では拾えない。`dataset_patterns = [r'^sample_mart$']` と
   `suffix_list = ['abjp', 'abuk', …]` を指定して試す
-- `build_table.mjs` は書き出す前に、`ENDS_WITH` の切り出しと `analyze.js` の抽出が
-  同じ base を返すかを照合する
-- **無関係なデータセットも `_` + 4 文字英字で終われば拾われる**。害が出るのは
-  その文字列で終わる View 名がある場合だけだが、気になるなら `schemataPattern` を
-  絞る（例: `^mart_([A-Za-z]{4})$`）
+- **無関係なデータセットも条件に一致すれば拾われる**。害が出るのはその文字列で
+  終わる View 名がある場合だけだが、気になるなら `dataset_patterns` を絞る
 
-手で決めたい場合は `"suffixSource": "config"` にすると、下の 3 通りの指定に戻る。
-
-## suffix パターンを変更する手順
-
-**設定は [`suffix_config.json`](./suffix_config.json) の 1 箇所だけ。**
-suffix 規則は SQL 側（base の切り出し）と UDF 側（`options_json`）の
-両方で必要になるが、手で 2 箇所書くとズレて base の束ね方と解析が食い違うので、
-1 つの設定から両方を生成する。
+## 設定を変えたときにやること
 
 ```bash
-# 1. suffix_config.json を直す
-# 2. SQL を作り直す（SQL 側の切り出しと analyze.js の抽出が一致するか検証してから書き出す）
-node build_table.mjs
-
-# 3. 変更が UDF の既定値にも関わる場合は UDF も作り直す
+# UDF の中身（analyze.js / render_groups.js）を変えたときだけ
 node build_udf.mjs
 ```
-
-`build_table.mjs` は書き出す前に、**SQL 側の切り出しと `analyze.js` の抽出が
-同じ base を返すか**を照合する。食い違えば失敗して SQL は出力されない。
 
 そのあと BigQuery で:
 
 1. `view_group_html.sql`（UDF を作り直した場合のみ）
 2. `build_table.sql`
-3. 表示が変わる設定を触ったら `template_style.html` も貼り直す
+3. 表示に関わる設定（`mode` や色）を変えたら `template_style.html` も貼り直す
 
-> UDF は `options_json` を実行時に受け取るので、**suffix 規則を変えるだけなら
-> UDF の作り直しは不要**。`build_table.sql` の再実行だけでよい。
+> UDF は `analyze_options` を実行時に受け取るので、**suffix 規則や
+> `literalGroups` を変えるだけなら UDF の作り直しは不要**。
+> `build_table.sql` の再実行だけでよい。
 
-### 手で指定する場合（suffixSource: "config"）
-
-上から優先される。`suffixSource: "schemata"` のときは `suffixList` が実行時に
-入るので、ここの指定は使われない（`suffixParts` はサンプル用の固定一覧として
-コメントに残るだけ）。
-
-| 指定 | 用途 |
-|---|---|
-| `suffixParts: [['ab','cd','ef'], ['jp','us','uk']]` | **区分の組み合わせ**。規則が最もはっきりする。内訳（`parts: ['ab','jp']`）も返る |
-| `suffixList: ['abjp', 'abus', …]` | 既知の一覧を直接指定 |
-| `suffixPattern: '^(.*?)_([A-Za-z0-9]{1,6})$'` | 正規表現。既定は末尾の `_` + 1〜6 文字 |
-
-`v_daily_sales` のように suffix を持たない名前は `unmatched` に入る。
-
-`suffixPattern` を使う場合は `^(base)(suffix)$` の形で**キャプチャを 2 つ**持たせる。
-1 つ目が base、2 つ目が suffix になる。
+`analyze_options` に書けるキーは `view_group_html.sql` の冒頭に一覧がある。
+綴りを間違えたキーは UDF 側で黙って無視されるので、効いていないと思ったら
+まずそこを見る。
 
 ## suffix を認識できなかった View
 
@@ -382,9 +364,8 @@ DECLARE suffix_list      ARRAY<STRING> DEFAULT [];
 DECLARE analyze_options  STRING        DEFAULT '{"literalGroups":[],"mode":"class"}';
 ```
 
-`build_table.sql` の設定は次のとおり。**既定値は `suffix_config.json` から生成される**
-ので、恒久的に変えるなら設定ファイルを直して再生成する。一度だけ試すなら
-`DECLARE` を直接書き換えればよい。
+`build_table.sql` の設定は次のとおり。ここが唯一の置き場所で、書き換えたら
+そのまま実行する。生成の手順はない。
 
 | 変数 | 役割 |
 |---|---|
@@ -443,8 +424,7 @@ INSERT INTO `@@PROJECT@@.@@WORK@@.view_logic_diff` …
 **`SET @@location` は `DECLARE` より前に置く。** どちらのスクリプトも、参照は
 すべて `EXECUTE IMMEDIATE` の中にあり、BigQuery がロケーションを推測できる
 テーブル参照が無い。指定しないと既定のロケーションで実行され、目的の
-データセットに作れない。`build_table.sql` では下の `region` と同じ値にする
-（どちらも `suffix_config.json` の `region` から生成される）。
+データセットに作れない。`build_table.sql` では下の `region` と同じ値にする。
 
 - **対象データセットはリージョン内から自動で拾う。** 既定は
   「suffix の条件に一致するデータセット全部」（下記）。
@@ -513,7 +493,7 @@ USING suffix_list AS suffix_list, analyze_options AS analyze_options;
 
 ## 事前生成テーブル（build_table.sql）
 
-`build_table.sql` は `build_table.mjs` の生成物。直接編集しない。
+`build_table.sql` は手で編集するファイル。設定はセクション 0 の `DECLARE` だけ。
 
 Looker の操作のたびに UDF を回すのは重いので、スケジュールドクエリで作り置きする。
 `INFORMATION_SCHEMA` の中身は View をデプロイしたときしか変わらない。
@@ -530,9 +510,8 @@ Looker Studio は `v_view_logic_diff_latest` を読むだけ。`base` をプル�
 パーティションに日付を積むので**履歴が残る**。「いつグループ構成が変わったか」を
 後から追えるので、ロジック逸脱の検知に使える（`build_table.sql` の末尾に例あり）。
 
-base の切り出しと UDF の `options_json` は `suffix_config.json` から同時に
-生成されるので、揃っていることが保証される。既定（`suffixSource: "schemata"`）では
-どちらも `SCHEMATA` から取った同じ suffix 一覧を使う。
+base の切り出しと UDF に渡す `suffixList` は、同じ 1 つの `suffixes` から作る。
+別々に持つ場所がないので、ズレようがない。
 
 ## Looker Studio への配線
 
