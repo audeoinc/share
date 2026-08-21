@@ -464,12 +464,13 @@ ${cssPack.code}
 --                 ["ident","quoted","number","string"]
 --   suffixAware   比較の前に自分の suffix を伏せ字にする（既定 true）。
 --                 リテラルに入った suffix でグループが割れるのを防ぐ
---   literalSuffixWords リテラルの中の語も suffix 語彙と照合する（既定 true）。
---                 'JP' / 'US' のように suffix そのものではないが連動する値を
---                 語単位・大文字小文字を無視して吸収する
+--   literalSuffixWords リテラルの値を suffix 語彙と照合する（既定 true）。
+--                 'JP' / 'US' のように suffix そのものではないが連動する値を、
+--                 引用符の中身がまるごと一致したときだけ吸収する
 --   literalGroups suffix から導けない同値リテラルを手で並べる。
 --                 [["apac","amer","emea"], ["JPY","USD","GBP"]]
---                 1 つの配列が 1 つの同値類。別の配列どうしは同一視しない
+--                 1 つの配列が 1 つの同値類。別の配列どうしは同一視しない。
+--                 こちらも値の全体が一致したときだけ効く
 --   includeUnmatched suffix を認識できなかった View を単独の base として
 --                 表示する（既定 true）。false で従来どおり除外
 --   stripOptions  OPTIONS( … ) 句を落としてから比較する（既定 true）

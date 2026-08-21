@@ -223,10 +223,6 @@ function suffixWords(suffix, parts) {
   return out;
 }
 
-const WORD_RE = /[A-Za-z0-9]+/g;
-
-/** 語を照合するトークン種別。識別子は substitutable が面倒を見るので入れない。 */
-const LITERAL_KINDS = { string: 1, quoted: 1, number: 1 };
 
 /**
  * 手で管理する「同一視するリテラル」の並びから、語 → 目印の対応を作る。
@@ -261,9 +257,15 @@ function buildLiteralMap(groups) {
  * 1. その View 自身の suffix（文字列として、どのトークンでも）
  *    参照先の識別子もデータセット名も View と同じ suffix を持つ運用なら、
  *    伏せ字にした時点で同じ文字列になる。
- * 2. リテラルの中の語（大文字小文字を無視、語全体が一致したときだけ）
+ * 2. リテラルの値そのもの（大文字小文字を無視、値の全体が一致したときだけ）
  *    a. その View の suffix 語彙 … 'JP' / 'US' のように suffix と連動する値
  *    b. literalGroups の並び  … suffix から導けない、人が並べた同値リテラル
+ *
+ * 2 はリテラルの中を語単位で探さない。区切り文字で割って探すと、
+ * 'ORDER_IN_TRANSIT' の IN のような無関係な語まで拾ってしまう。
+ * 引用符の中身がまるごと語彙と一致したときだけ置き換える。
+ * 対象は文字列リテラルと数値リテラルだけ。バッククォート識別子は
+ * substitutable が面倒を見るので触らない。
  *
  * 置換可能種別（substitutable）を緩めるのと違い、リテラルでも
  * 「連動しているから同じ」と「値そのものが違う」を区別できる。
@@ -273,7 +275,7 @@ function buildLiteralMap(groups) {
 function maskTokens(tokens, suffix, parts, opts) {
   const s = String(suffix || '');
   const useSuffix = s.length >= 2;
-  // リテラル内の語照合。suffix と連動する国コードなどを吸収する。
+  // リテラルの値の照合。suffix と連動する国コードなどを吸収する。
   const words = (useSuffix && !(opts && opts.literalSuffixWords === false))
     ? suffixWords(s, parts) : [];
   const map = buildLiteralMap(opts && opts.literalGroups);
@@ -282,12 +284,15 @@ function maskTokens(tokens, suffix, parts, opts) {
     if (t.kind === 'space') return t;
     let text = t.text;
     if (useSuffix && text.indexOf(s) >= 0) text = text.split(s).join(SUFFIX_MARK);
-    if ((words.length > 0 || map) && LITERAL_KINDS[t.kind]) {
-      text = text.replace(WORD_RE, (w) => {
-        const k = w.toLowerCase();
-        if (words.indexOf(k) >= 0) return SUFFIX_MARK;
-        return (map && map[k]) || w;
-      });
+    if (words.length > 0 || map) {
+      // 引用符を外した中身。数値は引用符が無いのでそのまま。
+      const body = t.kind === 'string' && text.length >= 2 ? text.slice(1, -1)
+        : (t.kind === 'number' ? text : null);
+      if (body) {
+        const k = body.toLowerCase();
+        const mark = words.indexOf(k) >= 0 ? SUFFIX_MARK : (map && map[k]);
+        if (mark) text = t.kind === 'string' ? text[0] + mark + text[0] : mark;
+      }
     }
     return text === t.text ? t : { kind: t.kind, text };
   });

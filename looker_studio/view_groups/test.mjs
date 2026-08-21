@@ -243,6 +243,37 @@ checks.push(['literalGroups は suffix と独立に効く',
 checks.push(['空の literalGroups は何もしない',
   A.buildLiteralMap([]) === null && A.buildLiteralMap(undefined) === null]);
 
+// リテラルは値の全体が一致したときだけ伏せ字にする
+// 語単位で中を探すと 'ORDER_IN_TRANSIT' の IN のような無関係な語まで拾う。
+const inWords = A.maskTokens(
+  A.tokenizeSql("SELECT a FROM t WHERE s = 'ORDER_IN_TRANSIT'"), 'abin');
+checks.push(['区切り文字で割った語には効かない',
+  inWords.map((t) => t.text).join('').includes("'ORDER_IN_TRANSIT'")]);
+checks.push(['値の全体が一致すれば効く',
+  !A.maskTokens(A.tokenizeSql("SELECT 'IN' AS x"), 'abin')
+    .map((t) => t.text).join('').includes("'IN'")]);
+checks.push(['バッククォート識別子は語照合の対象外',
+  A.maskTokens(A.tokenizeSql('SELECT a FROM `p.d.t_jp`'), 'abjp')
+    .map((t) => t.text).join('').includes('t_jp')]);
+checks.push(['literalGroups も値の全体が一致したときだけ',
+  A.maskTokens(A.tokenizeSql("SELECT 'x_apac_y' AS z"), null, null,
+    { literalGroups: [['apac']] })
+    .map((t) => t.text).join('').includes("'x_apac_y'")]);
+checks.push(['identifier の中の suffix は従来どおり伏せ字',
+  !A.maskTokens(A.tokenizeSql('SELECT a FROM t_abjp'), 'abjp')
+    .map((t) => t.text).join('').includes('abjp')]);
+checks.push(['リテラルの中の完全な suffix も従来どおり伏せ字',
+  !A.maskTokens(A.tokenizeSql("SELECT 'load_abjp' AS x"), 'abjp')
+    .map((t) => t.text).join('').includes('abjp')]);
+
+// グループ判定として: 語の一部の一致で意図せずまとまらない
+const inLogic = [
+  { view_name: 'v_q_abin', ddl: "SELECT a FROM t_abin WHERE s = 'ORDER_IN_TRANSIT'" },
+  { view_name: 'v_q_abus', ddl: "SELECT a FROM t_abus WHERE s = 'ORDER_ON_HOLD'" },
+];
+checks.push(['語の一部が一致しても別ロジックのままにする',
+  A.analyze(inLogic, { suffixList: ['abin', 'abus'] }).bases[0].groupCount === 2]);
+
 // suffix を認識できなかった View
 // 出さないとソースが画面から消える。単独の base（1 View / 1 グループ）として並べる。
 const withOdd = A.analyze(rows.concat([
