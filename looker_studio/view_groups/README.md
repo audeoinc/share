@@ -186,10 +186,10 @@ SQL 側も UDF 側も固定なので、片方だけ変えると食い違う。
 - `region` は**データセットのロケーションと揃える**こと。`SET @@location` も
   同じ値にする。間違えるとセクション 0 の事前チェックで止まる
 - **サンプルは View を 1 つのデータセット（`sample_mart`）にまとめてある**ので、
-  自動検出では拾えない。`dataset_patterns = [r'^sample_mart$']` と
+  自動検出では拾えない。`include_dataset_patterns = [r'^sample_mart$']` と
   `suffix_list = ['abjp', 'abuk', …]` を指定して試す
 - **無関係なデータセットも条件に一致すれば拾われる**。害が出るのはその文字列で
-  終わる View 名がある場合だけだが、気になるなら `dataset_patterns` を絞る
+  終わる View 名がある場合だけだが、気になるなら include / exclude で絞る
 
 ## 設定を変えたときにやること
 
@@ -369,24 +369,28 @@ DECLARE analyze_options  STRING        DEFAULT '{"literalGroups":[],"mode":"clas
 
 | 変数 | 役割 |
 |---|---|
-| `dataset_patterns` | 対象データセット。**いずれか**の正規表現に一致するものが対象。空配列ならリージョン内すべて |
-| `view_name_patterns` | 対象 View 名。空配列なら絞らない。指定するといずれかに一致するものだけ |
-| `view_name_exclude_patterns` | 落とす View 名。いずれかに一致したら対象外。include のあとに効く |
+| `include_dataset_patterns` | 対象データセット。空配列ならリージョン内すべて |
+| `exclude_dataset_patterns` | 落とすデータセット。include のあとに効く |
+| `include_view_patterns` | 対象 View 名（`table_name`）。空配列なら絞らない |
+| `exclude_view_patterns` | 落とす View 名。include のあとに効く |
 | `suffix_pattern` | データセット名から suffix を切り出す正規表現（1 つ目のキャプチャ） |
 | `suffix_list` | suffix 一覧。空なら `suffix_pattern` で自動抽出。データセット名から導けないときだけ並べる |
 | `analyze_options` | UDF に渡す解析オプション（JSON）。`literalGroups` をここで足せば再生成が要らない |
 | `partition_expiration_days` | 履歴の保持日数 |
 
-`dataset_patterns` は複数書ける。1 本に詰め込む必要はない。View 名の 2 つも同じ形。
+4 つとも同じ形で、**include は OR、そのあと exclude を `AND NOT` で足す**。
+複数書けるので 1 本の正規表現に詰め込む必要はない。
+照合は部分一致（`REGEXP_CONTAINS`）なので、完全一致にしたいなら `^…$` を付ける。
 
 ```sql
-DECLARE dataset_patterns ARRAY<STRING> DEFAULT [r'^mart_', r'^dwh_'];
+DECLARE include_dataset_patterns ARRAY<STRING> DEFAULT [r'^mart_', r'^dwh_'];
+DECLARE exclude_dataset_patterns ARRAY<STRING> DEFAULT [r'_sandbox$'];
 -- 特定のデータセットだけ試す
-DECLARE dataset_patterns ARRAY<STRING> DEFAULT [r'^mart_abjp$', r'^mart_abus$'];
+DECLARE include_dataset_patterns ARRAY<STRING> DEFAULT [r'^mart_abjp$', r'^mart_abus$'];
 ```
 
-配列は `OR` でつないだ条件文に組み立てられ、`SCHEMATA` と `VIEWS` の両方に
-同じ条件が効く（列名が違うので条件文は 2 本作る）。
+組み立てた条件文は `SCHEMATA` と `VIEWS` の両方に効く。見る列が
+`schema_name` / `table_schema` / `table_name` と違うので、条件文は 3 本作る。
 
 **View 名の絞り込みは `table_name`（suffix を含んだ実際の View 名）に効く。**
 base 名ではないので、`^v_daily_sales$` は `v_daily_sales_abjp` に一致しない。
@@ -394,9 +398,9 @@ base 名ではないので、`^v_daily_sales$` は `v_daily_sales_abjp` に一�
 
 ```sql
 -- 特定の base だけ試す
-DECLARE view_name_patterns ARRAY<STRING> DEFAULT [r'^v_daily_sales_'];
+DECLARE include_view_patterns ARRAY<STRING> DEFAULT [r'^v_daily_sales_'];
 -- 作業用の View を除く
-DECLARE view_name_exclude_patterns ARRAY<STRING> DEFAULT [r'_tmp$', r'_bk$', r'^wk_'];
+DECLARE exclude_view_patterns ARRAY<STRING> DEFAULT [r'_tmp$', r'_bk$', r'^wk_'];
 ```
 
 落とした View はセクション 5-5b に一覧で出る。意図せず落ちていないか確かめられる。
@@ -492,7 +496,7 @@ USING suffix_list AS suffix_list, analyze_options AS analyze_options;
 
 絞り込みの手段は 3 つ。上から順に「普段」「テスト」「例外」。
 
-絞り込みはすべて `dataset_patterns` に集約してある（上の表を参照）。
+絞り込みは上の 4 つの配列に集約してある。
 
 **セクション 0 に事前チェックを置いてある。** 対象 View が 0 件、または suffix を持つ
 データセットが 0 件なら `RAISE` で止まる。黙って空のテーブルを作ると
@@ -503,7 +507,7 @@ USING suffix_list AS suffix_list, analyze_options AS analyze_options;
 
 - **条件に一致するが無関係な View を持つデータセットも対象に入る。**
   base ごとに束ねるので混ざりはしないが、1 View だけの base が並ぶ。
-  `dataset_patterns` で絞れる
+  include / exclude で絞れる
 - `INFORMATION_SCHEMA.VIEWS` はリージョン単位で読むので、**そのリージョンの
   View 定義をすべて読む権限が要る**
 

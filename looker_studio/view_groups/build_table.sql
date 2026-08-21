@@ -40,19 +40,20 @@ DECLARE region       STRING DEFAULT 'asia-northeast1';  -- 読むリージョン
 DECLARE tz           STRING DEFAULT 'Asia/Tokyo'; -- snapshot_date の基準
 DECLARE partition_expiration_days INT64 DEFAULT 400;  -- 履歴の保持日数
 
--- 対象データセット。**いずれか**の正規表現に一致するものを対象にする。
--- 空配列にするとリージョン内のすべてのデータセットが対象になる。
---   絞る例: [r'^mart_']            mart_ で始まるものだけ
---   並べる例: [r'^mart_abjp$', r'^mart_abus$']
-DECLARE dataset_patterns ARRAY<STRING> DEFAULT [r'_([A-Za-z]{4})$'];
+-- 対象の絞り込み。データセットと View 名で、それぞれ include / exclude を持つ。
+--   include … 空配列なら絞らない。指定すると**いずれか**に一致するものだけが対象
+--   exclude … **いずれか**に一致したものを落とす。include のあとに効く
+-- 正規表現は部分一致（REGEXP_CONTAINS）。完全一致にしたいなら ^…$ を付ける。
+--
+--   include 例: [r'^mart_']  [r'^mart_abjp$', r'^mart_abus$']
+--   exclude 例: [r'_tmp$', r'_bk$', r'^wk_']
+DECLARE include_dataset_patterns ARRAY<STRING> DEFAULT [r'_([A-Za-z]{4})$'];
+DECLARE exclude_dataset_patterns ARRAY<STRING> DEFAULT [];
 
--- 対象 View。データセットの絞り込みとは別に、View 名でも絞れる。
--- include は空配列なら絞らない。指定するといずれかに一致するものだけが対象。
--- exclude はいずれかに一致したものを落とす。include より後に効く。
---   絞る例  : [r'^v_daily_sales_']
---   落とす例: [r'_tmp$', r'_bk$', r'^wk_']
-DECLARE view_name_patterns         ARRAY<STRING> DEFAULT [];
-DECLARE view_name_exclude_patterns ARRAY<STRING> DEFAULT [];
+-- View 名は table_name（suffix を含んだ実際の名前）に効く。base 名ではない。
+-- ある base だけ見たいなら r'^v_daily_sales_' のように書く。
+DECLARE include_view_patterns    ARRAY<STRING> DEFAULT [];
+DECLARE exclude_view_patterns    ARRAY<STRING> DEFAULT [];
 
 -- suffix の切り出し。1 つ目のキャプチャが suffix になる。
 DECLARE suffix_pattern STRING DEFAULT r'_([A-Za-z]{4})$';
@@ -69,9 +70,9 @@ DECLARE suffix_list ARRAY<STRING> DEFAULT [];
 -- suffixList は下の suffixes から自動で入るので、ここには書かない。
 DECLARE analyze_options STRING DEFAULT '{"literalGroups":[],"mode":"class"}';
 
-DECLARE schema_cond    STRING;  -- dataset_patterns から組み立てる（SCHEMATA 用）
-DECLARE view_cond      STRING;  -- 同上（VIEWS 用。列名が違うので 2 本作る）
-DECLARE view_name_cond STRING;  -- view_name_patterns / _exclude_ から組み立てる
+DECLARE schema_cond    STRING;  -- dataset の include/exclude から組み立てる（SCHEMATA 用）
+DECLARE view_cond      STRING;  -- 同上（VIEWS 用。列名が違うので別に作る）
+DECLARE view_name_cond STRING;  -- view の include/exclude から組み立てる
 DECLARE n_datasets  INT64;
 DECLARE n_views     INT64;
 
@@ -79,22 +80,32 @@ IF NOT REGEXP_CONTAINS(TRIM(analyze_options), r'^\{\s*"') THEN
   RAISE USING MESSAGE = 'analyze_options は 1 つ以上のキーを持つ JSON オブジェクトにしてください（例: {"mode":"class"}）。';
 END IF;
 
--- dataset_patterns を OR でつないだ条件文にする。空なら TRUE（＝全件）。
-SET schema_cond = IF(ARRAY_LENGTH(dataset_patterns) = 0, 'TRUE',
-  (SELECT STRING_AGG(FORMAT("REGEXP_CONTAINS(schema_name, r'%s')", p), ' OR ')
-   FROM UNNEST(dataset_patterns) AS p));
-SET view_cond = IF(ARRAY_LENGTH(dataset_patterns) = 0, 'TRUE',
-  (SELECT STRING_AGG(FORMAT("REGEXP_CONTAINS(table_schema, r'%s')", p), ' OR ')
-   FROM UNNEST(dataset_patterns) AS p));
+-- include / exclude を条件文に組み立てる。3 本とも形は同じで、見る列が違うだけ。
+--   データセット名は SCHEMATA では schema_name、VIEWS では table_schema。
+--   View 名は VIEWS の table_name。
+SET schema_cond = CONCAT(
+  IF(ARRAY_LENGTH(include_dataset_patterns) = 0, 'TRUE',
+    (SELECT CONCAT('(', STRING_AGG(FORMAT("REGEXP_CONTAINS(schema_name, r'%s')", p), ' OR '), ')')
+     FROM UNNEST(include_dataset_patterns) AS p)),
+  IF(ARRAY_LENGTH(exclude_dataset_patterns) = 0, '',
+    (SELECT CONCAT(' AND NOT (', STRING_AGG(FORMAT("REGEXP_CONTAINS(schema_name, r'%s')", p), ' OR '), ')')
+     FROM UNNEST(exclude_dataset_patterns) AS p)));
 
--- View 名の条件。include（いずれかに一致）→ exclude（いずれかに一致したら落とす）。
+SET view_cond = CONCAT(
+  IF(ARRAY_LENGTH(include_dataset_patterns) = 0, 'TRUE',
+    (SELECT CONCAT('(', STRING_AGG(FORMAT("REGEXP_CONTAINS(table_schema, r'%s')", p), ' OR '), ')')
+     FROM UNNEST(include_dataset_patterns) AS p)),
+  IF(ARRAY_LENGTH(exclude_dataset_patterns) = 0, '',
+    (SELECT CONCAT(' AND NOT (', STRING_AGG(FORMAT("REGEXP_CONTAINS(table_schema, r'%s')", p), ' OR '), ')')
+     FROM UNNEST(exclude_dataset_patterns) AS p)));
+
 SET view_name_cond = CONCAT(
-  IF(ARRAY_LENGTH(view_name_patterns) = 0, 'TRUE',
+  IF(ARRAY_LENGTH(include_view_patterns) = 0, 'TRUE',
     (SELECT CONCAT('(', STRING_AGG(FORMAT("REGEXP_CONTAINS(table_name, r'%s')", p), ' OR '), ')')
-     FROM UNNEST(view_name_patterns) AS p)),
-  IF(ARRAY_LENGTH(view_name_exclude_patterns) = 0, '',
+     FROM UNNEST(include_view_patterns) AS p)),
+  IF(ARRAY_LENGTH(exclude_view_patterns) = 0, '',
     (SELECT CONCAT(' AND NOT (', STRING_AGG(FORMAT("REGEXP_CONTAINS(table_name, r'%s')", p), ' OR '), ')')
-     FROM UNNEST(view_name_exclude_patterns) AS p)));
+     FROM UNNEST(exclude_view_patterns) AS p)));
 
 -- 事前チェック。0 件のまま進むと空のテーブルができ、設定の間違いに気づけない。
 EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
@@ -115,10 +126,10 @@ SELECT
 INTO n_datasets, n_views;
 
 IF n_views = 0 THEN
-  RAISE USING MESSAGE = '対象の View が 0 件です。region / dataset_patterns / view_name_patterns を確認してください。';
+  RAISE USING MESSAGE = '対象の View が 0 件です。region / include_dataset_patterns / include_view_patterns を確認してください。';
 END IF;
 IF n_datasets = 0 AND ARRAY_LENGTH(suffix_list) = 0 THEN
-  RAISE USING MESSAGE = 'suffix を持つデータセットが 0 件です。suffix_pattern / dataset_patterns を確認するか、suffix_list に直接並べてください。';
+  RAISE USING MESSAGE = 'suffix を持つデータセットが 0 件です。suffix_pattern / include_dataset_patterns を確認するか、suffix_list に直接並べてください。';
 END IF;
 
 
@@ -383,7 +394,7 @@ ORDER BY dataset_name
   '@@VIEW_NAME_COND@@', view_name_cond);
 
 -- 5-5b View 名の条件で落ちた View（対象のつもりのものが落ちていないか）
---      view_name_patterns / view_name_exclude_patterns が空なら 0 件。
+--      include_view_patterns / exclude_view_patterns が空なら 0 件。
 EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(r"""
 SELECT
   '5-5b View 名の条件で落ちた View'    AS check_name,
