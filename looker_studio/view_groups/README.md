@@ -370,12 +370,14 @@ DECLARE analyze_options  STRING        DEFAULT '{"literalGroups":[],"mode":"clas
 | 変数 | 役割 |
 |---|---|
 | `dataset_patterns` | 対象データセット。**いずれか**の正規表現に一致するものが対象。空配列ならリージョン内すべて |
+| `view_name_patterns` | 対象 View 名。空配列なら絞らない。指定するといずれかに一致するものだけ |
+| `view_name_exclude_patterns` | 落とす View 名。いずれかに一致したら対象外。include のあとに効く |
 | `suffix_pattern` | データセット名から suffix を切り出す正規表現（1 つ目のキャプチャ） |
 | `suffix_list` | suffix 一覧。空なら `suffix_pattern` で自動抽出。データセット名から導けないときだけ並べる |
 | `analyze_options` | UDF に渡す解析オプション（JSON）。`literalGroups` をここで足せば再生成が要らない |
 | `partition_expiration_days` | 履歴の保持日数 |
 
-`dataset_patterns` は複数書ける。1 本に詰め込む必要はない。
+`dataset_patterns` は複数書ける。1 本に詰め込む必要はない。View 名の 2 つも同じ形。
 
 ```sql
 DECLARE dataset_patterns ARRAY<STRING> DEFAULT [r'^mart_', r'^dwh_'];
@@ -385,6 +387,19 @@ DECLARE dataset_patterns ARRAY<STRING> DEFAULT [r'^mart_abjp$', r'^mart_abus$'];
 
 配列は `OR` でつないだ条件文に組み立てられ、`SCHEMATA` と `VIEWS` の両方に
 同じ条件が効く（列名が違うので条件文は 2 本作る）。
+
+**View 名の絞り込みは `table_name`（suffix を含んだ実際の View 名）に効く。**
+base 名ではないので、`^v_daily_sales$` は `v_daily_sales_abjp` に一致しない。
+その base だけ見たいなら `^v_daily_sales_` のように書く。
+
+```sql
+-- 特定の base だけ試す
+DECLARE view_name_patterns ARRAY<STRING> DEFAULT [r'^v_daily_sales_'];
+-- 作業用の View を除く
+DECLARE view_name_exclude_patterns ARRAY<STRING> DEFAULT [r'_tmp$', r'_bk$', r'^wk_'];
+```
+
+落とした View はセクション 5-5b に一覧で出る。意図せず落ちていないか確かめられる。
 
 **`suffix_list` が要るのはどういうときか。** 通常 suffix はデータセット名から
 取れるが、View が suffix を持たないデータセットに置いてある構成
@@ -435,9 +450,10 @@ INSERT INTO `@@PROJECT@@.@@WORK@@.view_logic_diff` …
   文字列リテラルに変換する（JSON のエスケープは BigQuery の文字列リテラルと互換）
 - **スケジュールドクエリには セクション 0 と 2 を登録する。** 設定ブロックが
   無いと変数が未定義になる。1 と 3 は初回だけ、5 は確認用なので不要
-- **セクション 5 の確認クエリは実行される。** ファイルを丸ごと流すと 7 本の
+- **セクション 5 の確認クエリは実行される。** ファイルを丸ごと流すと 8 本の
   結果が順に出る（生成結果 / 割れている base / 未認識の View / 対象データセットと
-  suffix / データセット別の View 数 / 条件から外れたデータセット / 構成が変わった日）
+  suffix / データセット別の View 数 / View 名の条件で落ちた View /
+  条件から外れたデータセット / 構成が変わった日）
 - **セクション 1 は `CREATE OR REPLACE TABLE`。** 実行すると既存の行が消える
   （パーティションに積んだ履歴も含めて）。スキーマを変えたときに確実に作り直せる
   かわり、うっかり流すと履歴が飛ぶ。日次の生成には含まれない

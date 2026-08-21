@@ -46,6 +46,14 @@ DECLARE partition_expiration_days INT64 DEFAULT 400;  -- 履歴の保持日数
 --   並べる例: [r'^mart_abjp$', r'^mart_abus$']
 DECLARE dataset_patterns ARRAY<STRING> DEFAULT [r'_([A-Za-z]{4})$'];
 
+-- 対象 View。データセットの絞り込みとは別に、View 名でも絞れる。
+-- include は空配列なら絞らない。指定するといずれかに一致するものだけが対象。
+-- exclude はいずれかに一致したものを落とす。include より後に効く。
+--   絞る例  : [r'^v_daily_sales_']
+--   落とす例: [r'_tmp$', r'_bk$', r'^wk_']
+DECLARE view_name_patterns         ARRAY<STRING> DEFAULT [];
+DECLARE view_name_exclude_patterns ARRAY<STRING> DEFAULT [];
+
 -- suffix の切り出し。1 つ目のキャプチャが suffix になる。
 DECLARE suffix_pattern STRING DEFAULT r'_([A-Za-z]{4})$';
 
@@ -61,8 +69,9 @@ DECLARE suffix_list ARRAY<STRING> DEFAULT [];
 -- suffixList は下の suffixes から自動で入るので、ここには書かない。
 DECLARE analyze_options STRING DEFAULT '{"literalGroups":[],"mode":"class"}';
 
-DECLARE schema_cond STRING;   -- dataset_patterns から組み立てる（SCHEMATA 用）
-DECLARE view_cond   STRING;   -- 同上（VIEWS 用。列名が違うので 2 本作る）
+DECLARE schema_cond    STRING;  -- dataset_patterns から組み立てる（SCHEMATA 用）
+DECLARE view_cond      STRING;  -- 同上（VIEWS 用。列名が違うので 2 本作る）
+DECLARE view_name_cond STRING;  -- view_name_patterns / _exclude_ から組み立てる
 DECLARE n_datasets  INT64;
 DECLARE n_views     INT64;
 
@@ -78,25 +87,35 @@ SET view_cond = IF(ARRAY_LENGTH(dataset_patterns) = 0, 'TRUE',
   (SELECT STRING_AGG(FORMAT("REGEXP_CONTAINS(table_schema, r'%s')", p), ' OR ')
    FROM UNNEST(dataset_patterns) AS p));
 
+-- View 名の条件。include（いずれかに一致）→ exclude（いずれかに一致したら落とす）。
+SET view_name_cond = CONCAT(
+  IF(ARRAY_LENGTH(view_name_patterns) = 0, 'TRUE',
+    (SELECT CONCAT('(', STRING_AGG(FORMAT("REGEXP_CONTAINS(table_name, r'%s')", p), ' OR '), ')')
+     FROM UNNEST(view_name_patterns) AS p)),
+  IF(ARRAY_LENGTH(view_name_exclude_patterns) = 0, '',
+    (SELECT CONCAT(' AND NOT (', STRING_AGG(FORMAT("REGEXP_CONTAINS(table_name, r'%s')", p), ' OR '), ')')
+     FROM UNNEST(view_name_exclude_patterns) AS p)));
+
 -- 事前チェック。0 件のまま進むと空のテーブルができ、設定の間違いに気づけない。
-EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
 SELECT
   (SELECT COUNT(*)
    FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA`
    WHERE REGEXP_CONTAINS(schema_name, r'@@SUFFIX_PATTERN@@') AND (@@SCHEMA_COND@@)),
   (SELECT COUNT(*)
    FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.VIEWS`
-   WHERE @@VIEW_COND@@)
+   WHERE (@@VIEW_COND@@) AND (@@VIEW_NAME_COND@@))
 """,
   '@@PROJECT@@',        project_id),
   '@@REGION@@',         region),
   '@@SUFFIX_PATTERN@@', suffix_pattern),
   '@@SCHEMA_COND@@',    schema_cond),
-  '@@VIEW_COND@@',      view_cond)
+  '@@VIEW_COND@@',      view_cond),
+  '@@VIEW_NAME_COND@@', view_name_cond)
 INTO n_datasets, n_views;
 
 IF n_views = 0 THEN
-  RAISE USING MESSAGE = '対象の View が 0 件です。region / dataset_patterns を確認してください。';
+  RAISE USING MESSAGE = '対象の View が 0 件です。region / dataset_patterns / view_name_patterns を確認してください。';
 END IF;
 IF n_datasets = 0 AND ARRAY_LENGTH(suffix_list) = 0 THEN
   RAISE USING MESSAGE = 'suffix を持つデータセットが 0 件です。suffix_pattern / dataset_patterns を確認するか、suffix_list に直接並べてください。';
@@ -151,7 +170,7 @@ WHERE snapshot_date = CURRENT_DATE('@@TZ@@')
   '@@WORK@@',    work_dataset),
   '@@TZ@@',      tz);
 
-EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
 INSERT INTO `@@PROJECT@@.@@WORK@@.view_logic_diff`
 WITH
 -- suffix 一覧。suffix_list が空なら、対象データセットの名前から切り出す。
@@ -189,7 +208,7 @@ opts AS (
 src AS (
   SELECT table_name AS view_name, view_definition AS ddl
   FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.VIEWS`
-  WHERE @@VIEW_COND@@
+  WHERE (@@VIEW_COND@@) AND (@@VIEW_NAME_COND@@)
 ),
 keyed AS (
   -- suffix 一覧との ENDS_WITH で base を切る。区切りは '_' 固定
@@ -242,7 +261,8 @@ FROM (
   '@@TZ@@',             tz),
   '@@SUFFIX_PATTERN@@', suffix_pattern),
   '@@SCHEMA_COND@@',    schema_cond),
-  '@@VIEW_COND@@',      view_cond)
+  '@@VIEW_COND@@',      view_cond),
+  '@@VIEW_NAME_COND@@', view_name_cond)
 USING suffix_list AS suffix_list, analyze_options AS analyze_options;
 
 
@@ -280,6 +300,7 @@ WHERE snapshot_date = (
 --      5-3 suffix を認識できなかった View
 --      5-4 対象データセットと suffix
 --      5-5 データセット別の対象 View 数
+--      5-5b View 名の条件で落ちた View
 --      5-6 条件から外れたデータセット
 --      5-7 グループ構成が変わった日
 -- ---------------------------------------------------------------------
@@ -346,19 +367,36 @@ ORDER BY extracted_suffix
   '@@SCHEMA_COND@@',    schema_cond);
 
 -- 5-5 データセット別の対象 View 数
-EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(r"""
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(r"""
 SELECT
   '5-5 データセット別の対象 View 数'   AS check_name,
   table_schema                      AS dataset_name,
   COUNT(*)                          AS target_view_count
 FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.VIEWS`
-WHERE @@VIEW_COND@@
+WHERE (@@VIEW_COND@@) AND (@@VIEW_NAME_COND@@)
 GROUP BY check_name, dataset_name
 ORDER BY dataset_name
 """,
-  '@@PROJECT@@',   project_id),
-  '@@REGION@@',    region),
-  '@@VIEW_COND@@', view_cond);
+  '@@PROJECT@@',        project_id),
+  '@@REGION@@',         region),
+  '@@VIEW_COND@@',      view_cond),
+  '@@VIEW_NAME_COND@@', view_name_cond);
+
+-- 5-5b View 名の条件で落ちた View（対象のつもりのものが落ちていないか）
+--      view_name_patterns / view_name_exclude_patterns が空なら 0 件。
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(r"""
+SELECT
+  '5-5b View 名の条件で落ちた View'    AS check_name,
+  table_schema                      AS dataset_name,
+  table_name                        AS excluded_view_name
+FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.VIEWS`
+WHERE (@@VIEW_COND@@) AND NOT (@@VIEW_NAME_COND@@)
+ORDER BY dataset_name, excluded_view_name
+""",
+  '@@PROJECT@@',        project_id),
+  '@@REGION@@',         region),
+  '@@VIEW_COND@@',      view_cond),
+  '@@VIEW_NAME_COND@@', view_name_cond);
 
 -- 5-6 条件から外れたデータセット（対象のつもりのものが落ちていないか）
 EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(r"""
