@@ -25,7 +25,14 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 >   メインQueryが括弧で包まれた形）の「トップレベルのSELECT Clauseが見つかりません」。
 >   `query_parser.js` に main-query の括弧剥がしを追加、テスト `test_v1_5_0_073`。
 >   → 現在のバンドル: `sha256 = f448d53c3e3b98aba209d0f0458c54e08a1c6fd20e7f724e21145d811bccacb0`、
->   `463531` bytes。`test:release` **53 本 PASS** / ゴールデン 48 ケース PASS。
+>   `463531` bytes。
+> - **本セッションで 2 件目の修正**：`(A INTERSECT DISTINCT B) EXCEPT DISTINCT C` のように
+>   **括弧付き branch が自身のセット演算を含む**形の
+>   "FromParser: JOIN was expected, but found ..."。括弧を剥がす際に
+>   `disableSetOperations` を引き継いでいたのが原因（演算子の種類には非依存）。
+>   テスト `test_v1_5_0_074`。
+>   → 現在のバンドル: `sha256 = d7992396d38f568b6d30a44ac7d75183f4563e0f2c22f867a9d7e87d8bee5372`、
+>   `465176` bytes。`test:release` **54 本 PASS** / ゴールデン 48 ケース PASS。
 >   **エンジン変更のため GCS 再アップロードが必要**。
 > - **本ドキュメントは §4.20 までしか追随していない**。§0.7 を参照。
 
@@ -505,6 +512,7 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 - 式パーサのエラーに位置情報を付与 … `test_v1_5_0_071`
 - 無型 STRUCT のフィールド別名 … `test_v1_5_0_072`
 - CTE の後ろの括弧付きメインQuery … `test_v1_5_0_073`（本セッション）
+- 括弧付き branch が自身のセット演算/CTE を含む形 … `test_v1_5_0_074`（本セッション）
 - SQL 追加：`sql/maintenance/08_view_last_access.sql`、
   `sql/maintenance/09_unanalyzed_object_definitions.sql`、
   `definition_registry` の `labels` 列（§4.12）
@@ -513,10 +521,10 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 
 - リポジトリ: `audeoinc/share` の `lineage/`。ブランチ `claude/lineage-project-resume-tqwrp9`。
 - バージョン表記: `1.5.0-032`（`release_manifest.json` / `package.json`）。
-  テスト番号は版数と独立で、現在 `test_v1_5_0_073` まで。
-- バンドル: `sha256 = f448d53c3e3b98aba209d0f0458c54e08a1c6fd20e7f724e21145d811bccacb0`、`463531` bytes
+  テスト番号は版数と独立で、現在 `test_v1_5_0_074` まで。
+- バンドル: `sha256 = d7992396d38f568b6d30a44ac7d75183f4563e0f2c22f867a9d7e87d8bee5372`、`465176` bytes
   （`release_manifest.json` と一致）。
-- テスト: `test:release` **53 本 PASS** / ゴールデン（`test_v1_5_0_003`）48 ケース PASS。
+- テスト: `test:release` **54 本 PASS** / ゴールデン（`test_v1_5_0_003`）48 ケース PASS。
 - 03 STEP 3：**データセット単位ループ ＋ 周回内フルバッチ**（§4.21）。チャンク分割は撤去済み。
 - **BigQuery 実機検証は未完了**。§4.5 のバッチ化、§4.6、§4.21 の各変更はいずれも未検証。
   本番前に staging 実行と旧実装との出力 diff（direct_dependency / lineage_diagnostic /
