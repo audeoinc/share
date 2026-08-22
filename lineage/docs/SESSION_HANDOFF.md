@@ -571,6 +571,25 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   JOBS 走査が必要で、preview でそのコストを払わないため。通知メッセージにも明記。
 - ドキュメントは `docs/OPERATION_GUIDE.md` §7。SQL のみ／エンジン不変。**BigQuery 未検証**。
 
+## 4.26 `{project_token}` が `source_project_filters` に効かない（SQLのみ）
+
+- **症状**：`source_project_filters` の `project_id` に `{project_token}` を書くと
+  `Invalid source project_id in source_project_filters`。
+- **原因**：置換ブロック（03 の 389-396 付近）が `repository_dataset` / `udf_dataset` /
+  table・UDF の prefix/suffix しか対象にしておらず、`source_project_filters` は**未対応**。
+  リテラルのまま STEP 1 の project_id 検証 ASSERT に到達し、`{` `}` が不正文字として弾かれる。
+  対象外だったのは `source_project_filters` が **STRUCT 配列**で、単純な `REPLACE` ではなく
+  配列の作り直しが必要だったため。
+- **対応**：`SET source_project_filters = ARRAY(SELECT AS STRUCT ... FROM UNNEST(...))` で
+  `project_id` と `dataset_include/exclude_patterns` を置換して再構築。併せて
+  `scheduled_query_service_accounts` / `dag_service_accounts` も置換対象に追加
+  （SA メールはプロジェクト ID を含むのが普通で、「一部の [A] だけ効く」状態は事故のもと）。
+- **併せて**：project_id の ASSERT メッセージに「未置換の `{project_token}` を疑え／
+  `project_token_pattern` が不一致だとトークンは空文字になる」旨を追記。
+  `preview_only` の `PREVIEW_SETTINGS` に `detected_project_id` と `project_token` を追加し、
+  実行前にトークン抽出の成否が見えるようにした。
+- SQL のみ／エンジン不変。**BigQuery 未検証**。
+
 ## 4.22 本ドキュメントと実装の乖離（重要）
 
 `docs/SESSION_HANDOFF.md` の §1〜§4.20 は **1.5.0-032 の途中まで**しか追随していない。
@@ -597,6 +616,7 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 - 定義ソース種別フィルタ `analysis_include_generation_types`（§4.23・本セッション、SQLのみ）
 - ソースデータセットのアクセス事前チェック（§4.24・本セッション、SQLのみ）
 - 03 実行前の対象確認 `preview_only`（§4.25・本セッション、SQLのみ）
+- `{project_token}` を `source_project_filters` / SA 配列へ拡張（§4.26・本セッション、SQLのみ）
 - SQL 追加：`sql/maintenance/08_view_last_access.sql`、
   `sql/maintenance/09_unanalyzed_object_definitions.sql`、
   `definition_registry` の `labels` 列（§4.12）
