@@ -119,7 +119,7 @@ add('IF … RAISE ではなく ASSERT を使っている',
 }
 
 // --- 6. 両ファイルで一致させる必要がある値 -----------------------------
-for (const base of ['group_info', 'group_css', 'render_dynamic_sql']) {
+for (const base of ['analyze', 'render', 'group_css', 'render_dynamic_sql']) {
   const line = `udf_name_prefix || 'viewlgc_' || '${base}' || udf_name_suffix`;
   add(`${base} の名前の組み立てが両ファイルで同じ`,
     table.includes(line) && udf.includes(line));

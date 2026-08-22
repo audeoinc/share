@@ -11,7 +11,7 @@
 -- パーティションに日付を積むので、履歴が残る。
 -- 「いつグループ構成が変わったか」を後から追える＝ロジック逸脱の検知に使える。
 --
--- 前提: view_group_html.sql で 3 つの UDF を作成済み。
+-- 前提: view_group_html.sql で 4 つの UDF を作成済み。
 --       udf_dataset / udf_name_prefix / udf_name_suffix は両ファイルで
 --       一致させること。食い違うと関数が見つからない。
 --
@@ -29,7 +29,8 @@
 --   __JOB_REGION__         region- を除いたロケーション
 --   __T_DIFF_HIST__        履歴テーブル（project.dataset.table）
 --   __V_DIFF__             最新スナップショットのビュー（同上）
---   __UDF_INFO__           group_info 関数（project.dataset.function）
+--   __UDF_ANALYZE__        analyze 関数（project.dataset.function）
+--   __UDF_RENDER__         render 関数（同上）
 --   __UDF_CSS__            group_css 関数（同上）
 --   __TZ__                 snapshot_date の基準タイムゾーン
 --   __RETENTION_DAYS__     パーティションの保持日数
@@ -162,9 +163,12 @@ DECLARE table_diff_hist STRING;  -- 日次スナップショットを積むテ�
 DECLARE view_diff       STRING;  -- 最新スナップショットだけのビュー
 
 -- view_group_html.sql が作った関数名。同じ規則で組み立てて突き合わせる。
-DECLARE udf_info_function_name   STRING;
-DECLARE udf_css_function_name    STRING;
-DECLARE udf_render_function_name STRING;
+-- 解析と描画が別の UDF なのは、インラインのコード ブロブが 1 個あたり 32 KB
+-- までのため。JS UDF から別の UDF は呼べないので、つなぐのはこの SQL の仕事。
+DECLARE udf_analyze_function_name STRING;
+DECLARE udf_render_function_name  STRING;
+DECLARE udf_css_function_name     STRING;
+DECLARE udf_sql_function_name     STRING;
 
 -- 動的 SQL。render_call_sql は 1 度だけ組み立てて全テンプレートで使い回す。
 -- 呼び出しごとに変わるのは @sql_template だけ。
@@ -222,18 +226,22 @@ ASSERT REGEXP_CONTAINS(view_diff, r'^[A-Za-z0-9_-]+$') AS
   'view_diff の名前が不正です。';
 
 -- UDF: udf_prefix + 'viewlgc_' + 基本名 + udf_suffix（view_group_html.sql と同じ）
-SET udf_info_function_name =
-  udf_name_prefix || 'viewlgc_' || 'group_info' || udf_name_suffix;
+SET udf_analyze_function_name =
+  udf_name_prefix || 'viewlgc_' || 'analyze' || udf_name_suffix;
+SET udf_render_function_name =
+  udf_name_prefix || 'viewlgc_' || 'render' || udf_name_suffix;
 SET udf_css_function_name =
   udf_name_prefix || 'viewlgc_' || 'group_css' || udf_name_suffix;
-SET udf_render_function_name =
+SET udf_sql_function_name =
   udf_name_prefix || 'viewlgc_' || 'render_dynamic_sql' || udf_name_suffix;
-ASSERT REGEXP_CONTAINS(udf_info_function_name, r'^[A-Za-z0-9_]+$') AS
-  'udf_info_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
-ASSERT REGEXP_CONTAINS(udf_css_function_name, r'^[A-Za-z0-9_]+$') AS
-  'udf_css_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_analyze_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_analyze_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_render_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_render_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_css_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_css_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_sql_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_sql_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 
 ASSERT REGEXP_CONTAINS(TRIM(analyze_options), r'^\{\s*"') AS
   'analyze_options は 1 つ以上のキーを持つ JSON オブジェクトにしてください（例: {"mode":"class"}）。';
@@ -270,11 +278,12 @@ SET view_name_condition = CONCAT(
 -- 固定の設定はここで焼き込み、テンプレートだけを @sql_template で渡す。
 -- 値は %T で埋める。条件文には引用符が入るので、%s だと壊れる。
 SET render_call_sql = FORMAT(
-  """SELECT `%s.%s.%s`(@sql_template, %T, %T, %T, %T, %T, %T, STRUCT(%T AS diff_hist, %T AS diff_latest, %T AS info_function, %T AS css_function), STRUCT(%T AS time_zone, %T AS retention_days, %T AS suffix_pattern), STRUCT(%T AS schema_condition, %T AS view_dataset_condition, %T AS view_name_condition))""",
-  udf_project_id, udf_dataset, udf_render_function_name,
+  """SELECT `%s.%s.%s`(@sql_template, %T, %T, %T, %T, %T, %T, STRUCT(%T AS diff_hist, %T AS diff_latest, %T AS analyze_function, %T AS render_function, %T AS css_function), STRUCT(%T AS time_zone, %T AS retention_days, %T AS suffix_pattern), STRUCT(%T AS schema_condition, %T AS view_dataset_condition, %T AS view_name_condition))""",
+  udf_project_id, udf_dataset, udf_sql_function_name,
   work_project_id, work_dataset, udf_project_id, udf_dataset,
   target_project_id, job_region,
-  table_diff_hist, view_diff, udf_info_function_name, udf_css_function_name,
+  table_diff_hist, view_diff,
+  udf_analyze_function_name, udf_render_function_name, udf_css_function_name,
   snapshot_time_zone, CAST(partition_expiration_days AS STRING), suffix_pattern,
   schema_condition, view_dataset_condition, view_name_condition);
 
@@ -411,28 +420,35 @@ keyed AS (
     PARTITION BY src.view_name ORDER BY LENGTH(s.suffix) DESC
   ) = 1
 )
-SELECT
-  CURRENT_DATE('__TZ__')              AS snapshot_date,
-  base,
-  CAST(info.view_count      AS INT64) AS view_count,
-  CAST(info.group_count     AS INT64) AS group_count,
-  info.group_count > 1                AS has_multiple,
-  info.group_labels,
-  ARRAY(SELECT CAST(x AS INT64) FROM UNNEST(info.group_sizes) AS x) AS group_sizes,
-  info.suffixes,
-  CAST(info.unmatched_count AS INT64) AS unmatched_count,
-  info.html                           AS diff_html
-FROM (
+-- 解析は base ごとに 1 回だけ。結果の JSON をこの段で持っておき、
+-- メタデータは JSON から取り出し、HTML は描画の UDF に渡す。
+-- JS UDF から別の UDF は呼べないので、この 2 段で合成する。
+analyzed AS (
   SELECT
     base,
-    `__UDF_INFO__`(
+    `__UDF_ANALYZE__`(
       ARRAY_AGG(STRUCT(view_name, ddl) ORDER BY view_name),
       -- suffixes から組み立てた設定（全行で同じ値）
       (SELECT options_json FROM opts)
-    ) AS info
+    ) AS analysis
   FROM keyed
   GROUP BY base
 )
+SELECT
+  CURRENT_DATE('__TZ__') AS snapshot_date,
+  base,
+  CAST(JSON_VALUE(analysis, '$.viewCount')  AS INT64) AS view_count,
+  CAST(JSON_VALUE(analysis, '$.groupCount') AS INT64) AS group_count,
+  CAST(JSON_VALUE(analysis, '$.groupCount') AS INT64) > 1 AS has_multiple,
+  JSON_VALUE_ARRAY(analysis, '$.groupLabels') AS group_labels,
+  ARRAY(
+    SELECT CAST(x AS INT64)
+    FROM UNNEST(JSON_VALUE_ARRAY(analysis, '$.groupSizes')) AS x
+  ) AS group_sizes,
+  JSON_VALUE_ARRAY(analysis, '$.suffixes') AS suffixes,
+  CAST(JSON_VALUE(analysis, '$.unmatchedCount') AS INT64) AS unmatched_count,
+  `__UDF_RENDER__`(analysis, (SELECT options_json FROM opts)) AS diff_html
+FROM analyzed
 """;
 EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
 ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS

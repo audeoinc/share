@@ -351,32 +351,60 @@ node preview.mjs --check  # 生成せず検証だけ
 
 ```bash
 node build_udf.mjs          # 検証して view_group_html.sql を生成
-node build_udf.mjs --check  # 生成せず検証だけ（27 アサーション）
+node build_udf.mjs --check  # 生成せず検証だけ（31 アサーション）
 node check_sql.mjs          # build_table.sql と view_group_html.sql の突き合わせ
 ```
 
 | 関数 | 戻り値 |
 |---|---|
-| `viewlgc_group_info(views, options_json)` | `STRUCT<view_count, group_count, group_labels, group_sizes, suffixes, unmatched_count, html>` |
+| `viewlgc_analyze(views, options_json)` | 解析結果の JSON（`viewCount` / `groupCount` / `groupLabels` / `groupSizes` / `suffixes` / `unmatchedCount` / `bases`） |
+| `viewlgc_render(analysis_json, options_json)` | 比較 HTML |
 | `viewlgc_group_css(options_json)` | `mode='class'` でテンプレートに貼る CSS |
 | `viewlgc_render_dynamic_sql(sql_template, …)` | `build_table.sql` の `__…__` を展開した SQL（JavaScript ではなく SQL 関数） |
 
-HTML とメタデータを 1 回の呼び出しで返すのは、事前生成テーブルに両方入れたいため。
-分けると同じ解析を 2 回走らせることになる。数値が `FLOAT64` なのは JS UDF が
-`INT64` を扱えないから（SQL 側で `CAST`）。
+### 解析と描画は別の UDF に分ける
 
-**インラインのコード ブロブは 32 KB までに制限される（標準 SQL でも同じ）。**
-素の連結は約 45 KB あって確実に弾かれるので、esbuild で最小化してから埋め込む。
+**インラインのコード ブロブは 1 個あたり 32 KB までに制限される（標準 SQL でも
+同じ）。** 1 本にまとめると枠が 1 つしか使えず、実際 29.3 KB まで詰まっていた。
+依存は素直に割れる（解析は `analyze.js` だけ、描画は `diff` / `render` /
+`render_groups` だけ）ので、2 つの UDF に分けて枠を 2 つ使う。
 
 ```
-viewlgc_group_info  素 49.5 KB → 最小化 29.3 KB（上限比 98%）
-viewlgc_group_css   素 49.2 KB → 最小化 29.0 KB（上限比 97%）
+viewlgc_analyze     素 19.2 KB → 最小化  9.2 KB（上限比 31%）
+viewlgc_render      素 31.7 KB → 最小化 21.5 KB（上限比 72%）
+viewlgc_group_css   素 33.0 KB → 最小化 22.2 KB（上限比 74%）
 ```
 
-3-way 系と `alphaMap` を外しているが、**残りは 32 KB に対して 2.7 KB ほど**
-（生成器の自主規制 30 KB に対しては 0.7 KB）。
-これ以上大きく機能を足すなら `OPTIONS(library=["gs://…"])` への移行を検討する。それでも枠は広くないので、
-大きく機能を足すときは `OPTIONS(library=["gs://…"])` への移行を検討する。
+**JS UDF の中から別の UDF は呼べない。** JS は V8 のサンドボックスで動き、
+SQL に戻る手段が無い。つなぐのは呼び出し側の SQL の仕事で、`build_table.sql` が
+`analyze` を 1 回呼び、その結果を `render` に渡す。
+
+```sql
+analyzed AS (
+  SELECT base, `__UDF_ANALYZE__`(ARRAY_AGG(…), (SELECT options_json FROM opts)) AS analysis
+  FROM keyed GROUP BY base
+)
+SELECT
+  CAST(JSON_VALUE(analysis, '$.viewCount') AS INT64) AS view_count,
+  …
+  `__UDF_RENDER__`(analysis, (SELECT options_json FROM opts)) AS diff_html
+FROM analyzed
+```
+
+**スカラー SQL UDF で包まない**のは、式が 1 本しか書けず中間結果を変数に置けない
+ため。メタデータ用と HTML 用で `analyze()` を 2 回書くことになり、解析が 2 回
+走りかねない。呼び出し側の `WITH` なら 1 回で済む。
+
+**UDF 間を渡る JSON は描画に要る分だけに削ってある。** 解析結果をそのまま積むと
+サンプル 9 本で 62 KB になるが、`members[].tokens` / `raw` / `ddl` を落とせば
+3 KB で足りる（描画結果は同じであることを検証で確かめている）。
+
+`viewlgc_group_css` も描画側だけで作れるよう、CSS の fixture は `analyze()` を
+通さず手で組んである。手組みが実物とズレていないかは、生成時のクラス網羅
+チェック（実物のパイプラインで描いた markup と突き合わせる）が見張る。
+
+3-way 系と `alphaMap` も外してある。これ以上詰まってきたら
+`OPTIONS(library=["gs://…"])` への移行を検討する。
 
 生成時に 30 KB を超えたら失敗させ、BigQuery に弾かれるものを出荷しない。
 最小化した本体はそのまま Node で実行して検証しているので、最小化で壊れていない
@@ -466,9 +494,10 @@ DECLARE target_project_id STRING DEFAULT NULL;
 |---|---|---|
 | `table_diff_hist` | 日次スナップショットを積むテーブル | `viewlgc_t_diff_hist` |
 | `view_diff` | 最新スナップショットだけのビュー | `viewlgc_vw_t_diff` |
-| `udf_info_function_name` | 比較 HTML を返す UDF | `viewlgc_group_info` |
+| `udf_analyze_function_name` | View 群を解析して JSON を返す UDF | `viewlgc_analyze` |
+| `udf_render_function_name` | その JSON を比較 HTML にする UDF | `viewlgc_render` |
 | `udf_css_function_name` | テンプレート用 CSS を返す UDF | `viewlgc_group_css` |
-| `udf_render_function_name` | 動的 SQL を展開する UDF | `viewlgc_render_dynamic_sql` |
+| `udf_sql_function_name` | 動的 SQL を展開する UDF | `viewlgc_render_dynamic_sql` |
 
 オブジェクトが増えたときは `DECLARE <名前> STRING;` と `SET <名前> = …;` を
 1 組足し、本文の `__…__` と `viewlgc_render_dynamic_sql` の置換も対で増やす。

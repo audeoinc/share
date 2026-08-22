@@ -4,7 +4,8 @@
 //   node build_udf.mjs --check  -> 生成せず、Node 上で UDF 本体を実行して検証だけ
 //
 // 生成するのは 2 つ:
-//   viewlgc_group_info(views ARRAY<STRUCT<view_name STRING, ddl STRING>>, options_json STRING)
+//   viewlgc_analyze(views ARRAY<STRUCT<view_name STRING, ddl STRING>>, options_json STRING) -> JSON
+//   viewlgc_render(analysis_json STRING, options_json STRING) -> HTML
 //     -> STRUCT<view_count, group_count, group_labels, group_sizes, suffixes,
 //               unmatched_count, html>
 //   viewlgc_group_css(options_json STRING)
@@ -35,10 +36,16 @@ const region = 'asia-northeast1';
 // インラインで埋め込んでよい上限。32 KB に対して余裕を持たせる。
 const SIZE_LIMIT = 30 * 1024;
 
-const SOURCES = [
+// 解析側と描画側は別々の UDF にする。インラインのコード ブロブは 1 個あたり
+// 32 KB までなので、1 本にまとめると枠が 1 つしか使えない。依存も素直に割れる
+// （解析は analyze.js だけ、描画は diff/render/render_groups だけ）。
+// JS UDF の中から別の UDF は呼べないので、つなぐのは呼び出し側の SQL。
+const ANALYZE_SOURCES = [
+  ['analyze.js', join(here, 'analyze.js')],
+];
+const RENDER_SOURCES = [
   ['lib/diff.js', join(here, '..', 'ddl_diff_viz', 'src', 'lib', 'diff.js')],
   ['lib/render.js', join(here, '..', 'ddl_diff_viz', 'src', 'lib', 'render.js')],
-  ['analyze.js', join(here, 'analyze.js')],
   ['render_groups.js', join(here, 'render_groups.js')],
 ];
 
@@ -69,8 +76,8 @@ function dropFunctions(src, names) {
 // 3 ペイン横並びを使わないので不要になったもの。
 // build3Way / mapToBase / baseCell / segsText は 3-way 専用。
 // alphaMap は alphaMapDetail の薄い包み。UDF は Detail 側しか呼ばない。
-const UNUSED = ['renderFragment3', 'build3Way', 'mapToBase', 'baseCell', 'segsText',
-  'alphaMap'];
+const UNUSED_ANALYZE = ['alphaMap'];
+const UNUSED_RENDER = ['renderFragment3', 'build3Way', 'mapToBase', 'baseCell', 'segsText'];
 
 /** CommonJS の体裁を落として素の関数群にする。 */
 function strip(src, file) {
@@ -88,14 +95,19 @@ function strip(src, file) {
   return out.trim();
 }
 
-const libs = [];
-for (const [name, path] of SOURCES) {
-  libs.push(strip(await readFile(path, 'utf8'), name));
+async function bundle(sources, unused) {
+  const libs = [];
+  for (const [name, path] of sources) {
+    libs.push(strip(await readFile(path, 'utf8'), name));
+  }
+  return dropFunctions(libs.join('\n\n'), unused);
 }
-const libSrc = dropFunctions(libs.join('\n\n'), UNUSED);
+const analyzeLib = await bundle(ANALYZE_SOURCES, UNUSED_ANALYZE);
+const renderLib = await bundle(RENDER_SOURCES, UNUSED_RENDER);
 
 // --- 共通ヘルパ（DIFF_HTML と同じ考え方） ------------------------------
-const shared = `
+// 両方の UDF に入れるもの。
+const sharedBase = `
 function __opts(options_json) {
   if (!options_json) return {};
   try { return JSON.parse(options_json) || {}; } catch (e) { return {}; }
@@ -104,7 +116,10 @@ function __opts(options_json) {
 function __notice(text) {
   return '<div class="vg-notice">' + String(text).replace(/[<>&]/g, '') + '</div>';
 }
+`.trim();
 
+// 描画側の UDF にだけ入れるもの。chromeCss() を使うので解析側には入らない。
+const sharedRender = `
 /* style 属性の中身のハッシュからクラス名を決める。内容や出現順に依存しないので、
    テンプレート側の固定 CSS と markup 側のクラス名がズレない。 */
 function __hashClass(s) {
@@ -143,18 +158,50 @@ function __applyMode(html, mode) {
 }
 `.trim();
 
-// --- group_info のドライバ ---------------------------------------------
-const infoDriver = `
-function __empty(msg) {
+// --- analyze のドライバ ------------------------------------------------
+// 解析結果を JSON で返す。描画側の UDF がそれを受け取って HTML にする。
+// 渡すのは描画に要る分だけに削る。members の tokens / raw / ddl を積むと
+// サンプル 9 本で 62 KB になるが、削れば 3 KB で済む（描画結果は同じ）。
+const analyzeDriver = `
+function __trimBase(bs) {
+  var groups = [];
+  for (var i = 0; i < bs.groups.length; i++) {
+    var g = bs.groups[i];
+    var members = [];
+    for (var j = 0; j < g.members.length; j++) {
+      members.push({ viewName: g.members[j].viewName });
+    }
+    groups.push({
+      suffixes: g.suffixes, members: members,
+      sql: g.sql, params: g.params, miss: g.miss
+    });
+  }
   return {
-    view_count: 0, group_count: 0, group_labels: [], group_sizes: [],
-    suffixes: [], unmatched_count: 0, html: __notice(msg)
+    base: bs.base, viewCount: bs.viewCount, groupCount: bs.groupCount,
+    unmatched: bs.unmatched, groups: groups
+  };
+}
+
+function __label(g) {
+  var out = [];
+  for (var i = 0; i < g.suffixes.length; i++) {
+    out.push(g.suffixes[i] || (g.members[i] && g.members[i].viewName) || '(suffix なし)');
+  }
+  return out.join(', ');
+}
+
+function __payload(lead) {
+  return {
+    viewCount: 0, groupCount: 0, groupLabels: [], groupSizes: [],
+    suffixes: [], unmatchedCount: 0, bases: [], lead: lead || '', tail: ''
   };
 }
 
 function __run(views, options_json) {
   var opts = __opts(options_json);
-  if (!views || views.length === 0) return __empty('View が渡されていません。');
+  if (!views || views.length === 0) {
+    return JSON.stringify(__payload('View が渡されていません。'));
+  }
 
   var rows = [];
   for (var i = 0; i < views.length; i++) {
@@ -163,99 +210,112 @@ function __run(views, options_json) {
 
   var res = analyze(rows, opts);
   if (res.bases.length === 0) {
-    var e = __empty(rows.length + ' 件すべて suffix を認識できませんでした。' +
+    var e = __payload(rows.length + ' 件すべて suffix を認識できませんでした。' +
       'suffixParts / suffixList / suffixPattern の指定を確認してください。');
-    e.unmatched_count = res.unmatched.length;
-    return e;
+    e.unmatchedCount = res.unmatched.length;
+    return JSON.stringify(e);
   }
 
-  // 呼び出し側で base ごとに束ねている前提。混ざっていても全部描く。
-  var html = '';
-  var labels = [];
-  var sizes = [];
-  var sufs = [];
-  var viewCount = 0;
-  var groupCount = 0;
+  // 呼び出し側で base ごとに束ねている前提。混ざっていても全部返す。
+  var out = __payload('');
   for (var b = 0; b < res.bases.length; b++) {
     var bs = res.bases[b];
-    html += renderBase(bs, opts);
-    viewCount += bs.viewCount;
-    groupCount += bs.groupCount;
+    out.bases.push(__trimBase(bs));
+    out.viewCount += bs.viewCount;
+    out.groupCount += bs.groupCount;
     for (var g = 0; g < bs.groups.length; g++) {
       var grp = bs.groups[g];
       // suffix が null（未認識）のときは View 名。表示の見出しと同じ規則にする。
-      labels.push(label(grp));
-      sizes.push(grp.members.length);
+      out.groupLabels.push(__label(grp));
+      out.groupSizes.push(grp.members.length);
       for (var k = 0; k < grp.suffixes.length; k++) {
-        sufs.push(grp.suffixes[k] || grp.members[k].viewName);
+        out.suffixes.push(grp.suffixes[k] || grp.members[k].viewName);
       }
     }
   }
-  // 未認識の View は base として描いてある（includeUnmatched: false のときだけ案内を出す）
+  out.suffixes.sort();
+  out.unmatchedCount = res.unmatched.length;
+  // 未認識の View は base として描いてある（includeUnmatched: false のときだけ案内）
   if (res.unmatched.length > 0 && opts.includeUnmatched === false) {
-    html += __notice('suffix を認識できなかった View が ' + res.unmatched.length + ' 件あります。');
+    out.tail = 'suffix を認識できなかった View が ' + res.unmatched.length + ' 件あります。';
   }
-
-  return {
-    view_count: viewCount,
-    group_count: groupCount,
-    group_labels: labels,
-    group_sizes: sizes,
-    suffixes: sufs.sort(),
-    unmatched_count: res.unmatched.length,
-    html: __applyMode(html, opts.mode || 'inline')
-  };
+  return JSON.stringify(out);
 }
 
 return __run(views, options_json);
 `.trim();
 
+// --- render のドライバ -------------------------------------------------
+// analyze の JSON を受け取って HTML にする。解析はしない。
+const renderDriver = `
+function __run(analysis_json, options_json) {
+  var opts = __opts(options_json);
+  var a;
+  try { a = JSON.parse(analysis_json); } catch (e) { a = null; }
+  if (!a) return __notice('解析結果を読み取れませんでした。');
+
+  var html = a.lead ? __notice(a.lead) : '';
+  var bases = a.bases || [];
+  for (var i = 0; i < bases.length; i++) html += renderBase(bases[i], opts);
+  if (a.tail) html += __notice(a.tail);
+  return __applyMode(html, opts.mode || 'inline');
+}
+
+return __run(analysis_json, options_json);
+`.trim();
+
 // --- group_css のドライバ ----------------------------------------------
 // 全パターンを描画して、そこに出る規則を集める。markup と同じコードから作るので
 // クラス名が食い違わない。chromeCss() はもともとクラス方式なのでそのまま足す。
+//
+// fixture は analyze() を通さず手で組む。解析側の UDF と分けた以上、
+// CSS のためだけに analyze.js を積むと 7 KB を無駄にするため。
+// 手組みが実物とズレていないかは、生成時のクラス網羅チェックが見張る。
 const cssDriver = `
 function __fixtureRules(opts) {
   var rules = {};
-  function collect(rows) {
-    var res = analyze(rows, opts);
-    for (var b = 0; b < res.bases.length; b++) {
-      var r = __split(renderBase(res.bases[b], opts)).rules;
-      for (var k in r) rules[k] = r[k];
-    }
+  function collect(b) {
+    var r = __split(renderBase(b, opts)).rules;
+    for (var k in r) rules[k] = r[k];
   }
-  function mk(suffix, sql) { return { view_name: 'v_fixture_' + suffix, ddl: sql }; }
+  function grp(sufs, sql, params, miss) {
+    var members = [];
+    for (var i = 0; i < sufs.length; i++) members.push({ viewName: 'v_fixture_' + sufs[i] });
+    return { suffixes: sufs, members: members, sql: sql, params: params || [], miss: miss };
+  }
+  function base(name, groups, unmatched) {
+    var n = 0;
+    for (var i = 0; i < groups.length; i++) n += groups[i].members.length;
+    return {
+      base: name, viewCount: n, groupCount: groups.length,
+      unmatched: unmatched, groups: groups
+    };
+  }
 
-  var A = 'SELECT\\n  a,\\n  b\\nFROM t_SUF\\nWHERE x = 1';
-  var B = 'SELECT\\n  a,\\n  c.b\\nFROM t_SUF\\nLEFT JOIN u_SUF AS c USING (a)\\nWHERE x = 1';
-  var C = 'SELECT\\n  a\\nFROM t_SUF\\nWHERE x = 1';
-  var D = 'SELECT\\n  a,\\n  b,\\n  d\\nFROM t_SUF\\nWHERE x = 1';
-  function s(t, suf) { return t.replace(/SUF/g, suf); }
+  // 差分の見た目（追加 / 削除 / 変更 / ハッチ）が全部出るように SQL を作る。
+  var A = 'SELECT\\n  a,\\n  b\\nFROM t_{{P1}}\\nWHERE x = 1';
+  var B = 'SELECT\\n  a,\\n  c.b\\nFROM t_{{P1}}\\nLEFT JOIN u_{{P1}} AS c USING (a)\\nWHERE x = 2';
+  var C = 'SELECT\\n  a\\nFROM t_{{P1}}\\nWHERE x = 1';
+  var P = [{ name: '{{P1}}', values: { abjp: 't_abjp', abus: 't_abus' } }];
+  var MISS = { vs: 'abjp, abus', detail: {
+    reason: 'not-substitutable', kind: 'string', aText: "'apac'", bText: "'amer'" } };
 
-  // 1 グループ（差分なし）
-  collect([mk('abjp', s(A, 'abjp')), mk('abus', s(A, 'abus'))]);
-  // 2 グループ（2 ペイン）
-  collect([mk('abjp', s(A, 'abjp')), mk('cdjp', s(B, 'cdjp'))]);
-  // 3 グループ以上（タブ）
-  collect([mk('abjp', s(A, 'abjp')), mk('cdjp', s(B, 'cdjp')),
-           mk('efjp', s(C, 'efjp')), mk('ghjp', s(D, 'ghjp'))]);
+  // 1 グループ（基準タブ 1 枚 ＋ 1 ペイン）。params 無しの「差分なし」も出す。
+  collect(base('v_fixture_one', [grp(['abjp', 'abus'], A, [])]));
+  // 2 グループ（基準 ＋ 比較 1 枚）。パラメータ表と「なぜ別グループか」も出す。
+  collect(base('v_fixture_two', [grp(['abjp', 'abus'], A, P), grp(['cdjp'], B, P, MISS)]));
+  // 3 グループ以上（タブが増える）
+  collect(base('v_fixture_many', [
+    grp(['abjp', 'abus'], A, P), grp(['cdjp'], B, P, MISS), grp(['efjp'], C, P, MISS)]));
   // suffix 未認識（単独表示。バッジが 1 つ増える）
-  collect([{ view_name: 'v_fixture_no_suffix', ddl: s(A, 'x') }]);
-  // 3 ペイン横並び（layout:'panes'）
-  var p = {}; for (var k in opts) p[k] = opts[k];
-  p.layout = 'panes';
-  var saved = opts; opts = p;
-  collect([mk('abjp', s(A, 'abjp')), mk('cdjp', s(B, 'cdjp')), mk('efjp', s(C, 'efjp'))]);
-  opts = saved;
+  collect(base('v_fixture_no_suffix',
+    [{ suffixes: [null], members: [{ viewName: 'v_fixture_no_suffix' }],
+       sql: A, params: [] }], true));
 
   return rules;
 }
 
-var __o = __opts(options_json);
-if (!__o.suffixParts && !__o.suffixList && !__o.suffixPattern) {
-  // fixture の View 名が割れるよう、既定を与える
-  __o.suffixParts = [['ab', 'cd', 'ef', 'gh'], ['jp', 'us', 'uk']];
-}
-return chromeCss() + '\\n' + __rulesToCss(__fixtureRules(__o));
+return chromeCss() + '\\n' + __rulesToCss(__fixtureRules(__opts(options_json)));
 `.trim();
 
 // --- 最小化 -------------------------------------------------------------
@@ -268,8 +328,8 @@ try {
   console.warn('      (looker_studio/ddl_diff_viz で npm install してください)');
 }
 
-function pack(driver, label) {
-  const raw = [libSrc, '', shared, '', driver].join('\n');
+function pack(driver, label, lib, extra) {
+  const raw = [lib, '', sharedBase, '', extra || '', '', driver].join('\n');
   if (!esbuild) return { code: raw, raw: raw.length, min: null, label };
   // format を指定するとラップされて未使用の関数が落ちるので、指定しない
   const min = esbuild.transformSync(raw, { loader: 'js', minify: true, target: 'es2017' }).code;
@@ -282,13 +342,32 @@ function pack(driver, label) {
   return { code, raw: raw.length, min: code.length, label };
 }
 
-const infoPack = pack(infoDriver, 'viewlgc_group_info');
-const cssPack = pack(cssDriver, 'viewlgc_group_css');
+const analyzePack = pack(analyzeDriver, 'viewlgc_analyze', analyzeLib);
+const renderPack = pack(renderDriver, 'viewlgc_render', renderLib, sharedRender);
+const cssPack = pack(cssDriver, 'viewlgc_group_css', renderLib, sharedRender);
 
 // --- 検証: 最小化した本体をそのまま実行する -----------------------------
 const S = require(join(here, 'sample_views.js'));
-const VIEW_GROUP_INFO = new Function('views', 'options_json', infoPack.code);
+const VIEWLGC_ANALYZE = new Function('views', 'options_json', analyzePack.code);
+const VIEWLGC_RENDER = new Function('analysis_json', 'options_json', renderPack.code);
 const VIEW_GROUP_CSS = new Function('options_json', cssPack.code);
+
+// JS UDF から別の UDF は呼べないので、つなぐのは呼び出し側の SQL の仕事。
+// ここではその合成を JS で再現して、分割前と同じ検証をそのまま通す。
+// build_table.sql も同じ順（analyze を 1 回 → その結果を render へ）で呼ぶ。
+function VIEW_GROUP_INFO(views, options_json) {
+  const a = VIEWLGC_ANALYZE(views, options_json);
+  const j = JSON.parse(a);
+  return {
+    view_count: j.viewCount,
+    group_count: j.groupCount,
+    group_labels: j.groupLabels,
+    group_sizes: j.groupSizes,
+    suffixes: j.suffixes,
+    unmatched_count: j.unmatchedCount,
+    html: VIEWLGC_RENDER(a, options_json),
+  };
+}
 
 const views = S.sampleRows().map((r) => ({ view_name: r.view_name, ddl: r.ddl }));
 const OPTS = JSON.stringify({ suffixParts: S.SUFFIX_PARTS });
@@ -375,10 +454,18 @@ const checks = [
   ['壊れた options_json でも落ちない',
     typeof VIEW_GROUP_INFO(views, '{ broken').html === 'string'],
   ['script タグを含まない', !/<script/i.test(html)],
+  // 分割の要。解析結果は UDF 間を JSON で渡るので、素の解析結果をそのまま
+  // 積むと 60 KB を超える。描画に要る分だけに削れているかを見る。
+  ['解析結果の受け渡しが小さい（描画に要る分だけ）',
+    Buffer.byteLength(VIEWLGC_ANALYZE(views, OPTS)) < 8 * 1024],
+  ['解析結果に tokens / ddl を積んでいない',
+    !/"tokens"|"ddl"|"raw"/.test(VIEWLGC_ANALYZE(views, OPTS))],
+  ['render は壊れた JSON でも落ちない',
+    typeof VIEWLGC_RENDER('{ broken', OPTS) === 'string'],
 ];
 
 // サイズ検証
-for (const p of [infoPack, cssPack]) {
+for (const p of [analyzePack, renderPack, cssPack]) {
   const size = Buffer.byteLength(p.code);
   checks.push([`${p.label} が ${(SIZE_LIMIT / 1024).toFixed(0)} KB 以内`, size <= SIZE_LIMIT]);
 }
@@ -392,7 +479,7 @@ for (const [name, ok] of checks) {
 const kb = (n) => (n / 1024).toFixed(1) + ' KB';
 console.log(`\n${checks.length - failed}/${checks.length} passed\n`);
 console.log('UDF 本体のサイズ（インライン上限 32 KB）');
-for (const p of [infoPack, cssPack]) {
+for (const p of [analyzePack, renderPack, cssPack]) {
   console.log(`  ${p.label.padEnd(20)} 素 ${kb(p.raw).padStart(8)} → ` +
     (p.min === null ? '最小化なし' : `最小化 ${kb(p.min).padStart(8)}`) +
     `  （上限比 ${(Buffer.byteLength(p.code) / SIZE_LIMIT * 100).toFixed(0)}%）`);
@@ -412,10 +499,15 @@ const sql = `-- ================================================================
 --    本体は esbuild で最小化してある（インラインのコード ブロブは
 --    32 KB までに制限されるため。素の連結は約 48 KB で確実に弾かれる）。
 --
--- 作る関数は 3 つ。名前はすべて CONFIGURATION の値から組み立てる。
---   viewlgc_group_info          比較 HTML とメタデータを返す（JavaScript）
+-- 作る関数は 4 つ。名前はすべて CONFIGURATION の値から組み立てる。
+--   viewlgc_analyze             View 群を解析して JSON を返す（JavaScript）
+--   viewlgc_render              その JSON を比較 HTML にする（JavaScript）
 --   viewlgc_group_css           テンプレートに貼る CSS を返す（JavaScript）
 --   viewlgc_render_dynamic_sql  build_table.sql の __…__ を展開する（SQL）
+--
+-- 解析と描画を分けてあるのは、インラインのコード ブロブが 1 個あたり 32 KB
+-- までのため。JS UDF の中から別の UDF は呼べないので、つなぐのは呼び出し側
+-- の SQL（build_table.sql が analyze を 1 回呼び、その結果を render に渡す）。
 --
 -- 命名と設定の書き方は lineage プロジェクト（lineage/sql/setup/
 -- 01_setup_lineage_environment.sql）にそろえてある。
@@ -469,9 +561,10 @@ DECLARE udf_name_suffix STRING DEFAULT '';
 -- [B] 既定のままで動くもの --------------------------------------------
 -- 関数名（[C] で組み立てる）。基本名はリテラルで、変えるならここではなく
 -- 下の SET を直す。build_table.sql の同名の変数と必ず同じ値にすること。
-DECLARE udf_info_function_name   STRING;
-DECLARE udf_css_function_name    STRING;
-DECLARE udf_render_function_name STRING;
+DECLARE udf_analyze_function_name STRING;
+DECLARE udf_render_function_name  STRING;
+DECLARE udf_css_function_name     STRING;
+DECLARE udf_sql_function_name     STRING;
 
 -- [C] 導出・内部用。編集しない ----------------------------------------
 -- プロジェクトは自動検出した値を使う。別プロジェクトに作るときだけ
@@ -485,8 +578,12 @@ DECLARE project_token      STRING;
 -- それをさらに EXECUTE IMMEDIATE の文字列に入れ子にできないため。
 -- 埋め込むときは TO_JSON_STRING で SQL の文字列リテラルに変換する
 -- （JSON のエスケープは BigQuery の文字列リテラルと互換）。
-DECLARE js_info STRING DEFAULT r"""
-${infoPack.code}
+DECLARE js_analyze STRING DEFAULT r"""
+${analyzePack.code}
+""";
+
+DECLARE js_render STRING DEFAULT r"""
+${renderPack.code}
 """;
 
 DECLARE js_css STRING DEFAULT r"""
@@ -515,38 +612,47 @@ ASSERT REGEXP_CONTAINS(udf_dataset, r'^[A-Za-z0-9_]+$') AS
   'udf_dataset は英数字と _ だけにしてください（置換されていない {project_token} が残っていませんか）。';
 
 -- 関数名: udf_name_prefix + 'viewlgc_' + 基本名 + udf_name_suffix
-SET udf_info_function_name =
-  udf_name_prefix || 'viewlgc_' || 'group_info' || udf_name_suffix;
+SET udf_analyze_function_name =
+  udf_name_prefix || 'viewlgc_' || 'analyze' || udf_name_suffix;
+SET udf_render_function_name =
+  udf_name_prefix || 'viewlgc_' || 'render' || udf_name_suffix;
 SET udf_css_function_name =
   udf_name_prefix || 'viewlgc_' || 'group_css' || udf_name_suffix;
-SET udf_render_function_name =
+SET udf_sql_function_name =
   udf_name_prefix || 'viewlgc_' || 'render_dynamic_sql' || udf_name_suffix;
-ASSERT REGEXP_CONTAINS(udf_info_function_name, r'^[A-Za-z0-9_]+$') AS
-  'udf_info_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
-ASSERT REGEXP_CONTAINS(udf_css_function_name, r'^[A-Za-z0-9_]+$') AS
-  'udf_css_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_analyze_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_analyze_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_render_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_render_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_css_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_css_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_sql_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_sql_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 
 
 -- ---------------------------------------------------------------------
--- 1. viewlgc_group_info
---    base 1 件分の View 群を渡すと、比較 HTML とメタデータを返す
+-- 1. viewlgc_analyze
+--    base 1 件分の View 群を渡すと、解析結果を JSON で返す
+--
+-- 解析と描画を別の UDF に分けてある。インラインのコード ブロブは 1 個あたり
+-- 32 KB までなので、1 本にまとめると枠が 1 つしか使えない。JS UDF の中から
+-- 別の UDF は呼べないため、つなぐのは呼び出し側の SQL の仕事
+-- （build_table.sql は analyze を 1 回呼び、その結果を render に渡す）。
 --
 -- 引数:
 --   views         ARRAY<STRUCT<view_name STRING, ddl STRING>>
 --                 同じ base を持つ View を全部渡す
 --   options_json  NULL または '{}' で既定
 --
--- 戻り値 STRUCT:
---   view_count       FLOAT64        渡された View 数
---   group_count      FLOAT64        ロジックのグループ数（1 なら全部同一＝正常）
---   group_labels     ARRAY<STRING>  ["abjp, abuk, abus", …] タブ / ペイン見出し
---   group_sizes      ARRAY<FLOAT64> 各グループの View 数
---   suffixes         ARRAY<STRING>  認識した suffix 一覧
---   unmatched_count  FLOAT64        suffix を認識できなかった数
---   html             STRING         比較 HTML
---   （数値が FLOAT64 なのは JS UDF が INT64 を扱えないため。SQL 側で CAST する）
+-- 戻り値 STRING（JSON）:
+--   viewCount      渡された View 数
+--   groupCount     ロジックのグループ数（1 なら全部同一＝正常）
+--   groupLabels    ["abjp, abuk, abus", …] タブ / ペイン見出し
+--   groupSizes     各グループの View 数
+--   suffixes       認識した suffix 一覧
+--   unmatchedCount suffix を認識できなかった数
+--   bases          描画に渡す本体。lead / tail は案内文
+--   （メタデータは SQL 側で JSON_VALUE / JSON_VALUE_ARRAY で取り出す）
 --
 -- options_json のキー:
 --   suffixParts   [["ab","cd","ef"],["jp","us","uk"]] のような区分の並び
@@ -582,23 +688,34 @@ CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
   views ARRAY<STRUCT<view_name STRING, ddl STRING>>,
   options_json STRING
 )
-RETURNS STRUCT<
-  view_count      FLOAT64,
-  group_count     FLOAT64,
-  group_labels    ARRAY<STRING>,
-  group_sizes     ARRAY<FLOAT64>,
-  suffixes        ARRAY<STRING>,
-  unmatched_count FLOAT64,
-  html            STRING
->
+RETURNS STRING
 LANGUAGE js AS %s
 ''',
-  udf_project_id, udf_dataset, udf_info_function_name,
-  TO_JSON_STRING(js_info));
+  udf_project_id, udf_dataset, udf_analyze_function_name,
+  TO_JSON_STRING(js_analyze));
 
 
 -- ---------------------------------------------------------------------
--- 2. viewlgc_group_css
+-- 2. viewlgc_render
+--    viewlgc_analyze が返した JSON を受け取って比較 HTML にする
+--
+-- 解析はしない。options_json は analyze に渡したものと同じものを渡すこと
+-- （mode / layout / 色の指定はこちらで効く）。
+-- ---------------------------------------------------------------------
+EXECUTE IMMEDIATE FORMAT('''
+CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
+  analysis_json STRING,
+  options_json STRING
+)
+RETURNS STRING
+LANGUAGE js AS %s
+''',
+  udf_project_id, udf_dataset, udf_render_function_name,
+  TO_JSON_STRING(js_render));
+
+
+-- ---------------------------------------------------------------------
+-- 3. viewlgc_group_css
 --    mode='class' のときテンプレートへ貼る CSS を返す
 --
 --   SELECT \`<project>.<udf_dataset>.viewlgc_group_css\`(NULL);
@@ -621,7 +738,7 @@ LANGUAGE js AS %s
 
 
 -- ---------------------------------------------------------------------
--- 3. viewlgc_render_dynamic_sql
+-- 4. viewlgc_render_dynamic_sql
 --    build_table.sql の SQL テンプレートに含まれる __…__ を展開する
 --
 -- BigQuery は識別子（プロジェクト・データセット・テーブル・関数名）を
@@ -637,7 +754,8 @@ LANGUAGE js AS %s
 --   __JOB_REGION__         region- を除いたロケーション
 --   __T_DIFF_HIST__        履歴テーブル（project.dataset.table）
 --   __V_DIFF__             最新スナップショットのビュー（同上）
---   __UDF_INFO__           group_info 関数（project.dataset.function）
+--   __UDF_ANALYZE__        analyze 関数（project.dataset.function）
+--   __UDF_RENDER__         render 関数（同上）
 --   __UDF_CSS__            group_css 関数（同上）
 --   __TZ__                 snapshot_date の基準タイムゾーン
 --   __RETENTION_DAYS__     パーティションの保持日数
@@ -659,10 +777,11 @@ CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
   target_project_id STRING,
   job_region STRING,
   objects STRUCT<
-    diff_hist     STRING,
-    diff_latest   STRING,
-    info_function STRING,
-    css_function  STRING
+    diff_hist        STRING,
+    diff_latest      STRING,
+    analyze_function STRING,
+    render_function  STRING,
+    css_function     STRING
   >,
   options STRUCT<
     time_zone      STRING,
@@ -689,6 +808,7 @@ AS (
   REPLACE(
   REPLACE(
   REPLACE(
+  REPLACE(
     sql_template,
     '__TARGET_PROJECT__', target_project_id),
     '__JOB_REGION__', job_region),
@@ -696,8 +816,10 @@ AS (
       work_project_id || '.' || work_dataset || '.' || objects.diff_hist),
     '__V_DIFF__',
       work_project_id || '.' || work_dataset || '.' || objects.diff_latest),
-    '__UDF_INFO__',
-      udf_project_id || '.' || udf_dataset || '.' || objects.info_function),
+    '__UDF_ANALYZE__',
+      udf_project_id || '.' || udf_dataset || '.' || objects.analyze_function),
+    '__UDF_RENDER__',
+      udf_project_id || '.' || udf_dataset || '.' || objects.render_function),
     '__UDF_CSS__',
       udf_project_id || '.' || udf_dataset || '.' || objects.css_function),
     '__TZ__', options.time_zone),
@@ -708,14 +830,15 @@ AS (
     '__VIEW_NAME_COND__', conditions.view_name_condition)
 )
 ''',
-  udf_project_id, udf_dataset, udf_render_function_name);
+  udf_project_id, udf_dataset, udf_sql_function_name);
 
 
--- 作った 3 つの名前を出す。build_table.sql に同じ値を入れる。
+-- 作った 4 つの名前を出す。build_table.sql に同じ値を入れる。
 SELECT
-  FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_info_function_name)   AS info_function,
-  FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_css_function_name)    AS css_function,
-  FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_render_function_name) AS render_function,
+  FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_analyze_function_name) AS analyze_function,
+  FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_render_function_name)  AS render_function,
+  FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_css_function_name)     AS css_function,
+  FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_sql_function_name)     AS sql_function,
   CURRENT_TIMESTAMP() AS created_at;
 END;
 `;
@@ -731,8 +854,8 @@ END;
   // FORMAT のテンプレートに素の % があると書式指定と解釈される。
   // 引数側（JS 本体）の % は無関係なので、''' … ''' の中だけを見る。
   const templates = [...sql.matchAll(/FORMAT\('''([\s\S]*?)'''/g)].map((m) => m[1]);
-  if (templates.length !== 3) {
-    console.log(`  FAIL  FORMAT のテンプレートが 3 つ見つかりません（${templates.length} 個）`);
+  if (templates.length !== 4) {
+    console.log(`  FAIL  FORMAT のテンプレートが 4 つ見つかりません（${templates.length} 個）`);
     process.exit(1);
   }
   for (const t of templates) {
