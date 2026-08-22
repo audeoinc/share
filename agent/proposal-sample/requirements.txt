@@ -1,0 +1,14 @@
+# 依存パッケージ。
+#
+# ここでは「古すぎて壊れる」ことを防ぐ下限固定にしている。thinking_level や
+# RunConfig(streaming_mode=SSE) など比較的新しい ADK/genai の機能を使うため。
+#
+# 完全な再現性が必要なら、動作確認済みの環境で下記を実行してロックを作り、
+# そのファイルからインストールする:
+#   pip freeze > requirements.lock
+#   pip install -r requirements.lock
+google-adk>=1.0
+fastapi>=0.115
+uvicorn>=0.30
+python-dotenv>=1.0
+pydantic>=2.7
