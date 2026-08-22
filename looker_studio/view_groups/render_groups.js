@@ -333,6 +333,21 @@ function chromeCss() {
     `.vg-mcode{padding:1px 5px;border-radius:3px;background:#FFEBE9;color:#82071E;` +
       `font:11px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace}`,
     `.vg-mkind{margin-left:6px;color:#8250DF;font-size:11px}`,
+    // SQL 中の {{P1}}。中身は data-tip 属性にあり、ここで content:attr() で出す。
+    // 子要素として置かないのは、この CSS を貼り忘れたときに値が SQL 本文に
+    // 流れ出さないようにするため（属性なら何も出ないだけで済む）。
+    `.vg-ph{position:relative;border-bottom:1px dotted #8250DF;cursor:help}`,
+    `.vg-ph::after{content:attr(data-tip);display:none;position:absolute;z-index:20;` +
+      // 絶対配置の既定の幅は「収まる幅」＝目印の幅しかない。max-content にしないと
+      // 1 文字ずつ折り返した細長い吹き出しになる。
+      `left:0;top:calc(100% + 5px);width:max-content;max-width:340px;` +
+      `padding:6px 10px;border-radius:6px;background:#24292F;color:#fff;` +
+      `font:11px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;` +
+      `white-space:pre-wrap;overflow-wrap:anywhere;text-align:left;` +
+      `box-shadow:0 2px 10px rgba(0,0,0,.30);pointer-events:none}`,
+    `.vg-ph:hover::after{display:block}`,
+    // 右端では左に出さないと枠の外へ出てしまう。最後の 2 ペインぶんだけ寄せる。
+    `.vg-ph.vg-phr::after{left:auto;right:0}`,
   ];
   // タブ本体。ID ではなくクラスで書くので、CSS を静的に保てる。
   for (let i = 1; i <= MAX_TABS; i++) {

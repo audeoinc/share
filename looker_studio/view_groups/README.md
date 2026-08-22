@@ -467,22 +467,26 @@ ORDER BY table_name;
 **何をパラメータ化したかの一覧を常時添付**する（折りたたみ）。α 等価の判定は
 強力なので、当否を人が確認できるようにしておく。
 
-SQL 中の `{{P1}}` にはツールチップ（`title` 属性）が付き、種別と suffix ごとの
-実際の値がその場で読める。末尾の一覧まで目を往復させずに済ませるため。
-実装は `render.js` の `withTips()`。
+SQL 中の `{{P1}}` にカーソルを合わせると、種別と suffix ごとの実際の値が
+吹き出しで読める。末尾の一覧まで目を往復させずに済ませるため。
+目印を付けるのは `render.js` の `withTips()`、見た目は `chromeCss()` の `.vg-ph`。
 
-- JavaScript は使えないので、CSS の疑似要素ではなくブラウザ標準の `title`。
-  Templated Record は `innerHTML` で流し込むだけなので属性は落ちない。
-- `title` を付ける `<span>` に `style` は持たせない。`mode='class'` は
-  `style` の中身をハッシュしてクラス名にするので、`style` を足すと
-  `template_style.html` を貼り直すまでその部分が素のままになる。
+- JavaScript は使えないので `:hover::after` ＋ `content:attr(data-tip)`。
+- **値は `data-tip` 属性に置く。** 子要素として置くと、CSS を貼り忘れたときに
+  値が SQL 本文に流れ出す。属性なら何も出ないだけで済む。
+- 絶対配置の既定の幅は「収まる幅」＝目印の幅しかない。`width:max-content` を
+  付けないと 1 文字ずつ折り返した細長い吹き出しになる。
+- 右ペインは `.vg-phr` で右寄せにする。左寄せのままだと表の右端からはみ出す。
+- 吹き出しは最終行では表の下へ出るので、`wrapTable` の `overflow` を
+  `visible` にしている（`tips` を渡したときだけ。Confluence 貼り付けは従来どおり
+  `hidden`）。角の丸めが少し甘くなるが、読めないよりはよい。
 - 行内差分は語単位（`{` `{` `P1` `}` `}`）で切るため、値が違う位置では
   目印がハイライトの `<span>` に割られる。目印の検出は途中にタグが入る形で
   書いてある（`PARAM_HTML_RE`）。
 - パラメータ名はグループごとに振り直すので、左右のペインには別の対応表を渡す。
 
 ```bash
-node preview.mjs          # dist/preview.html を生成して検証（42 アサーション）
+node preview.mjs          # dist/preview.html を生成して検証（44 アサーション）
 node preview.mjs --check  # 生成せず検証だけ
 ```
 

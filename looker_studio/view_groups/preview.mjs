@@ -151,11 +151,15 @@ const checks = [
   ['複雑な SQL のパラメータに実体名の種別が出る',
     parts[5].html.includes('実体名')],
   // --- パラメータの tooltip ---------------------------------------------
-  ['パラメータの目印に tooltip が付く', h3.includes('<span title="P1: ')],
+  ['パラメータの目印に tooltip が付く', h3.includes('data-tip="P1: ')],
   ['tooltip に種別と suffix ごとの値が並ぶ',
-    /<span title="P1: [^"]*\n[a-z]+ = /.test(h3)],
-  ['tooltip の span は style を持たない（class モードで CSS が増えない）',
-    !/<span title="[^"]*" style=/.test(h3) && !/<span style="[^"]*" title=/.test(h3)],
+    /data-tip="P1: [^"]*\n[a-z]+ = /.test(h3)],
+  ['tooltip の中身は属性に置く（CSS 未適用でも本文に流れ出さない）',
+    !/>P1: /.test(h3)],
+  ['右ペインの吹き出しは右寄せにする', h3.includes('class="vg-ph vg-phr"')],
+  ['tooltip の CSS が chrome 側にある',
+    R.chromeCss().includes('.vg-ph::after{content:attr(data-tip)') &&
+    R.chromeCss().includes('.vg-ph:hover::after')],
   ['すべての目印に tooltip が付く（タグで割れた分も含む）', (() => {
     // 行内差分は語単位で切るので、値が違う位置では {{ と P1 の間にタグが入る。
     // 左右でパラメータ名の振られ方がずれる形を作って、その経路も通す。
@@ -168,11 +172,11 @@ const checks = [
     const h = R.renderBase(b, {});
     const marks = h.match(/\{(?:<[^>]+>)*\{(?:<[^>]+>)*P\d+(?:<[^>]+>)*\}(?:<[^>]+>)*\}/g) || [];
     return marks.length === 3 && marks.some((m) => m.includes('<')) &&
-      (h.match(/<span title=/g) || []).length === marks.length;
+      (h.match(/class="vg-ph/g) || []).length === marks.length;
   })()],
   ['左右のペインで別の対応表を使う', (() => {
     // パラメータ名はグループごとに振り直すので、同じ P1 でも左右で中身が違う
-    const tips = [...parts[0].html.matchAll(/<span title="(P1: [^"]*)"/g)].map((m) => m[1]);
+    const tips = [...parts[0].html.matchAll(/data-tip="(P1: [^"]*)"/g)].map((m) => m[1]);
     return new Set(tips).size > 1;
   })()],
   ['伏せ字は診断で見える表記に戻す',

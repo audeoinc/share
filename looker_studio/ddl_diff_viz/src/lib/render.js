@@ -107,7 +107,7 @@ function esc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-/** 属性値用。title に入れるので " も落とす。改行はそのまま（tooltip の改行になる）。 */
+/** 属性値用。改行はそのまま（CSS 側が white-space:pre-wrap で行として出す）。 */
 function escAttr(s) {
   return esc(s).replace(/"/g, '&quot;');
 }
@@ -122,16 +122,21 @@ function escAttr(s) {
 const PARAM_HTML_RE = /\{(?:<[^>]+>)*\{(?:<[^>]+>)*(P\d+)(?:<[^>]+>)*\}(?:<[^>]+>)*\}/g;
 
 /**
- * パラメータの目印に title を付ける。tips は { P1: '…' } の形。
+ * パラメータの目印に tooltip 用の目印を付ける。tips は { P1: '…' } の形。
  *
- * style 属性を持たない <span> なので、class モード（style をハッシュして
- * クラス名にする描画）でも新しいクラスは生えない＝貼り済みの CSS のまま動く。
+ * 中身は data-tip 属性に持たせ、表示は CSS の :hover::after が content:attr()
+ * で行う（.vg-ph / render_groups.js の chromeCss）。文字を子要素として置くと、
+ * CSS を貼り忘れたときに値が SQL 本文に流れ出してしまう。属性なら CSS が
+ * 無いときは何も出ないだけで済む。
  */
-function withTips(html, tips) {
+function withTips(html, tips, alignRight) {
   if (!tips) return html;
+  // 右ペインは吹き出しを右寄せにする。左寄せのままだと表の右端からはみ出し、
+  // <table> の overflow:hidden（角丸のために要る）で切られる。
+  const cls = alignRight ? 'vg-ph vg-phr' : 'vg-ph';
   return html.replace(PARAM_HTML_RE, (m, name) => {
     const t = tips[name];
-    return t ? `<span title="${escAttr(t)}">${m}</span>` : m;
+    return t ? `<span class="${cls}" data-tip="${escAttr(t)}">${m}</span>` : m;
   });
 }
 
@@ -174,14 +179,14 @@ function sqlHighlight(src) {
   return out;
 }
 
-function renderSegs(segs, hiColor, tips) {
+function renderSegs(segs, hiColor, tips, alignRight) {
   if (!segs || !segs.length) return '&nbsp;';
   let out = '';
   for (const seg of segs) {
     const inner = sqlHighlight(seg.text);
     out += seg.hi ? `<span style="background:${hiColor};border-radius:2px;">${inner}</span>` : inner;
   }
-  return out === '' ? '&nbsp;' : withTips(out, tips);
+  return out === '' ? '&nbsp;' : withTips(out, tips, alignRight);
 }
 
 function numTd(num, pane, leftBorder) {
@@ -224,10 +229,16 @@ function th(colspan, labelSegs, sub, pane, leftBorder) {
   return `<th colspan="${colspan}" style="text-align:left;font-family:${T.headFont};font-weight:600;color:${T.title};background:${pane.headBg};border-bottom:2px solid ${pane.bar};${lb}padding:7px 12px;">${labelHtml(labelSegs, pane)}${subHtml}</th>`;
 }
 
-function wrapTable(colgroup, theadHtml, bodyHtml) {
+/**
+ * @param {boolean} [showOverflow] 表の外へはみ出す要素を切らない。
+ *   tooltip（.vg-ph::after）は最終行でも表の下へ出るので、overflow:hidden の
+ *   ままだと切られてしまう。角の丸めが甘くなるが、読めないよりはよい。
+ *   Confluence 貼り付け（tooltip なし）は既定のまま。
+ */
+function wrapTable(colgroup, theadHtml, bodyHtml, showOverflow) {
   return (
     `<div style="font-family:${T.font};color:${T.text};line-height:${T.lineHeight};-webkit-text-size-adjust:100%;-moz-text-size-adjust:100%;text-size-adjust:100%;">\n` +
-    `  <table style="border-collapse:collapse;border:1px solid ${T.border};border-radius:4px;overflow:hidden;font-size:${T.fontSize}px;background:#ffffff;width:100%;max-width:100%;table-layout:fixed;box-shadow:${T.shadow};-webkit-text-size-adjust:100%;text-size-adjust:100%;">\n` +
+    `  <table style="border-collapse:collapse;border:1px solid ${T.border};border-radius:4px;overflow:${showOverflow ? 'visible' : 'hidden'};font-size:${T.fontSize}px;background:#ffffff;width:100%;max-width:100%;table-layout:fixed;box-shadow:${T.shadow};-webkit-text-size-adjust:100%;text-size-adjust:100%;">\n` +
     `    ${colgroup}\n` +
     `    <thead><tr>${theadHtml}</tr></thead>\n` +
     `    <tbody>\n${bodyHtml}    </tbody>\n` +
@@ -254,7 +265,7 @@ function renderFragment1(label, sub, lines, opts, tips) {
     body += `      <tr>${numTd(i + 1, PANES.base, false)}` +
       `${codeTd('same', withTips(sqlHighlight(lines[i]), tips), PANES.base)}</tr>\n`;
   }
-  return wrapTable(colgroup, thead, body);
+  return wrapTable(colgroup, thead, body, !!tips);
 }
 
 /**
@@ -277,11 +288,11 @@ function renderFragment2(leftLabel, rightLabel, rows, opts, tips) {
     let cells = '';
     if (L) cells += numTd(L.num, PANES.base, false) + markTd(L.kind === 'del' ? 'del' : 'blank', PANES.base) + codeTd(L.kind, renderSegs(L.segs, PANES.base.hi, tips && tips.left), PANES.base);
     else cells += hatchTd('num', false) + hatchTd('mark', false) + hatchTd('code', false);
-    if (R) cells += numTd(R.num, PANES.after, true) + markTd(R.kind === 'add' ? 'add' : 'blank', PANES.after) + codeTd(R.kind, renderSegs(R.segs, PANES.after.hi, tips && tips.right), PANES.after);
+    if (R) cells += numTd(R.num, PANES.after, true) + markTd(R.kind === 'add' ? 'add' : 'blank', PANES.after) + codeTd(R.kind, renderSegs(R.segs, PANES.after.hi, tips && tips.right, true), PANES.after);
     else cells += hatchTd('num', true) + hatchTd('mark', true) + hatchTd('code', true);
     body += `      <tr>${cells}</tr>\n`;
   }
-  return wrapTable(colgroup, thead, body);
+  return wrapTable(colgroup, thead, body, !!tips);
 }
 
 /** 3-way フラグメント（base / after / reference, 基準=左端 base）。各ペイン等幅 */
