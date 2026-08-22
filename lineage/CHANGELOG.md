@@ -1,5 +1,29 @@
 # 1.5.0-032
 
+- Added a dry run to `03_run_daily_lineage_pipeline.sql`: `preview_only BOOL DEFAULT
+  FALSE` in [B]. With it TRUE the script resolves the analysis scope from [A], reports
+  what the run WOULD cover, and stops before anything is written -- no MERGE, no UPDATE,
+  and not even the self-healing `CREATE TABLE IF NOT EXISTS` for the column-usage table.
+  Four sections come back: PREVIEW_SETTINGS (the [A] values actually in effect),
+  PREVIEW_ANALYSIS_DATASETS (each target dataset with its View count, zero-count datasets
+  kept so "matched the dataset filter but holds no View" is visible),
+  PREVIEW_SOURCE_DATASETS (ACCESSIBLE vs SKIPPED_NO_ACCESS with the reason, from the
+  access pre-check) and PREVIEW_TARGET_VIEWS (the View list after every filter).
+  This lives inside 03 rather than in a separate pre-flight script on purpose: the
+  operator edits one [A], and the preview prints the values 03 itself resolved, so there
+  is no second copy of the settings and no second implementation of the filters that
+  could disagree with the real run. The report sits at the point in STEP 1 where target
+  datasets, source datasets and the filtered View list are all settled and nothing has
+  been written yet; the rest of STEP 1, STEP 2, and STEP 3 through the pipeline summary
+  are gated off. `non_completed_udf_results` is still created, because the FINAL
+  OPERATIONAL RESULT select sits outside the script's block and would otherwise fail on a
+  missing table -- in preview it just returns no rows. Generated tables are deliberately
+  not listed: enumerating them needs STEP 2's INFORMATION_SCHEMA.JOBS scan, which a
+  preview should not pay for, and the closing notice says so (plus a hint when
+  `analysis_include_generation_types` excludes VIEW_DEFINITION and an empty View list is
+  therefore expected). Documented in OPERATION_GUIDE section 7. SQL-only; the engine
+  bundle is unchanged. Not yet validated against BigQuery.
+
 - Closed the remaining Access Denied hole in the source-dataset pre-check: a source
   *project* whose region-wide INFORMATION_SCHEMA.SCHEMATA listing is denied aborted the
   run while resolving `source_datasets`, before the per-dataset probe added above could
