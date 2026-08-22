@@ -4,10 +4,11 @@
 //   node build_udf.mjs --check  -> 生成せず、Node 上で UDF 本体を実行して検証だけ
 //
 // 生成するのは 2 つ:
-//   VIEW_GROUP_INFO(views ARRAY<STRUCT<view_name STRING, ddl STRING>>, options_json STRING)
+//   viewlgc_group_info(views ARRAY<STRUCT<view_name STRING, ddl STRING>>, options_json STRING)
 //     -> STRUCT<view_count, group_count, group_labels, group_sizes, suffixes,
 //               unmatched_count, html>
-//   VIEW_GROUP_CSS(options_json STRING)
+//   viewlgc_group_css(options_json STRING)
+//   viewlgc_render_dynamic_sql(...)  -- SQL 関数。build_table.sql の __…__ を展開する
 //
 // HTML とメタデータ（グループ数・ラベル）を 1 回の呼び出しで返すのは、
 // 事前生成テーブルに両方入れたいため。分けると同じ解析を 2 回走らせることになる。
@@ -142,7 +143,7 @@ function __applyMode(html, mode) {
 }
 `.trim();
 
-// --- VIEW_GROUP_INFO のドライバ ----------------------------------------
+// --- group_info のドライバ ---------------------------------------------
 const infoDriver = `
 function __empty(msg) {
   return {
@@ -209,7 +210,7 @@ function __run(views, options_json) {
 return __run(views, options_json);
 `.trim();
 
-// --- VIEW_GROUP_CSS のドライバ -----------------------------------------
+// --- group_css のドライバ ----------------------------------------------
 // 全パターンを描画して、そこに出る規則を集める。markup と同じコードから作るので
 // クラス名が食い違わない。chromeCss() はもともとクラス方式なのでそのまま足す。
 const cssDriver = `
@@ -281,8 +282,8 @@ function pack(driver, label) {
   return { code, raw: raw.length, min: code.length, label };
 }
 
-const infoPack = pack(infoDriver, 'VIEW_GROUP_INFO');
-const cssPack = pack(cssDriver, 'VIEW_GROUP_CSS');
+const infoPack = pack(infoDriver, 'viewlgc_group_info');
+const cssPack = pack(cssDriver, 'viewlgc_group_css');
 
 // --- 検証: 最小化した本体をそのまま実行する -----------------------------
 const S = require(join(here, 'sample_views.js'));
@@ -318,8 +319,8 @@ const checks = [
   ['ペイン見出しに suffix が列記される', text.includes('abjp, abuk, abus')],
   ['パラメータ一覧が付く', text.includes('パラメータ化した箇所')],
   ['class モードは style 属性を残さない', !/ style="/.test(classed)],
-  ['VIEW_GROUP_CSS が markup の全クラスを網羅', used.every((c) => defined.has(c))],
-  ['VIEW_GROUP_CSS に chrome の規則が入る', css.includes('.vg-tablist') && css.includes('.vg-r1:checked')],
+  ['group_css が markup の全クラスを網羅', used.every((c) => defined.has(c))],
+  ['group_css に chrome の規則が入る', css.includes('.vg-tablist') && css.includes('.vg-r1:checked')],
   ['embed モードは style ブロックを含む', embed.includes('<style>') && embed.includes('.vg-panel')],
   ['メタデータ: View 数', info.view_count === 9],
   ['メタデータ: グループ数', info.group_count === 3],
@@ -392,7 +393,7 @@ const kb = (n) => (n / 1024).toFixed(1) + ' KB';
 console.log(`\n${checks.length - failed}/${checks.length} passed\n`);
 console.log('UDF 本体のサイズ（インライン上限 32 KB）');
 for (const p of [infoPack, cssPack]) {
-  console.log(`  ${p.label.padEnd(17)} 素 ${kb(p.raw).padStart(8)} → ` +
+  console.log(`  ${p.label.padEnd(20)} 素 ${kb(p.raw).padStart(8)} → ` +
     (p.min === null ? '最小化なし' : `最小化 ${kb(p.min).padStart(8)}`) +
     `  （上限比 ${(Buffer.byteLength(p.code) / SIZE_LIMIT * 100).toFixed(0)}%）`);
 }
@@ -404,50 +405,80 @@ if (process.argv.includes('--check')) process.exit(0);
 
 // --- SQL を書き出す ----------------------------------------------------
 const sql = `-- =====================================================================
--- suffix 違い View のロジック グループ比較を HTML で返す BigQuery UDF
+-- suffix 違い View のロジック グループ比較の UDF を作る
 --
 -- ※ このファイルは build_udf.mjs が生成する。直接編集しないこと。
 --    再生成: node looker_studio/view_groups/build_udf.mjs
 --    本体は esbuild で最小化してある（インラインのコード ブロブは
---    32 KB までに制限されるため。素の連結は約 45 KB で確実に弾かれる）。
+--    32 KB までに制限されるため。素の連結は約 48 KB で確実に弾かれる）。
 --
--- 環境に合わせるのは先頭の DECLARE だけ。本文の書き換えは要らない。
+-- 作る関数は 3 つ。名前はすべて CONFIGURATION の値から組み立てる。
+--   viewlgc_group_info          比較 HTML とメタデータを返す（JavaScript）
+--   viewlgc_group_css           テンプレートに貼る CSS を返す（JavaScript）
+--   viewlgc_render_dynamic_sql  build_table.sql の __…__ を展開する（SQL）
 --
--- BigQuery は識別子（プロジェクト・データセット・関数名）をクエリ
--- パラメータにできない。@param が使えるのは値だけ。
--- そこでスクリプト変数に持ち、EXECUTE IMMEDIATE でテキスト置換する。
--- @@PROJECT@@ / @@UDF@@ / @@INFO_FN@@ / @@CSS_FN@@ が置換される目印。
+-- 命名と設定の書き方は lineage プロジェクト（lineage/sql/setup/
+-- 01_setup_lineage_environment.sql）にそろえてある。
+--   UDF 名: udf_name_prefix + 'viewlgc_' + 基本名 + udf_name_suffix
 -- =====================================================================
 
 
--- ---------------------------------------------------------------------
--- 0. 設定（書き換えるのはここだけ）
---
---    SET @@location は DECLARE より前に置く。
---    このスクリプトは EXECUTE IMMEDIATE で DDL を投げるだけで、
---    ロケーションを推測できるテーブル参照が無い。指定しないと既定の
---    ロケーションで実行され、目的のデータセットに作れない。
--- ---------------------------------------------------------------------
 SET @@location = '${region}';
 
-DECLARE project_id  STRING DEFAULT 'my-project';
+BEGIN
+-- ---------------------------------------------------------------------
+-- CONFIGURATION（書き換えるのはここだけ）
+--
+--   [A] 環境ごとに必ず見るもの
+--   [B] 既定のままで動くもの
+--   [C] 導出・内部用。編集しない
+--
+--   リージョンは先頭の SET @@location が唯一の置き場所。
+--   SET @@location は DECLARE より前に置く。このスクリプトは
+--   EXECUTE IMMEDIATE で DDL を投げるだけで、ロケーションを推測できる
+--   テーブル参照が無いため、指定しないと既定のロケーションで実行される。
+-- ---------------------------------------------------------------------
+-- [A] 環境ごとに必ず見るもの ------------------------------------------
+-- プロジェクト ID は実行時に自動検出する（[C]）。別プロジェクトに作る
+-- ときだけ [C] の udf_project_id にリテラルを入れて固定する。
+--
+-- プロジェクト トークンの置換
+DECLARE project_token_pattern STRING DEFAULT r'^([^-]+)';
+-- UDF の置き場所
 DECLARE udf_dataset STRING DEFAULT 'ops_meta';
+-- UDF の命名（prefix / suffix）
+DECLARE udf_name_prefix STRING DEFAULT '';
+DECLARE udf_name_suffix STRING DEFAULT '';
+--
+-- 変数の説明:
+--   project_token_pattern
+--     自動検出したプロジェクト ID からこの正規表現で切り出したトークン
+--     （REGEXP_EXTRACT。キャプチャがあればグループ 1）が、下の名前に書いた
+--     '{project_token}' をすべて置き換える。例: プロジェクト
+--     'mycompany-prod-123' に r'-([^-]+)-' なら 'prod' になるので、
+--     udf_name_suffix='_{project_token}' が '_prod' になる。
+--     一致しなければ '' になり、残った '{project_token}' は下の ASSERT で落ちる。
+--   udf_dataset
+--     3 つの関数を作るデータセット。build_table.sql の同名の変数と合わせること。
+--   udf_name_prefix / udf_name_suffix
+--     関数名は udf_name_prefix + 'viewlgc_' + 基本名 + udf_name_suffix で
+--     組み立てる。'viewlgc_' はこのシステムの識別子なのでリテラルのまま。
+--     ルーチン名は英数字と '_' しか使えない（'-' は不可）ので、テーブル側の
+--     prefix / suffix とは別に持つ。build_table.sql の同名の変数と合わせること。
 
--- 関数名は udf_prefix + system_name + _ + 基本名 + udf_suffix で組み立てる。
--- system_name はこのシステムを表す文字列。区切りの _ は下の SET で足すので
--- 値には書かない。空にすればシステム名なしになる。
--- 関数名は大文字の慣習なので、system_name は UPPER にして付ける。
--- この 5 つは build_table.sql の同名の変数と必ず同じ値にすること。
--- 食い違うと、作った関数を build_table.sql が見つけられない。
-DECLARE system_name  STRING DEFAULT 'viewlgc';
-DECLARE udf_prefix   STRING DEFAULT '';
-DECLARE udf_suffix   STRING DEFAULT '';
-DECLARE info_fn_base STRING DEFAULT 'VIEW_GROUP_INFO';
-DECLARE css_fn_base  STRING DEFAULT 'VIEW_GROUP_CSS';
+-- [B] 既定のままで動くもの --------------------------------------------
+-- 関数名（[C] で組み立てる）。基本名はリテラルで、変えるならここではなく
+-- 下の SET を直す。build_table.sql の同名の変数と必ず同じ値にすること。
+DECLARE udf_info_function_name   STRING;
+DECLARE udf_css_function_name    STRING;
+DECLARE udf_render_function_name STRING;
 
-DECLARE udf_system_tag STRING;  -- system_name を大文字にして区切りの _ を足したもの
-DECLARE info_fn STRING;
-DECLARE css_fn  STRING;
+-- [C] 導出・内部用。編集しない ----------------------------------------
+-- プロジェクトは自動検出した値を使う。別プロジェクトに作るときだけ
+-- DEFAULT にリテラルを入れて固定する（COALESCE で非 NULL が勝つ）。
+DECLARE default_project_id STRING;
+DECLARE udf_project_id     STRING DEFAULT NULL;
+DECLARE project_token      STRING;
 
 -- 関数の本体（JavaScript）。ここは触らない。
 -- SQL 文に直接埋めず変数に置くのは、本体を r\"\"\" \"\"\" で囲む必要があり、
@@ -462,13 +493,45 @@ DECLARE js_css STRING DEFAULT r"""
 ${cssPack.code}
 """;
 
-SET udf_system_tag = IF(system_name = '', '', CONCAT(UPPER(system_name), '_'));
-SET info_fn = CONCAT(udf_prefix, udf_system_tag, info_fn_base, udf_suffix);
-SET css_fn  = CONCAT(udf_prefix, udf_system_tag, css_fn_base,  udf_suffix);
+-- 実行中のプロジェクトを INFORMATION_SCHEMA.SCHEMATA から自動検出する
+-- （catalog_name = ジョブが動いているプロジェクト）。リージョン修飾の
+-- 識別子はパラメータにできないので @@location から組み立てる。
+EXECUTE IMMEDIATE FORMAT(
+  "SELECT DISTINCT catalog_name FROM \`region-%s\`.INFORMATION_SCHEMA.SCHEMATA LIMIT 1",
+  @@location
+) INTO default_project_id;
+ASSERT default_project_id IS NOT NULL AS
+  'プロジェクト ID を自動検出できません（このリージョンにデータセットが無い？）。udf_project_id にリテラルを入れて固定してください。';
+SET udf_project_id = COALESCE(udf_project_id, default_project_id);
+
+-- 名前を組み立てる前に '{project_token}' を置き換える。
+SET project_token =
+  COALESCE(REGEXP_EXTRACT(default_project_id, project_token_pattern), '');
+SET udf_dataset     = REPLACE(udf_dataset,     '{project_token}', project_token);
+SET udf_name_prefix = REPLACE(udf_name_prefix, '{project_token}', project_token);
+SET udf_name_suffix = REPLACE(udf_name_suffix, '{project_token}', project_token);
+
+ASSERT REGEXP_CONTAINS(udf_dataset, r'^[A-Za-z0-9_]+$') AS
+  'udf_dataset は英数字と _ だけにしてください（置換されていない {project_token} が残っていませんか）。';
+
+-- 関数名: udf_name_prefix + 'viewlgc_' + 基本名 + udf_name_suffix
+SET udf_info_function_name =
+  udf_name_prefix || 'viewlgc_' || 'group_info' || udf_name_suffix;
+SET udf_css_function_name =
+  udf_name_prefix || 'viewlgc_' || 'group_css' || udf_name_suffix;
+SET udf_render_function_name =
+  udf_name_prefix || 'viewlgc_' || 'render_dynamic_sql' || udf_name_suffix;
+ASSERT REGEXP_CONTAINS(udf_info_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_info_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_css_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_css_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_render_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_render_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 
 
 -- ---------------------------------------------------------------------
--- VIEW_GROUP_INFO — base 1 件分の View 群を渡すと、比較 HTML とメタデータを返す
+-- 1. viewlgc_group_info
+--    base 1 件分の View 群を渡すと、比較 HTML とメタデータを返す
 --
 -- 引数:
 --   views         ARRAY<STRUCT<view_name STRING, ddl STRING>>
@@ -478,7 +541,7 @@ SET css_fn  = CONCAT(udf_prefix, udf_system_tag, css_fn_base,  udf_suffix);
 -- 戻り値 STRUCT:
 --   view_count       FLOAT64        渡された View 数
 --   group_count      FLOAT64        ロジックのグループ数（1 なら全部同一＝正常）
---   group_labels     ARRAY<STRING>  ["abjp, abuk, abus", …] ペイン見出し
+--   group_labels     ARRAY<STRING>  ["abjp, abuk, abus", …] タブ / ペイン見出し
 --   group_sizes      ARRAY<FLOAT64> 各グループの View 数
 --   suffixes         ARRAY<STRING>  認識した suffix 一覧
 --   unmatched_count  FLOAT64        suffix を認識できなかった数
@@ -505,11 +568,11 @@ SET css_fn  = CONCAT(udf_prefix, udf_system_tag, css_fn_base,  udf_suffix);
 --                 表示する（既定 true）。false で従来どおり除外
 --   stripOptions  OPTIONS( … ) 句を落としてから比較する（既定 true）
 --   layout        'auto'（既定・3 グループ以上はタブ）/ 'panes' / 'tabs'
---   mode          'inline'（既定）/ 'class'（CSS は VIEW_GROUP_CSS へ）/ 'embed'
+--   mode          'inline'（既定）/ 'class'（CSS は group_css へ）/ 'embed'
 --   fontSize / lineHeight / colors / diffLineOpacity / diffCharOpacity / syntax
 -- ---------------------------------------------------------------------
-EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(r"""
-CREATE OR REPLACE FUNCTION \`@@PROJECT@@.@@UDF@@.@@INFO_FN@@\`(
+EXECUTE IMMEDIATE FORMAT('''
+CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
   views ARRAY<STRUCT<view_name STRING, ddl STRING>>,
   options_json STRING
 )
@@ -522,37 +585,133 @@ RETURNS STRUCT<
   unmatched_count FLOAT64,
   html            STRING
 >
-LANGUAGE js AS @@JS@@
-""",
-  '@@PROJECT@@', project_id),
-  '@@UDF@@',     udf_dataset),
-  '@@INFO_FN@@', info_fn),
-  -- @@JS@@ を最後にするのは、本体の中身がさらに置換されないようにするため
-  '@@JS@@',      TO_JSON_STRING(js_info));
+LANGUAGE js AS %s
+''',
+  udf_project_id, udf_dataset, udf_info_function_name,
+  TO_JSON_STRING(js_info));
 
 
 -- ---------------------------------------------------------------------
--- VIEW_GROUP_CSS — mode='class' のときテンプレートへ貼る CSS を返す
+-- 2. viewlgc_group_css
+--    mode='class' のときテンプレートへ貼る CSS を返す
 --
---   SELECT \`<project>.<udf_dataset>.VIEW_GROUP_CSS\`(NULL);
+--   SELECT \`<project>.<udf_dataset>.viewlgc_group_css\`(NULL);
 --
 -- 結果を <style> … </style> で囲んで Templated Record のテンプレートに貼る。
 -- 見出し・タブ・パラメータ表の規則と、差分表の規則の両方を含む。
 -- タブの CSS は ID ではなくクラスで書いてあるので、レコードが変わっても
 -- この CSS のまま使える。
 --
--- options_json は VIEW_GROUP_HTML と同じものを渡すこと。色やフォントを
+-- options_json は group_info と同じものを渡すこと。色やフォントを
 -- 変えた場合、CSS 側も同じ設定で作り直す必要がある。
 -- ---------------------------------------------------------------------
-EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(r"""
-CREATE OR REPLACE FUNCTION \`@@PROJECT@@.@@UDF@@.@@CSS_FN@@\`(options_json STRING)
+EXECUTE IMMEDIATE FORMAT('''
+CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(options_json STRING)
 RETURNS STRING
-LANGUAGE js AS @@JS@@
-""",
-  '@@PROJECT@@', project_id),
-  '@@UDF@@',     udf_dataset),
-  '@@CSS_FN@@',  css_fn),
-  '@@JS@@',      TO_JSON_STRING(js_css));
+LANGUAGE js AS %s
+''',
+  udf_project_id, udf_dataset, udf_css_function_name,
+  TO_JSON_STRING(js_css));
+
+
+-- ---------------------------------------------------------------------
+-- 3. viewlgc_render_dynamic_sql
+--    build_table.sql の SQL テンプレートに含まれる __…__ を展開する
+--
+-- BigQuery は識別子（プロジェクト・データセット・テーブル・関数名）を
+-- クエリ パラメータにできない。@param が使えるのは値だけ。そこで
+-- テンプレートの目印をこの関数で置き換えてから EXECUTE IMMEDIATE する。
+--
+-- 永続関数にしてあるのは、スクリプトの TEMP FUNCTION を 1 つでも置くと
+-- その DDL が子ジョブすべてのクエリ本文に前置され、コンソールの結果一覧が
+-- どれも TEMP FUNCTION の DDL に見えてしまうため（CREATE VIEW も通らない）。
+--
+-- 置き換える目印:
+--   __TARGET_PROJECT__     読み取り対象のプロジェクト
+--   __JOB_REGION__         region- を除いたロケーション
+--   __T_DIFF_HIST__        履歴テーブル（project.dataset.table）
+--   __V_DIFF__             最新スナップショットのビュー（同上）
+--   __UDF_INFO__           group_info 関数（project.dataset.function）
+--   __UDF_CSS__            group_css 関数（同上）
+--   __TZ__                 snapshot_date の基準タイムゾーン
+--   __RETENTION_DAYS__     パーティションの保持日数
+--   __SUFFIX_PATTERN__     suffix を切り出す正規表現
+--   __SCHEMA_COND__        SCHEMATA 用の絞り込み条件（SQL 片）
+--   __VIEW_DATASET_COND__  VIEWS 用のデータセット条件（SQL 片）
+--   __VIEW_NAME_COND__     VIEWS 用の View 名条件（SQL 片）
+--
+-- 中身が SQL になるもの（__*_COND__）を最後に置くのは、置き換えた中身が
+-- さらに走査されないようにするため。
+-- ---------------------------------------------------------------------
+EXECUTE IMMEDIATE FORMAT('''
+CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
+  sql_template STRING,
+  work_project_id STRING,
+  work_dataset STRING,
+  udf_project_id STRING,
+  udf_dataset STRING,
+  target_project_id STRING,
+  job_region STRING,
+  objects STRUCT<
+    diff_hist     STRING,
+    diff_latest   STRING,
+    info_function STRING,
+    css_function  STRING
+  >,
+  options STRUCT<
+    time_zone      STRING,
+    retention_days STRING,
+    suffix_pattern STRING
+  >,
+  conditions STRUCT<
+    schema_condition       STRING,
+    view_dataset_condition STRING,
+    view_name_condition    STRING
+  >
+)
+RETURNS STRING
+AS (
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+    sql_template,
+    '__TARGET_PROJECT__', target_project_id),
+    '__JOB_REGION__', job_region),
+    '__T_DIFF_HIST__',
+      work_project_id || '.' || work_dataset || '.' || objects.diff_hist),
+    '__V_DIFF__',
+      work_project_id || '.' || work_dataset || '.' || objects.diff_latest),
+    '__UDF_INFO__',
+      udf_project_id || '.' || udf_dataset || '.' || objects.info_function),
+    '__UDF_CSS__',
+      udf_project_id || '.' || udf_dataset || '.' || objects.css_function),
+    '__TZ__', options.time_zone),
+    '__RETENTION_DAYS__', options.retention_days),
+    '__SUFFIX_PATTERN__', options.suffix_pattern),
+    '__SCHEMA_COND__', conditions.schema_condition),
+    '__VIEW_DATASET_COND__', conditions.view_dataset_condition),
+    '__VIEW_NAME_COND__', conditions.view_name_condition)
+)
+''',
+  udf_project_id, udf_dataset, udf_render_function_name);
+
+
+-- 作った 3 つの名前を出す。build_table.sql に同じ値を入れる。
+SELECT
+  FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_info_function_name)   AS info_function,
+  FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_css_function_name)    AS css_function,
+  FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_render_function_name) AS render_function,
+  CURRENT_TIMESTAMP() AS created_at;
+END;
 `;
 
 // 生成物の検証。r""" """ の中に """ が現れると文字列がそこで切れる。
@@ -563,12 +722,26 @@ LANGUAGE js AS @@JS@@
     console.log(`  FAIL  三重引用符の数が合いません（開始 ${opens} 個に対して ${triples} 個）`);
     process.exit(1);
   }
-  const stale = sql.match(/`PROJECT\.|\.DATASET\./);
+  // FORMAT のテンプレートに素の % があると書式指定と解釈される。
+  // 引数側（JS 本体）の % は無関係なので、''' … ''' の中だけを見る。
+  const templates = [...sql.matchAll(/FORMAT\('''([\s\S]*?)'''/g)].map((m) => m[1]);
+  if (templates.length !== 3) {
+    console.log(`  FAIL  FORMAT のテンプレートが 3 つ見つかりません（${templates.length} 個）`);
+    process.exit(1);
+  }
+  for (const t of templates) {
+    const bad = t.match(/%(?![s])/);
+    if (bad) {
+      console.log(`  FAIL  FORMAT テンプレートに %s 以外の % があります: ${bad[0]}`);
+      process.exit(1);
+    }
+  }
+  const stale = sql.match(/@@[A-Z_]+@@/);
   if (stale) {
     console.log(`  FAIL  旧いプレースホルダが残っています: ${stale[0]}`);
     process.exit(1);
   }
-  console.log('\n  PASS  置換トークンは @@PROJECT@@ / @@UDF@@ / @@JS@@ のみ');
+  console.log('\n  PASS  DDL は FORMAT の書式で組み立て（% は %s のみ）');
 }
 
 const outPath = join(here, 'view_group_html.sql');
@@ -576,13 +749,13 @@ await writeFile(outPath, sql);
 console.log(`\nwrote ${outPath} (${kb(Buffer.byteLength(sql))})`);
 
 // テンプレートに貼る CSS も書き出しておく。中身は
-// SELECT VIEW_GROUP_CSS(...) の出力そのものなので、BigQuery を叩かずに
+// SELECT viewlgc_group_css(...) の出力そのものなので、BigQuery を叩かずに
 // 貼り付けたいときはこのファイルを使える（内容は同じ）。
 const cssPath = join(here, 'template_style.html');
 await writeFile(cssPath,
   `<!--
   Templated Record のテンプレートに貼る CSS（mode='class' のとき）。
-  中身は SELECT \`<project>.<udf_dataset>.VIEW_GROUP_CSS\`(...) の出力そのもの。
+  中身は SELECT \`<project>.<udf_dataset>.viewlgc_group_css\`(...) の出力そのもの。
   このファイルは build_udf.mjs が生成する。直接編集しないこと。
 
   ここは固定。差分の内容が変わっても書き換え不要。

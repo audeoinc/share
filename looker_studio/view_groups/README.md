@@ -155,7 +155,7 @@ WHERE country = 'US'   -- v_x_abus
 
 | ファイル | 位置づけ |
 |---|---|
-| `build_table.sql` | 手で編集する。設定はセクション 0 の `DECLARE` |
+| `build_table.sql` | 手で編集する。設定は CONFIGURATION の `DECLARE` |
 | `view_group_html.sql` | `build_udf.mjs` の生成物。JS を最小化して埋めるため。設定は先頭の `DECLARE` |
 | `template_style.html` | `build_udf.mjs` の生成物（CSS） |
 
@@ -171,10 +171,10 @@ suffixes AS (
     IF(ARRAY_LENGTH(@suffix_list) > 0,
        @suffix_list,
        ARRAY(
-         SELECT DISTINCT REGEXP_EXTRACT(schema_name, r'@@SUFFIX_PATTERN@@')
-         FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.SCHEMATA`
-         WHERE REGEXP_CONTAINS(schema_name, r'@@SUFFIX_PATTERN@@')
-           AND (@@SCHEMA_COND@@)
+         SELECT DISTINCT REGEXP_EXTRACT(schema_name, r'__SUFFIX_PATTERN__')
+         FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.SCHEMATA`
+         WHERE REGEXP_CONTAINS(schema_name, r'__SUFFIX_PATTERN__')
+           AND (__SCHEMA_COND__)
        ))
   ) AS suffix
 ),
@@ -190,10 +190,10 @@ SQL 側も UDF 側も固定なので、片方だけ変えると食い違う。
 
 注意点:
 
-- `region` は**データセットのロケーションと揃える**こと。`SET @@location` も
-  同じ値にする。間違えるとセクション 0 の事前チェックで止まる
+- ロケーションは `SET @@location` が唯一の置き場所（`job_region` はそこから
+  受け取る）。データセットのロケーションと違うと事前チェックの `ASSERT` で止まる
 - **サンプルは View を 1 つのデータセット（`sample_mart`）にまとめてある**ので、
-  自動検出では拾えない。`include_dataset_patterns = [r'^sample_mart$']` と
+  自動検出では拾えない。`analysis_include_dataset_patterns = [r'^sample_mart$']` と
   `suffix_list = ['abjp', 'abuk', …]` を指定して試す
 - **無関係なデータセットも条件に一致すれば拾われる**。害が出るのはその文字列で
   終わる View 名がある場合だけだが、気になるなら include / exclude で絞る
@@ -336,12 +336,14 @@ node preview.mjs --check  # 生成せず検証だけ
 ```bash
 node build_udf.mjs          # 検証して view_group_html.sql を生成
 node build_udf.mjs --check  # 生成せず検証だけ（27 アサーション）
+node check_sql.mjs          # build_table.sql と view_group_html.sql の突き合わせ
 ```
 
 | 関数 | 戻り値 |
 |---|---|
-| `VIEW_GROUP_INFO(views, options_json)` | `STRUCT<view_count, group_count, group_labels, group_sizes, suffixes, unmatched_count, html>` |
-| `VIEW_GROUP_CSS(options_json)` | `mode='class'` でテンプレートに貼る CSS |
+| `viewlgc_group_info(views, options_json)` | `STRUCT<view_count, group_count, group_labels, group_sizes, suffixes, unmatched_count, html>` |
+| `viewlgc_group_css(options_json)` | `mode='class'` でテンプレートに貼る CSS |
+| `viewlgc_render_dynamic_sql(sql_template, …)` | `build_table.sql` の `__…__` を展開した SQL（JavaScript ではなく SQL 関数） |
 
 HTML とメタデータを 1 回の呼び出しで返すのは、事前生成テーブルに両方入れたいため。
 分けると同じ解析を 2 回走らせることになる。数値が `FLOAT64` なのは JS UDF が
@@ -351,8 +353,8 @@ HTML とメタデータを 1 回の呼び出しで返すのは、事前生成テ
 素の連結は約 45 KB あって確実に弾かれるので、esbuild で最小化してから埋め込む。
 
 ```
-VIEW_GROUP_INFO  素 48.4 KB → 最小化 28.7 KB（上限比 96%）
-VIEW_GROUP_CSS   素 48.1 KB → 最小化 28.4 KB（上限比 95%）
+viewlgc_group_info  素 48.4 KB → 最小化 28.7 KB（上限比 96%）
+viewlgc_group_css   素 48.1 KB → 最小化 28.4 KB（上限比 95%）
 ```
 
 3-way 系と `alphaMap` を外しているが、**残りは 32 KB に対して 3.2 KB ほど**。
@@ -375,79 +377,94 @@ VIEW_GROUP_CSS   素 48.1 KB → 最小化 28.4 KB（上限比 95%）
 
 ```sql
 -- view_group_html.sql
-SET @@location = 'asia-northeast1';   -- DECLARE より前に置く
+SET @@location = 'asia-northeast1';   -- DECLARE より前。ここが唯一の置き場所
 
-DECLARE project_id  STRING DEFAULT 'my-project';
-DECLARE udf_dataset STRING DEFAULT 'ops_meta';
-
-DECLARE system_name  STRING DEFAULT 'viewlgc';  -- build_table.sql と同じ値にする
-DECLARE udf_prefix   STRING DEFAULT '';
-DECLARE udf_suffix   STRING DEFAULT '';
-DECLARE info_fn_base STRING DEFAULT 'VIEW_GROUP_INFO';
-DECLARE css_fn_base  STRING DEFAULT 'VIEW_GROUP_CSS';
+BEGIN
+-- [A] 環境ごとに必ず見るもの
+DECLARE project_token_pattern STRING DEFAULT r'^([^-]+)';
+DECLARE udf_dataset     STRING DEFAULT 'ops_meta';
+DECLARE udf_name_prefix STRING DEFAULT '';
+DECLARE udf_name_suffix STRING DEFAULT '';
 
 -- build_table.sql
-SET @@location = 'asia-northeast1';   -- DECLARE より前。region と同じ値にする
+SET @@location = 'asia-northeast1';   -- DECLARE より前。ここが唯一の置き場所
 
-DECLARE project_id   STRING DEFAULT 'my-project';
-DECLARE udf_dataset  STRING DEFAULT 'ops_meta';   -- UDF の置き場所
-DECLARE work_dataset STRING DEFAULT 'ops_meta';   -- テーブル / ビューの置き場所
-DECLARE region       STRING DEFAULT 'asia-northeast1';
-DECLARE tz           STRING DEFAULT 'Asia/Tokyo';
+BEGIN
+-- [A] 環境ごとに必ず見るもの
+DECLARE project_token_pattern STRING DEFAULT r'^([^-]+)';
+DECLARE work_dataset      STRING DEFAULT 'ops_meta';   -- テーブル / ビューの置き場所
+DECLARE udf_dataset       STRING DEFAULT 'ops_meta';   -- UDF の置き場所
+DECLARE table_name_prefix STRING DEFAULT '';
+DECLARE table_name_suffix STRING DEFAULT '';
+DECLARE udf_name_prefix   STRING DEFAULT '';
+DECLARE udf_name_suffix   STRING DEFAULT '';
+DECLARE analysis_include_dataset_patterns ARRAY<STRING> DEFAULT [r'_([A-Za-z]{4})$'];
+DECLARE analysis_exclude_dataset_patterns ARRAY<STRING> DEFAULT [];
+DECLARE analysis_include_object_patterns  ARRAY<STRING> DEFAULT [];
+DECLARE analysis_exclude_object_patterns  ARRAY<STRING> DEFAULT [];
+
+-- [B] 既定のままで動くもの
+DECLARE snapshot_time_zone STRING DEFAULT 'Asia/Tokyo';
 DECLARE partition_expiration_days INT64 DEFAULT 400;
+DECLARE suffix_pattern  STRING        DEFAULT r'_([A-Za-z]{4})$';
+DECLARE suffix_list     ARRAY<STRING> DEFAULT [];
+DECLARE analyze_options STRING        DEFAULT '{"literalGroups":[],"mode":"class"}';
 
-DECLARE include_dataset_patterns ARRAY<STRING> DEFAULT [r'_([A-Za-z]{4})$'];
-DECLARE suffix_pattern           STRING        DEFAULT r'_([A-Za-z]{4})$';
-DECLARE suffix_list              ARRAY<STRING> DEFAULT [];
-DECLARE analyze_options          STRING        DEFAULT '{"literalGroups":[],"mode":"class"}';
-
--- 作るオブジェクトの名前。prefix / suffix は UDF と テーブル・ビューで別に持つ
-DECLARE object_prefix STRING DEFAULT '';
-DECLARE object_suffix STRING DEFAULT '';
-DECLARE system_name   STRING DEFAULT 'viewlgc';  -- システムを表す文字列。名前の前に付く
-DECLARE udf_prefix    STRING DEFAULT '';
-DECLARE udf_suffix    STRING DEFAULT '';
-
--- base 名は作るオブジェクトごとに 1 つ
-DECLARE diff_table_base  STRING DEFAULT 't_diff_hist';  -- t_=transaction / m_=master
-DECLARE latest_view_base STRING DEFAULT 't_diff';
-DECLARE info_fn_base     STRING DEFAULT 'VIEW_GROUP_INFO';
-DECLARE css_fn_base      STRING DEFAULT 'VIEW_GROUP_CSS';
+-- [C] 導出・内部用。編集しない
+DECLARE job_region STRING DEFAULT @@location;
+DECLARE work_project_id   STRING DEFAULT NULL;  -- 自動検出した値を使う
+DECLARE udf_project_id    STRING DEFAULT NULL;
+DECLARE target_project_id STRING DEFAULT NULL;
 ```
+
+設定は **[A] / [B] / [C] の 3 段**に分けてある。触るのは [A] だけで、[B] は
+既定のままで動き、[C] は自動検出や組み立ての結果が入る。**プロジェクト ID は
+`INFORMATION_SCHEMA.SCHEMATA.catalog_name` から実行時に自動検出する**ので、
+書き換える必要はない（役割ごとに別プロジェクトへ置くときだけ [C] を固定する）。
+
+データセット名と prefix / suffix には `{project_token}` と書ける。プロジェクト ID
+から `project_token_pattern` で切り出したトークンに置き換わるので、環境ごとに
+`table_name_prefix = '{project_token}_'` のような書き方ができる。置き換えられずに
+残った `{project_token}` は `ASSERT` で落ちる。
+
 
 ### 作るオブジェクトの名前
 
 命名規則に沿って組み立てる。prefix / suffix は UDF と テーブル・ビューで別々に持つ。
 
+**lineage プロジェクトの命名にそろえてある**（`lineage/sql/setup/01_setup_lineage_environment.sql`）。
+
 | 種別 | 組み立て |
 |---|---|
-| テーブル | `object_prefix` + `system_name` + `_` + `<base 名>` + `object_suffix` |
-| ビュー | `object_prefix` + `system_name` + `_` + `vw_` + `<base 名>` + `object_suffix` |
-| UDF | `udf_prefix` + `UPPER(system_name)` + `_` + `<関数の基本名>` + `udf_suffix` |
+| テーブル | `table_name_prefix` + `viewlgc_` + 区分 + 基本名 + `table_name_suffix` |
+| ビュー | `table_name_prefix` + `viewlgc_` + `vw_` + 区分 + 基本名 + `table_name_suffix` |
+| UDF | `udf_name_prefix` + `viewlgc_` + 基本名 + `udf_name_suffix` |
 
-`system_name` はこのシステムを表す文字列で、テーブル・ビューでは `t_` / `vw_t_` の
-**前**、UDF では関数名の**前**に付く。**UDF 側だけ大文字**にするのは、関数名を
-大文字で書く慣習に合わせるため（`viewlgc_VIEW_GROUP_INFO` にならないように）。
-区切りの `_` は自動で足すので値には書かない。空にすればシステム名なしになる。
+**変数なのは prefix と suffix だけ。** `viewlgc_`（システムの識別子）と区分
+（`t_` = transaction / `m_` = master）と基本名は `SET` の行に**リテラルで書く**。
+環境ごとに変わるのは prefix / suffix だけで、区分は分類を変えるときにしか
+動かないため。区切りの `_` は prefix / suffix の値に含めて書く。
 
-base 名は**作るオブジェクトごとに 1 つ**持たせてある。オブジェクトが増えたときは
-`<名前>_base` の DECLARE を 1 行足し、組み立て先の `DECLARE <名前> STRING;` と
-`SET <名前> = CONCAT(…);`、本文で使う `@@…@@` を対で増やす。
-
-| 変数 | 作られるもの | 既定でできる名前 |
+| SET する変数 | 作られるもの | 既定でできる名前 |
 |---|---|---|
-| `diff_table_base` | 日次スナップショットを積むテーブル | `viewlgc_t_diff_hist` |
-| `latest_view_base` | 最新スナップショットだけのビュー | `viewlgc_vw_t_diff` |
-| `info_fn_base` | 比較 HTML を返す UDF | `VIEWLGC_VIEW_GROUP_INFO` |
-| `css_fn_base` | テンプレート用 CSS を返す UDF | `VIEWLGC_VIEW_GROUP_CSS` |
+| `table_diff_hist` | 日次スナップショットを積むテーブル | `viewlgc_t_diff_hist` |
+| `view_diff` | 最新スナップショットだけのビュー | `viewlgc_vw_t_diff` |
+| `udf_info_function_name` | 比較 HTML を返す UDF | `viewlgc_group_info` |
+| `udf_css_function_name` | テンプレート用 CSS を返す UDF | `viewlgc_group_css` |
+| `udf_render_function_name` | 動的 SQL を展開する UDF | `viewlgc_render_dynamic_sql` |
 
-base 名の先頭の `t_` / `m_` は transaction / master の区分。既定は `t_`
-（日次のスナップショットを積むテーブルのため）。システムが何かは `system_name`
-が表すので、base 名にはその中での役割（`diff`）だけを書く。
+オブジェクトが増えたときは `DECLARE <名前> STRING;` と `SET <名前> = …;` を
+1 組足し、本文の `__…__` と `viewlgc_render_dynamic_sql` の置換も対で増やす。
+足し忘れは `node check_sql.mjs` が見つける。
 
-> **`system_name` は `build_table.sql` と `view_group_html.sql` の両方にある。
-> `udf_prefix` / `udf_suffix` / 関数の基本名と合わせて、必ず同じ値にすること。**
+**テーブル側とは prefix / suffix を分けてある。** ルーチン名は英数字と `_` しか
+使えず `-` が入らないのに対し、テーブル・ビューの参照はすべてバッククォート
+引用なので `-tky` のようなハイフンが使える。混ぜると UDF 側だけ落ちる。
+
+> **`udf_dataset` / `udf_name_prefix` / `udf_name_suffix` は
+> `build_table.sql` と `view_group_html.sql` の両方にある。必ず同じ値にすること。**
 > 食い違うと、作った関数を `build_table.sql` が見つけられない。
+> `node check_sql.mjs` が組み立ての式が同じかどうかまで見る。
 
 **テーブルだけ `_hist` が付く。** 実体が日次スナップショットの積み上げ
 （`PARTITION BY snapshot_date`・過去日を消さない・`partition_expiration_days` で
@@ -462,13 +479,14 @@ base 名の先頭の `t_` / `m_` は transaction / master の区分。既定は 
 
 | 変数 | 役割 |
 |---|---|
-| `include_dataset_patterns` | 対象データセット。空配列ならリージョン内すべて |
-| `exclude_dataset_patterns` | 落とすデータセット。include のあとに効く |
-| `include_view_patterns` | 対象 View 名（`table_name`）。空配列なら絞らない |
-| `exclude_view_patterns` | 落とす View 名。include のあとに効く |
+| `analysis_include_dataset_patterns` | 対象データセット。空配列ならリージョン内すべて |
+| `analysis_exclude_dataset_patterns` | 落とすデータセット。include のあとに効く |
+| `analysis_include_object_patterns` | 対象 View 名（`table_name`）。空配列なら絞らない |
+| `analysis_exclude_object_patterns` | 落とす View 名。include のあとに効く |
 | `suffix_pattern` | データセット名から suffix を切り出す正規表現（1 つ目のキャプチャ） |
 | `suffix_list` | suffix 一覧。空なら `suffix_pattern` で自動抽出。データセット名から導けないときだけ並べる |
 | `analyze_options` | UDF に渡す解析オプション（JSON）。`literalGroups` をここで足せば再生成が要らない |
+| `snapshot_time_zone` | `snapshot_date` の基準タイムゾーン |
 | `partition_expiration_days` | 履歴の保持日数 |
 
 4 つとも同じ形で、**include は OR、そのあと exclude を `AND NOT` で足す**。
@@ -476,10 +494,10 @@ base 名の先頭の `t_` / `m_` は transaction / master の区分。既定は 
 照合は部分一致（`REGEXP_CONTAINS`）なので、完全一致にしたいなら `^…$` を付ける。
 
 ```sql
-DECLARE include_dataset_patterns ARRAY<STRING> DEFAULT [r'^mart_', r'^dwh_'];
-DECLARE exclude_dataset_patterns ARRAY<STRING> DEFAULT [r'_sandbox$'];
+DECLARE analysis_include_dataset_patterns ARRAY<STRING> DEFAULT [r'^mart_', r'^dwh_'];
+DECLARE analysis_exclude_dataset_patterns ARRAY<STRING> DEFAULT [r'_sandbox$'];
 -- 特定のデータセットだけ試す
-DECLARE include_dataset_patterns ARRAY<STRING> DEFAULT [r'^mart_abjp$', r'^mart_abus$'];
+DECLARE analysis_include_dataset_patterns ARRAY<STRING> DEFAULT [r'^mart_abjp$', r'^mart_abus$'];
 ```
 
 組み立てた条件文は `SCHEMATA` と `VIEWS` の両方に効く。見る列が
@@ -491,9 +509,9 @@ base 名ではないので、`^v_daily_sales$` は `v_daily_sales_abjp` に一�
 
 ```sql
 -- 特定の base だけ試す
-DECLARE include_view_patterns ARRAY<STRING> DEFAULT [r'^v_daily_sales_'];
+DECLARE analysis_include_object_patterns ARRAY<STRING> DEFAULT [r'^v_daily_sales_'];
 -- 作業用の View を除く
-DECLARE exclude_view_patterns ARRAY<STRING> DEFAULT [r'_tmp$', r'_bk$', r'^wk_'];
+DECLARE analysis_exclude_object_patterns ARRAY<STRING> DEFAULT [r'_tmp$', r'_bk$', r'^wk_'];
 ```
 
 落とした View はセクション 5-5b に一覧で出る。意図せず落ちていないか確かめられる。
@@ -508,37 +526,54 @@ DECLARE exclude_view_patterns ARRAY<STRING> DEFAULT [r'_tmp$', r'_bk$', r'^wk_']
 `dataset_patterns` に `^名前$` を並べれば同じことができる。
 
 **BigQuery は識別子をクエリ パラメータにできない。** `@param` が使えるのは値だけで、
-プロジェクト・データセット・関数名は渡せない。そこでスクリプト変数に持ち、
-`EXECUTE IMMEDIATE` に渡す前にテキスト置換する。`@@PROJECT@@` / `@@UDF@@` /
-`@@WORK@@` / `@@REGION@@` / `@@TZ@@` / `@@DIFF_TABLE@@` / `@@LATEST_VIEW@@` /
-`@@INFO_FN@@` / `@@CSS_FN@@` が置換される目印。
+プロジェクト・データセット・テーブル・関数名は渡せない。そこでテンプレートに
+`__…__` の目印を書き、**永続 SQL UDF `viewlgc_render_dynamic_sql`** で展開してから
+`EXECUTE IMMEDIATE` する。lineage の `lnge_render_dynamic_sql` と同じ形。
+
+動的 SQL は **4 手**で書く。
 
 ```sql
-EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
-INSERT INTO `@@PROJECT@@.@@WORK@@.@@DIFF_TABLE@@` …
-""",
-  '@@PROJECT@@',    project_id),
-  '@@UDF@@',        udf_dataset),
-  '@@WORK@@',       work_dataset),
-  '@@REGION@@',     region),
-  '@@TZ@@',         tz),
-  '@@DIFF_TABLE@@', diff_table);
+SET sql_template = """
+INSERT INTO `__T_DIFF_HIST__` …
+""";
+EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS '… に未展開のプレースホルダがあります。';
+EXECUTE IMMEDIATE rendered_sql;
 ```
 
-**この `REPLACE` の連鎖は一時 UDF にまとめてはいけない。** まとめると
-セクション 3 の `CREATE OR REPLACE VIEW` が
-`Creating views with temporary user defined functions is not supported` で落ちる。
-永続 UDF にすると今度は**その関数名自身が `EXECUTE IMMEDIATE` の外に出る**ので、
-プロジェクトとデータセットを置き換えられなくなる。呼び出しごとに展開するのが
-いちばん単純で確実。
+3 手目の `ASSERT` が効きどころ。**目印を足したのに関数側に置換を足し忘れると、
+展開されないまま実行して意味不明な構文エラーになる**ところを、その場で
+「未展開のプレースホルダがある」と言って止められる。
 
-置換対象を最後に埋めるのは、埋めた中身がさらに置換されないようにするため
-（`@@JS@@` が該当）。
+`render_call_sql` は**1 度だけ**組み立てて全テンプレートで使い回す。関数の場所は
+変数で決まるので静的には書けず、呼び出し自体も動的 SQL になる。呼び出しごとに
+変わるのは `@sql_template` だけなので、ほかの設定は焼き込む。
+
+```sql
+SET render_call_sql = FORMAT(
+  """SELECT `%s.%s.%s`(@sql_template, %T, %T, …)""",
+  udf_project_id, udf_dataset, udf_render_function_name,
+  work_project_id, work_dataset, …);
+```
+
+**値は `%s` ではなく `%T` で埋める。** 条件文（`REGEXP_CONTAINS(schema_name, r'…')`）
+には引用符が入るので、`%s` だと呼び出し側の文字列リテラルが壊れる。`%T` は
+値から**妥当な SQL リテラル**を作るのでエスケープを自分で書かずに済む。
+
+**永続関数なのは、一時 UDF が使えないから。** スクリプトに `CREATE TEMP FUNCTION`
+を 1 つでも置くと、セクション 3 の `CREATE OR REPLACE VIEW` が
+`Creating views with temporary user defined functions is not supported` で落ちる。
+加えて BigQuery は一時 UDF の DDL を**子ジョブすべてのクエリ本文に前置する**ので、
+コンソールの結果一覧がどれも同じ DDL に見えてしまう。永続関数ならどちらも起きない。
+
+置換の順番は、**中身が SQL になるもの（`__*_COND__`）を最後**にする。
+先に埋めると、埋めた中身がさらに走査される。
 
 **`SET @@location` は `DECLARE` より前に置く。** どちらのスクリプトも、参照は
 すべて `EXECUTE IMMEDIATE` の中にあり、BigQuery がロケーションを推測できる
 テーブル参照が無い。指定しないと既定のロケーションで実行され、目的の
-データセットに作れない。`build_table.sql` では下の `region` と同じ値にする。
+データセットに作れない。`job_region` はこの値を `DEFAULT @@location` で受け取るので、
+**ロケーションの置き場所は先頭の 1 行だけ**になる。
 
 - **対象データセットはリージョン内から自動で拾う。** 既定は
   「suffix の条件に一致するデータセット全部」（下記）。
@@ -547,8 +582,8 @@ INSERT INTO `@@PROJECT@@.@@WORK@@.@@DIFF_TABLE@@` …
   本体は `r""" """` で囲む必要があり、それをさらに `EXECUTE IMMEDIATE` の
   文字列に入れ子にできないため。埋めるときは `TO_JSON_STRING` で SQL の
   文字列リテラルに変換する（JSON のエスケープは BigQuery の文字列リテラルと互換）
-- **スケジュールドクエリには セクション 0 と 2 を登録する。** 設定ブロックが
-  無いと変数が未定義になる。1 と 3 は初回だけ、5 は確認用なので不要
+- **スケジュールドクエリには CONFIGURATION と セクション 2 を登録する。** 設定
+  ブロックが無いと変数が未定義になる。1 と 3 は初回だけ、5 は確認用なので不要
 - **セクション 5 の確認クエリは実行される。** ファイルを丸ごと流すと 8 本の
   結果が順に出る（生成結果 / 割れている base / 未認識の View / 対象データセットと
   suffix / データセット別の View 数 / View 名の条件で落ちた View /
@@ -556,8 +591,11 @@ INSERT INTO `@@PROJECT@@.@@WORK@@.@@DIFF_TABLE@@` …
 - **セクション 1 は `CREATE OR REPLACE TABLE`。** 実行すると既存の行が消える
   （パーティションに積んだ履歴も含めて）。スキーマを変えたときに確実に作り直せる
   かわり、うっかり流すと履歴が飛ぶ。日次の生成には含まれない
-- 生成器は書き出す前に、`@@…@@` が既知のものだけか、`r"""` の対応が取れているか、
-  旧いプレースホルダが残っていないかを検査する
+- 生成器は書き出す前に、`FORMAT` の書式に `%s` 以外の `%` が無いか、`r"""` の
+  対応が取れているか、旧いプレースホルダが残っていないかを検査する
+- **`node check_sql.mjs` が 2 つの SQL の食い違いを見つける。** 使っている目印が
+  関数側で展開できるか、4 手の型が崩れていないか、`render_call_sql` の書式と
+  引数の数が合うか、UDF 名の組み立てが両ファイルで同じかを突き合わせる
 
 > `EXECUTE IMMEDIATE` に渡す本文は `r""" """` の生文字列。中に `"""` が出ると
 > そこで切れるので、生成器が個数を数えて検査している。
@@ -575,8 +613,8 @@ suffix を出すデータセットと、比較対象の View があるデータ�
 ```sql
 src AS (
   SELECT table_name AS view_name, view_definition AS ddl
-  FROM `@@PROJECT@@.region-@@REGION@@.INFORMATION_SCHEMA.VIEWS`
-  WHERE @@VIEW_COND@@   -- dataset_patterns から組み立てた OR の並び
+  FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.VIEWS`
+  WHERE (__VIEW_DATASET_COND__) AND (__VIEW_NAME_COND__)
 ),
 ```
 
@@ -585,7 +623,7 @@ src AS (
 パターンに定数を要求しうるため。
 
 ```sql
-EXECUTE IMMEDIATE REPLACE(… r""" … """ …)
+EXECUTE IMMEDIATE rendered_sql
 USING suffix_list AS suffix_list, analyze_options AS analyze_options;
 ```
 
@@ -593,10 +631,11 @@ USING suffix_list AS suffix_list, analyze_options AS analyze_options;
 
 絞り込みは上の 4 つの配列に集約してある。
 
-**セクション 0 に事前チェックを置いてある。** 対象 View が 0 件、または suffix を持つ
-データセットが 0 件なら `RAISE` で止まる。黙って空のテーブルを作ると
-`region` や `dataset_patterns` の間違いに気づけないため。
-`analyze_options` が JSON オブジェクトの形をしていない場合も止まる。
+**CONFIGURATION の末尾に事前チェックを置いてある。** 対象 View が 0 件、または
+suffix を持つデータセットが 0 件なら `ASSERT` で止まる。黙って空のテーブルを作ると
+ロケーションや `analysis_*_patterns` の間違いに気づけないため。
+名前が不正（ハイフンや未置換の `{project_token}`）な場合、`analyze_options` が
+JSON オブジェクトの形をしていない場合も、同じく `ASSERT` で止まる。
 
 注意しておくこと:
 
@@ -608,7 +647,7 @@ USING suffix_list AS suffix_list, analyze_options AS analyze_options;
 
 ## 事前生成テーブル（build_table.sql）
 
-`build_table.sql` は手で編集するファイル。設定はセクション 0 の `DECLARE` だけ。
+`build_table.sql` は手で編集するファイル。設定は CONFIGURATION の `DECLARE` だけ。
 
 Looker の操作のたびに UDF を回すのは重いので、スケジュールドクエリで作り置きする。
 `INFORMATION_SCHEMA` の中身は View をデプロイしたときしか変わらない。
@@ -644,7 +683,7 @@ CSS は **`template_style.html`**（`build_udf.mjs` の生成物）をそのま�
 BigQuery から取る。中身は同じ。
 
 ```sql
-SELECT `<project>.<udf_dataset>.VIEWLGC_VIEW_GROUP_CSS`('{"mode": "class"}');
+SELECT `<project>.<udf_dataset>.viewlgc_group_css`('{"mode": "class"}');
 ```
 
 `<style> … </style>` で囲んでテンプレートの先頭に置き、その下に
