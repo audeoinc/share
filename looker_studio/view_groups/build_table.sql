@@ -80,6 +80,8 @@ DECLARE analysis_exclude_dataset_patterns ARRAY<STRING> DEFAULT [];
 -- 解析対象の View 名（どの View を集めるか）
 DECLARE analysis_include_object_patterns ARRAY<STRING> DEFAULT [];
 DECLARE analysis_exclude_object_patterns ARRAY<STRING> DEFAULT [];
+-- snapshot_date の基準タイムゾーン
+DECLARE snapshot_time_zone STRING DEFAULT 'Asia/Tokyo';
 --
 -- 変数の説明:
 --   project_token_pattern
@@ -119,10 +121,15 @@ DECLARE analysis_exclude_object_patterns ARRAY<STRING> DEFAULT [];
 --     r'^v_daily_sales_' のように書く。
 --       include 例: [r'^mart_']  [r'^mart_abjp$', r'^mart_abus$']
 --       exclude 例: [r'_tmp$', r'_bk$', r'^wk_']
+--   snapshot_time_zone
+--     snapshot_date（履歴テーブルのパーティション キー）をどの日付で刻むか。
+--     このツールはリージョンをまたいで使うので、置き場所によって変える。
+--     ジョブのリージョンとは別物で、@@location からは決まらない。
+--     日付の境目がずれると、同じ実行が別の日に積まれたり 1 日に 2 回積まれたり
+--     するので、運用しているタイムゾーンに合わせること。
+--     IANA のタイムゾーン名（'Asia/Tokyo' / 'UTC' / 'America/New_York' など）。
 
 -- [B] 既定のままで動くもの --------------------------------------------
--- snapshot_date の基準タイムゾーン。
-DECLARE snapshot_time_zone STRING DEFAULT 'Asia/Tokyo';
 -- 履歴の保持日数（パーティションの有効期限）。
 DECLARE partition_expiration_days INT64 DEFAULT 400;
 -- suffix の切り出し。1 つ目のキャプチャが suffix になる。

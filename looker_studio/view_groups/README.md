@@ -590,9 +590,9 @@ DECLARE analysis_include_dataset_patterns ARRAY<STRING> DEFAULT [r'_([A-Za-z]{4}
 DECLARE analysis_exclude_dataset_patterns ARRAY<STRING> DEFAULT [];
 DECLARE analysis_include_object_patterns  ARRAY<STRING> DEFAULT [];
 DECLARE analysis_exclude_object_patterns  ARRAY<STRING> DEFAULT [];
+DECLARE snapshot_time_zone STRING DEFAULT 'Asia/Tokyo';   -- snapshot_date の基準
 
 -- [B] 既定のままで動くもの
-DECLARE snapshot_time_zone STRING DEFAULT 'Asia/Tokyo';
 DECLARE partition_expiration_days INT64 DEFAULT 400;
 DECLARE suffix_pattern  STRING        DEFAULT r'_([A-Za-z]{4})$';
 DECLARE suffix_list     ARRAY<STRING> DEFAULT [];
@@ -674,8 +674,8 @@ DECLARE target_project_id STRING DEFAULT NULL;
 | `analysis_exclude_object_patterns` | 落とす View 名。include のあとに効く |
 | `suffix_pattern` | データセット名から suffix を切り出す正規表現（1 つ目のキャプチャ） |
 | `suffix_list` | suffix 一覧。空なら `suffix_pattern` で自動抽出。データセット名から導けないときだけ並べる |
+| `snapshot_time_zone` | `snapshot_date` の基準タイムゾーン。リージョンごとに変える（[A]） |
 | `analyze_options` | UDF に渡す解析オプション（JSON）。`substitutable` などをここで足せば再生成が要らない |
-| `snapshot_time_zone` | `snapshot_date` の基準タイムゾーン |
 | `partition_expiration_days` | 履歴の保持日数 |
 
 4 つとも同じ形で、**include は OR、そのあと exclude を `AND NOT` で足す**。
