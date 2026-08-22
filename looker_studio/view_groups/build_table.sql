@@ -424,7 +424,7 @@ keyed AS (
   QUALIFY ROW_NUMBER() OVER (
     PARTITION BY src.view_name ORDER BY LENGTH(s.suffix) DESC
   ) = 1
-)
+),
 -- 解析は base ごとに 1 回だけ。結果の JSON をこの段で持っておき、
 -- メタデータは JSON から取り出し、HTML は描画の UDF に渡す。
 -- JS UDF から別の UDF は呼べないので、この 2 段で合成する。

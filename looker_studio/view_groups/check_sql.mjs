@@ -72,6 +72,27 @@ add('@@…@@ 形式のプレースホルダが残っていない',
 add('IF … RAISE ではなく ASSERT を使っている',
   !/RAISE USING MESSAGE/.test(table));
 
+// --- 4b. WITH の CTE がカンマで区切られているか ------------------------
+// 直前の CTE を閉じる ')' の後ろにカンマを置き忘れると構文エラーになる。
+// CTE の間に説明コメントを挟んでいるので目視では気づきにくい。
+{
+  const missing = [];
+  for (const [i, t] of templates.entries()) {
+    const lines = t.split('\n');
+    for (let n = 0; n < lines.length; n++) {
+      // 列 0 の 'name AS (' だけを見る＝トップレベルの CTE
+      if (!/^[A-Za-z_][A-Za-z0-9_]* AS \($/.test(lines[n])) continue;
+      let p = n - 1;
+      while (p >= 0 && (lines[p].trim() === '' || lines[p].trim().startsWith('--'))) p--;
+      const prev = p >= 0 ? lines[p].trim() : '';
+      if (prev === 'WITH' || prev.endsWith(',')) continue;
+      missing.push(`テンプレート ${i + 1}: ${lines[n].split(' ')[0]}`);
+    }
+  }
+  add('WITH の CTE がカンマで区切られている', missing.length === 0,
+    missing.join(' / '));
+}
+
 // --- 5. render_call_sql の書式と引数の数が合うか ----------------------
 {
   const m = table.match(/SET render_call_sql = FORMAT\(\n\s*"""([\s\S]*?)""",([\s\S]*?)\);\n/);
