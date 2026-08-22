@@ -543,6 +543,34 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   §4.6 の分類では「消えたソース」扱い＝WARNING（公開可）であり FAILED にはならない。
 - SQL のみ／エンジン不変。**BigQuery 未検証**。
 
+## 4.25 03 実行前の対象確認 `preview_only`（SQLのみ）
+
+- **要望**：「[A] の条件で狙った対象が選ばれているか」を 03 実行前に確認したい。
+  当初は確認用の別スクリプト（02）案だったが、次の 2 点から **03 内のドライラン**にした。
+  1. **02 は空き番号ではない**（`sql/sample/02_setup_sample_environment.sql` と `02a` が既存。
+     README・INTEGRATION_TEST_PLAN からも参照されている）。
+  2. **BigQuery に include 機構が無い**ため、別ファイルにすると `[A]` が 2 箇所になり必ずズレる。
+     さらにフィルタ解決ロジックを再実装することになり、「確認した対象」と「本実行の対象」が
+     食い違いうる。03 内なら **[A] は 1 つ、表示されるのは 03 自身が解決した値**。
+- **追加**：`preview_only BOOL DEFAULT FALSE`（[B]）。TRUE で以下を出力して停止する。
+  - `PREVIEW_SETTINGS` … 実際に効いている [A] の値
+  - `PREVIEW_ANALYSIS_DATASETS` … 解析対象データセット＋View 件数（0 件も残す）
+  - `PREVIEW_SOURCE_DATASETS` … ソースデータセット＋`ACCESSIBLE`/`SKIPPED_NO_ACCESS`（理由付き）
+  - `PREVIEW_TARGET_VIEWS` … 全フィルタ通過後の View 一覧
+- **書き込みゼロ**：レジストリの MERGE/UPDATE はもちろん、column usage テーブルの
+  自己修復 `CREATE TABLE IF NOT EXISTS` も preview では実行しない。
+- **停止のさせ方**（BigQuery に RETURN が無いための構造）：
+  - 出力は STEP 1 の「target_datasets・source_datasets・フィルタ済み View が出揃い、
+    まだ何も書いていない」地点に置く。
+  - STEP 1 の残り、STEP 2（既存 IF に `AND NOT preview_only`）、STEP 3〜PIPELINE SUMMARY を
+    `IF NOT preview_only THEN ... END IF;` でゲート。既存行は再インデントせず挿入のみ（差分最小）。
+  - `CREATE TEMP TABLE non_completed_udf_results` は**ゲートの外**に残す。最終の
+    FINAL OPERATIONAL RESULT の SELECT が最外ブロックの外にあり、テーブルが無いと落ちるため
+    （preview では 0 件が返る）。
+- **対象外**：生成テーブル（Scheduled Query / DAG）は一覧に出ない。列挙には STEP 2 の
+  JOBS 走査が必要で、preview でそのコストを払わないため。通知メッセージにも明記。
+- ドキュメントは `docs/OPERATION_GUIDE.md` §7。SQL のみ／エンジン不変。**BigQuery 未検証**。
+
 ## 4.22 本ドキュメントと実装の乖離（重要）
 
 `docs/SESSION_HANDOFF.md` の §1〜§4.20 は **1.5.0-032 の途中まで**しか追随していない。
@@ -568,6 +596,7 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 - 括弧付き branch が自身のセット演算/CTE を含む形 … `test_v1_5_0_074`（本セッション）
 - 定義ソース種別フィルタ `analysis_include_generation_types`（§4.23・本セッション、SQLのみ）
 - ソースデータセットのアクセス事前チェック（§4.24・本セッション、SQLのみ）
+- 03 実行前の対象確認 `preview_only`（§4.25・本セッション、SQLのみ）
 - SQL 追加：`sql/maintenance/08_view_last_access.sql`、
   `sql/maintenance/09_unanalyzed_object_definitions.sql`、
   `definition_registry` の `labels` 列（§4.12）

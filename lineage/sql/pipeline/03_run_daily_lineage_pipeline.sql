@@ -242,6 +242,18 @@ DECLARE configured_max_impact_rank INT64 DEFAULT 100;
 -- failing -- see the STEP 3 source classifier.
 DECLARE skip_inaccessible_source_datasets BOOL DEFAULT TRUE;
 
+-- Dry run. Set TRUE to resolve the analysis scope from the [A] settings, print what
+-- this run WOULD cover, and stop before anything is written: the target (analysis)
+-- datasets, the source datasets with their access status, and the View list that
+-- passed the name / definition-source filters. Nothing is inserted, merged, updated
+-- or created -- not even the self-healing column-usage table -- so a preview run
+-- cannot disturb the repository. Use it to confirm the [A] filters select what you
+-- intended, then set FALSE and run the same script for real: the preview reads the
+-- values 03 itself resolves, so there is no second copy of the settings to drift.
+-- STEP 2 (the JOBS scan) is skipped in preview, so generated tables are not listed --
+-- only Views. Cost is the SCHEMATA / VIEWS listing plus one probe per source dataset.
+DECLARE preview_only BOOL DEFAULT FALSE;
+
 -- Set FALSE to skip STEP 2 (Scheduled Query / DAG generated-table collection
 -- from INFORMATION_SCHEMA.JOBS) and process only Views. STEP 1/3/4 still run.
 DECLARE process_generated_tables BOOL DEFAULT TRUE;
@@ -497,6 +509,8 @@ AS 'analysis_include_generation_types accepts only VIEW_DEFINITION, SCHEDULED_QU
 SET column_usage_fqn = FORMAT(
   '%s.%s.%s', repository_project_id, repository_dataset, table_column_usage
 );
+-- Skipped in preview: a dry run must not create anything, not even idempotently.
+IF NOT preview_only THEN
 EXECUTE IMMEDIATE FORMAT(
   """
   CREATE TABLE IF NOT EXISTS `%s`
@@ -529,6 +543,7 @@ EXECUTE IMMEDIATE FORMAT(
   """,
   column_usage_fqn
 );
+END IF;
 
 -- Resolve target_datasets by scanning the target project's datasets in
 -- job_region and applying the analysis dataset include/exclude patterns. Dataset
@@ -831,6 +846,97 @@ BEGIN
     ORDER BY project_id, dataset_id;
   END IF;
 
+  -- ==========================================================================
+  -- PREVIEW (preview_only = TRUE): report the resolved scope and stop.
+  --
+  -- Everything the preview needs is already settled at this point -- target
+  -- datasets from [C], source datasets from the resolution and access probe
+  -- above, and the View list after the name / definition-source filters -- and
+  -- nothing has been written yet. Reporting here rather than in a separate
+  -- script means the operator sees the values 03 itself will use, with one copy
+  -- of the [A] settings and no second implementation of the filters to drift.
+  -- ==========================================================================
+  IF preview_only THEN
+    SELECT
+      'PREVIEW_SETTINGS' AS section,
+      target_project_id AS target_project,
+      job_region,
+      ARRAY_TO_STRING(analysis_include_dataset_patterns, ', ') AS analysis_include_dataset_patterns,
+      ARRAY_TO_STRING(analysis_exclude_dataset_patterns, ', ') AS analysis_exclude_dataset_patterns,
+      ARRAY_TO_STRING(analysis_include_object_patterns, ', ') AS analysis_include_object_patterns,
+      ARRAY_TO_STRING(analysis_exclude_object_patterns, ', ') AS analysis_exclude_object_patterns,
+      IF(ARRAY_LENGTH(analysis_generation_types) = 0,
+         '(empty = every kind)',
+         ARRAY_TO_STRING(analysis_generation_types, ', ')) AS analysis_include_generation_types,
+      process_generated_tables,
+      skip_inaccessible_source_datasets,
+      (SELECT STRING_AGG(project_id, ', ' ORDER BY project_id)
+       FROM UNNEST(source_project_filters)) AS source_projects;
+
+    -- Analysis (target) datasets, with how many Views each contributes. A
+    -- dataset listed with 0 matched the dataset filter but has no View passing
+    -- the object-name / definition-source filters -- worth seeing, so it is not
+    -- dropped from the list.
+    SELECT
+      'PREVIEW_ANALYSIS_DATASETS' AS section,
+      ds AS analysis_dataset,
+      (
+        SELECT COUNT(*)
+        FROM current_view_definitions AS v
+        WHERE v.object_dataset = LOWER(ds)
+      ) AS view_count
+    FROM UNNEST(target_datasets) AS ds
+    ORDER BY analysis_dataset;
+
+    -- Source datasets: what the physical-column metadata will be read from,
+    -- plus anything dropped by the access probe (skip_inaccessible_source_datasets).
+    SELECT
+      'PREVIEW_SOURCE_DATASETS' AS section,
+      project_id,
+      dataset_id,
+      'ACCESSIBLE' AS access_status,
+      CAST(NULL AS STRING) AS error_message
+    FROM source_datasets
+    UNION ALL
+    SELECT
+      'PREVIEW_SOURCE_DATASETS' AS section,
+      project_id,
+      COALESCE(dataset_id, '(entire project)') AS dataset_id,
+      'SKIPPED_NO_ACCESS' AS access_status,
+      error_message
+    FROM inaccessible_source_datasets
+    ORDER BY access_status, project_id, dataset_id;
+
+    -- The Views this run would analyze, after every [A] filter.
+    SELECT
+      'PREVIEW_TARGET_VIEWS' AS section,
+      object_project,
+      object_dataset,
+      object_name,
+      definition_hash,
+      LENGTH(definition_text) AS definition_length
+    FROM current_view_definitions
+    ORDER BY object_project, object_dataset, object_name;
+
+    SELECT
+      'PREVIEW_ONLY' AS notice,
+      'Nothing was written. Review the sections above, then set preview_only = FALSE and run this script again.'
+        AS next_step,
+      (SELECT COUNT(*) FROM current_view_definitions) AS target_view_count,
+      ARRAY_LENGTH(target_datasets) AS analysis_dataset_count,
+      (SELECT COUNT(*) FROM source_datasets) AS source_dataset_count,
+      (SELECT COUNT(*) FROM inaccessible_source_datasets) AS skipped_source_count,
+      'Generated tables (Scheduled Query / DAG) are NOT listed: STEP 2 scans INFORMATION_SCHEMA.JOBS and is skipped in preview.'
+        AS scope_note,
+      IF(ARRAY_LENGTH(analysis_generation_types) > 0
+           AND 'VIEW_DEFINITION' NOT IN UNNEST(analysis_generation_types),
+         'analysis_include_generation_types excludes VIEW_DEFINITION, so an empty View list is expected here.',
+         CAST(NULL AS STRING)) AS generation_type_note;
+  END IF;
+
+  -- Everything below writes to the repository, so it is skipped in preview.
+  IF NOT preview_only THEN
+
   -- TABLES per source dataset (dataset-scoped, so only dataset-level metadata
   -- access is needed; the region-qualified form requires broader permissions).
   -- TABLE_OPTIONS is joined to expose each table's expiration_timestamp: a table
@@ -992,13 +1098,15 @@ BEGIN
     CURRENT_TIMESTAMP() AS step_finished_at,
     (SELECT COUNT(*) FROM current_view_definitions)
       AS current_view_count;
+
+  END IF;  -- NOT preview_only
 END;
 
 -- ============================================================================
 -- STEP 2: Synchronize Scheduled Query / DAG generated-table definitions
 -- Skipped entirely when process_generated_tables is FALSE (Views-only run).
 -- ============================================================================
-IF process_generated_tables THEN
+IF process_generated_tables AND NOT preview_only THEN
   -- Progress marker: labels this step in the console's "All results" list.
   SELECT '===== STEP 2: synchronize Scheduled Query / DAG definitions ====='
     AS processing_step;
@@ -1709,6 +1817,15 @@ CREATE TEMP TABLE non_completed_udf_results (
   error_nodes_json JSON,
   analysis_result_json STRING
 );
+
+-- ============================================================================
+-- Everything from STEP 3 to the pipeline summary reads and writes the
+-- repository, so a preview run stops here. non_completed_udf_results is created
+-- above this gate on purpose: the FINAL OPERATIONAL RESULT select sits outside
+-- this block and would fail on a missing table -- in preview it simply returns
+-- no rows. STEP 2 is gated at its own IF, and STEP 1 stopped after reporting.
+-- ============================================================================
+IF NOT preview_only THEN
 
 -- ============================================================================
 -- STEP 3: Analyze changed definitions
@@ -4078,6 +4195,9 @@ ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
 AS 'Unresolved placeholder in pipeline summary SQL.';
 
 EXECUTE IMMEDIATE rendered_sql;
+
+END IF;  -- NOT preview_only
+
 END;
 
 
