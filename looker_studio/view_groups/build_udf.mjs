@@ -406,7 +406,7 @@ const sql = `-- ================================================================
 -- BigQuery は識別子（プロジェクト・データセット・関数名）をクエリ
 -- パラメータにできない。@param が使えるのは値だけ。
 -- そこでスクリプト変数に持ち、EXECUTE IMMEDIATE でテキスト置換する。
--- @@PROJECT@@ / @@UDF@@ が置換される目印。
+-- @@PROJECT@@ / @@UDF@@ / @@INFO_FN@@ / @@CSS_FN@@ が置換される目印。
 -- =====================================================================
 
 
@@ -423,6 +423,17 @@ SET @@location = '${region}';
 DECLARE project_id  STRING DEFAULT 'my-project';
 DECLARE udf_dataset STRING DEFAULT 'ops_meta';
 
+-- 関数名は udf_prefix + 基本名 + udf_suffix で組み立てる。
+-- build_table.sql の同名の変数と必ず同じ値にすること。
+-- 食い違うと、作った関数を build_table.sql が見つけられない。
+DECLARE udf_prefix   STRING DEFAULT '';
+DECLARE udf_suffix   STRING DEFAULT '';
+DECLARE info_fn_base STRING DEFAULT 'VIEW_GROUP_INFO';
+DECLARE css_fn_base  STRING DEFAULT 'VIEW_GROUP_CSS';
+
+DECLARE info_fn STRING;
+DECLARE css_fn  STRING;
+
 -- 関数の本体（JavaScript）。ここは触らない。
 -- SQL 文に直接埋めず変数に置くのは、本体を r\"\"\" \"\"\" で囲む必要があり、
 -- それをさらに EXECUTE IMMEDIATE の文字列に入れ子にできないため。
@@ -435,6 +446,9 @@ ${infoPack.code}
 DECLARE js_css STRING DEFAULT r"""
 ${cssPack.code}
 """;
+
+SET info_fn = CONCAT(udf_prefix, info_fn_base, udf_suffix);
+SET css_fn  = CONCAT(udf_prefix, css_fn_base,  udf_suffix);
 
 
 -- ---------------------------------------------------------------------
@@ -478,8 +492,8 @@ ${cssPack.code}
 --   mode          'inline'（既定）/ 'class'（CSS は VIEW_GROUP_CSS へ）/ 'embed'
 --   fontSize / lineHeight / colors / diffLineOpacity / diffCharOpacity / syntax
 -- ---------------------------------------------------------------------
-EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(r"""
-CREATE OR REPLACE FUNCTION \`@@PROJECT@@.@@UDF@@.VIEW_GROUP_INFO\`(
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(r"""
+CREATE OR REPLACE FUNCTION \`@@PROJECT@@.@@UDF@@.@@INFO_FN@@\`(
   views ARRAY<STRUCT<view_name STRING, ddl STRING>>,
   options_json STRING
 )
@@ -496,6 +510,7 @@ LANGUAGE js AS @@JS@@
 """,
   '@@PROJECT@@', project_id),
   '@@UDF@@',     udf_dataset),
+  '@@INFO_FN@@', info_fn),
   -- @@JS@@ を最後にするのは、本体の中身がさらに置換されないようにするため
   '@@JS@@',      TO_JSON_STRING(js_info));
 
@@ -513,13 +528,14 @@ LANGUAGE js AS @@JS@@
 -- options_json は VIEW_GROUP_HTML と同じものを渡すこと。色やフォントを
 -- 変えた場合、CSS 側も同じ設定で作り直す必要がある。
 -- ---------------------------------------------------------------------
-EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(r"""
-CREATE OR REPLACE FUNCTION \`@@PROJECT@@.@@UDF@@.VIEW_GROUP_CSS\`(options_json STRING)
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(r"""
+CREATE OR REPLACE FUNCTION \`@@PROJECT@@.@@UDF@@.@@CSS_FN@@\`(options_json STRING)
 RETURNS STRING
 LANGUAGE js AS @@JS@@
 """,
   '@@PROJECT@@', project_id),
   '@@UDF@@',     udf_dataset),
+  '@@CSS_FN@@',  css_fn),
   '@@JS@@',      TO_JSON_STRING(js_css));
 `;
 

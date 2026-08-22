@@ -365,11 +365,44 @@ DECLARE region       STRING DEFAULT 'asia-northeast1';
 DECLARE tz           STRING DEFAULT 'Asia/Tokyo';
 DECLARE partition_expiration_days INT64 DEFAULT 400;
 
-DECLARE dataset_patterns ARRAY<STRING> DEFAULT [r'_([A-Za-z]{4})$'];
-DECLARE suffix_pattern   STRING        DEFAULT r'_([A-Za-z]{4})$';
-DECLARE suffix_list      ARRAY<STRING> DEFAULT [];
-DECLARE analyze_options  STRING        DEFAULT '{"literalGroups":[],"mode":"class"}';
+DECLARE include_dataset_patterns ARRAY<STRING> DEFAULT [r'_([A-Za-z]{4})$'];
+DECLARE suffix_pattern           STRING        DEFAULT r'_([A-Za-z]{4})$';
+DECLARE suffix_list              ARRAY<STRING> DEFAULT [];
+DECLARE analyze_options          STRING        DEFAULT '{"literalGroups":[],"mode":"class"}';
+
+-- 作るオブジェクトの名前
+DECLARE object_prefix    STRING DEFAULT '';
+DECLARE object_suffix    STRING DEFAULT '';
+DECLARE object_kind      STRING DEFAULT 't';   -- t=transaction / m=master
+DECLARE object_base_name STRING DEFAULT 'view_logic_diff';
+DECLARE udf_prefix       STRING DEFAULT '';
+DECLARE udf_suffix       STRING DEFAULT '';
+DECLARE info_fn_base     STRING DEFAULT 'VIEW_GROUP_INFO';
+DECLARE css_fn_base      STRING DEFAULT 'VIEW_GROUP_CSS';
 ```
+
+### 作るオブジェクトの名前
+
+命名規則に沿って組み立てる。prefix / suffix は UDF と テーブル・ビューで別々に持つ。
+
+| 種別 | 組み立て |
+|---|---|
+| テーブル | `object_prefix` + `<kind>_` + `object_base_name` + `object_suffix` |
+| ビュー | `object_prefix` + `vw_<kind>_` + `object_base_name` + `object_suffix` |
+| UDF | `udf_prefix` + `<関数の基本名>` + `udf_suffix` |
+
+`<kind>` は `t`（transaction）か `m`（master）。既定は `t`
+（日次のスナップショットを積むテーブルのため）。それ以外を書くと `RAISE` で止まる。
+
+既定値のままなら `t_view_logic_diff` / `vw_t_view_logic_diff` /
+`VIEW_GROUP_INFO` / `VIEW_GROUP_CSS` になる。
+
+> **`udf_prefix` / `udf_suffix` / 関数の基本名は `view_group_html.sql` と
+> `build_table.sql` の両方にある。必ず同じ値にすること。** 食い違うと、
+> 作った関数を `build_table.sql` が見つけられない。
+
+> ビューの名前から `_latest` が消えているが、中身は変わらず最新スナップショットだけを
+> 返す。テーブルと同じ base 名にして `vw_` で区別する命名規則に合わせたため。
 
 `build_table.sql` の設定は次のとおり。ここが唯一の置き場所で、書き換えたら
 そのまま実行する。生成の手順はない。
