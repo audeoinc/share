@@ -7,11 +7,12 @@
  *   本体         : グループ間の差分（パラメータ化済み SQL 同士の比較）
  *   末尾         : 何をパラメータ化したかの一覧（判定の当否を人が確認するため）
  *
- * レイアウト:
- *   1 グループ  … 案内 ＋ SQL 1 ペイン（比較する相手がいないため）
- *   2 グループ  … 2 ペイン（比較が 1 通りしかないので、タブ 1 枚は無駄）
- *   3 グループ〜… 最大グループを基準に、比較相手をタブで切り替える
- *                 （横に並べると 1 ペインが狭くなって読めないため）
+ * レイアウト: グループ数によらずタブ。タブは基準グループ ＋ 比較相手で、
+ * 枚数がそのままグループ数になる。基準タブは常に選択状態で固定（左ペインに
+ * 出っぱなしのため）、比較相手のタブだけが切り替わる。
+ *   1 グループ  … 基準タブ 1 枚 ＋ SQL 1 ペイン（比較する相手がいないため）
+ *   2 グループ〜… 基準タブ ＋ 比較相手のタブ。中身は 2 ペイン比較
+ *                 （3 ペイン横並びは 1 ペインが狭くなって読めないので採らない）
  *
  * 3 ペイン横並び（renderFragment3）は使わない方針にしたので、
  * build_udf.mjs で 3-way 系の関数ごと UDF から外している（サイズ削減）。
@@ -176,18 +177,38 @@ function pair(baseGroup, other, opts) {
   );
 }
 
-/** 4 グループ以上。基準は固定で、比較相手をタブで切り替える。 */
+/**
+ * 基準グループのタブ。左ペインに出っぱなしなので、選択状態で固定して出す。
+ * ラジオを持たないので押しても切り替わらない（label ではなく span）。
+ */
+function baseTab(g) {
+  return `<span class="vg-tab vg-tbase"><span class="vg-tbadge">基準</span>` +
+    `${esc(label(g))}<span class="vg-tabn">${g.members.length}</span></span>`;
+}
+
+/**
+ * タブ。先頭は基準グループで、常に選択状態のまま固定する。
+ *
+ * 基準を左ペインに出しているのにタブが比較相手の分しか無いと、
+ * 「タブの数＝グループ数」に見えて数が合わないように読めてしまう。
+ * 基準の分もタブに並べれば、タブを数えればグループ数になる。
+ *
+ * 1 グループのときもタブを 1 枚出す。比較相手がいないので中身は SQL 1 ペイン。
+ */
 function tabs(groups, opts, idPrefix) {
   const [base, ...others] = groups;
   const shown = others.slice(0, MAX_TABS);
   const radios = shown.map((g, i) =>
     `<input class="vg-r vg-r${i + 1}" type="radio" name="${idPrefix}"` +
     ` id="${idPrefix}-${i + 1}"${i === 0 ? ' checked' : ''}>`).join('');
-  const tablist = shown.map((g, i) =>
+  const tablist = baseTab(base) + shown.map((g, i) =>
     `<label class="vg-tab vg-t${i + 1}" for="${idPrefix}-${i + 1}">` +
     `${esc(label(g))}<span class="vg-tabn">${g.members.length}</span></label>`).join('');
-  const panels = shown.map((g, i) =>
-    `<div class="vg-panel vg-p${i + 1}">${pair(base, g, opts)}</div>`).join('');
+  const panels = shown.length
+    ? shown.map((g, i) =>
+      `<div class="vg-panel vg-p${i + 1}">${pair(base, g, opts)}</div>`).join('')
+    : `<div class="vg-single">${renderFragment1(
+      label(base), paneSub(base), splitLines(base.sql), opts)}</div>`;
 
   const over = others.length > shown.length
     ? notice(`グループが多いため先頭 ${MAX_TABS} 件のみタブ表示しています` +
@@ -195,8 +216,6 @@ function tabs(groups, opts, idPrefix) {
     : '';
 
   return over +
-    `<div class="vg-basenote">基準: <b>${esc(label(base))}</b>` +
-    `（${base.members.length} View / 最大グループ）</div>` +
     `<div class="vg-tabs">${radios}` +
     `<div class="vg-tablist">${tablist}</div>` +
     `<div class="vg-panels">${panels}</div></div>`;
@@ -215,22 +234,17 @@ function renderBase(b, opts) {
   // （同一内容を 2 回描画した場合は衝突しうる。1 チャート 1 レコードが前提。）
   const idPrefix = 'vgt' + hashId(b.base + '|' + groups.map(label).join('|'));
 
+  // グループ数によらずタブで出す。タブを数えればグループ数になる形にそろえる。
   let body;
   if (n === 0) {
     body = notice('View が見つかりません。');
-  } else if (n === 1) {
-    // 比較する相手がいない。同じ SQL を左右に並べても読む人が得るものが無いので、
-    // 1 ペインだけ出す。
-    body = notice(b.unmatched
-      ? 'suffix を認識できなかった View です。比較相手がないので単独で表示しています。'
-      : `${b.viewCount} View すべてが同一ロジックです。比較の必要がないので SQL だけ出しています。`) +
-      `<div class="vg-single">${renderFragment1(
-        label(groups[0]), paneSub(groups[0]), splitLines(groups[0].sql), o)}</div>`;
-  } else if (n === 2) {
-    // 比較が 1 通りしかないので、タブ 1 枚を出しても意味がない
-    body = pair(groups[0], groups[1], o);
   } else {
-    body = tabs(groups, o, idPrefix);
+    // 比較する相手がいないときは、同じ SQL を左右に並べても読む人が得るものが
+    // 無いので、基準タブ 1 枚と SQL 1 ペインになる。
+    const lead = n > 1 ? '' : notice(b.unmatched
+      ? 'suffix を認識できなかった View です。比較相手がないので単独で表示しています。'
+      : `${b.viewCount} View すべてが同一ロジックです。比較の必要がないので SQL だけ出しています。`);
+    body = lead + tabs(groups, o, idPrefix);
   }
 
   return `<div class="vg-root">` +
@@ -254,14 +268,16 @@ function chromeCss() {
     `.vg-badge{display:inline-block;padding:1px 8px;border-radius:10px;font-weight:600;font-size:12px}`,
     `.vg-notice{margin:8px 0;padding:8px 12px;border:1px solid #D0D7DE;border-left:4px solid #57606A;` +
       `border-radius:4px;background:#F6F8FA;color:#57606A}`,
-    `.vg-basenote{margin:0 0 8px;color:#57606A;font-size:12px}`,
-    `.vg-basenote b{color:#24292F}`,
     // タブ
     `.vg-r{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}`,
     `.vg-tablist{display:flex;flex-wrap:wrap;gap:4px;border-bottom:1px solid #D0D7DE;margin-bottom:-1px}`,
     `.vg-tab{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border:1px solid transparent;` +
       `border-bottom:none;border-radius:6px 6px 0 0;color:#57606A;cursor:pointer;user-select:none;font-weight:600}`,
     `.vg-tab:hover{background:#EAEEF2;color:#24292F}`,
+    // 基準タブ。左ペインに出っぱなしなので選択状態で固定する（押しても切り替わらない）
+    `.vg-tbase{background:#fff;border-color:#D0D7DE;color:#24292F;cursor:default}`,
+    `.vg-tbase:hover{background:#fff}`,
+    `.vg-tbadge{padding:0 6px;border-radius:8px;background:#FFEFF7;color:#BF3989;font-size:11px;font-weight:600}`,
     `.vg-tabn{padding:0 6px;border-radius:8px;background:#EAEEF2;color:#57606A;font-size:11px}`,
     `.vg-panels{border:1px solid #D0D7DE;border-radius:0 6px 6px 6px;padding:10px;background:#fff}`,
     `.vg-panel{display:none}`,

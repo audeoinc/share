@@ -52,8 +52,8 @@ const baseOdd = A.analyze([
 
 const cases = [
   { title: '3 グループ（既定 = タブ）', b: base3, opts: {} },
-  { title: '2 グループ（2 ペイン）', b: base2, opts: {} },
-  { title: '1 グループ（差分なし）', b: base1, opts: {} },
+  { title: '2 グループ（基準 ＋ 比較 1 枚）', b: base2, opts: {} },
+  { title: '1 グループ（基準タブのみ）', b: base1, opts: {} },
   { title: `${baseMany.groupCount} グループ（既定 = タブ）`, b: baseMany, opts: {} },
   { title: 'suffix 未認識（単独表示）', b: baseOdd, opts: {} },
 ];
@@ -72,17 +72,23 @@ const checks = [
   ['グループ数バッジが出る', h3.includes('3 グループ')],
   ['ペイン見出しに suffix が列記される', h3.replace(/<[^>]*>/g, '').includes('abjp, abuk, abus')],
   ['3 グループは既定でタブ', h3.includes('vg-tablist')],
-  ['タブは基準を除いた 2 枚', (h3.match(/class="vg-tab /g) || []).length === 2],
+  ['タブは基準を含めて 3 枚', (h3.match(/class="vg-tab /g) || []).length === 3],
+  ['タブの枚数がグループ数と一致する',
+    (h3.match(/class="vg-tab /g) || []).length === base3.groupCount &&
+    (hMany.match(/class="vg-tab /g) || []).length === baseMany.groupCount],
   ['タブ見出しに suffix が列記される',
     ['cdjp, cduk, cdus', 'efjp, efuk, efus']
       .every((s) => h3.replace(/<[^>]*>/g, '').includes(s))],
   ['3 ペイン横並びは出さない（タブのみ）',
     !parts.map((p) => p.html).join('').includes('reference')],
   ['4 グループ以上もタブ', hMany.includes('vg-tablist') && baseMany.groupCount > 3],
-  ['タブに基準グループの表示がある', hMany.includes('基準:')],
+  ['基準タブが選択状態で固定されている',
+    hMany.includes('vg-tbase') && !/vg-tbase[^>]*for=/.test(hMany)],
   ['1 グループは差分なしの案内', h1.includes('すべてが同一ロジック')],
   // 比較相手がいないので、同じ SQL を左右に並べない
   ['1 グループはペインが 1 枚', (h1.match(/<th colspan=/g) || []).length === 1],
+  ['1 グループでも基準タブが 1 枚出る',
+    (h1.match(/class="vg-tab /g) || []).length === 1 && h1.includes('vg-tbase')],
   ['3 グループはペインが 2 枚', (h3.match(/<th colspan=/g) || []).length === 2 * 2],
   ['1 グループでも SQL は出る', h1.replace(/<[^>]*>/g, '').includes('SELECT')],
   ['1 グループに差分マーカーが出ない', !/[+−]<\/td>/.test(h1)],
@@ -101,8 +107,8 @@ const checks = [
   ['誤解を招く副題 (after)/(reference) が残っていない',
     !/\((?:before|after|base|reference)\)/.test(parts.map((p) => p.html).join(''))],
   ['副題が View 数になっている', h3.includes('基準 / 3 View')],
-  ['2 グループはタブにしない（比較が 1 通りのため）',
-    !parts[1].html.includes('vg-tablist')],
+  ['2 グループもタブ（基準 ＋ 比較相手の 2 枚）',
+    (parts[1].html.match(/class="vg-tab /g) || []).length === 2],
   ['なぜ別グループになったかを出す', h3.includes('なぜ別グループになったか')],
   ['未認識の View はタイトルが View 名', hOdd.includes('v_legacy_report')],
   ['未認識の View にバッジが付く', hOdd.includes('suffix 未認識')],
