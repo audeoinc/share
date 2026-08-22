@@ -107,6 +107,34 @@ function esc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+/** 属性値用。title に入れるので " も落とす。改行はそのまま（tooltip の改行になる）。 */
+function escAttr(s) {
+  return esc(s).replace(/"/g, '&quot;');
+}
+
+/**
+ * {{P1}} のようなパラメータの目印を、生成後の HTML の上で拾う。
+ *
+ * 行内差分は語単位（'{' '{' 'P1' '}' '}'）で切るので、値が違う位置では
+ * 'P1' だけがハイライトの <span> に入り、目印が途中でタグに割られる。
+ * そのため単純な /\{\{P\d+\}\}/ では拾えない。タグを挟んでよい形で書く。
+ */
+const PARAM_HTML_RE = /\{(?:<[^>]+>)*\{(?:<[^>]+>)*(P\d+)(?:<[^>]+>)*\}(?:<[^>]+>)*\}/g;
+
+/**
+ * パラメータの目印に title を付ける。tips は { P1: '…' } の形。
+ *
+ * style 属性を持たない <span> なので、class モード（style をハッシュして
+ * クラス名にする描画）でも新しいクラスは生えない＝貼り済みの CSS のまま動く。
+ */
+function withTips(html, tips) {
+  if (!tips) return html;
+  return html.replace(PARAM_HTML_RE, (m, name) => {
+    const t = tips[name];
+    return t ? `<span title="${escAttr(t)}">${m}</span>` : m;
+  });
+}
+
 /** SQL の簡易シンタックスハイライト */
 function sqlHighlight(src) {
   const n = src.length;
@@ -146,14 +174,14 @@ function sqlHighlight(src) {
   return out;
 }
 
-function renderSegs(segs, hiColor) {
+function renderSegs(segs, hiColor, tips) {
   if (!segs || !segs.length) return '&nbsp;';
   let out = '';
   for (const seg of segs) {
     const inner = sqlHighlight(seg.text);
     out += seg.hi ? `<span style="background:${hiColor};border-radius:2px;">${inner}</span>` : inner;
   }
-  return out === '' ? '&nbsp;' : out;
+  return out === '' ? '&nbsp;' : withTips(out, tips);
 }
 
 function numTd(num, pane, leftBorder) {
@@ -217,20 +245,24 @@ function wrapTable(colgroup, theadHtml, bodyHtml) {
  * mode='class' が style をハッシュしてクラス名にするため。新しい組み合わせを
  * 作ると、テンプレートに貼った CSS を貼り直すまでその部分が素のままになる。
  */
-function renderFragment1(label, sub, lines, opts) {
+function renderFragment1(label, sub, lines, opts, tips) {
   configure(opts);
   const colgroup = '<colgroup><col style="width:40px"><col></colgroup>';
   const thead = th(2, label, sub, PANES.base, false);
   let body = '';
   for (let i = 0; i < lines.length; i++) {
     body += `      <tr>${numTd(i + 1, PANES.base, false)}` +
-      `${codeTd('same', sqlHighlight(lines[i]), PANES.base)}</tr>\n`;
+      `${codeTd('same', withTips(sqlHighlight(lines[i]), tips), PANES.base)}</tr>\n`;
   }
   return wrapTable(colgroup, thead, body);
 }
 
-/** 2-way フラグメント（左=base / 右=after）。各ペイン等幅（table-layout:fixed） */
-function renderFragment2(leftLabel, rightLabel, rows, opts) {
+/**
+ * 2-way フラグメント（左=base / 右=after）。各ペイン等幅（table-layout:fixed）
+ * tips は { left: {P1:'…'}, right: {P1:'…'} }。パラメータ名は左右で独立して
+ * 振り直されるので、ペインごとに別の対応表を渡す。
+ */
+function renderFragment2(leftLabel, rightLabel, rows, opts, tips) {
   configure(opts);
   const colgroup =
     '<colgroup>' +
@@ -243,9 +275,9 @@ function renderFragment2(leftLabel, rightLabel, rows, opts) {
   for (const r of rows) {
     const L = r.left, R = r.right;
     let cells = '';
-    if (L) cells += numTd(L.num, PANES.base, false) + markTd(L.kind === 'del' ? 'del' : 'blank', PANES.base) + codeTd(L.kind, renderSegs(L.segs, PANES.base.hi), PANES.base);
+    if (L) cells += numTd(L.num, PANES.base, false) + markTd(L.kind === 'del' ? 'del' : 'blank', PANES.base) + codeTd(L.kind, renderSegs(L.segs, PANES.base.hi, tips && tips.left), PANES.base);
     else cells += hatchTd('num', false) + hatchTd('mark', false) + hatchTd('code', false);
-    if (R) cells += numTd(R.num, PANES.after, true) + markTd(R.kind === 'add' ? 'add' : 'blank', PANES.after) + codeTd(R.kind, renderSegs(R.segs, PANES.after.hi), PANES.after);
+    if (R) cells += numTd(R.num, PANES.after, true) + markTd(R.kind === 'add' ? 'add' : 'blank', PANES.after) + codeTd(R.kind, renderSegs(R.segs, PANES.after.hi, tips && tips.right), PANES.after);
     else cells += hatchTd('num', true) + hatchTd('mark', true) + hatchTd('code', true);
     body += `      <tr>${cells}</tr>\n`;
   }

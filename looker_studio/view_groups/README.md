@@ -467,8 +467,22 @@ ORDER BY table_name;
 **何をパラメータ化したかの一覧を常時添付**する（折りたたみ）。α 等価の判定は
 強力なので、当否を人が確認できるようにしておく。
 
+SQL 中の `{{P1}}` にはツールチップ（`title` 属性）が付き、種別と suffix ごとの
+実際の値がその場で読める。末尾の一覧まで目を往復させずに済ませるため。
+実装は `render.js` の `withTips()`。
+
+- JavaScript は使えないので、CSS の疑似要素ではなくブラウザ標準の `title`。
+  Templated Record は `innerHTML` で流し込むだけなので属性は落ちない。
+- `title` を付ける `<span>` に `style` は持たせない。`mode='class'` は
+  `style` の中身をハッシュしてクラス名にするので、`style` を足すと
+  `template_style.html` を貼り直すまでその部分が素のままになる。
+- 行内差分は語単位（`{` `{` `P1` `}` `}`）で切るため、値が違う位置では
+  目印がハイライトの `<span>` に割られる。目印の検出は途中にタグが入る形で
+  書いてある（`PARAM_HTML_RE`）。
+- パラメータ名はグループごとに振り直すので、左右のペインには別の対応表を渡す。
+
 ```bash
-node preview.mjs          # dist/preview.html を生成して検証（37 アサーション）
+node preview.mjs          # dist/preview.html を生成して検証（42 アサーション）
 node preview.mjs --check  # 生成せず検証だけ
 ```
 

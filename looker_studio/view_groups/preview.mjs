@@ -150,6 +150,31 @@ const checks = [
     (parts[5].html.match(/class="vg-tab /g) || []).length === 2],
   ['複雑な SQL のパラメータに実体名の種別が出る',
     parts[5].html.includes('実体名')],
+  // --- パラメータの tooltip ---------------------------------------------
+  ['パラメータの目印に tooltip が付く', h3.includes('<span title="P1: ')],
+  ['tooltip に種別と suffix ごとの値が並ぶ',
+    /<span title="P1: [^"]*\n[a-z]+ = /.test(h3)],
+  ['tooltip の span は style を持たない（class モードで CSS が増えない）',
+    !/<span title="[^"]*" style=/.test(h3) && !/<span style="[^"]*" title=/.test(h3)],
+  ['すべての目印に tooltip が付く（タグで割れた分も含む）', (() => {
+    // 行内差分は語単位で切るので、値が違う位置では {{ と P1 の間にタグが入る。
+    // 左右でパラメータ名の振られ方がずれる形を作って、その経路も通す。
+    const b = A.analyze([
+      { view_name: 'v_y_abjp', ddl: "SELECT 'X' AS k FROM t_abjp" },
+      { view_name: 'v_y_abus', ddl: "SELECT 'Y' AS k FROM t_abus" },
+      { view_name: 'v_y_cdjp', ddl: "SELECT 'Z' AS k, b FROM t_cdjp" },
+      { view_name: 'v_y_cdus', ddl: "SELECT 'Z' AS k, b FROM t_cdus" },
+    ], { suffixParts: [['ab', 'cd'], ['jp', 'us']] }).bases[0];
+    const h = R.renderBase(b, {});
+    const marks = h.match(/\{(?:<[^>]+>)*\{(?:<[^>]+>)*P\d+(?:<[^>]+>)*\}(?:<[^>]+>)*\}/g) || [];
+    return marks.length === 3 && marks.some((m) => m.includes('<')) &&
+      (h.match(/<span title=/g) || []).length === marks.length;
+  })()],
+  ['左右のペインで別の対応表を使う', (() => {
+    // パラメータ名はグループごとに振り直すので、同じ P1 でも左右で中身が違う
+    const tips = [...parts[0].html.matchAll(/<span title="(P1: [^"]*)"/g)].map((m) => m[1]);
+    return new Set(tips).size > 1;
+  })()],
   ['伏せ字は診断で見える表記に戻す',
     R.renderBase(A.analyze([
       { view_name: 'v_w_abjp', ddl: "SELECT a FROM t WHERE c = 'abjp'" },

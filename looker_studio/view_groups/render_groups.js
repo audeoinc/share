@@ -176,13 +176,30 @@ function paramsTable(groups) {
     `パラメータ化した箇所（グループ内で異なるトークン）</summary>${blocks}</details>`;
 }
 
+/**
+ * SQL 中の {{P1}} に付ける tooltip の文言。{ P1: '…' } の形で返す。
+ *
+ * 何に置き換わるのかは末尾の一覧に出しているが、SQL を読んでいる最中に
+ * そこまで目を往復させずに済むよう、その場でも見えるようにする。
+ * パラメータ名はグループごとに独立して振るので、対応表もグループごとに作る。
+ */
+function paramTips(g) {
+  const tips = {};
+  for (const p of g.params) {
+    tips[p.name] = `${p.name}: ${kindText(p.kind)}\n` +
+      Object.entries(p.values).map(([s, v]) => `${s || '(suffix なし)'} = ${v}`).join('\n');
+  }
+  return tips;
+}
+
 /** 基準グループと 1 グループの 2 ペイン比較。 */
 function pair(baseGroup, other, opts) {
   return relabelPanes(
     renderFragment2(
       label(baseGroup), label(other),
       build2Way(splitLines(baseGroup.sql), splitLines(other.sql)),
-      opts
+      opts,
+      { left: paramTips(baseGroup), right: paramTips(other) }
     ),
     [`基準 / ${paneSub(baseGroup)}`, paneSub(other)]
   );
@@ -219,7 +236,7 @@ function tabs(groups, opts, idPrefix) {
     ? shown.map((g, i) =>
       `<div class="vg-panel vg-p${i + 1}">${pair(base, g, opts)}</div>`).join('')
     : `<div class="vg-single">${renderFragment1(
-      label(base), paneSub(base), splitLines(base.sql), opts)}</div>`;
+      label(base), paneSub(base), splitLines(base.sql), opts, paramTips(base))}</div>`;
 
   const over = others.length > shown.length
     ? notice(`グループが多いため先頭 ${MAX_TABS} 件のみタブ表示しています` +
