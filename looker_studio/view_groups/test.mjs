@@ -52,8 +52,9 @@ const checks = [
   ['グループ間のパラメータ化 SQL は異なる（ロジック差が残る）',
     new Set(sales.groups.map((g) => g.sql)).size === 3],
   ['パラメータ化 SQL の改行が保たれている', groupOf('abjp').sql.split('\n').length > 5],
-  ['cd 系は customers も別パラメータになる', groupOf('cdjp').params.length >= 3],
-  ['ab 系のパラメータは View 名と orders の 2 つ', groupOf('abjp').params.length === 2],
+  ['cd 系は orders と customers の 2 パラメータ', groupOf('cdjp').params.length === 2],
+  ['ab 系のパラメータは orders の 1 つ', groupOf('abjp').params.length === 1],
+  ['パラメータの種別は実体名', groupOf('abjp').params.every((p) => p.kind === 'entity')],
   ['パラメータ値に suffix が現れる',
     JSON.stringify(groupOf('efjp').params).includes('efuk')],
 ];
@@ -76,7 +77,18 @@ const strict = A.analyze([
   { view_name: 'v_x_abus', ddl: 'SELECT a FROM t_abus WHERE x = 2' },        // 数値リテラル差
   { view_name: 'v_x_abuk', ddl: 'SELECT DISTINCT a FROM t_abuk WHERE x = 1' }, // 予約語差
 ], OPTS).bases[0];
-checks.push(['リテラル差は既定でロジック差として残す', strict.groupCount === 3]);
+// 既定ではリテラルは値としてパラメータ化されるので、abjp と abus はまとまる。
+// 予約語の差（DISTINCT）は構造の差なので残る。
+checks.push(['リテラル差は既定でパラメータ化して同じグループにする',
+  strict.groupCount === 2]);
+checks.push(['予約語の差は既定でもロジック差として残る',
+  strict.groups.some((g) => g.suffixes.join(',') === 'abjp,abus') &&
+  strict.groups.some((g) => g.suffixes.join(',') === 'abuk')]);
+checks.push(['substitutable を絞ればリテラル差も残せる',
+  A.analyze([
+    { view_name: 'v_x_abjp', ddl: 'SELECT a FROM t_abjp WHERE x = 1' },
+    { view_name: 'v_x_abus', ddl: 'SELECT a FROM t_abus WHERE x = 2' },
+  ], { ...OPTS, substitutable: ['entity'] }).bases[0].groupCount === 2]);
 
 const loose = A.analyze([
   { view_name: 'v_x_abjp', ddl: 'SELECT a FROM t_abjp WHERE x = 1' },
@@ -93,10 +105,13 @@ const uniform = A.analyze(
 checks.push(['全 suffix 同一ロジックなら 1 グループ', uniform.groupCount === 1]);
 
 // OPTIONS 句（BigQuery が返す DDL に description や作成タイムスタンプが入る）
+// ヘッダの View 名は全 View で同じにする。View 自身の名前は FROM / JOIN の
+// 実体名ではないので、名前を変えるとそれだけで全部が別グループに割れてしまい、
+// OPTIONS を落とせているかどうかが見えなくなる。
 const withOptions = S.sampleRows().map((r, i) => ({
   view_name: r.view_name,
-  ddl: r.ddl.replace(/ AS\n/, `\nOPTIONS(\n  description="auto",\n` +
-    `  labels=[("created", "2026-08-18T0${i}:11:22Z")]\n)\nAS `),
+  ddl: 'CREATE VIEW `p.d.v`\nOPTIONS(\n  description="auto",\n' +
+    `  labels=[("created", "2026-08-18T0${i}:11:22Z")]\n)\nAS\n` + r.ddl,
 }));
 const wo = A.analyze(withOptions, OPTS).bases[0];
 checks.push(['OPTIONS 句は既定で無視する（メタデータでロジックではない）',
@@ -106,12 +121,25 @@ checks.push(['OPTIONS を無視してもグループ分けは同じ',
   sales.groups.map((g) => g.suffixes.join(',')).join('|')]);
 checks.push(['パラメータ化 SQL に OPTIONS が残らない',
   !/OPTIONS/.test(wo.groups[0].sql)]);
-checks.push(['stripOptions:false なら従来どおり割れる',
-  A.analyze(withOptions, { ...OPTS, stripOptions: false }).bases[0].groupCount === 9]);
+// 既定ではタイムスタンプも値としてパラメータ化されるので、
+// OPTIONS を残しても割れない。落とす価値が見えるのは substitutable を
+// 絞った運用のほうなので、そちらで確かめる。
+checks.push(['stripOptions:false なら OPTIONS の差で割れる',
+  A.analyze(withOptions, { ...OPTS, substitutable: ['entity'], stripOptions: false })
+    .bases[0].groupCount === 9]);
+checks.push(['既定では OPTIONS を残しても値として吸収される',
+  A.analyze(withOptions, { ...OPTS, stripOptions: false })
+    .bases[0].groupCount === 3]);
 checks.push(['OPTIONS の値に括弧や引用符があっても対応する ) を見つける',
   A.stripOptionsClause(A.tokenizeSql(
     'CREATE VIEW `a` OPTIONS(x="a)b(c", y=[(1,2)]) AS SELECT 1'))
     .map((t) => t.text).join('') === 'CREATE VIEW `a` AS SELECT 1']);
+
+// --- ここから下は substitutable を絞って検証する -----------------------
+// 既定ではリテラルが置換対象なので、伏せ字や同値リテラルの有無で差が出ない。
+// これらは「リテラル差をロジック差として残したい」運用のための仕組みなので、
+// その設定（実体名だけを置換対象にする）で検証する。
+const STRICT = { ...OPTS, substitutable: ['entity'] };
 
 // suffix の伏せ字（suffixAware）
 // suffix はデータセット名・テーブル名・リテラルのどこにでも現れる。
@@ -124,9 +152,9 @@ const spread = S.allSuffixes().map((e) => ({
        `WHERE src = 'load_${e.suffix}'`,
 }));
 checks.push(['suffix はデータセット・テーブル・リテラルのどこにあっても吸収する',
-  A.analyze(spread, OPTS).bases[0].groupCount === 1]);
+  A.analyze(spread, STRICT).bases[0].groupCount === 1]);
 checks.push(['suffixAware:false なら suffix 入りリテラルで割れる',
-  A.analyze(spread, { ...OPTS, suffixAware: false }).bases[0].groupCount === 9]);
+  A.analyze(spread, { ...STRICT, suffixAware: false }).bases[0].groupCount === 9]);
 
 // 伏せ字はロジック差まで消さない
 const literalLogic = [
@@ -134,7 +162,7 @@ const literalLogic = [
   { view_name: 'v_y_abus', ddl: "SELECT a FROM t_abus WHERE status = 'A'" },
   { view_name: 'v_y_cdjp', ddl: "SELECT a FROM t_cdjp WHERE status = 'B'" },
 ];
-const ll = A.analyze(literalLogic, OPTS).bases[0];
+const ll = A.analyze(literalLogic, STRICT).bases[0];
 checks.push(['suffix 以外のリテラル差はロジック差として残る', ll.groupCount === 2]);
 checks.push(['ロジックが同じ 2 本は同じグループに入る',
   ll.groups.some((g) => g.suffixes.join(',') === 'abjp,abus')]);
@@ -171,9 +199,9 @@ const codes = S.allSuffixes().map((e) => ({
        `  AND line = '${e.suffix.slice(0, 2)}'`,
 }));
 checks.push(['リテラルの国コードは suffix と連動していれば吸収する',
-  A.analyze(codes, OPTS).bases[0].groupCount === 1]);
+  A.analyze(codes, STRICT).bases[0].groupCount === 1]);
 checks.push(['literalSuffixWords:false なら従来どおり割れる',
-  A.analyze(codes, { ...OPTS, literalSuffixWords: false }).bases[0].groupCount === 9]);
+  A.analyze(codes, { ...STRICT, literalSuffixWords: false }).bases[0].groupCount === 9]);
 
 // 連動していないリテラルは残す
 const notCodes = [
@@ -181,7 +209,7 @@ const notCodes = [
   { view_name: 'v_z_abus', ddl: "SELECT a FROM t_abus WHERE country = 'US' AND s = 'A'" },
   { view_name: 'v_z_cdjp', ddl: "SELECT a FROM t_cdjp WHERE country = 'JP' AND s = 'B'" },
 ];
-const nc = A.analyze(notCodes, OPTS).bases[0];
+const nc = A.analyze(notCodes, STRICT).bases[0];
 checks.push(['連動しないリテラル差はロジック差として残る', nc.groupCount === 2]);
 checks.push(['連動する値だけ吸収して 2 本がまとまる',
   nc.groups.some((g) => g.suffixes.join(',') === 'abjp,abus')]);
@@ -208,31 +236,31 @@ const manual = [
   { view_name: 'v_m_abuk', ddl: "SELECT a FROM t_abuk WHERE zone = 'emea'" },
 ];
 checks.push(['literalGroups なしでは連動が分からないので割れる',
-  A.analyze(manual, OPTS).bases[0].groupCount === 3]);
+  A.analyze(manual, STRICT).bases[0].groupCount === 3]);
 checks.push(['literalGroups に並べれば同一視する',
-  A.analyze(manual, { ...OPTS, literalGroups: [['apac', 'amer', 'emea']] })
+  A.analyze(manual, { ...STRICT, literalGroups: [['apac', 'amer', 'emea']] })
     .bases[0].groupCount === 1]);
 checks.push(['1 段の配列も 1 組として受ける',
-  A.analyze(manual, { ...OPTS, literalGroups: ['apac', 'amer', 'emea'] })
+  A.analyze(manual, { ...STRICT, literalGroups: ['apac', 'amer', 'emea'] })
     .bases[0].groupCount === 1]);
 checks.push(['組が違えば同一視しない',
-  A.analyze(manual, { ...OPTS, literalGroups: [['apac'], ['amer'], ['emea']] })
+  A.analyze(manual, { ...STRICT, literalGroups: [['apac'], ['amer'], ['emea']] })
     .bases[0].groupCount === 3]);
 checks.push(['大文字小文字は無視する',
   A.analyze([
     { view_name: 'v_m_abjp', ddl: "SELECT a FROM t_abjp WHERE zone = 'APAC'" },
     { view_name: 'v_m_abus', ddl: "SELECT a FROM t_abus WHERE zone = 'amer'" },
-  ], { ...OPTS, literalGroups: [['apac', 'amer']] }).bases[0].groupCount === 1]);
+  ], { ...STRICT, literalGroups: [['apac', 'amer']] }).bases[0].groupCount === 1]);
 checks.push(['並べていない値はロジック差のまま',
   A.analyze([
     { view_name: 'v_m_abjp', ddl: "SELECT a FROM t_abjp WHERE zone = 'apac'" },
     { view_name: 'v_m_abus', ddl: "SELECT a FROM t_abus WHERE zone = 'zzz'" },
-  ], { ...OPTS, literalGroups: [['apac', 'amer', 'emea']] }).bases[0].groupCount === 2]);
+  ], { ...STRICT, literalGroups: [['apac', 'amer', 'emea']] }).bases[0].groupCount === 2]);
 checks.push(['数値リテラルも並べれば同一視できる',
   A.analyze([
     { view_name: 'v_m_abjp', ddl: 'SELECT a FROM t_abjp WHERE region_id = 1' },
     { view_name: 'v_m_abus', ddl: 'SELECT a FROM t_abus WHERE region_id = 2' },
-  ], { ...OPTS, literalGroups: [['1', '2']] }).bases[0].groupCount === 1]);
+  ], { ...STRICT, literalGroups: [['1', '2']] }).bases[0].groupCount === 1]);
 
 // 同値リテラルの一覧を 1 本にまとめる（equivalentLiterals）
 // "suffix" は「その View 自身の suffix とその区分」を表す予約語。
@@ -241,7 +269,7 @@ const eqRows = [
   { view_name: 'v_e_abjp', ddl: "SELECT 'aa' AS id, 'JP' AS c FROM t_abjp" },
   { view_name: 'v_e_abus', ddl: "SELECT 'bb' AS id, 'US' AS c FROM t_abus" },
 ];
-const eqCount = (o) => A.analyze(eqRows, { ...OPTS, ...o }).bases[0].groupCount;
+const eqCount = (o) => A.analyze(eqRows, { ...STRICT, ...o }).bases[0].groupCount;
 checks.push(['一覧に suffix と組を並べれば両方効く',
   eqCount({ equivalentLiterals: ['suffix', ['aa', 'bb']] }) === 1]);
 checks.push(['suffix を書かなければ suffix 語彙は効かない',
@@ -252,19 +280,19 @@ checks.push(['組が違えば同一視しない（一覧でも）',
   A.analyze([
     { view_name: 'v_e_abjp', ddl: "SELECT 'aa' AS id FROM t_abjp" },
     { view_name: 'v_e_abus', ddl: "SELECT 'cc' AS id FROM t_abus" },
-  ], { ...OPTS, equivalentLiterals: ['suffix', ['aa', 'bb'], ['cc', 'dd']] })
+  ], { ...STRICT, equivalentLiterals: ['suffix', ['aa', 'bb'], ['cc', 'dd']] })
     .bases[0].groupCount === 2]);
 checks.push(['1 組だけを 1 段で書いても受ける',
   A.analyze([
     { view_name: 'v_e_abjp', ddl: "SELECT 'aa' AS id FROM t_abjp" },
     { view_name: 'v_e_abus', ddl: "SELECT 'bb' AS id FROM t_abus" },
-  ], { ...OPTS, equivalentLiterals: ['aa', 'bb'] }).bases[0].groupCount === 1]);
+  ], { ...STRICT, equivalentLiterals: ['aa', 'bb'] }).bases[0].groupCount === 1]);
 checks.push(['equivalentLiterals が無ければ従来の 2 つの設定で動く',
-  A.analyze(manual, { ...OPTS, literalGroups: [['apac', 'amer', 'emea']] })
+  A.analyze(manual, { ...STRICT, literalGroups: [['apac', 'amer', 'emea']] })
     .bases[0].groupCount === 1]);
 checks.push(['equivalentLiterals を書くと literalGroups は見ない',
   A.analyze(manual, {
-    ...OPTS,
+    ...STRICT,
     literalGroups: [['apac', 'amer', 'emea']],
     equivalentLiterals: ['suffix'],
   }).bases[0].groupCount === 3]);
@@ -312,7 +340,74 @@ const inLogic = [
   { view_name: 'v_q_abus', ddl: "SELECT a FROM t_abus WHERE s = 'ORDER_ON_HOLD'" },
 ];
 checks.push(['語の一部が一致しても別ロジックのままにする',
-  A.analyze(inLogic, { suffixList: ['abin', 'abus'] }).bases[0].groupCount === 2]);
+  A.analyze(inLogic, { suffixList: ['abin', 'abus'], substitutable: ['entity'] })
+    .bases[0].groupCount === 2]);
+
+// --- 置換してよいのは実体名と値だけ -----------------------------------
+// 横展開はロジックが同じならコピーで行う運用なので、SQL の中で閉じた名前
+// （列名・別名・CTE 名・ウィンドウ名）が違えば、それは環境差ではなく
+// 書き換えの差。意味が同じでも書き方が違えば別グループにする。
+{
+  const P = { suffixParts: [['ab'], ['jp', 'us']] };
+  const two = (a, b) => A.analyze(
+    [{ view_name: 'v_e_abjp', ddl: a }, { view_name: 'v_e_abus', ddl: b }], P
+  ).bases[0].groupCount;
+
+  checks.push(['FROM の実体名はパラメータ化する（バッククォート）',
+    two('SELECT a FROM `p.d.t_abjp`', 'SELECT a FROM `p.d.t_abus`') === 1]);
+  checks.push(['FROM の実体名はパラメータ化する（裸）',
+    two('SELECT a FROM p.d.t_abjp', 'SELECT a FROM p.d.t_abus') === 1]);
+  checks.push(['JOIN の実体名もパラメータ化する',
+    two('SELECT a FROM t_abjp JOIN u_abjp ON a=b',
+        'SELECT a FROM t_abus JOIN w_abus ON a=b') === 1]);
+  checks.push(['FROM a, b のように並んでもパラメータ化する',
+    two('SELECT a FROM t_abjp, u_abjp', 'SELECT a FROM t_abus, u_abus') === 1]);
+  checks.push(['バッククォート内の部分数が違ってもパラメータ化する',
+    two('SELECT a FROM `p.d.t_abjp`', 'SELECT a FROM `d.t_abus`') === 1]);
+
+  checks.push(['バッククォートの有無が違えば別グループ',
+    two('SELECT a FROM `p.d.t_abjp`', 'SELECT a FROM p.d.t_abus') === 2]);
+  checks.push(['裸で部分数が違えば別グループ',
+    two('SELECT a FROM p.d.t_abjp', 'SELECT a FROM d.t_abus') === 2]);
+
+  checks.push(['列名が違えば別グループ',
+    two('SELECT amount FROM t_abjp', 'SELECT revenue FROM t_abus') === 2]);
+  checks.push(['テーブル別名が違えば別グループ',
+    two('SELECT o.a FROM t_abjp AS o', 'SELECT ord.a FROM t_abus AS ord') === 2]);
+  checks.push(['列別名が違えば別グループ',
+    two('SELECT a AS amount FROM t_abjp', 'SELECT a AS total FROM t_abus') === 2]);
+  checks.push(['CTE 名が違えば別グループ',
+    two('WITH daily AS (SELECT a FROM t_abjp) SELECT * FROM daily',
+        'WITH dly AS (SELECT a FROM t_abus) SELECT * FROM dly') === 2]);
+  checks.push(['CTE 名が同じならまとまる',
+    two('WITH daily AS (SELECT a FROM t_abjp) SELECT * FROM daily',
+        'WITH daily AS (SELECT a FROM t_abus) SELECT * FROM daily') === 1]);
+  checks.push(['ウィンドウ名が違えば別グループ',
+    two('SELECT SUM(a) OVER w FROM t_abjp WINDOW w AS (PARTITION BY b)',
+        'SELECT SUM(a) OVER win FROM t_abus WINDOW win AS (PARTITION BY b)') === 2]);
+  checks.push(['関数名が違えば別グループ',
+    two('SELECT my_udf(a) FROM t_abjp', 'SELECT other_udf(a) FROM t_abus') === 2]);
+}
+
+// markEntities: 実体名だけに印を付ける
+{
+  const ent = (sql) => A.markEntities(A.tokenizeSql(sql))
+    .filter((t) => t.kind === 'entity').map((t) => t.text).join(',');
+  checks.push(['バッククォートの実体名を 1 トークンで拾う',
+    ent('SELECT a FROM `p.d.t`') === '`p.d.t`']);
+  checks.push(['裸の実体名はドット区切りで全部拾う',
+    ent('SELECT a FROM p.d.t') === 'p,d,t']);
+  checks.push(['別名は実体名にしない',
+    ent('SELECT a FROM d.t AS o') === 'd,t']);
+  checks.push(['EXTRACT(… FROM …) の FROM は実体名にしない',
+    ent('SELECT EXTRACT(HOUR FROM ts) FROM d.t') === 'd,t']);
+  checks.push(['UNNEST など関数呼び出しは実体名にしない',
+    ent('SELECT a FROM UNNEST(arr) AS x') === '']);
+  checks.push(['サブクエリは実体名にしない',
+    ent('SELECT a FROM (SELECT 1) AS x') === '']);
+  checks.push(['列参照は実体名にしない',
+    ent('SELECT o.amount FROM d.t AS o WHERE o.k = 1') === 'd,t']);
+}
 
 // suffix を認識できなかった View
 // 出さないとソースが画面から消える。単独の base（1 View / 1 グループ）として並べる。

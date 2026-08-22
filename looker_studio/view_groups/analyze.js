@@ -109,6 +109,69 @@ function stripOptionsClause(tokens) {
   return out;
 }
 
+/**
+ * FROM / JOIN が指す実体の名前に 'entity' の印を付ける。
+ *
+ * 置換してよいのは「SQL の外を指す名前」と「値」だけ、という方針のため、
+ * 実体名だけを識別子から切り出す。列名・別名・CTE 名・ウィンドウ名・関数名は
+ * SQL の中で閉じた名前なので、印を付けず完全一致を要求する
+ * （横展開はコピーで行う運用なので、そこが違えば書き換えの差）。
+ *
+ * 判定は位置だけ。パーサーは要らない。
+ *   FROM `p.d.t` / FROM p.d.t / FROM d.t / JOIN … / FROM a, b
+ * 次のものは実体名ではないので印を付けない。
+ *   FROM (SELECT …) / FROM UNNEST(x) / EXTRACT(HOUR FROM ts) の FROM
+ *
+ * 表記は正規化しない。バッククォートの有無でトークン数が変わるのはそのままで、
+ * 「意味が同じでも書き方が違えば別グループ」という方針どおりに割れる。
+ */
+function markEntities(tokens) {
+  const out = tokens.slice();
+  const skip = (i) => { let j = i + 1; while (j < out.length && out[j].kind === 'space') j++; return j; };
+  // いま開いている括弧の直前の名前。EXTRACT( … FROM … ) を除くために使う。
+  const stack = [];
+  let prevName = null;
+  for (let i = 0; i < out.length; i++) {
+    const t = out[i];
+    if (t.kind === 'space' || t.kind === 'comment') continue;
+    if (t.text === '(') { stack.push(prevName); prevName = null; continue; }
+    if (t.text === ')') { stack.pop(); prevName = null; continue; }
+    const up = t.text.toUpperCase();
+    prevName = (t.kind === 'keyword' || t.kind === 'ident') ? up : null;
+    if (t.kind !== 'keyword' || (up !== 'FROM' && up !== 'JOIN')) continue;
+    if (stack.length > 0 && stack[stack.length - 1] === 'EXTRACT') continue;
+
+    let j = skip(i);
+    for (;;) {
+      if (j >= out.length) break;
+      const s = out[j];
+      if (s.kind === 'quoted') {
+        out[j] = { kind: 'entity', text: s.text };
+        j = skip(j);
+      } else if (s.kind === 'ident') {
+        // 直後が '(' なら関数呼び出し（UNNEST など）。実体名ではない。
+        const after = skip(j);
+        if (after < out.length && out[after].text === '(') break;
+        let k = j;
+        for (;;) {
+          out[k] = { kind: 'entity', text: out[k].text };
+          const dot = skip(k);
+          if (dot < out.length && out[dot].text === '.') {
+            const nm = skip(dot);
+            if (nm < out.length && out[nm].kind === 'ident') { k = nm; continue; }
+          }
+          break;
+        }
+        j = skip(k);
+      } else break;
+      // 'FROM a, b' のようにカンマで続くことがある
+      if (j < out.length && out[j].text === ',') { j = skip(j); continue; }
+      break;
+    }
+  }
+  return out;
+}
+
 /** 比較用に空白を 1 個へ潰す（整形の違いでロジック差と誤認しないため）。 */
 function normalizeSpace(tokens) {
   return tokens.map((t) => (t.kind === 'space' ? { kind: 'space', text: ' ' } : t));
@@ -189,8 +252,15 @@ function extractSuffix(viewName, opts) {
 // α 等価判定
 // ---------------------------------------------------------------------
 
-/** 既定で置換可能とみなす種類。リテラルは既定で含めない（意味の差である可能性が高いため）。 */
-const DEFAULT_SUBSTITUTABLE = ['ident', 'quoted'];
+/**
+ * 既定で置換可能とみなす種類。
+ *
+ * 置換してよいのは「SQL の外を指す名前」（FROM / JOIN の実体名）と「値」だけ。
+ * 横展開はロジックが同じならコピーで行う運用なので、列名・別名・CTE 名・
+ * ウィンドウ名・関数名が違えば、それは環境差ではなく書き換えの差になる。
+ * 予約語・記号はもちろんロジック差。
+ */
+const DEFAULT_SUBSTITUTABLE = ['entity', 'number', 'string'];
 
 // 伏せ字の目印。SQL には現れない制御文字を使う。
 // 最小化するとソースに生の制御文字が出るので、UDF に埋めるときは
@@ -315,6 +385,9 @@ function maskTokens(tokens, suffix, parts, opts) {
   const words = (useSuffix && eq.useWords) ? suffixWords(s, parts) : [];
   const map = buildLiteralMap(eq.groups);
   if (!useSuffix && words.length === 0 && !map) return tokens;
+  // 伏せ字は置換とは別の仕組みなので、置換対象かどうかでは絞らない。
+  // 既定ではリテラルが置換対象なので出番が無いが、substitutable を
+  // 絞った運用（リテラル差を残したい場合）ではこちらが効く。
   return tokens.map((t) => {
     if (t.kind === 'space') return t;
     let text = t.text;
@@ -428,6 +501,8 @@ function groupByLogic(views, opts) {
     let raw = tokenizeSql(v.ddl);
     // OPTIONS はメタデータ。既定で落とす（stripOptions: false で無効化）
     if (stripOpts) raw = stripOptionsClause(raw);
+    // FROM / JOIN の実体名に印を付ける。表示にも影響しない（テキストは変えない）。
+    raw = markEntities(raw);
     // raw は表示用（元の整形を保つ）、tokens は比較用
     //   空白を潰し、さらに自分の suffix を伏せ字にする
     const tokens = normalizeSpace(raw);
@@ -518,7 +593,8 @@ function analyze(rows, opts) {
 }
 
 module.exports = {
-  tokenizeSql, normalizeSpace, stripOptionsClause, maskTokens, suffixWords, buildLiteralMap,
+  tokenizeSql, normalizeSpace, stripOptionsClause, markEntities,
+  maskTokens, suffixWords, buildLiteralMap,
   parseEquivalents,
   extractSuffix, expandSuffixParts, alphaMap, alphaMapDetail,
   parameterize, groupByLogic, analyze,

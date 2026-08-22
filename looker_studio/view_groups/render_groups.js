@@ -93,10 +93,19 @@ function notice(text) {
   return `<div class="vg-notice">${esc(text)}</div>`;
 }
 
+/** トークン種別の表示名。生の kind をそのまま出しても読めないため。 */
+const KIND_TEXT = {
+  entity: '実体名', string: '値（文字列）', number: '値（数値）',
+  ident: '名前', quoted: '名前', keyword: '予約語', punct: '記号', comment: 'コメント',
+};
+const kindText = (k) => KIND_TEXT[k] || k;
+
 const REASON_TEXT = {
   'length': 'トークン数が違う（構造そのものが別）',
   'kind': 'トークンの種類が違う',
-  'not-substitutable': '置換対象外のトークンが違う（既定ではリテラルもここに入る）',
+  'not-substitutable':
+    '置換できないトークンが違う（列名・別名・CTE 名・予約語など。' +
+    '置換してよいのは FROM / JOIN の実体名と値だけ）',
   'inconsistent': '同じトークンが別の値に対応していて一貫しない',
   'not-injective': '別々のトークンが同じ値に対応していて 1 対 1 にならない',
 };
@@ -118,7 +127,7 @@ function missTable(groups) {
       ? `${d.aLen} 対 ${d.bLen}`
       : `<code class="vg-mcode">${esc(unmask(d.aText))}</code> ↔ ` +
         `<code class="vg-mcode">${esc(unmask(d.bText))}</code>` +
-        `<span class="vg-mkind">${esc(d.kind)}</span>`;
+        `<span class="vg-mkind">${esc(kindText(d.kind))}</span>`;
     return `<tr><th class="vg-mname">${esc(label(g))}</th>` +
       `<td class="vg-mvs">vs ${esc(g.miss.vs)}</td>` +
       `<td class="vg-mreason">${esc(REASON_TEXT[d.reason] || d.reason)}<br>${what}</td></tr>`;
@@ -128,15 +137,12 @@ function missTable(groups) {
     g.miss.detail.reason === 'not-substitutable' &&
     (g.miss.detail.kind === 'string' || g.miss.detail.kind === 'number'));
   const hint = literal
-    ? `<div class="vg-mhint">リテラルの違いで割れています。` +
-      `suffix と連動する値（<code class="vg-mcode">'JP'</code> / ` +
-      `<code class="vg-mcode">'US'</code> など）は既定で吸収するので、` +
-      `ここに残っているのは連動していない値です。それでも同一視したいなら、` +
-      `options_json に ` +
-      `<code class="vg-mcode">"substitutable": ["ident","quoted","number","string"]</code>` +
-      ` を指定すると<b>すべての</b>リテラル差が無視されます` +
-      `（<code class="vg-mcode">'A'</code> と <code class="vg-mcode">'B'</code> の差も消えます）。` +
-      `<br>特定の値だけ同一視したいなら、` +
+    ? `<div class="vg-mhint">値の違いで割れています。` +
+      `既定では値はパラメータ化して同じグループにするので、` +
+      `<code class="vg-mcode">substitutable</code> を絞った設定になっています。` +
+      `既定に戻すなら options_json から ` +
+      `<code class="vg-mcode">"substitutable"</code> を外します。` +
+      `<br>絞ったまま特定の値だけ同一視したいなら、` +
       `<code class="vg-mcode">"equivalentLiterals": ["suffix", ["apac","amer","emea"]]</code>` +
       ` のように組で並べます（<code class="vg-mcode">"suffix"</code> は` +
       `その View 自身の suffix を表す予約語）。</div>`
@@ -157,7 +163,11 @@ function paramsTable(groups) {
       const vals = Object.entries(p.values)
         .map(([s, v]) => `<div class="vg-pv"><span class="vg-psuf">${esc(s)}</span>${esc(v)}</div>`)
         .join('');
-      return `<tr><th class="vg-pname">${esc(p.name)}</th><td class="vg-pvals">${vals}</td></tr>`;
+      // 種別を出す。実体名の差は suffix 違いなら当然なので流し見でよく、
+      // 値の差は業務上の意味があるので人が見るべき、という区別のため。
+      const kind = `<span class="vg-mkind">${esc(kindText(p.kind))}</span>`;
+      return `<tr><th class="vg-pname">${esc(p.name)}</th>` +
+        `<td class="vg-pvals">${kind}${vals}</td></tr>`;
     }).join('');
     return `<div class="vg-pblock"><div class="vg-plabel">${esc(label(g))}</div>` +
       `<table class="vg-ptable">${rows}</table></div>`;

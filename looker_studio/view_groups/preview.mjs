@@ -120,7 +120,7 @@ const checks = [
     R.renderBase(A.analyze([
       { view_name: 'v_x_abjp', ddl: "SELECT a FROM t_abjp WHERE s = 'A'" },
       { view_name: 'v_x_abus', ddl: "SELECT a FROM t_abus WHERE s = 'B'" },
-    ], { suffixParts: [['ab'], ['jp', 'us']] }).bases[0], {})
+    ], { suffixParts: [['ab'], ['jp', 'us']], substitutable: ['entity'] }).bases[0], {})
       .includes('substitutable')],
   ['suffix と連動するリテラルは割らない',
     A.analyze([
@@ -131,13 +131,13 @@ const checks = [
     R.renderBase(A.analyze([
       { view_name: 'v_v_abjp', ddl: "SELECT a FROM t_abjp WHERE z = 'apac'" },
       { view_name: 'v_v_abus', ddl: "SELECT a FROM t_abus WHERE z = 'amer'" },
-    ], { suffixParts: [['ab'], ['jp', 'us']] }).bases[0], {})
+    ], { suffixParts: [['ab'], ['jp', 'us']], substitutable: ['entity'] }).bases[0], {})
       .includes('equivalentLiterals')],
   ['伏せ字は診断で見える表記に戻す',
     R.renderBase(A.analyze([
       { view_name: 'v_w_abjp', ddl: "SELECT a FROM t WHERE c = 'abjp'" },
       { view_name: 'v_w_abus', ddl: "SELECT a FROM t WHERE c = 'zz'" },
-    ], { suffixParts: [['ab'], ['jp', 'us']] }).bases[0], {})
+    ], { suffixParts: [['ab'], ['jp', 'us']], substitutable: ['entity'] }).bases[0], {})
       .includes('\u27e8suffix\u27e9')],
 ];
 

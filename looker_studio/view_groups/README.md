@@ -29,11 +29,18 @@ suffix の文字列置換に依存しないので、**参照テーブル以外�
 
 α 等価は推移的（全単射の合成）なので、グループ判定は代表 1 本との比較で足りる。
 
-### 比較の前に suffix を伏せ字にする（suffixAware・既定 on）
+### 値の差を残したいときの仕組み（既定では出番がない）
+
+> **ここから `equivalentLiterals` までの 3 節は、`"substitutable": ["entity"]` の
+> ように値を置換対象から外した運用のためのもの。** 既定では値がパラメータ化されるので、
+> 伏せ字も同値リテラルも効かせる必要がない。「値の差もロジック差として見たい」
+> ときだけ読めばよい。
+
+#### 比較の前に suffix を伏せ字にする（suffixAware・既定 on）
 
 suffix はいろいろな場所に現れる。データセット名（`mart_abjp`）、テーブル名
-（`orders_abjp`）、リテラル（`'abjp' AS region`）。識別子の差は α 等価が吸収するが、
-**リテラルの差は既定でロジック差として残す**ので、suffix 入りのリテラルがあると
+（`orders_abjp`）、リテラル（`'abjp' AS region`）。実体名の差は α 等価が吸収するが、
+値を置換対象から外すと、suffix 入りのリテラルがあるだけで
 「本当は同じロジックなのに 9 本が 9 グループに割れる」ことになる。
 
 そこで比較の直前に、**その View 自身の suffix をトークン内で伏せ字**にする。
@@ -46,16 +53,15 @@ v_y_abjp:  WHERE status = 'A'                                 ┐ 違う
 v_y_cdjp:  WHERE status = 'B'                                 ┘
 ```
 
-`substitutable` に `string` を足すのとは違う。あちらは**すべての**リテラル差を
-同一視してしまうので、`'A'` と `'B'` のロジック差まで消える。伏せ字は suffix に
-一致する部分だけを対象にするので、そこが残る。
+値をまるごと置換対象にする（既定）のとは違う。あちらは `'A'` と `'B'` の差も
+パラメータにするが、伏せ字は suffix に一致する部分だけを対象にするので、そこが残る。
 
 伏せ字は比較用のトークン列にだけ効く。パラメータ化と表示は元のテキストを使うので、
 `{{P1}}` の値には `orders_abjp` / `orders_abus` がそのまま並ぶ。
 
 `suffixAware: false` で無効化できる。
 
-#### リテラルは値がまるごと一致したときだけ照合する
+##### リテラルは値がまるごと一致したときだけ照合する
 
 リテラルには `'abjp'` そのものではなく、**suffix と連動した別表記**が入ることが多い。
 
@@ -86,7 +92,7 @@ WHERE country = 'US'   -- v_x_abus
 
 `literalSuffixWords: false` で無効化できる。
 
-#### 同値とみなす文字列は 1 本の一覧で持つ（equivalentLiterals）
+##### 同値とみなす文字列は 1 本の一覧で持つ（equivalentLiterals）
 
 `'aa'` ↔ `'bb'` や `'apac'` ↔ `'amer'` のように、**suffix とは別の語彙で連動して
 いる**値は機械的には導けない。数が多くないのなら、並べて持つのが確実で
@@ -122,9 +128,8 @@ WHERE country = 'US'   -- v_x_abus
 旧い書き方（`literalSuffixWords` と `literalGroups` を別々に持つ）もそのまま
 動く。`equivalentLiterals` を書いたときだけ、そちらが一覧の唯一の定義になる。
 
-並べていない値は従来どおりロジック差として残る。
-**すべての**リテラル差を無視したいなら `substitutable` に `string` / `number` を
-足すが、そちらは `'A'` と `'B'` の差も消える。
+並べていない値はロジック差として残る。すべての値の差を吸収したいなら
+`substitutable` を既定（`["entity","number","string"]`）に戻す。
 
 何を伏せ字にしたかは「なぜ別グループになったか」に
 `⟨suffix⟩` / `⟨同値リテラル 1 組目⟩` として出るので、効きすぎていないか確かめられる。
@@ -149,16 +154,49 @@ WHERE country = 'US'   -- v_x_abus
 正規表現ではなくトークン列で処理しているので、`OPTIONS` の値に括弧や引用符が
 入っていても対応する `)` を正しく見つける。`stripOptions: false` で無効化できる。
 
-### 効きすぎないようにしていること
+### 置換してよいのは「実体名」と「値」だけ
 
-この判定は強力なので、放っておくと本物のロジック差まで同一視しかねない。
+横展開は**ロジックが同じならコピーで行う**運用が前提。だから、SQL の中で閉じた
+名前（列名・別名・CTE 名・ウィンドウ名・関数名）が違えば、それは環境差ではなく
+**書き換えの差**になる。逆に、`FROM` / `JOIN` が指す実体名と値は環境ごとに変わって
+当然なので、パラメータに置き換えて同じグループにする。
 
-- **置換可能なのは識別子とバッククォート識別子だけ**。予約語や記号の差はロジック差
-- **リテラル差は既定でロジック差として残す**。`WHERE x = 1` と `WHERE x = 2` は別グループ。
-  例外は suffix と連動する値（下記）。同一視したい場合だけ `substitutable` に
-  `number` / `string` を足す
-- **何をパラメータとみなしたかを必ず `params` で返す**。判定が正しいかを人が確認できる。
-  ここを隠すと危ないので、画面にも出す前提
+| 種別 | 例 | 扱い |
+|---|---|---|
+| `entity`（`FROM` / `JOIN` の参照先） | `` `p.d.orders_abjp` `` | **置換可** |
+| `string` / `number`（値） | `'JP'` / `1` | **置換可** |
+| 列名・別名・CTE 名・ウィンドウ名・関数名 | `amount` / `o` / `daily` | 完全一致 |
+| 予約語・記号 | `SUM` / `LEFT` / `,` | 完全一致 |
+
+```
+SELECT o.amount AS total FROM `p.d.orders_abjp` AS o JOIN d.items_abjp AS i ON o.k = i.k
+       └───┬──┘    └─┬─┘      └────────┬───────┘    └┬┘      └────┬────┘    └┬┘
+        完全一致    完全一致        置換可          完全一致    置換可      完全一致
+```
+
+**表記は正規化しない。** バッククォートの有無やパスの部分数が違えばトークン数が
+変わり、そのまま別グループになる。「意味が同じでも書き方が違えば別グループ」という
+方針どおりで、コピー運用なら書き方も揃うため実害はない。
+
+| 差 | 結果 |
+|---|---|
+| `` FROM `p.d.t_abjp` `` vs `` `p.d.t_abus` `` | 同一（パラメータ化） |
+| `FROM p.d.t_abjp` vs `p.d.t_abus` | 同一（パラメータ化） |
+| `` FROM `p.d.t_abjp` `` vs `` `d.t_abus` `` | 同一（クォート内の構造は問わない） |
+| `` FROM `p.d.t_abjp` `` vs `FROM p.d.t_abus` | **別グループ**（トークン数が違う） |
+| `FROM p.d.t_abjp` vs `FROM d.t_abus` | **別グループ**（トークン数が違う） |
+
+実体名の判定は**位置だけ**で行う（パーサーは要らない）。`FROM` / `JOIN` の直後に
+来る名前が実体名で、`FROM (SELECT …)` / `FROM UNNEST(x)` / `EXTRACT(HOUR FROM ts)`
+の `FROM` は対象外。
+
+**値の差もロジック差として残したい**なら `"substitutable": ["entity"]` を指定する。
+そのとき効くのが下記の伏せ字と `equivalentLiterals`。既定では値が置換対象なので
+出番がない。
+
+**何をパラメータとみなしたかは必ず `params` で返す。** 判定が正しいかを人が確認
+できるようにするため。パラメータ一覧には種別（実体名 / 値）も出るので、
+「実体名の差は流し見、値の差は業務上の意味があるので確認する」と読み分けられる。
 
 ## 設定は build_table.sql の DECLARE だけ
 
@@ -255,7 +293,7 @@ BigQuery に実データを作って試せる。
 
 ```bash
 node build_sample_sql.mjs   # sample_data.sql / sample_teardown.sql を生成
-node test.mjs               # アナライザの検証（80 アサーション）
+node test.mjs               # アナライザの検証（105 アサーション）
 ```
 
 | ファイル | 内容 |
@@ -351,7 +389,7 @@ node preview.mjs --check  # 生成せず検証だけ
 
 ```bash
 node build_udf.mjs          # 検証して view_group_html.sql を生成
-node build_udf.mjs --check  # 生成せず検証だけ（31 アサーション）
+node build_udf.mjs --check  # 生成せず検証だけ（35 アサーション）
 node check_sql.mjs          # build_table.sql と view_group_html.sql の突き合わせ
 ```
 
@@ -370,9 +408,9 @@ node check_sql.mjs          # build_table.sql と view_group_html.sql の突き�
 `render_groups` だけ）ので、2 つの UDF に分けて枠を 2 つ使う。
 
 ```
-viewlgc_analyze     素 19.2 KB → 最小化  9.2 KB（上限比 31%）
-viewlgc_render      素 31.7 KB → 最小化 21.5 KB（上限比 72%）
-viewlgc_group_css   素 33.0 KB → 最小化 22.2 KB（上限比 74%）
+viewlgc_analyze     素 21.6 KB → 最小化 10.1 KB（上限比 34%）
+viewlgc_render      素 31.9 KB → 最小化 21.6 KB（上限比 72%）
+viewlgc_group_css   素 33.2 KB → 最小化 22.3 KB（上限比 74%）
 ```
 
 **JS UDF の中から別の UDF は呼べない。** JS は V8 のサンドボックスで動き、
@@ -453,7 +491,7 @@ DECLARE snapshot_time_zone STRING DEFAULT 'Asia/Tokyo';
 DECLARE partition_expiration_days INT64 DEFAULT 400;
 DECLARE suffix_pattern  STRING        DEFAULT r'_([A-Za-z]{4})$';
 DECLARE suffix_list     ARRAY<STRING> DEFAULT [];
-DECLARE analyze_options STRING        DEFAULT '{"equivalentLiterals":["suffix"],"mode":"class"}';
+DECLARE analyze_options STRING        DEFAULT '{"mode":"class"}';
 
 -- [C] 導出・内部用。編集しない
 DECLARE job_region STRING DEFAULT @@location;
@@ -531,7 +569,7 @@ DECLARE target_project_id STRING DEFAULT NULL;
 | `analysis_exclude_object_patterns` | 落とす View 名。include のあとに効く |
 | `suffix_pattern` | データセット名から suffix を切り出す正規表現（1 つ目のキャプチャ） |
 | `suffix_list` | suffix 一覧。空なら `suffix_pattern` で自動抽出。データセット名から導けないときだけ並べる |
-| `analyze_options` | UDF に渡す解析オプション（JSON）。`equivalentLiterals` をここで足せば再生成が要らない |
+| `analyze_options` | UDF に渡す解析オプション（JSON）。`substitutable` などをここで足せば再生成が要らない |
 | `snapshot_time_zone` | `snapshot_date` の基準タイムゾーン |
 | `partition_expiration_days` | 履歴の保持日数 |
 

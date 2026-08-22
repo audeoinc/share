@@ -135,15 +135,20 @@ DECLARE suffix_pattern STRING DEFAULT r'_([A-Za-z]{4})$';
 DECLARE suffix_list ARRAY<STRING> DEFAULT [];
 -- UDF に渡す解析オプション（JSON）。1 つ以上のキーを持つオブジェクトにすること。
 -- 指定できるキーは view_group_html.sql の冒頭に一覧がある。
---   equivalentLiterals / suffixAware / includeUnmatched /
---   stripOptions / substitutable / layout / mode / 表示の調整
--- equivalentLiterals は「同じグループとみなす文字列の組」の一覧。
---   ["suffix", ["aa","bb"], ["cc","dd"]]
--- "suffix" は予約語で、その View 自身の suffix とその区分を表す。
--- 明示の組は View に関係なく効く。既定は ["suffix"]（従来と同じ挙動）。
+--   substitutable / equivalentLiterals / suffixAware / includeUnmatched /
+--   stripOptions / layout / mode / 表示の調整
+--
+-- 既定の分類方針: 置換してよいのは FROM / JOIN が指す実体名と値だけ。
+-- 列名・別名・CTE 名・ウィンドウ名・関数名が違えば別グループにする
+-- （横展開はロジックが同じならコピーで行う運用なので、そこが違えば
+-- 環境差ではなく書き換えの差）。バッククォートの有無やパスの部分数も
+-- 正規化しないので、意味が同じでも書き方が違えば別グループになる。
+--
+-- 値の差もロジック差として残したいなら "substitutable":["entity"] を指定する。
+-- そのとき効くのが equivalentLiterals（同じとみなす文字列の組の一覧）。
 -- suffixList は下の suffixes から自動で入るので、ここには書かない。
 -- 綴りを間違えたキーは UDF 側で黙って無視される。
-DECLARE analyze_options STRING DEFAULT '{"equivalentLiterals":["suffix"],"mode":"class"}';
+DECLARE analyze_options STRING DEFAULT '{"mode":"class"}';
 
 -- [C] 導出・内部用。編集しない ----------------------------------------
 -- リージョンは @@location が唯一の置き場所。

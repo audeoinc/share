@@ -434,10 +434,31 @@ const checks = [
       { view_name: 'v_c_abjp', ddl: "SELECT a FROM t_abjp WHERE c = 'JP'" },
       { view_name: 'v_c_abus', ddl: "SELECT a FROM t_abus WHERE c = 'US'" },
     ], OPTS).group_count === 1],
-  ['連動しないリテラル差は残す',
+  ['値の差は既定でパラメータ化して同じグループにする',
     VIEW_GROUP_INFO([
       { view_name: 'v_c_abjp', ddl: "SELECT a FROM t_abjp WHERE s = 'A'" },
       { view_name: 'v_c_abus', ddl: "SELECT a FROM t_abus WHERE s = 'B'" },
+    ], OPTS).group_count === 1],
+  ['substitutable を絞れば値の差を残せる',
+    VIEW_GROUP_INFO([
+      { view_name: 'v_c_abjp', ddl: "SELECT a FROM t_abjp WHERE s = 'A'" },
+      { view_name: 'v_c_abus', ddl: "SELECT a FROM t_abus WHERE s = 'B'" },
+    ], JSON.stringify({ suffixParts: S.SUFFIX_PARTS, substitutable: ['entity'] }))
+      .group_count === 2],
+  ['列名が違えば別グループ',
+    VIEW_GROUP_INFO([
+      { view_name: 'v_c_abjp', ddl: 'SELECT amount FROM t_abjp' },
+      { view_name: 'v_c_abus', ddl: 'SELECT revenue FROM t_abus' },
+    ], OPTS).group_count === 2],
+  ['CTE 名が違えば別グループ',
+    VIEW_GROUP_INFO([
+      { view_name: 'v_c_abjp', ddl: 'WITH d AS (SELECT a FROM t_abjp) SELECT * FROM d' },
+      { view_name: 'v_c_abus', ddl: 'WITH e AS (SELECT a FROM t_abus) SELECT * FROM e' },
+    ], OPTS).group_count === 2],
+  ['バッククォートの有無が違えば別グループ',
+    VIEW_GROUP_INFO([
+      { view_name: 'v_c_abjp', ddl: 'SELECT a FROM `p.d.t_abjp`' },
+      { view_name: 'v_c_abus', ddl: 'SELECT a FROM p.d.t_abus' },
     ], OPTS).group_count === 2],
   ['literalGroups で手動の同値リテラルを吸収する',
     VIEW_GROUP_INFO([
@@ -445,11 +466,11 @@ const checks = [
       { view_name: 'v_g_abus', ddl: "SELECT a FROM t_abus WHERE z = 'amer'" },
     ], JSON.stringify({ suffixParts: S.SUFFIX_PARTS,
       literalGroups: [['apac', 'amer', 'emea']] })).group_count === 1],
-  ['literalGroups にない値は残す',
+  ['literalGroups にない値は残す（substitutable を絞ったとき）',
     VIEW_GROUP_INFO([
       { view_name: 'v_g_abjp', ddl: "SELECT a FROM t_abjp WHERE z = 'apac'" },
       { view_name: 'v_g_abus', ddl: "SELECT a FROM t_abus WHERE z = 'zzz'" },
-    ], JSON.stringify({ suffixParts: S.SUFFIX_PARTS,
+    ], JSON.stringify({ suffixParts: S.SUFFIX_PARTS, substitutable: ['entity'],
       literalGroups: [['apac', 'amer', 'emea']] })).group_count === 2],
   ['壊れた options_json でも落ちない',
     typeof VIEW_GROUP_INFO(views, '{ broken').html === 'string'],
@@ -658,9 +679,15 @@ ASSERT REGEXP_CONTAINS(udf_sql_function_name, r'^[A-Za-z0-9_]+$') AS
 --   suffixParts   [["ab","cd","ef"],["jp","us","uk"]] のような区分の並び
 --   suffixList    既知の suffix 一覧
 --   suffixPattern 正規表現（既定は末尾の _ + 1〜6 文字）
---   substitutable 同一ロジックとみなす際に置換を許すトークン種別
---                 既定 ["ident","quoted"]。リテラル差も無視するなら
---                 ["ident","quoted","number","string"]
+--   substitutable 同一ロジックとみなす際に置換を許すトークン種別。
+--                 既定 ["entity","number","string"]。置換してよいのは
+--                 FROM / JOIN が指す実体名（entity）と値（number / string）
+--                 だけ、という方針。列名・別名・CTE 名・ウィンドウ名・
+--                 関数名は SQL の中で閉じた名前なので完全一致を要求する
+--                 （横展開はコピーで行う運用なので、違えば書き換えの差）。
+--                 値の差もロジック差として残したいなら ["entity"] にする。
+--                 バッククォートの有無やパスの部分数は正規化しないので、
+--                 意味が同じでも書き方が違えば別グループになる
 --   suffixAware   比較の前に自分の suffix を伏せ字にする（既定 true）。
 --                 リテラルに入った suffix でグループが割れるのを防ぐ
 --   equivalentLiterals 同じグループとみなす文字列の組を 1 本の配列で並べる。

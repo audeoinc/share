@@ -93,14 +93,18 @@ function viewDef(entry, project) {
   };
 }
 
-/** INFORMATION_SCHEMA から取れるのと同じ形（view_name, ddl）でサンプルを返す。 */
+/**
+ * INFORMATION_SCHEMA.VIEWS から取れるのと同じ形（view_name, ddl）で返す。
+ *
+ * ddl は **クエリ本体だけ**。VIEWS.view_definition は CREATE VIEW のヘッダも
+ * OPTIONS も返さないので、ヘッダを付けると本番と違う入力で検証することになる。
+ * 実際、View 自身の名前は FROM / JOIN の実体名ではないため、ヘッダを付けると
+ * その 1 トークンだけで全 View が別グループに割れる。
+ */
 function sampleRows(project) {
   return allSuffixes().map((e) => {
     const v = viewDef(e, project);
-    return {
-      view_name: v.viewName,
-      ddl: `CREATE VIEW ${v.fullName} AS\n${v.query};`,
-    };
+    return { view_name: v.viewName, ddl: v.query };
   });
 }
 
