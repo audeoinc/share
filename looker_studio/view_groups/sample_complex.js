@@ -11,7 +11,11 @@
  * 入っているもの:
  *   多段 CTE / CTE の相互参照 / UNNEST を伴うカンマ結合 / 名前付きウィンドウ /
  *   QUALIFY / LEFT JOIN … USING / スカラー サブクエリ / EXISTS 相関サブクエリ /
- *   CASE 式 / STRUCT / UNION ALL / バッククォートあり・なしの参照 / ORDER BY
+ *   CASE 式 / IF / IN リスト / STRUCT / UNION ALL /
+ *   バッククォートあり・なしの参照 / ORDER BY
+ *
+ * 横展開で実際にいちばん多いのは WHERE / IF / CASE の条件をリテラルで
+ * 指定している箇所なので、そこを厚くしてある。
  */
 
 const TEMPLATE = `
@@ -27,10 +31,12 @@ base_orders AS (
       WHEN o.amount >= 10000 THEN 'LARGE'
       WHEN o.amount >= 1000  THEN 'MEDIUM'
       ELSE 'SMALL'
-    END AS size_band
+    END AS size_band,
+    IF(o.amount >= 5000, 'PRIORITY', 'NORMAL') AS handling
   FROM \`PRJ.mart_@S@.orders_@S@\` AS o
   WHERE o.order_date >= DATE '2025-01-01'
     AND o.status = 'CONFIRMED'
+    AND o.channel IN ('WEB', 'STORE')
     AND EXISTS (
       SELECT 1
       FROM \`PRJ.mart_@S@.customers_@S@\` AS c

@@ -440,6 +440,83 @@ checks.push(['語の一部が一致しても別ロジックのままにする',
     ], { suffixParts: [['ab'], ['jp', 'us']] }).bases[0].groupCount === 2]);
 }
 
+// --- WHERE / CASE / IF のリテラル条件 -----------------------------------
+// 横展開で実際にいちばん多いのがここ。国ごとにしきい値・区分値・対象コードが
+// 変わる。値の差はパラメータ化して同じグループにし、条件の構造が変われば割る。
+{
+  const P = { suffixParts: [['ab'], ['jp', 'us']] };
+  const pair = (a, b) => A.analyze(
+    [{ view_name: 'v_w_abjp', ddl: a }, { view_name: 'v_w_abus', ddl: b }], P
+  ).bases[0];
+  const where = (a, b) => pair(
+    'SELECT a FROM t_abjp WHERE ' + a, 'SELECT a FROM t_abus WHERE ' + b);
+  const expr = (a, b) => pair(
+    'SELECT ' + a + ' AS x FROM t_abjp', 'SELECT ' + b + ' AS x FROM t_abus');
+  const same = (label, b, valueShown) => {
+    const shown = JSON.stringify(b.groups[0].params.filter((p) => p.kind !== 'entity'));
+    checks.push([label, b.groupCount === 1 && (!valueShown || shown.includes(valueShown))]);
+  };
+  const cut = (label, b, reason) => {
+    const g = b.groups.find((x) => x.miss);
+    checks.push([label, b.groupCount === 2 && (!reason || (g && g.miss.detail.reason === reason))]);
+  };
+
+  // 値だけが違う → パラメータ化して同じグループ
+  same('WHERE: 文字列の等値はパラメータ化', where("s = 'A'", "s = 'B'"), "'B'");
+  same('WHERE: 数値の等値はパラメータ化', where('n = 1', 'n = 2'), '2');
+  same('WHERE: 日付リテラルはパラメータ化',
+    where("d >= DATE '2025-01-01'", "d >= DATE '2025-04-01'"), '2025-04-01');
+  same('WHERE: LIKE のパターンはパラメータ化',
+    where("s LIKE 'AB%'", "s LIKE 'CD%'"), "'CD%'");
+  same('WHERE: BETWEEN の上下限はパラメータ化',
+    where('n BETWEEN 1 AND 10', 'n BETWEEN 5 AND 20'), '20');
+  same('WHERE: IN の中身はパラメータ化',
+    where("s IN ('A','B')", "s IN ('C','D')"), "'D'");
+  same('CASE: THEN の値と閾値はパラメータ化',
+    expr("CASE WHEN n >= 100 THEN 'BIG' ELSE 'SMALL' END",
+         "CASE WHEN n >= 200 THEN 'LARGE' ELSE 'MINI' END"), "'LARGE'");
+  same('CASE: 値指定の CASE もパラメータ化',
+    expr("CASE region WHEN 'JP' THEN 1 ELSE 0 END",
+         "CASE region WHEN 'US' THEN 1 ELSE 0 END"), "'US'");
+  same('IF: 条件の値と戻り値はパラメータ化',
+    expr("IF(n >= 100, 'A', 'B')", "IF(n >= 200, 'C', 'D')"), "'C'");
+
+  // 条件の構造が変わる → 別グループ
+  cut('WHERE: IN の要素数が違えば割れる',
+    where("s IN ('A','B')", "s IN ('A','B','C')"), 'length');
+  cut('WHERE: 真偽値の違いは割れる（予約語）',
+    where('f = TRUE', 'f = FALSE'), 'not-substitutable');
+  cut('WHERE: IS NULL と IS NOT NULL は割れる',
+    where('x IS NULL', 'x IS NOT NULL'), 'length');
+  cut('WHERE: 比較演算子が違えば割れる',
+    where('n >= 100', 'n > 100'), 'length');
+  cut('WHERE: 条件の順序が違えば割れる',
+    where("a = 'X' AND b = 'Y'", "b = 'Y' AND a = 'X'"), 'not-substitutable');
+  cut('CASE: WHEN の数が違えば割れる',
+    expr("CASE WHEN n >= 100 THEN 'A' ELSE 'B' END",
+         "CASE WHEN n >= 100 THEN 'A' WHEN n >= 50 THEN 'C' ELSE 'B' END"), 'length');
+  cut('CASE: ELSE の有無が違えば割れる',
+    expr("CASE WHEN n >= 100 THEN 'A' ELSE 'B' END",
+         "CASE WHEN n >= 100 THEN 'A' END"), 'length');
+  cut('IF: 条件に使う列が違えば割れる',
+    expr("IF(n >= 100, 'A', 'B')", "IF(m >= 100, 'A', 'B')"), 'not-substitutable');
+  cut('IF と CASE の書き換えは割れる',
+    expr("IF(n >= 100, 'A', 'B')", "CASE WHEN n >= 100 THEN 'A' ELSE 'B' END"), 'length');
+  cut('COALESCE の引数が増えれば割れる',
+    expr('COALESCE(a, b)', 'COALESCE(a, b, c)'), 'length');
+
+  // 対応が 1 対 1 にならない置き換えは割る（値だからと何でも同一視はしない）
+  cut('同じ値が別々の値に対応していれば割れる',
+    where("a = 'X' AND b = 'X'", "a = 'Y' AND b = 'Z'"), 'inconsistent');
+  cut('別々の値が同じ値に対応していれば割れる',
+    where("a = 'X' AND b = 'Y'", "a = 'Z' AND b = 'Z'"), 'not-injective');
+
+  // 符号や表記のゆれ。数値リテラルは値なので、符号の有無はトークン数の差になる。
+  cut('負号の有無はトークン数の差として割れる',
+    expr('IFNULL(n, 0)', 'IFNULL(n, -1)'), 'length');
+  same('負号どうしならパラメータ化', expr('IFNULL(n, -1)', 'IFNULL(n, -2)'), '2');
+}
+
 // --- 複雑な SQL での検証 ------------------------------------------------
 // 単純な SELECT だけだと実体名の検出が素通りしてしまうので、多段 CTE /
 // 名前付きウィンドウ / QUALIFY / UNION / UNNEST / 相関サブクエリを入れた
@@ -498,6 +575,16 @@ checks.push(['語の一部が一致しても別ロジックのままにする',
     (q) => q.replace('>= 10000', '>= 20000'), '20000');
   merged('参照先の差は実体名としてパラメータ化する',
     (q) => q.replace('returns_abus', 'refunds_abus'), 'refunds_abus');
+  merged('IF の条件値の差もパラメータ化する',
+    (q) => q.replace('>= 5000', '>= 8000'), '8000');
+  merged('IN リストの中身の差もパラメータ化する',
+    (q) => q.replace("'WEB', 'STORE'", "'ONLINE', 'SHOP'"), "'ONLINE'");
+  split('IN リストの要素が増えると割れる',
+    (q) => q.replace("'WEB', 'STORE'", "'WEB', 'STORE', 'PHONE'"), 'length');
+  split('CASE の WHEN が増えると割れる',
+    (q) => q.replace("WHEN o.amount >= 1000  THEN 'MEDIUM'",
+      "WHEN o.amount >= 5000 THEN 'UPPER'\n      WHEN o.amount >= 1000  THEN 'MEDIUM'"),
+    'length');
 
   // 実体名の検出。取りこぼすと誤って割れ、拾いすぎると差を見逃す。
   const ents = A.markEntities(A.tokenizeSql(C.complexSql('abjp')))
