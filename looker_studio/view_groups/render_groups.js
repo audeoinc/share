@@ -8,7 +8,7 @@
  *   末尾         : 何をパラメータ化したかの一覧（判定の当否を人が確認するため）
  *
  * レイアウト:
- *   1 グループ  … 差分なしの案内
+ *   1 グループ  … 案内 ＋ SQL 1 ペイン（比較する相手がいないため）
  *   2 グループ  … 2 ペイン（比較が 1 通りしかないので、タブ 1 枚は無駄）
  *   3 グループ〜… 最大グループを基準に、比較相手をタブで切り替える
  *                 （横に並べると 1 ペインが狭くなって読めないため）
@@ -22,7 +22,7 @@
  */
 
 const { splitLines, build2Way } = require('../ddl_diff_viz/src/lib/diff');
-const { renderFragment2 } = require('../ddl_diff_viz/src/lib/render');
+const { renderFragment1, renderFragment2 } = require('../ddl_diff_viz/src/lib/render');
 
 const MAX_TABS = 12; // 静的 CSS が面倒を見るタブ数の上限
 
@@ -219,13 +219,13 @@ function renderBase(b, opts) {
   if (n === 0) {
     body = notice('View が見つかりません。');
   } else if (n === 1) {
+    // 比較する相手がいない。同じ SQL を左右に並べても読む人が得るものが無いので、
+    // 1 ペインだけ出す。
     body = notice(b.unmatched
       ? 'suffix を認識できなかった View です。比較相手がないので単独で表示しています。'
-      : `${b.viewCount} View すべてが同一ロジックです。`) +
-      `<div class="vg-single">${relabelPanes(renderFragment2(
-        label(groups[0]), label(groups[0]),
-        build2Way(splitLines(groups[0].sql), splitLines(groups[0].sql)), o),
-        [paneSub(groups[0]), paneSub(groups[0])])}</div>`;
+      : `${b.viewCount} View すべてが同一ロジックです。比較の必要がないので SQL だけ出しています。`) +
+      `<div class="vg-single">${renderFragment1(
+        label(groups[0]), paneSub(groups[0]), splitLines(groups[0].sql), o)}</div>`;
   } else if (n === 2) {
     // 比較が 1 通りしかないので、タブ 1 枚を出しても意味がない
     body = pair(groups[0], groups[1], o);

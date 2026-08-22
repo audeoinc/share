@@ -281,9 +281,13 @@ ORDER BY table_name;
 
 | グループ数 | レイアウト |
 |---|---|
-| 1 | 差分なしの案内（suffix 未認識の View もここ。単独で 1 View） |
+| 1 | 案内 ＋ **SQL 1 ペイン**（suffix 未認識の View もここ。単独で 1 View） |
 | 2 | 2 ペイン（比較が 1 通りしかないので、タブ 1 枚は無駄） |
 | 3 以上 | 最大グループを基準に、比較相手を**タブ**で切り替える |
+
+**全 View が同一ロジックなら比較しない。** 同じ SQL を左右に並べても読む人が得る
+ものが無いので、`renderFragment1` で 1 ペインだけ出す。差分の色分け（`+` / `−`
+マーカー・行背景・ハッチ）は出番が無いので付かず、行番号と SQL だけになる。
 
 **3 ペイン横並びは廃止。** 使わない方針にしたので、`build_udf.mjs` の `UNUSED` で
 3-way 系の関数（`renderFragment3` / `build3Way` / `mapToBase` / `baseCell` /
@@ -302,7 +306,7 @@ ORDER BY table_name;
 強力なので、当否を人が確認できるようにしておく。
 
 ```bash
-node preview.mjs          # dist/preview.html を生成して検証（28 アサーション）
+node preview.mjs          # dist/preview.html を生成して検証（32 アサーション）
 node preview.mjs --check  # 生成せず検証だけ
 ```
 
@@ -326,11 +330,11 @@ HTML とメタデータを 1 回の呼び出しで返すのは、事前生成テ
 素の連結は約 45 KB あって確実に弾かれるので、esbuild で最小化してから埋め込む。
 
 ```
-VIEW_GROUP_INFO  素 46.7 KB → 最小化 28.3 KB（上限比 94%）
-VIEW_GROUP_CSS   素 46.4 KB → 最小化 28.0 KB（上限比 93%）
+VIEW_GROUP_INFO  素 47.5 KB → 最小化 28.6 KB（上限比 95%）
+VIEW_GROUP_CSS   素 47.3 KB → 最小化 28.3 KB（上限比 94%）
 ```
 
-3-way 系と `alphaMap` を外しているが、**残りは 32 KB に対して 3.7 KB ほど**。
+3-way 系と `alphaMap` を外しているが、**残りは 32 KB に対して 3.4 KB ほど**。
 これ以上大きく機能を足すなら `OPTIONS(library=["gs://…"])` への移行を検討する。それでも枠は広くないので、
 大きく機能を足すときは `OPTIONS(library=["gs://…"])` への移行を検討する。
 

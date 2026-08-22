@@ -208,6 +208,23 @@ function wrapTable(colgroup, theadHtml, bodyHtml) {
   );
 }
 
+/**
+ * 1-way フラグメント（1 ペインだけ）。比較する相手がいないとき用。
+ * 同じ SQL を左右に並べても読む人が得るものが無いので、そのまま 1 枚で出す。
+ * 差分の色分け（+/− マーカー・行背景）は出番が無いので付けない。
+ */
+function renderFragment1(label, sub, lines, opts) {
+  configure(opts);
+  const colgroup = '<colgroup><col style="width:40px"><col></colgroup>';
+  const thead = th(2, label, sub, PANES.after, false);
+  let body = '';
+  for (let i = 0; i < lines.length; i++) {
+    body += `      <tr>${numTd(i + 1, PANES.after, false)}` +
+      `${codeTd('same', sqlHighlight(lines[i]), PANES.after)}</tr>\n`;
+  }
+  return wrapTable(colgroup, thead, body);
+}
+
 /** 2-way フラグメント（左=base / 右=after）。各ペイン等幅（table-layout:fixed） */
 function renderFragment2(leftLabel, rightLabel, rows, opts) {
   configure(opts);
@@ -266,4 +283,4 @@ function renderFragment3(labels, rows, opts) {
   return wrapTable(colgroup, thead, body);
 }
 
-module.exports = { renderFragment2, renderFragment3, configure, esc, sqlHighlight, DEFAULTS };
+module.exports = { renderFragment1, renderFragment2, renderFragment3, configure, esc, sqlHighlight, DEFAULTS };

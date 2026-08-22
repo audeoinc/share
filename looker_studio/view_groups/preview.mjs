@@ -81,6 +81,11 @@ const checks = [
   ['4 グループ以上もタブ', hMany.includes('vg-tablist') && baseMany.groupCount > 3],
   ['タブに基準グループの表示がある', hMany.includes('基準:')],
   ['1 グループは差分なしの案内', h1.includes('すべてが同一ロジック')],
+  // 比較相手がいないので、同じ SQL を左右に並べない
+  ['1 グループはペインが 1 枚', (h1.match(/<th colspan=/g) || []).length === 1],
+  ['3 グループはペインが 2 枚', (h3.match(/<th colspan=/g) || []).length === 2 * 2],
+  ['1 グループでも SQL は出る', h1.replace(/<[^>]*>/g, '').includes('SELECT')],
+  ['1 グループに差分マーカーが出ない', !/[+−]<\/td>/.test(h1)],
   ['パラメータ一覧が出る', h3.includes('パラメータ化した箇所')],
   ['パラメータ値に suffix が並ぶ', h3.includes('vg-psuf')],
   ['radio の id が一意',
