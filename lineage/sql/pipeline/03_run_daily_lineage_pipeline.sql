@@ -83,6 +83,9 @@ DECLARE analysis_exclude_dataset_patterns ARRAY<STRING> DEFAULT [];
 -- Analysis object filter (which object names to collect & analyze)
 DECLARE analysis_include_object_patterns ARRAY<STRING> DEFAULT [];
 DECLARE analysis_exclude_object_patterns ARRAY<STRING> DEFAULT [];
+-- Analysis definition-source filter (which kinds of definition to collect & analyze).
+-- Empty = every kind (current behavior). E.g. ['DAG'] analyzes only DAG job SQL.
+DECLARE analysis_include_generation_types ARRAY<STRING> DEFAULT [];
 -- STEP 2 service accounts (generated tables)
 DECLARE scheduled_query_service_accounts ARRAY<STRING> DEFAULT [
   'project_id@appspot.gserviceaccount.com'
@@ -168,6 +171,27 @@ DECLARE dag_service_accounts ARRAY<STRING> DEFAULT [
 --     write patterns as raw strings in any case.
 --       include e.g. only sales views: [r'^v_sales']
 --       exclude e.g. staging/temp:     [r'^stg_', r'_tmp$']
+--   analysis_include_generation_types
+--     Definition-source whitelist, applied at collection like the two filters above,
+--     so the registry again holds exactly the analysis targets. Allowed values (the
+--     generation_type stored in the definition registry; case-insensitive here):
+--       'VIEW_DEFINITION'  Views collected from INFORMATION_SCHEMA.VIEWS (STEP 1)
+--       'SCHEDULED_QUERY'  generated tables from Scheduled Query jobs   (STEP 2)
+--       'DAG'              generated tables from DAG / Airflow jobs     (STEP 2)
+--     An empty array (the default) keeps every kind and is exactly the previous
+--     behavior. Any other value fails an ASSERT in [C], so a typo cannot silently
+--     analyze nothing. Examples:
+--       only DAG job SQL:            ['DAG']
+--       generated tables, no Views:  ['DAG', 'SCHEDULED_QUERY']
+--     A kind left out is not collected, hence not change-tracked, and objects already
+--     in the registry take exactly the same path as one newly excluded by the
+--     name/dataset filters: Views are deactivated by STEP 1's "not found" rule on the
+--     next run, while generated TABLEs stop being change-tracked and are aged out by
+--     the existing cleanup (a persistent one whose destination still exists stays
+--     registered but idle). Re-adding the kind re-collects and re-analyzes them.
+--     Note this only narrows WHAT is analyzed --
+--     STEP 1 still lists Views and STEP 2 still scans JOBS, so it is not a cost
+--     control (use process_generated_tables to skip the JOBS scan entirely).
 --   scheduled_query_service_accounts / dag_service_accounts
 --     STEP 2 service accounts (consumed only when process_generated_tables = TRUE).
 --     Previously read from the lineage_execution_account_config table; declared
@@ -255,6 +279,8 @@ DECLARE udf_project_id STRING DEFAULT NULL;
 -- scanning INFORMATION_SCHEMA.SCHEMATA (see the resolution block below).
 DECLARE target_datasets ARRAY<STRING>;
 DECLARE target_datasets_lower ARRAY<STRING>;
+-- analysis_include_generation_types, trimmed and uppercased (validated below).
+DECLARE analysis_generation_types ARRAY<STRING>;
 DECLARE view_defs_union_sql STRING;
 
 -- Repository physical table names: prefix + marker + canonical base + suffix,
@@ -432,6 +458,22 @@ AS 'Invalid target_project_id.';
 ASSERT REGEXP_CONTAINS(job_region, r'^[A-Za-z0-9-]+$')
 AS 'Invalid job_region.';
 
+-- Normalize the definition-source whitelist once (trimmed / uppercased) so the
+-- collection gates in STEP 1 and STEP 2 can compare against stored generation_type
+-- values directly, and reject anything outside the known set: an unrecognized value
+-- would otherwise match nothing and silently reduce the run to zero analysis targets.
+SET analysis_generation_types = ARRAY(
+  SELECT UPPER(TRIM(entry))
+  FROM UNNEST(analysis_include_generation_types) AS entry
+  WHERE TRIM(entry) != ''
+);
+ASSERT NOT EXISTS (
+  SELECT 1
+  FROM UNNEST(analysis_generation_types) AS entry
+  WHERE entry NOT IN ('VIEW_DEFINITION', 'SCHEDULED_QUERY', 'DAG')
+)
+AS 'analysis_include_generation_types accepts only VIEW_DEFINITION, SCHEDULED_QUERY and DAG.';
+
 -- Column usage index table qualified name (not a lnge_render_dynamic_sql placeholder).
 -- Built once and reused by STEP 3's publish. CREATE TABLE IF NOT EXISTS keeps a
 -- deployment whose 01 setup predates this table self-healing (no-op once 01 has
@@ -583,15 +625,23 @@ BEGIN
     view_defs_union_sql
   );
 
-  -- Keep only Views that pass the analysis object-name gate, so the registry holds
-  -- exactly the analysis targets (the dataset scope is already applied by the
-  -- target-dataset resolution above). A View is kept when it matches the include
-  -- gate (empty include = all) AND no exclude pattern; object_name is already
-  -- lowercased. A View filtered out here -- or newly excluded by a config change --
-  -- is deactivated by the STEP 1 "not found" rule below (it is no longer present in
-  -- current_view_definitions), so excluded objects are not change-tracked.
+  -- Keep only Views that pass the analysis object-name gate and the definition-source
+  -- gate, so the registry holds exactly the analysis targets (the dataset scope is
+  -- already applied by the target-dataset resolution above). A View is kept when it
+  -- matches the include gate (empty include = all) AND no exclude pattern, and when
+  -- VIEW_DEFINITION is in analysis_generation_types (empty = every kind); object_name
+  -- is already lowercased. A View filtered out here -- or newly excluded by a config
+  -- change -- is deactivated by the STEP 1 "not found" rule below (it is no longer
+  -- present in current_view_definitions), so excluded objects are not change-tracked.
+  -- Dropping every row when Views are not a selected kind is deliberate: it takes the
+  -- same path as excluding them all by name, which keeps the registry consistent with
+  -- the configuration instead of leaving stale active View rows behind.
   DELETE FROM current_view_definitions AS v
   WHERE (
+    ARRAY_LENGTH(analysis_generation_types) > 0
+    AND 'VIEW_DEFINITION' NOT IN UNNEST(analysis_generation_types)
+  )
+  OR (
     ARRAY_LENGTH(analysis_include_object_patterns) > 0
     AND NOT EXISTS (
       SELECT 1
@@ -1077,6 +1127,20 @@ BEGIN
       -- here: kept when it matches each include gate (empty include = all) AND no
       -- exclude pattern. A job filtered out never enters the job / definition
       -- registry, so excluded objects are not change-tracked.
+      -- The definition-source gate uses the same classification that becomes
+      -- generation_type below, so ['DAG'] collects DAG job SQL only and
+      -- ['SCHEDULED_QUERY'] only Scheduled Queries (empty = every kind). It is
+      -- spelled out rather than referencing the execution_source alias because a
+      -- SELECT alias is not visible to this WHERE clause.
+      AND (
+        ARRAY_LENGTH(analysis_generation_types) = 0
+        OR (
+          CASE
+            WHEN is_scheduled_query THEN 'SCHEDULED_QUERY'
+            WHEN is_dag THEN 'DAG'
+          END
+        ) IN UNNEST(analysis_generation_types)
+      )
       AND (
         ARRAY_LENGTH(analysis_include_object_patterns) = 0
         OR EXISTS (

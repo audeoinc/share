@@ -490,6 +490,29 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 - **未検証**：この一連の変更も **BigQuery 実機での検証は完了していない**（CHANGELOG の
   各エントリ末尾に "Not yet validated against BigQuery"）。
 
+## 4.23 定義ソース種別フィルタ `analysis_include_generation_types`（SQLのみ）
+
+- **背景**：解析スコープの軸は §0.5 の 2 系統（dataset / object 名）＋
+  `process_generated_tables`（生成テーブルを解析するかの ON/OFF）だけで、
+  **「DAG のジョブ SQL だけを解析する」指定ができなかった**。レジストリには
+  `generation_type`（`VIEW_DEFINITION` / `SCHEDULED_QUERY` / `DAG`。STEP 2 の
+  `execution_source` 由来）が入っているのに、それで絞る手段が無かった。
+- **追加**：`analysis_include_generation_types ARRAY<STRING> DEFAULT []`（[A]）。
+  空＝全種別（従来と完全に同じ挙動）。`['DAG']` で DAG のみ、
+  `['DAG','SCHEDULED_QUERY']` で View を外す。
+- **検証**：[C] で trim/大文字化して `analysis_generation_types` に正規化し、
+  既知の 3 値以外は ASSERT で即失敗させる（タイプミスで解析対象が黙って 0 件になるのを防ぐ）。
+- **適用位置は収集段**（他の 2 軸と同じ＝レジストリ＝解析対象を維持）：
+  - STEP 1：`VIEW_DEFINITION` が未選択なら `current_view_definitions` を全削除。
+    「全 View を名前で除外した」のと同じ経路になり、既存行は "not found" ルールで
+    deactivate される（active のまま取り残さない）。
+  - STEP 2：`classified_jobs` の WHERE に、`generation_type` になるのと同じ CASE で
+    ゲートを追加（`execution_source` は同一 SELECT の別名なので WHERE からは参照できず、
+    CASE を書き下している）。
+- **注意（コスト削減ではない）**：STEP 1 は VIEWS を、STEP 2 は JOBS を従来どおり走査する。
+  JOBS 走査自体を止めるのは `process_generated_tables`。
+- SQL のみ／エンジン不変。**BigQuery 未検証**。
+
 ## 4.22 本ドキュメントと実装の乖離（重要）
 
 `docs/SESSION_HANDOFF.md` の §1〜§4.20 は **1.5.0-032 の途中まで**しか追随していない。
@@ -513,6 +536,7 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 - 無型 STRUCT のフィールド別名 … `test_v1_5_0_072`
 - CTE の後ろの括弧付きメインQuery … `test_v1_5_0_073`（本セッション）
 - 括弧付き branch が自身のセット演算/CTE を含む形 … `test_v1_5_0_074`（本セッション）
+- 定義ソース種別フィルタ `analysis_include_generation_types`（§4.23・本セッション、SQLのみ）
 - SQL 追加：`sql/maintenance/08_view_last_access.sql`、
   `sql/maintenance/09_unanalyzed_object_definitions.sql`、
   `definition_registry` の `labels` 列（§4.12）

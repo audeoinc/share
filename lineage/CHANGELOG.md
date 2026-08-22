@@ -1,5 +1,29 @@
 # 1.5.0-032
 
+- Added `analysis_include_generation_types` to `03_run_daily_lineage_pipeline.sql`, a
+  definition-source whitelist so a run can analyze one kind of definition -- most
+  usefully `['DAG']` for DAG job SQL only. Until now the analysis scope had two axes
+  (`analysis_include/exclude_dataset_patterns`, `analysis_include/exclude_object_patterns`)
+  plus the `process_generated_tables` toggle, which can exclude generated tables but not
+  select among them; the registry already records `generation_type`
+  (`VIEW_DEFINITION` / `SCHEDULED_QUERY` / `DAG`, from STEP 2's `execution_source`
+  classification) but nothing filtered on it, so "DAG only" was reachable only by
+  pointing `scheduled_query_service_accounts` at a dummy account. The new
+  `ARRAY<STRING>` in [A] defaults to `[]`, which keeps every kind and is byte-for-byte
+  the previous behavior. [C] normalizes it once (trim / uppercase) into
+  `analysis_generation_types` and ASSERTs every entry is one of the three known values,
+  so a typo fails the run instead of silently reducing it to zero analysis targets.
+  Like the other two axes the gate is applied at collection, keeping "registry ==
+  analysis targets": STEP 1 drops all of `current_view_definitions` when
+  VIEW_DEFINITION is not selected (the same path as excluding every View by name, so
+  the "not found" rule deactivates stale rows rather than leaving them active), and
+  STEP 2 gates `classified_jobs` on the same CASE that becomes `generation_type`
+  (spelled out rather than referencing the `execution_source` alias, which is not
+  visible to its own WHERE). This narrows what is analyzed, not what is scanned:
+  STEP 1 still lists VIEWS and STEP 2 still scans JOBS -- `process_generated_tables`
+  remains the way to skip the JOBS scan. SQL-only; the engine bundle is unchanged.
+  Not yet validated against BigQuery.
+
 - Fixed a parenthesized set-operation branch that itself contains a set operation --
   `(SELECT id FROM aaa INTERSECT DISTINCT SELECT id FROM bbb) EXCEPT DISTINCT (SELECT id FROM ccc)`
   -- failing with "FromParser: JOIN was expected, but found \"INTERSECT\"" (engine).
