@@ -274,10 +274,12 @@ function chromeCss() {
     `.vg-tab{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border:1px solid transparent;` +
       `border-bottom:none;border-radius:6px 6px 0 0;color:#57606A;cursor:pointer;user-select:none;font-weight:600}`,
     `.vg-tab:hover{background:#EAEEF2;color:#24292F}`,
-    // 基準タブ。左ペインに出っぱなしなので選択状態で固定する（押しても切り替わらない）
-    `.vg-tbase{background:#fff;border-color:#D0D7DE;color:#24292F;cursor:default}`,
-    `.vg-tbase:hover{background:#fff}`,
-    `.vg-tbadge{padding:0 6px;border-radius:8px;background:#FFEFF7;color:#BF3989;font-size:11px;font-weight:600}`,
+    // 基準タブ。左ペインに出っぱなしなので選択状態で固定する（押しても切り替わらない）。
+    // 色は基準ペイン（render.js の paneColors.base = #E17B7B）の薄い色に合わせてある。
+    // 既定値を焼き込んでいるので、opts.colors.baseColor を変えたらここも直す。
+    `.vg-tbase{background:#fbeded;border-color:#efb6b6;color:#24292F;cursor:default}`,
+    `.vg-tbase:hover{background:#fbeded;color:#24292F}`,
+    `.vg-tbadge{padding:0 6px;border-radius:8px;background:#f6d7d7;color:#87494a;font-size:11px;font-weight:600}`,
     `.vg-tabn{padding:0 6px;border-radius:8px;background:#EAEEF2;color:#57606A;font-size:11px}`,
     `.vg-panels{border:1px solid #D0D7DE;border-radius:0 6px 6px 6px;padding:10px;background:#fff}`,
     `.vg-panel{display:none}`,
@@ -293,13 +295,13 @@ function chromeCss() {
     `.vg-pvals{padding:3px 0}`,
     `.vg-pv{font:11px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;color:#57606A;word-break:break-all}`,
     `.vg-psuf{display:inline-block;min-width:44px;color:#24292F;font-weight:600}`,
-    // 「なぜ別グループになったか」
-    `.vg-miss{background:#FFF8C5;border-color:#D4A72C}`,
-    `.vg-mhint{padding:0 12px 8px;color:#54470A;font-size:12px}`,
+    // 「なぜ別グループになったか」。パラメータ表と同じ枠・同じ地色で出す。
+    // 常時出るものを警告色にすると、見るべきときの手がかりにならない。
+    `.vg-mhint{padding:0 12px 8px;color:#57606A;font-size:12px}`,
     `.vg-mname{text-align:left;vertical-align:top;padding:3px 10px 3px 0;` +
       `font:600 12px/1.6 inherit;color:#24292F;white-space:nowrap}`,
     `.vg-mvs{vertical-align:top;padding:3px 10px 3px 0;color:#57606A;font-size:12px;white-space:nowrap}`,
-    `.vg-mreason{padding:3px 0;color:#54470A;font-size:12px}`,
+    `.vg-mreason{padding:3px 0;color:#57606A;font-size:12px}`,
     `.vg-mcode{padding:1px 5px;border-radius:3px;background:#FFEBE9;color:#82071E;` +
       `font:11px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace}`,
     `.vg-mkind{margin-left:6px;color:#8250DF;font-size:11px}`,
