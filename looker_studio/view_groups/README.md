@@ -377,7 +377,7 @@ DECLARE udf_prefix    STRING DEFAULT '';
 DECLARE udf_suffix    STRING DEFAULT '';
 
 -- base 名は作るオブジェクトごとに 1 つ
-DECLARE diff_table_base  STRING DEFAULT 't_view_logic_diff';  -- t_=transaction / m_=master
+DECLARE diff_table_base  STRING DEFAULT 't_view_logic_diff_hist';  -- t_=transaction / m_=master
 DECLARE latest_view_base STRING DEFAULT 't_view_logic_diff';
 DECLARE info_fn_base     STRING DEFAULT 'VIEW_GROUP_INFO';
 DECLARE css_fn_base      STRING DEFAULT 'VIEW_GROUP_CSS';
@@ -397,23 +397,27 @@ base 名は**作るオブジェクトごとに 1 つ**持たせてある。オ�
 `<名前>_base` の DECLARE を 1 行足し、組み立て先の `DECLARE <名前> STRING;` と
 `SET <名前> = CONCAT(…);`、本文で使う `@@…@@` を対で増やす。
 
-| 変数 | 作られるもの | 既定値 |
+| 変数 | 作られるもの | 既定でできる名前 |
 |---|---|---|
-| `diff_table_base` | スナップショットを積むテーブル | `t_view_logic_diff` |
+| `diff_table_base` | 日次スナップショットを積むテーブル | `t_view_logic_diff_hist` |
 | `latest_view_base` | 最新スナップショットだけのビュー | `vw_t_view_logic_diff` |
 | `info_fn_base` | 比較 HTML を返す UDF | `VIEW_GROUP_INFO` |
 | `css_fn_base` | テンプレート用 CSS を返す UDF | `VIEW_GROUP_CSS` |
 
 base 名の先頭の `t_` / `m_` は transaction / master の区分。既定は `t_`
-（日次のスナップショットを積むテーブルのため）。テーブルとビューは同じ base 名に
-してあるので、片方だけ変えたいときは片方の変数だけ書き換える。
+（日次のスナップショットを積むテーブルのため）。
+
+**テーブルだけ `_hist` が付く。** 実体が日次スナップショットの積み上げ
+（`PARTITION BY snapshot_date`・過去日を消さない・`partition_expiration_days` で
+落ちる）なのに対し、ビューは最新 1 日ぶんだけを返すため。base 名を
+オブジェクトごとに分けてあるので、こういう付け分けができる。
 
 > **`udf_prefix` / `udf_suffix` / 関数の基本名は `view_group_html.sql` と
 > `build_table.sql` の両方にある。必ず同じ値にすること。** 食い違うと、
 > 作った関数を `build_table.sql` が見つけられない。
 
 > ビューの名前から `_latest` が消えているが、中身は変わらず最新スナップショットだけを
-> 返す。テーブルと同じ base 名にして `vw_` で区別する命名規則に合わせたため。
+> 返す。履歴側に `_hist` を付けて区別する形にしたため。
 
 `build_table.sql` の設定は次のとおり。ここが唯一の置き場所で、書き換えたら
 そのまま実行する。生成の手順はない。
@@ -572,7 +576,7 @@ Looker の操作のたびに UDF を回すのは重いので、スケジュー�
 `INFORMATION_SCHEMA` の中身は View をデプロイしたときしか変わらない。
 
 ```
-t_view_logic_diff  PARTITION BY snapshot_date CLUSTER BY base
+t_view_logic_diff_hist  PARTITION BY snapshot_date CLUSTER BY base
   base / view_count / group_count / has_multiple
   group_labels / group_sizes / suffixes / unmatched_count / diff_html
 ```

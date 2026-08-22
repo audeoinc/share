@@ -53,10 +53,10 @@ DECLARE udf_suffix    STRING DEFAULT '';
 
 -- base 名は作るオブジェクトごとに持つ。オブジェクトが増えたらここに 1 行足し、
 -- 下の DECLARE と SET と、本文で使う @@…@@ を対で増やす。
-DECLARE diff_table_base  STRING DEFAULT 't_view_logic_diff';  -- スナップショットを積むテーブル
-DECLARE latest_view_base STRING DEFAULT 't_view_logic_diff';  -- 最新スナップショットだけのビュー
-DECLARE info_fn_base     STRING DEFAULT 'VIEW_GROUP_INFO';    -- 比較 HTML を返す UDF
-DECLARE css_fn_base      STRING DEFAULT 'VIEW_GROUP_CSS';     -- テンプレート用 CSS を返す UDF
+DECLARE diff_table_base  STRING DEFAULT 't_view_logic_diff_hist';  -- 日次スナップショットを積むテーブル
+DECLARE latest_view_base STRING DEFAULT 't_view_logic_diff';       -- 最新スナップショットだけのビュー
+DECLARE info_fn_base     STRING DEFAULT 'VIEW_GROUP_INFO';         -- 比較 HTML を返す UDF
+DECLARE css_fn_base      STRING DEFAULT 'VIEW_GROUP_CSS';          -- テンプレート用 CSS を返す UDF
 
 -- 組み立てた名前（下の SET で決まる）。データセット名は含まない。
 -- UDF の 4 変数は view_group_html.sql と同じ値にすること。食い違うと見つからない。
@@ -106,8 +106,8 @@ IF diff_table_base = '' OR latest_view_base = ''
   RAISE USING MESSAGE = 'base 名は空にできません（diff_table_base / latest_view_base / info_fn_base / css_fn_base）。';
 END IF;
 
--- 命名規則どおりに組み立てる。ビューは最新スナップショットだけを返すが、
--- テーブルと同じ base 名で vw_ が付く形にそろえてある。
+-- 命名規則どおりに組み立てる。テーブルは履歴なので _hist、
+-- ビューは最新スナップショットだけなので _hist を付けない。
 SET diff_table  = CONCAT(object_prefix, diff_table_base, object_suffix);
 SET latest_view = CONCAT(object_prefix, 'vw_', latest_view_base, object_suffix);
 SET info_fn     = CONCAT(udf_prefix, info_fn_base, udf_suffix);
