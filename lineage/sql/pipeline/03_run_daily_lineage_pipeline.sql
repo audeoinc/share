@@ -228,6 +228,20 @@ DECLARE udf_render_function_name STRING;
 DECLARE parser_strict_mode BOOL DEFAULT FALSE;
 DECLARE configured_max_impact_rank INT64 DEFAULT 100;
 
+-- Source-dataset access pre-check. source_project_filters resolves source datasets
+-- from INFORMATION_SCHEMA.SCHEMATA, but being listed there does not guarantee the job
+-- account can read that dataset's INFORMATION_SCHEMA: a single unreadable dataset makes
+-- the whole UNION fail with "Access Denied", taking the run down. When TRUE (default),
+-- STEP 1 probes each resolved source dataset once, drops the ones it cannot read, and
+-- reports them as SKIPPED_INACCESSIBLE_SOURCE_DATASETS; the metadata scans then union
+-- only readable datasets. Costs one INFORMATION_SCHEMA job per source dataset per run
+-- (no bytes billed). Set FALSE to restore the previous all-or-nothing behavior -- then
+-- exclude unreadable datasets by hand via source_project_filters[].dataset_exclude_patterns.
+-- A skipped dataset's tables are simply absent from the metadata, so objects referencing
+-- them resolve as "source no longer present" (WARNING, still publishable) rather than
+-- failing -- see the STEP 3 source classifier.
+DECLARE skip_inaccessible_source_datasets BOOL DEFAULT TRUE;
+
 -- Set FALSE to skip STEP 2 (Scheduled Query / DAG generated-table collection
 -- from INFORMATION_SCHEMA.JOBS) and process only Views. STEP 1/3/4 still run.
 DECLARE process_generated_tables BOOL DEFAULT TRUE;
@@ -336,6 +350,8 @@ DECLARE columns_union_sql STRING;
 DECLARE field_paths_union_sql STRING;
 DECLARE tables_union_sql STRING;
 DECLARE source_dataset_count INT64;
+-- Scratch for the per-dataset source access probe (skip_inaccessible_source_datasets).
+DECLARE source_access_probe INT64;
 -- Token extracted from the project id (see project_token_pattern).
 DECLARE project_token STRING;
 
@@ -721,6 +737,82 @@ BEGIN
   SET source_dataset_count = (SELECT COUNT(*) FROM source_datasets);
   ASSERT source_dataset_count > 0
   AS 'No source datasets were found in the configured projects and region.';
+
+  -- --------------------------------------------------------------------------
+  -- Source-dataset access pre-check.
+  --
+  -- SCHEMATA listing a dataset does not mean its INFORMATION_SCHEMA is readable
+  -- (dataset-level metadata access can be missing even when the dataset is
+  -- visible). Because every metadata scan below is one big UNION ALL over these
+  -- datasets, a single unreadable one fails the entire statement with
+  -- "Access Denied", so the run dies on a dataset it does not even need.
+  --
+  -- Probe each dataset once and keep only those that answer. One job per dataset,
+  -- and all four views the pipeline reads are checked in that single job, so a
+  -- dataset with partial access is dropped here rather than surviving STEP 1's
+  -- TABLES scan and killing STEP 3's COLUMNS scan instead. INFORMATION_SCHEMA
+  -- queries bill no bytes; the cost is the job count.
+  --
+  -- The dropped datasets are reported, not swallowed: their tables are then absent
+  -- from the metadata, so an object referencing one resolves as "source no longer
+  -- present" (WARNING, still publishable) instead of FAILED.
+  -- --------------------------------------------------------------------------
+  CREATE OR REPLACE TEMP TABLE inaccessible_source_datasets (
+    project_id STRING,
+    dataset_id STRING,
+    error_message STRING
+  );
+
+  IF skip_inaccessible_source_datasets THEN
+    FOR probe_ds IN (
+      SELECT DISTINCT project_id, dataset_id
+      FROM source_datasets
+      ORDER BY project_id, dataset_id
+    )
+    DO
+      BEGIN
+        -- LIMIT 1 per view: the ACL is checked when the reference is resolved, so
+        -- one row is enough to prove readability without counting every column of a
+        -- wide dataset. An empty but readable dataset returns 0 and passes.
+        EXECUTE IMMEDIATE FORMAT(
+          'SELECT COUNT(*) FROM ('
+          || '(SELECT 1 FROM `%s.%s.INFORMATION_SCHEMA.TABLES` LIMIT 1) '
+          || 'UNION ALL (SELECT 1 FROM `%s.%s.INFORMATION_SCHEMA.TABLE_OPTIONS` LIMIT 1) '
+          || 'UNION ALL (SELECT 1 FROM `%s.%s.INFORMATION_SCHEMA.COLUMNS` LIMIT 1) '
+          || 'UNION ALL (SELECT 1 FROM `%s.%s.INFORMATION_SCHEMA.COLUMN_FIELD_PATHS` LIMIT 1))',
+          probe_ds.project_id, probe_ds.dataset_id,
+          probe_ds.project_id, probe_ds.dataset_id,
+          probe_ds.project_id, probe_ds.dataset_id,
+          probe_ds.project_id, probe_ds.dataset_id
+        )
+        INTO source_access_probe;
+      EXCEPTION WHEN ERROR THEN
+        INSERT INTO inaccessible_source_datasets (project_id, dataset_id, error_message)
+        VALUES (probe_ds.project_id, probe_ds.dataset_id, @@error.message);
+      END;
+    END FOR;
+
+    DELETE FROM source_datasets AS sd
+    WHERE EXISTS (
+      SELECT 1
+      FROM inaccessible_source_datasets AS blocked
+      WHERE blocked.project_id = sd.project_id
+        AND blocked.dataset_id = sd.dataset_id
+    );
+
+    SET source_dataset_count = (SELECT COUNT(*) FROM source_datasets);
+    ASSERT source_dataset_count > 0
+    AS 'Every resolved source dataset was unreadable -- check source_project_filters and the job account metadata permissions (see SKIPPED_INACCESSIBLE_SOURCE_DATASETS).';
+
+    -- Surfaced in the console's "All results" so a silently narrowed scan is visible.
+    SELECT
+      'SKIPPED_INACCESSIBLE_SOURCE_DATASETS' AS notice,
+      project_id,
+      dataset_id,
+      error_message
+    FROM inaccessible_source_datasets
+    ORDER BY project_id, dataset_id;
+  END IF;
 
   -- TABLES per source dataset (dataset-scoped, so only dataset-level metadata
   -- access is needed; the region-qualified form requires broader permissions).

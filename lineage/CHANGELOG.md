@@ -1,5 +1,29 @@
 # 1.5.0-032
 
+- Stopped one unreadable source dataset from killing the whole run in
+  `03_run_daily_lineage_pipeline.sql` ("Access Denied" on the
+  INFORMATION_SCHEMA.TABLES union). `source_project_filters` resolves source datasets
+  from INFORMATION_SCHEMA.SCHEMATA, but appearing in SCHEMATA does not mean the job
+  account can read that dataset's INFORMATION_SCHEMA; because every metadata scan is
+  one large UNION ALL over those datasets, a single unreadable one fails the entire
+  statement, and the only remedy was to name it by hand in
+  `source_project_filters[].dataset_exclude_patterns`. STEP 1 now runs an access
+  pre-check right after `source_datasets` is resolved, gated by the new
+  `skip_inaccessible_source_datasets BOOL DEFAULT TRUE` in [B]: each resolved dataset is
+  probed once, unreadable ones are deleted from `source_datasets`, and the skipped list
+  is emitted as a SKIPPED_INACCESSIBLE_SOURCE_DATASETS result so a narrowed scan is
+  never silent. Because every union (TABLES / TABLE_OPTIONS in STEP 1, COLUMNS /
+  COLUMN_FIELD_PATHS / TABLES in STEP 3) derives from `source_datasets`, pruning once
+  protects all of them; the probe reads all four views in a single job
+  (`(SELECT 1 FROM ... LIMIT 1) UNION ALL ...`) so a dataset with partial access is
+  dropped here instead of surviving STEP 1 and killing STEP 3's COLUMNS scan. One
+  INFORMATION_SCHEMA job per source dataset per run, no bytes billed; set the toggle
+  FALSE for the previous all-or-nothing behavior. An ASSERT still fails the run if every
+  dataset turns out unreadable. Skipping a dataset is not silently lossy in the analysis:
+  its tables are absent from the metadata, so a referencing object resolves as "source no
+  longer present" (WARNING, still publishable) rather than FAILED. SQL-only; the engine
+  bundle is unchanged. Not yet validated against BigQuery.
+
 - Added `analysis_include_generation_types` to `03_run_daily_lineage_pipeline.sql`, a
   definition-source whitelist so a run can analyze one kind of definition -- most
   usefully `['DAG']` for DAG job SQL only. Until now the analysis scope had two axes

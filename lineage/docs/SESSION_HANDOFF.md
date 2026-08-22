@@ -513,6 +513,28 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   JOBS 走査自体を止めるのは `process_generated_tables`。
 - SQL のみ／エンジン不変。**BigQuery 未検証**。
 
+## 4.24 アクセスできないソースデータセットで落ちる問題（SQLのみ）
+
+- **症状**：03 実行時、`INFORMATION_SCHEMA.TABLES` を UNION する箇所で特定データセットに
+  対し **Access Denied**。UNION ALL 一発なので、1 つ読めないだけで文全体が落ちる。
+- **原因**：`source_project_filters` は SCHEMATA からソースデータセットを解決するが、
+  **SCHEMATA に見えることと、そのデータセットの INFORMATION_SCHEMA が読めることは別**。
+  従来の回避策は `source_project_filters[].dataset_exclude_patterns` に手で列挙するのみ。
+- **対応**：STEP 1 の `source_datasets` 解決直後に**アクセス事前チェック**を追加。
+  新 DECLARE `skip_inaccessible_source_datasets BOOL DEFAULT TRUE`（[B]）。
+  - 各データセットを 1 回プローブし、失敗したものを `source_datasets` から DELETE。
+  - 除外分は `inaccessible_source_datasets` に理由付きで残し、
+    `SKIPPED_INACCESSIBLE_SOURCE_DATASETS` として結果に出す（黙って縮まないように）。
+  - **全 UNION が `source_datasets` 由来**なので、ここで 1 回削るだけで
+    STEP 1 の TABLES/TABLE_OPTIONS も STEP 3 の COLUMNS/COLUMN_FIELD_PATHS/TABLES も守れる。
+  - プローブは 4 ビューを 1 ジョブで確認（`(SELECT 1 FROM ... LIMIT 1) UNION ALL ...`）。
+    部分的にしか権限が無いデータセットが STEP 1 を通過して STEP 3 で落ちるのを防ぐため。
+  - コストはソースデータセット数 × 1 ジョブ／run（バイト課金なし）。FALSE で従来動作。
+  - 全滅した場合は ASSERT で失敗させる。
+- **解析への影響**：外したデータセットのテーブルはメタデータに存在しなくなるため、
+  §4.6 の分類では「消えたソース」扱い＝WARNING（公開可）であり FAILED にはならない。
+- SQL のみ／エンジン不変。**BigQuery 未検証**。
+
 ## 4.22 本ドキュメントと実装の乖離（重要）
 
 `docs/SESSION_HANDOFF.md` の §1〜§4.20 は **1.5.0-032 の途中まで**しか追随していない。
@@ -537,6 +559,7 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 - CTE の後ろの括弧付きメインQuery … `test_v1_5_0_073`（本セッション）
 - 括弧付き branch が自身のセット演算/CTE を含む形 … `test_v1_5_0_074`（本セッション）
 - 定義ソース種別フィルタ `analysis_include_generation_types`（§4.23・本セッション、SQLのみ）
+- ソースデータセットのアクセス事前チェック（§4.24・本セッション、SQLのみ）
 - SQL 追加：`sql/maintenance/08_view_last_access.sql`、
   `sql/maintenance/09_unanalyzed_object_definitions.sql`、
   `definition_registry` の `labels` 列（§4.12）
