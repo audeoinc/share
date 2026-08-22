@@ -440,6 +440,53 @@ checks.push(['語の一部が一致しても別ロジックのままにする',
     ], { suffixParts: [['ab'], ['jp', 'us']] }).bases[0].groupCount === 2]);
 }
 
+// --- リテラルの書き方（lineage の lexer に合わせる）------------------------
+// 1 つのリテラルを複数トークンに割ってしまうと、値の差なのに
+// 「トークン数が違う」で別グループになる。lineage/javascript/src/lexer/lexer.js
+// が扱っている形を突き合わせて、取りこぼしが無いかを見る。
+{
+  const one = (sql) => {
+    const t = A.tokenizeSql(sql).filter((x) => x.kind !== 'space');
+    return t.length === 1 ? t[0].kind : t.map((x) => x.kind).join('+');
+  };
+  const D = String.fromCharCode(34);  // 二重引用符。ソースに 3 連を書かない
+  const D3 = D + D + D;
+  checks.push(['単一引用符 3 連を 1 トークンにする', one("'''a b'''") === 'string']);
+  checks.push(['二重引用符 3 連を 1 トークンにする', one(D3 + 'a b' + D3) === 'string']);
+  checks.push(['raw 文字列 r-quote を 1 トークンにする', one("r'^\\d+$'") === 'string']);
+  checks.push(['bytes 文字列 b-quote を 1 トークンにする', one("b'abc'") === 'string']);
+  checks.push(['rb / br の組み合わせも 1 トークンにする',
+    one("rb'x'") === 'string' && one("br'x'") === 'string']);
+  checks.push(['引用符の二重化を 1 トークンにする', one("'it''s'") === 'string']);
+  checks.push(['バックスラッシュのエスケープも 1 トークンにする', one("'a\\'b'") === 'string']);
+  checks.push(['指数表記を 1 トークンにする',
+    one('1e6') === 'number' && one('2E-4') === 'number' && one('1.5e3') === 'number']);
+  checks.push(['16 進を 1 トークンにする', one('0x1F') === 'number']);
+  checks.push(['先頭ドットの小数を 1 トークンにする', one('.5') === 'number']);
+  checks.push(['小数はそのまま 1 トークン', one('1.5') === 'number']);
+  // 'p.d.t_123' の '.' を数値に食わせない（lineage も同じ理由で場合分けしている）。
+  // 食わせるとパスが壊れ、実体名の検出が狂う。
+  checks.push(['パスのドットを数値に食わせない',
+    A.tokenizeSql('p.d.t_123').filter((x) => x.kind !== 'space')
+      .map((x) => x.text).join('|') === 'p|.|d|.|t_123']);
+
+  // 取りこぼしていれば、値だけの差でも別グループになる
+  const P = { suffixParts: [['ab'], ['jp', 'us']] };
+  const same = (label, a, b) => {
+    const r = A.analyze([
+      { view_name: 'v_l_abjp', ddl: 'SELECT a FROM t_abjp WHERE ' + a },
+      { view_name: 'v_l_abus', ddl: 'SELECT a FROM t_abus WHERE ' + b },
+    ], P).bases[0];
+    checks.push([label, r.groupCount === 1]);
+  };
+  same('指数表記の値の差はパラメータ化', 'n > 1e6', 'n > 2e7');
+  same('16 進の値の差はパラメータ化', 'n = 0x1F', 'n = 0x2A');
+  same('引用符を二重化した値の差はパラメータ化', "s = 'it''s'", "s = 'ok'");
+  same('raw 文字列の値の差はパラメータ化',
+    "REGEXP_CONTAINS(s, r'^A\\d+$')", "REGEXP_CONTAINS(s, r'^B\\d+$')");
+  same('3 連引用符の値の差はパラメータ化', "s = '''alpha'''", "s = '''beta'''");
+}
+
 // --- WHERE / CASE / IF のリテラル条件 -----------------------------------
 // 横展開で実際にいちばん多いのがここ。国ごとにしきい値・区分値・対象コードが
 // 変わる。値の差はパラメータ化して同じグループにし、条件の構造が変われば割る。

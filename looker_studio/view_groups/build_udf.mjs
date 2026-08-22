@@ -503,6 +503,23 @@ const checks = [
     COMPLEX.group_labels.length === 1 &&
     /orders_/.test(JSON.stringify(COMPLEX.suffixes)) === false],
   ['複雑な SQL で列名を変えると割れる', COMPLEX_SPLIT.group_count === 2],
+  // 最小化するとエスケープの書き方が変わりうるので、リテラルの読み分けが
+  // 生き残っているかを本体そのもので見る。割れていれば値の差で別グループになる。
+  ['最小化後もリテラルの書き方を取りこぼさない', (() => {
+    const D3 = String.fromCharCode(34, 34, 34);
+    const pairs = [
+      ['n > 1e6', 'n > 2e7'],
+      ['n = 0x1F', 'n = 0x2A'],
+      ["s = 'it''s'", "s = 'ok'"],
+      ["REGEXP_CONTAINS(s, r'^A\\d+$')", "REGEXP_CONTAINS(s, r'^B\\d+$')"],
+      ["s = '''alpha'''", "s = '''beta'''"],
+      [`s = ${D3}alpha${D3}`, `s = ${D3}beta${D3}`],
+    ];
+    return pairs.every(([x, y]) => VIEW_GROUP_INFO([
+      { view_name: 'v_l_abjp', ddl: 'SELECT a FROM t_abjp WHERE ' + x },
+      { view_name: 'v_l_abus', ddl: 'SELECT a FROM t_abus WHERE ' + y },
+    ], OPTS).group_count === 1);
+  })()],
 ];
 
 // サイズ検証
