@@ -1,0 +1,4 @@
+# `npm run build:everything` stages a full copy of lineage/ here before zipping it.
+# The release ZIP beside it IS committed; the staging directory is a duplicate of
+# the tree and must not be.
+/release/lineage_v*/
