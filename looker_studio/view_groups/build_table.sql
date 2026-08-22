@@ -42,24 +42,28 @@ DECLARE tz           STRING DEFAULT 'Asia/Tokyo'; -- snapshot_date の基準
 DECLARE partition_expiration_days INT64 DEFAULT 400;  -- 履歴の保持日数
 
 -- 作るオブジェクトの名前。prefix / suffix は UDF と テーブル・ビューで別に持つ。
---   テーブル: object_prefix + <base 名> + object_suffix
---   ビュー  : object_prefix + vw_ + <base 名> + object_suffix
+--   テーブル: object_prefix + system_name + _ + <base 名> + object_suffix
+--   ビュー  : object_prefix + system_name + _ + vw_ + <base 名> + object_suffix
 --   UDF     : udf_prefix + <関数の基本名> + udf_suffix
+-- system_name はこのシステムを表す文字列。t_ / vw_t_ の前に付く。
+-- 末尾の _ は自動で足すので書かない。空にすればシステム名なしになる。
 -- base 名の先頭の t_ / m_ は transaction / master の区分。
 DECLARE object_prefix STRING DEFAULT '';
 DECLARE object_suffix STRING DEFAULT '';
+DECLARE system_name   STRING DEFAULT 'viewlgc';
 DECLARE udf_prefix    STRING DEFAULT '';
 DECLARE udf_suffix    STRING DEFAULT '';
 
 -- base 名は作るオブジェクトごとに持つ。オブジェクトが増えたらここに 1 行足し、
 -- 下の DECLARE と SET と、本文で使う @@…@@ を対で増やす。
-DECLARE diff_table_base  STRING DEFAULT 't_view_logic_diff_hist';  -- 日次スナップショットを積むテーブル
-DECLARE latest_view_base STRING DEFAULT 't_view_logic_diff';       -- 最新スナップショットだけのビュー
-DECLARE info_fn_base     STRING DEFAULT 'VIEW_GROUP_INFO';         -- 比較 HTML を返す UDF
-DECLARE css_fn_base      STRING DEFAULT 'VIEW_GROUP_CSS';          -- テンプレート用 CSS を返す UDF
+DECLARE diff_table_base  STRING DEFAULT 't_diff_hist';     -- 日次スナップショットを積むテーブル
+DECLARE latest_view_base STRING DEFAULT 't_diff';          -- 最新スナップショットだけのビュー
+DECLARE info_fn_base     STRING DEFAULT 'VIEW_GROUP_INFO'; -- 比較 HTML を返す UDF
+DECLARE css_fn_base      STRING DEFAULT 'VIEW_GROUP_CSS';  -- テンプレート用 CSS を返す UDF
 
 -- 組み立てた名前（下の SET で決まる）。データセット名は含まない。
 -- UDF の 4 変数は view_group_html.sql と同じ値にすること。食い違うと見つからない。
+DECLARE system_tag  STRING;  -- system_name に区切りの _ を足したもの
 DECLARE diff_table  STRING;
 DECLARE latest_view STRING;
 DECLARE info_fn     STRING;
@@ -108,8 +112,9 @@ END IF;
 
 -- 命名規則どおりに組み立てる。テーブルは履歴なので _hist、
 -- ビューは最新スナップショットだけなので _hist を付けない。
-SET diff_table  = CONCAT(object_prefix, diff_table_base, object_suffix);
-SET latest_view = CONCAT(object_prefix, 'vw_', latest_view_base, object_suffix);
+SET system_tag  = IF(system_name = '', '', CONCAT(system_name, '_'));
+SET diff_table  = CONCAT(object_prefix, system_tag, diff_table_base, object_suffix);
+SET latest_view = CONCAT(object_prefix, system_tag, 'vw_', latest_view_base, object_suffix);
 SET info_fn     = CONCAT(udf_prefix, info_fn_base, udf_suffix);
 SET css_fn      = CONCAT(udf_prefix, css_fn_base, udf_suffix);
 
@@ -320,7 +325,7 @@ USING suffix_list AS suffix_list, analyze_options AS analyze_options;
 
 -- ---------------------------------------------------------------------
 -- 3. Looker Studio が読むビュー（最新スナップショットだけ・初回のみ）
---    名前は object_prefix + vw_ + latest_view_base + object_suffix。
+--    名前は object_prefix + system_name + _vw_ + latest_view_base + object_suffix。
 -- ---------------------------------------------------------------------
 EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(r"""
 CREATE OR REPLACE VIEW `@@PROJECT@@.@@WORK@@.@@LATEST_VIEW@@` AS

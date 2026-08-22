@@ -373,12 +373,13 @@ DECLARE analyze_options          STRING        DEFAULT '{"literalGroups":[],"mod
 -- 作るオブジェクトの名前。prefix / suffix は UDF と テーブル・ビューで別に持つ
 DECLARE object_prefix STRING DEFAULT '';
 DECLARE object_suffix STRING DEFAULT '';
+DECLARE system_name   STRING DEFAULT 'viewlgc';  -- システムを表す文字列。t_ / vw_t_ の前に付く
 DECLARE udf_prefix    STRING DEFAULT '';
 DECLARE udf_suffix    STRING DEFAULT '';
 
 -- base 名は作るオブジェクトごとに 1 つ
-DECLARE diff_table_base  STRING DEFAULT 't_view_logic_diff_hist';  -- t_=transaction / m_=master
-DECLARE latest_view_base STRING DEFAULT 't_view_logic_diff';
+DECLARE diff_table_base  STRING DEFAULT 't_diff_hist';  -- t_=transaction / m_=master
+DECLARE latest_view_base STRING DEFAULT 't_diff';
 DECLARE info_fn_base     STRING DEFAULT 'VIEW_GROUP_INFO';
 DECLARE css_fn_base      STRING DEFAULT 'VIEW_GROUP_CSS';
 ```
@@ -389,9 +390,12 @@ DECLARE css_fn_base      STRING DEFAULT 'VIEW_GROUP_CSS';
 
 | 種別 | 組み立て |
 |---|---|
-| テーブル | `object_prefix` + `<base 名>` + `object_suffix` |
-| ビュー | `object_prefix` + `vw_` + `<base 名>` + `object_suffix` |
+| テーブル | `object_prefix` + `system_name` + `_` + `<base 名>` + `object_suffix` |
+| ビュー | `object_prefix` + `system_name` + `_` + `vw_` + `<base 名>` + `object_suffix` |
 | UDF | `udf_prefix` + `<関数の基本名>` + `udf_suffix` |
+
+`system_name` はこのシステムを表す文字列で、`t_` / `vw_t_` の**前**に付く。
+区切りの `_` は自動で足すので値には書かない。空にすればシステム名なしになる。
 
 base 名は**作るオブジェクトごとに 1 つ**持たせてある。オブジェクトが増えたときは
 `<名前>_base` の DECLARE を 1 行足し、組み立て先の `DECLARE <名前> STRING;` と
@@ -399,13 +403,19 @@ base 名は**作るオブジェクトごとに 1 つ**持たせてある。オ�
 
 | 変数 | 作られるもの | 既定でできる名前 |
 |---|---|---|
-| `diff_table_base` | 日次スナップショットを積むテーブル | `t_view_logic_diff_hist` |
-| `latest_view_base` | 最新スナップショットだけのビュー | `vw_t_view_logic_diff` |
+| `diff_table_base` | 日次スナップショットを積むテーブル | `viewlgc_t_diff_hist` |
+| `latest_view_base` | 最新スナップショットだけのビュー | `viewlgc_vw_t_diff` |
 | `info_fn_base` | 比較 HTML を返す UDF | `VIEW_GROUP_INFO` |
 | `css_fn_base` | テンプレート用 CSS を返す UDF | `VIEW_GROUP_CSS` |
 
 base 名の先頭の `t_` / `m_` は transaction / master の区分。既定は `t_`
-（日次のスナップショットを積むテーブルのため）。
+（日次のスナップショットを積むテーブルのため）。システムが何かは `system_name`
+が表すので、base 名にはその中での役割（`diff`）だけを書く。
+
+> UDF には `system_name` が付かない。関数名は `udf_prefix` + 基本名 +
+> `udf_suffix` のままなので、システム名を入れたい場合は `udf_prefix` に
+> `'VIEWLGC_'` のように書く（`build_table.sql` と `view_group_html.sql` の
+> 両方に同じ値を入れること）。
 
 **テーブルだけ `_hist` が付く。** 実体が日次スナップショットの積み上げ
 （`PARTITION BY snapshot_date`・過去日を消さない・`partition_expiration_days` で
@@ -576,12 +586,12 @@ Looker の操作のたびに UDF を回すのは重いので、スケジュー�
 `INFORMATION_SCHEMA` の中身は View をデプロイしたときしか変わらない。
 
 ```
-t_view_logic_diff_hist  PARTITION BY snapshot_date CLUSTER BY base
+viewlgc_t_diff_hist  PARTITION BY snapshot_date CLUSTER BY base
   base / view_count / group_count / has_multiple
   group_labels / group_sizes / suffixes / unmatched_count / diff_html
 ```
 
-Looker Studio は `vw_t_view_logic_diff` を読むだけ。`base` をプルダウンにして
+Looker Studio は `viewlgc_vw_t_diff` を読むだけ。`base` をプルダウンにして
 `diff_html` を Templated Record に渡す。パラメータもカスタムクエリも UDF も不要。
 
 パーティションに日付を積むので**履歴が残る**。「いつグループ構成が変わったか」を
@@ -594,7 +604,7 @@ base の切り出しと UDF に渡す `suffixList` は、同じ 1 つの `suffix
 
 事前生成テーブルができていれば、あとは読むだけ。
 
-1. **データを追加 → BigQuery** で `vw_t_view_logic_diff`（`latest_view_base` から
+1. **データを追加 → BigQuery** で `viewlgc_vw_t_diff`（`latest_view_base` から
    組み立てた名前）を選ぶ
    （カスタムクエリではなくテーブル選択でよい）
 2. **Templated Record** を配置し、表示対象のカラムに `diff_html` を指定
@@ -625,7 +635,7 @@ SELECT `<project>.<udf_dataset>.VIEW_GROUP_CSS`('{"mode": "class"}');
 ```sql
 SELECT base, view_count, group_count, group_labels, unmatched_count,
        LENGTH(diff_html) AS html_len
-FROM `<project>.<work_dataset>.vw_t_view_logic_diff`
+FROM `<project>.<work_dataset>.viewlgc_vw_t_diff`
 ORDER BY base;
 ```
 
