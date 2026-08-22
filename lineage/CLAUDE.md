@@ -135,7 +135,14 @@ npm test                        # build + verify:bundle + test:release を一括
   `analysis_*`（解析ゲート）を、`analysis_include/exclude_dataset_patterns`
   （dataset スコープ＝View 走査範囲＋生成テーブルの dataset ゲート）と
   `analysis_include/exclude_object_patterns`（object 名フィルタ、収集時に適用）の
-  2系統だけに整理。両フィルタは **収集段（STEP1 View／STEP2 生成テーブル）で適用**し、
+  2系統だけに整理。さらに**定義ソース種別の 3 つめの軸**として
+  `analysis_include_generation_types`（`VIEW_DEFINITION` / `SCHEDULED_QUERY` / `DAG`
+  のホワイトリスト、既定 `[]`＝全種別）を追加。例 `['DAG']` で DAG のジョブ SQL だけを
+  解析対象にする。値は [C] で正規化（trim/大文字化）し、既知の3値以外は ASSERT で弾く
+  （タイプミスで解析対象が黙って 0 件になるのを防ぐ）。これも収集段で適用するため、
+  外した種別は登録も変更追跡もされない。ただし**コスト削減の手段ではない**
+  （STEP1 は VIEWS を、STEP2 は JOBS を従来どおり走査する。JOBS 走査自体を止めるのは
+  `process_generated_tables`）。両フィルタは **収集段（STEP1 View／STEP2 生成テーブル）で適用**し、
   通ったものだけがレジストリに載る＝そのまま解析対象。除外された object は登録も
   変更追跡もされず、設定変更で新たに除外された既存 object は orphan cleanup が
   deactivate。よって解析段（changed_datasets probe・per-dataset materialization）
