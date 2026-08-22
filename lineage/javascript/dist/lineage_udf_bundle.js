@@ -7826,9 +7826,18 @@ class QueryParser {
     const innerTokens = this.#stripWrappingParentheses(this.tokens);
 
     if (innerTokens) {
+      /*
+       * disableSetOperations は「この Token 列を、いま分割中のセット演算の 1 branch として
+       * 解析している」という意味であり、同じ深さでの再分割を防ぐためのもの。括弧は
+       * GoogleSQL の query_expr を新しく開くので、括弧の内側では改めてセット演算を
+       * 許可しなければならない（`(A UNION ALL B) EXCEPT DISTINCT C` の左辺など）。
+       * ここで引き継いでしまうと内側の UNION/INTERSECT/EXCEPT が分割されず、
+       * FROM Clause の途中に演算子が残って
+       * "FromParser: JOIN was expected, but found ..." になる。
+       */
       return new QueryParser(this.#normalizeTokenDepth(innerTokens), {
         isSubquery: this.isSubquery,
-        disableSetOperations: this.disableSetOperations
+        disableSetOperations: false
       }).parse();
     }
 
@@ -7843,9 +7852,10 @@ class QueryParser {
     const statementBodyTokens = this.#stripStatementBodyParentheses(this.tokens);
 
     if (statementBodyTokens) {
+      /* 括弧の内側は新しい query_expr。理由は #stripWrappingParentheses と同じ。 */
       return new QueryParser(this.#normalizeTokenDepth(statementBodyTokens), {
         isSubquery: this.isSubquery,
-        disableSetOperations: this.disableSetOperations
+        disableSetOperations: false
       }).parse();
     }
 
@@ -7868,9 +7878,10 @@ class QueryParser {
       const innerMainTokens = this.#stripWrappingParentheses(mainQueryTokens);
 
       if (innerMainTokens) {
+        /* 括弧の内側は新しい query_expr。理由は #stripWrappingParentheses と同じ。 */
         const mainQuery = new QueryParser(this.#normalizeTokenDepth(innerMainTokens), {
           isSubquery: this.isSubquery,
-          disableSetOperations: this.disableSetOperations
+          disableSetOperations: false
         }).parse();
 
         mainQuery.recursive = cteResult.recursive || Boolean(mainQuery.recursive);
@@ -7894,9 +7905,22 @@ class QueryParser {
           disableSetOperations: true
         }).parse();
 
-        firstQuery.recursive = cteResult.recursive;
-        firstQuery.common_table_expressions = cteResult.ctes;
-        firstQuery.set_operations = [];
+        /*
+         * branch 0 が括弧付きで、それ自身がセット演算や WITH を持つ場合
+         * （`(A UNION ALL B) EXCEPT DISTINCT C` など）、firstQuery は既に
+         * set_operations / common_table_expressions を持っている。上書きすると
+         * 内側の branch や CTE が丸ごと失われて lineage が欠落するため、
+         * この階層のものを前に足す形で保存する。リネージ上、セット演算の出力は
+         * 全 branch の和なので、入れ子を平坦化しても結果は変わらない。
+         */
+        firstQuery.recursive = cteResult.recursive || Boolean(firstQuery.recursive);
+        firstQuery.common_table_expressions = [
+          ...cteResult.ctes,
+          ...(firstQuery.common_table_expressions || [])
+        ];
+        firstQuery.set_operations = Array.isArray(firstQuery.set_operations)
+          ? firstQuery.set_operations
+          : [];
 
         for (let branchIndex = 1; branchIndex < setOperation.branches.length; branchIndex++) {
           const operation = setOperation.operations[branchIndex - 1];

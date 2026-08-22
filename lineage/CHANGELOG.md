@@ -1,5 +1,28 @@
 # 1.5.0-032
 
+- Fixed a parenthesized set-operation branch that itself contains a set operation --
+  `(SELECT id FROM aaa INTERSECT DISTINCT SELECT id FROM bbb) EXCEPT DISTINCT (SELECT id FROM ccc)`
+  -- failing with "FromParser: JOIN was expected, but found \"INTERSECT\"" (engine).
+  Not operator-specific: the same shape with `UNION ALL` failed identically, while
+  `(A) UNION ALL (B)` (single-SELECT branches) worked. Two coupled defects. (1)
+  `disableSetOperations` means "this token run is one branch of the set operation being
+  split", guarding against re-splitting at the same depth, but
+  `#stripWrappingParentheses` passed it straight into the parentheses. Parentheses open a
+  fresh GoogleSQL `query_expr`, where a set operation is legal again, so the inner
+  INTERSECT/UNION was never split and the operator stayed inside the FROM clause, where
+  FromParser expected a JOIN. All three unwrapping paths (whole-query, `CREATE ... AS
+  (...)`, and the CTE-body path added above) now pass `disableSetOperations: false`.
+  (2) The split then assigned `firstQuery.set_operations = []` and
+  `firstQuery.common_table_expressions = cteResult.ctes` unconditionally; once (1) was
+  fixed, branch 0 can carry its own set operations and CTEs, and those assignments erased
+  them along with every nested branch's lineage. Branch 0's `set_operations` are now kept
+  and this level's CTEs are prepended (outer first). Flattening the nesting is sound for
+  lineage: a set operation's output draws on every branch regardless of grouping. All
+  branches (aaa, bbb, ccc) now resolve, in the analysis pass and in 03's throwing
+  source-discovery pass alike. `SELECT * EXCEPT(col)` is still not a set operation
+  (the modifier guard is unchanged). Test: test_v1_5_0_074. Bundle rebuilt
+  (sha256 d7992396..., 465176 bytes); test:release 54 / golden 48 PASS.
+
 - Fixed `WITH cte AS (...) (SELECT ...)` -- a CTE list followed by a *parenthesized*
   main query -- throwing "QueryParser: トップレベルのSELECT Clauseが見つかりません"
   (engine). GoogleSQL's `query_expr` is `[WITH ...] { select | ( query_expr ) | set_op }`,
