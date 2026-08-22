@@ -41,27 +41,29 @@ DECLARE region       STRING DEFAULT 'asia-northeast1';  -- 読むリージョン
 DECLARE tz           STRING DEFAULT 'Asia/Tokyo'; -- snapshot_date の基準
 DECLARE partition_expiration_days INT64 DEFAULT 400;  -- 履歴の保持日数
 
--- 作るオブジェクトの名前。命名規則に沿って組み立てる。
---   テーブル: object_prefix + object_base_name + object_suffix
---   ビュー  : object_prefix + vw_ + object_base_name + object_suffix
+-- 作るオブジェクトの名前。prefix / suffix は UDF と テーブル・ビューで別に持つ。
+--   テーブル: object_prefix + <base 名> + object_suffix
+--   ビュー  : object_prefix + vw_ + <base 名> + object_suffix
 --   UDF     : udf_prefix + <関数の基本名> + udf_suffix
--- object_base_name の先頭の t_ / m_ は transaction / master の区分。
--- このテーブルは日次のスナップショットを積むので t_。
-DECLARE object_prefix    STRING DEFAULT '';
-DECLARE object_suffix    STRING DEFAULT '';
-DECLARE object_base_name STRING DEFAULT 't_view_logic_diff';
+-- base 名の先頭の t_ / m_ は transaction / master の区分。
+DECLARE object_prefix STRING DEFAULT '';
+DECLARE object_suffix STRING DEFAULT '';
+DECLARE udf_prefix    STRING DEFAULT '';
+DECLARE udf_suffix    STRING DEFAULT '';
 
--- UDF 側は view_group_html.sql と同じ値にすること。食い違うと関数が見つからない。
-DECLARE udf_prefix   STRING DEFAULT '';
-DECLARE udf_suffix   STRING DEFAULT '';
-DECLARE info_fn_base STRING DEFAULT 'VIEW_GROUP_INFO';
-DECLARE css_fn_base  STRING DEFAULT 'VIEW_GROUP_CSS';
+-- base 名は作るオブジェクトごとに持つ。オブジェクトが増えたらここに 1 行足し、
+-- 下の DECLARE と SET と、本文で使う @@…@@ を対で増やす。
+DECLARE diff_table_base  STRING DEFAULT 't_view_logic_diff';  -- スナップショットを積むテーブル
+DECLARE latest_view_base STRING DEFAULT 't_view_logic_diff';  -- 最新スナップショットだけのビュー
+DECLARE info_fn_base     STRING DEFAULT 'VIEW_GROUP_INFO';    -- 比較 HTML を返す UDF
+DECLARE css_fn_base      STRING DEFAULT 'VIEW_GROUP_CSS';     -- テンプレート用 CSS を返す UDF
 
 -- 組み立てた名前（下の SET で決まる）。データセット名は含まない。
-DECLARE table_name STRING;
-DECLARE view_name  STRING;
-DECLARE info_fn    STRING;
-DECLARE css_fn     STRING;
+-- UDF の 4 変数は view_group_html.sql と同じ値にすること。食い違うと見つからない。
+DECLARE diff_table  STRING;
+DECLARE latest_view STRING;
+DECLARE info_fn     STRING;
+DECLARE css_fn      STRING;
 
 -- 対象の絞り込み。データセットと View 名で、それぞれ include / exclude を持つ。
 --   include … 空配列なら絞らない。指定すると**いずれか**に一致するものだけが対象
@@ -99,16 +101,17 @@ DECLARE view_name_cond STRING;  -- view の include/exclude から組み立て�
 DECLARE n_datasets  INT64;
 DECLARE n_views     INT64;
 
-IF object_base_name = '' OR info_fn_base = '' OR css_fn_base = '' THEN
-  RAISE USING MESSAGE = 'object_base_name / info_fn_base / css_fn_base は空にできません。';
+IF diff_table_base = '' OR latest_view_base = ''
+   OR info_fn_base = '' OR css_fn_base = '' THEN
+  RAISE USING MESSAGE = 'base 名は空にできません（diff_table_base / latest_view_base / info_fn_base / css_fn_base）。';
 END IF;
 
 -- 命名規則どおりに組み立てる。ビューは最新スナップショットだけを返すが、
 -- テーブルと同じ base 名で vw_ が付く形にそろえてある。
-SET table_name = CONCAT(object_prefix, object_base_name, object_suffix);
-SET view_name  = CONCAT(object_prefix, 'vw_', object_base_name, object_suffix);
-SET info_fn    = CONCAT(udf_prefix, info_fn_base, udf_suffix);
-SET css_fn     = CONCAT(udf_prefix, css_fn_base, udf_suffix);
+SET diff_table  = CONCAT(object_prefix, diff_table_base, object_suffix);
+SET latest_view = CONCAT(object_prefix, 'vw_', latest_view_base, object_suffix);
+SET info_fn     = CONCAT(udf_prefix, info_fn_base, udf_suffix);
+SET css_fn      = CONCAT(udf_prefix, css_fn_base, udf_suffix);
 
 IF NOT REGEXP_CONTAINS(TRIM(analyze_options), r'^\{\s*"') THEN
   RAISE USING MESSAGE = 'analyze_options は 1 つ以上のキーを持つ JSON オブジェクトにしてください（例: {"mode":"class"}）。';
@@ -176,7 +179,7 @@ END IF;
 --    日次の生成でここが動くことはない。
 -- ---------------------------------------------------------------------
 EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(r"""
-CREATE OR REPLACE TABLE `@@PROJECT@@.@@WORK@@.@@TABLE@@`
+CREATE OR REPLACE TABLE `@@PROJECT@@.@@WORK@@.@@DIFF_TABLE@@`
 (
   snapshot_date   DATE           OPTIONS (description = '生成日'),
   base            STRING         OPTIONS (description = 'suffix を除いた View 名。Looker のキー。suffix を認識できなかった View は View 名そのもの'),
@@ -196,10 +199,10 @@ OPTIONS (
   partition_expiration_days = @@RETENTION@@
 )
 """,
-  '@@PROJECT@@',   project_id),
-  '@@WORK@@',      work_dataset),
-  '@@RETENTION@@', CAST(partition_expiration_days AS STRING)),
-  '@@TABLE@@',     table_name);
+  '@@PROJECT@@',    project_id),
+  '@@WORK@@',       work_dataset),
+  '@@RETENTION@@',  CAST(partition_expiration_days AS STRING)),
+  '@@DIFF_TABLE@@', diff_table);
 
 
 -- ---------------------------------------------------------------------
@@ -209,16 +212,16 @@ OPTIONS (
 --    MERGE より DELETE + INSERT のほうが単純で、パーティション単位なので安い。
 -- ---------------------------------------------------------------------
 EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(r"""
-DELETE FROM `@@PROJECT@@.@@WORK@@.@@TABLE@@`
+DELETE FROM `@@PROJECT@@.@@WORK@@.@@DIFF_TABLE@@`
 WHERE snapshot_date = CURRENT_DATE('@@TZ@@')
 """,
-  '@@PROJECT@@', project_id),
-  '@@WORK@@',    work_dataset),
-  '@@TZ@@',      tz),
-  '@@TABLE@@',   table_name);
+  '@@PROJECT@@',    project_id),
+  '@@WORK@@',       work_dataset),
+  '@@TZ@@',         tz),
+  '@@DIFF_TABLE@@', diff_table);
 
 EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
-INSERT INTO `@@PROJECT@@.@@WORK@@.@@TABLE@@`
+INSERT INTO `@@PROJECT@@.@@WORK@@.@@DIFF_TABLE@@`
 WITH
 -- suffix 一覧。suffix_list が空なら、対象データセットの名前から切り出す。
 suffixes AS (
@@ -306,7 +309,7 @@ FROM (
   '@@WORK@@',           work_dataset),
   '@@REGION@@',         region),
   '@@TZ@@',             tz),
-  '@@TABLE@@',          table_name),
+  '@@DIFF_TABLE@@',     diff_table),
   '@@INFO_FN@@',        info_fn),
   '@@SUFFIX_PATTERN@@', suffix_pattern),
   '@@SCHEMA_COND@@',    schema_cond),
@@ -317,20 +320,20 @@ USING suffix_list AS suffix_list, analyze_options AS analyze_options;
 
 -- ---------------------------------------------------------------------
 -- 3. Looker Studio が読むビュー（最新スナップショットだけ・初回のみ）
---    名前は object_prefix + vw_ + object_base_name + object_suffix。
+--    名前は object_prefix + vw_ + latest_view_base + object_suffix。
 -- ---------------------------------------------------------------------
 EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(r"""
-CREATE OR REPLACE VIEW `@@PROJECT@@.@@WORK@@.@@VIEW@@` AS
+CREATE OR REPLACE VIEW `@@PROJECT@@.@@WORK@@.@@LATEST_VIEW@@` AS
 SELECT *
-FROM `@@PROJECT@@.@@WORK@@.@@TABLE@@`
+FROM `@@PROJECT@@.@@WORK@@.@@DIFF_TABLE@@`
 WHERE snapshot_date = (
-  SELECT MAX(snapshot_date) FROM `@@PROJECT@@.@@WORK@@.@@TABLE@@`
+  SELECT MAX(snapshot_date) FROM `@@PROJECT@@.@@WORK@@.@@DIFF_TABLE@@`
 )
 """,
-  '@@PROJECT@@', project_id),
-  '@@WORK@@',    work_dataset),
-  '@@TABLE@@',   table_name),
-  '@@VIEW@@',    view_name);
+  '@@PROJECT@@',     project_id),
+  '@@WORK@@',        work_dataset),
+  '@@DIFF_TABLE@@',  diff_table),
+  '@@LATEST_VIEW@@', latest_view);
 
 
 -- ---------------------------------------------------------------------
@@ -367,12 +370,12 @@ SELECT
   group_labels                      AS logic_groups_by_suffix,
   unmatched_count                   AS suffix_unrecognized_views,
   LENGTH(diff_html)                 AS diff_html_length_chars
-FROM `@@PROJECT@@.@@WORK@@.@@VIEW@@`
+FROM `@@PROJECT@@.@@WORK@@.@@LATEST_VIEW@@`
 ORDER BY base_view_name
 """,
-  '@@PROJECT@@', project_id),
-  '@@WORK@@',    work_dataset),
-  '@@VIEW@@',    view_name);
+  '@@PROJECT@@',     project_id),
+  '@@WORK@@',        work_dataset),
+  '@@LATEST_VIEW@@', latest_view);
 
 -- 5-2 ロジックが割れている base（＝要確認のもの）
 EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(r"""
@@ -382,13 +385,13 @@ SELECT
   view_count                        AS views_in_base,
   group_count                       AS logic_group_count,
   group_labels                      AS logic_groups_by_suffix
-FROM `@@PROJECT@@.@@WORK@@.@@VIEW@@`
+FROM `@@PROJECT@@.@@WORK@@.@@LATEST_VIEW@@`
 WHERE has_multiple
 ORDER BY logic_group_count DESC, base_view_name
 """,
-  '@@PROJECT@@', project_id),
-  '@@WORK@@',    work_dataset),
-  '@@VIEW@@',    view_name);
+  '@@PROJECT@@',     project_id),
+  '@@WORK@@',        work_dataset),
+  '@@LATEST_VIEW@@', latest_view);
 
 -- 5-3 suffix を認識できなかった View（単独で 1 行ずつ並ぶ）
 EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(r"""
@@ -396,13 +399,13 @@ SELECT
   '5-3 suffix を認識できなかった View' AS check_name,
   base                              AS unrecognized_view_name,
   LENGTH(diff_html)                 AS diff_html_length_chars
-FROM `@@PROJECT@@.@@WORK@@.@@VIEW@@`
+FROM `@@PROJECT@@.@@WORK@@.@@LATEST_VIEW@@`
 WHERE unmatched_count > 0
 ORDER BY unrecognized_view_name
 """,
-  '@@PROJECT@@', project_id),
-  '@@WORK@@',    work_dataset),
-  '@@VIEW@@',    view_name);
+  '@@PROJECT@@',     project_id),
+  '@@WORK@@',        work_dataset),
+  '@@LATEST_VIEW@@', latest_view);
 
 -- 5-4 対象データセットと suffix（セクション 0 と同じ条件）
 EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(r"""
@@ -480,12 +483,12 @@ FROM (
   SELECT *,
     LAG(TO_JSON_STRING(group_labels)) OVER w AS prev_labels,
     TO_JSON_STRING(group_labels)      AS curr_labels
-  FROM `@@PROJECT@@.@@WORK@@.@@TABLE@@`
+  FROM `@@PROJECT@@.@@WORK@@.@@DIFF_TABLE@@`
   WINDOW w AS (PARTITION BY base ORDER BY snapshot_date)
 )
 WHERE prev_labels IS NOT NULL AND prev_labels != curr_labels
 ORDER BY changed_on DESC, base_view_name
 """,
-  '@@PROJECT@@', project_id),
-  '@@WORK@@',    work_dataset),
-  '@@TABLE@@',   table_name);
+  '@@PROJECT@@',    project_id),
+  '@@WORK@@',       work_dataset),
+  '@@DIFF_TABLE@@', diff_table);

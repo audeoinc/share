@@ -360,7 +360,7 @@ SET @@location = 'asia-northeast1';   -- DECLARE より前。region と同じ値
 
 DECLARE project_id   STRING DEFAULT 'my-project';
 DECLARE udf_dataset  STRING DEFAULT 'ops_meta';   -- UDF の置き場所
-DECLARE work_dataset STRING DEFAULT 'ops_meta';   -- view_logic_diff の置き場所
+DECLARE work_dataset STRING DEFAULT 'ops_meta';   -- テーブル / ビューの置き場所
 DECLARE region       STRING DEFAULT 'asia-northeast1';
 DECLARE tz           STRING DEFAULT 'Asia/Tokyo';
 DECLARE partition_expiration_days INT64 DEFAULT 400;
@@ -370,12 +370,15 @@ DECLARE suffix_pattern           STRING        DEFAULT r'_([A-Za-z]{4})$';
 DECLARE suffix_list              ARRAY<STRING> DEFAULT [];
 DECLARE analyze_options          STRING        DEFAULT '{"literalGroups":[],"mode":"class"}';
 
--- 作るオブジェクトの名前
-DECLARE object_prefix    STRING DEFAULT '';
-DECLARE object_suffix    STRING DEFAULT '';
-DECLARE object_base_name STRING DEFAULT 't_view_logic_diff';  -- t_=transaction / m_=master
-DECLARE udf_prefix       STRING DEFAULT '';
-DECLARE udf_suffix       STRING DEFAULT '';
+-- 作るオブジェクトの名前。prefix / suffix は UDF と テーブル・ビューで別に持つ
+DECLARE object_prefix STRING DEFAULT '';
+DECLARE object_suffix STRING DEFAULT '';
+DECLARE udf_prefix    STRING DEFAULT '';
+DECLARE udf_suffix    STRING DEFAULT '';
+
+-- base 名は作るオブジェクトごとに 1 つ
+DECLARE diff_table_base  STRING DEFAULT 't_view_logic_diff';  -- t_=transaction / m_=master
+DECLARE latest_view_base STRING DEFAULT 't_view_logic_diff';
 DECLARE info_fn_base     STRING DEFAULT 'VIEW_GROUP_INFO';
 DECLARE css_fn_base      STRING DEFAULT 'VIEW_GROUP_CSS';
 ```
@@ -386,15 +389,24 @@ DECLARE css_fn_base      STRING DEFAULT 'VIEW_GROUP_CSS';
 
 | 種別 | 組み立て |
 |---|---|
-| テーブル | `object_prefix` + `object_base_name` + `object_suffix` |
-| ビュー | `object_prefix` + `vw_` + `object_base_name` + `object_suffix` |
+| テーブル | `object_prefix` + `<base 名>` + `object_suffix` |
+| ビュー | `object_prefix` + `vw_` + `<base 名>` + `object_suffix` |
 | UDF | `udf_prefix` + `<関数の基本名>` + `udf_suffix` |
 
-`object_base_name` の先頭の `t_` / `m_` は transaction / master の区分。
-既定は `t_`（日次のスナップショットを積むテーブルのため）。
+base 名は**作るオブジェクトごとに 1 つ**持たせてある。オブジェクトが増えたときは
+`<名前>_base` の DECLARE を 1 行足し、組み立て先の `DECLARE <名前> STRING;` と
+`SET <名前> = CONCAT(…);`、本文で使う `@@…@@` を対で増やす。
 
-既定値のままなら `t_view_logic_diff` / `vw_t_view_logic_diff` /
-`VIEW_GROUP_INFO` / `VIEW_GROUP_CSS` になる。
+| 変数 | 作られるもの | 既定値 |
+|---|---|---|
+| `diff_table_base` | スナップショットを積むテーブル | `t_view_logic_diff` |
+| `latest_view_base` | 最新スナップショットだけのビュー | `vw_t_view_logic_diff` |
+| `info_fn_base` | 比較 HTML を返す UDF | `VIEW_GROUP_INFO` |
+| `css_fn_base` | テンプレート用 CSS を返す UDF | `VIEW_GROUP_CSS` |
+
+base 名の先頭の `t_` / `m_` は transaction / master の区分。既定は `t_`
+（日次のスナップショットを積むテーブルのため）。テーブルとビューは同じ base 名に
+してあるので、片方だけ変えたいときは片方の変数だけ書き換える。
 
 > **`udf_prefix` / `udf_suffix` / 関数の基本名は `view_group_html.sql` と
 > `build_table.sql` の両方にある。必ず同じ値にすること。** 食い違うと、
@@ -456,17 +468,19 @@ DECLARE exclude_view_patterns ARRAY<STRING> DEFAULT [r'_tmp$', r'_bk$', r'^wk_']
 **BigQuery は識別子をクエリ パラメータにできない。** `@param` が使えるのは値だけで、
 プロジェクト・データセット・関数名は渡せない。そこでスクリプト変数に持ち、
 `EXECUTE IMMEDIATE` に渡す前にテキスト置換する。`@@PROJECT@@` / `@@UDF@@` /
-`@@WORK@@` / `@@REGION@@` / `@@TZ@@` / `@@SRC@@` が置換される目印。
+`@@WORK@@` / `@@REGION@@` / `@@TZ@@` / `@@DIFF_TABLE@@` / `@@LATEST_VIEW@@` /
+`@@INFO_FN@@` / `@@CSS_FN@@` が置換される目印。
 
 ```sql
-EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
-INSERT INTO `@@PROJECT@@.@@WORK@@.view_logic_diff` …
+EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r"""
+INSERT INTO `@@PROJECT@@.@@WORK@@.@@DIFF_TABLE@@` …
 """,
-  '@@PROJECT@@', project_id),
-  '@@UDF@@',     udf_dataset),
-  '@@WORK@@',    work_dataset),
-  '@@REGION@@',  region),
-  '@@TZ@@',      tz);
+  '@@PROJECT@@',    project_id),
+  '@@UDF@@',        udf_dataset),
+  '@@WORK@@',       work_dataset),
+  '@@REGION@@',     region),
+  '@@TZ@@',         tz),
+  '@@DIFF_TABLE@@', diff_table);
 ```
 
 **この `REPLACE` の連鎖は一時 UDF にまとめてはいけない。** まとめると
@@ -558,12 +572,12 @@ Looker の操作のたびに UDF を回すのは重いので、スケジュー�
 `INFORMATION_SCHEMA` の中身は View をデプロイしたときしか変わらない。
 
 ```
-view_logic_diff  PARTITION BY snapshot_date CLUSTER BY base
+t_view_logic_diff  PARTITION BY snapshot_date CLUSTER BY base
   base / view_count / group_count / has_multiple
   group_labels / group_sizes / suffixes / unmatched_count / diff_html
 ```
 
-Looker Studio は `v_view_logic_diff_latest` を読むだけ。`base` をプルダウンにして
+Looker Studio は `vw_t_view_logic_diff` を読むだけ。`base` をプルダウンにして
 `diff_html` を Templated Record に渡す。パラメータもカスタムクエリも UDF も不要。
 
 パーティションに日付を積むので**履歴が残る**。「いつグループ構成が変わったか」を
@@ -576,7 +590,8 @@ base の切り出しと UDF に渡す `suffixList` は、同じ 1 つの `suffix
 
 事前生成テーブルができていれば、あとは読むだけ。
 
-1. **データを追加 → BigQuery** で `v_view_logic_diff_latest` を選ぶ
+1. **データを追加 → BigQuery** で `vw_t_view_logic_diff`（`latest_view_base` から
+   組み立てた名前）を選ぶ
    （カスタムクエリではなくテーブル選択でよい）
 2. **Templated Record** を配置し、表示対象のカラムに `diff_html` を指定
 3. **コントロール → プルダウン リスト**を置き、コントロール フィールドに `base`。
@@ -606,7 +621,7 @@ SELECT `<project>.<udf_dataset>.VIEW_GROUP_CSS`('{"mode": "class"}');
 ```sql
 SELECT base, view_count, group_count, group_labels, unmatched_count,
        LENGTH(diff_html) AS html_len
-FROM `<project>.<work_dataset>.v_view_logic_diff_latest`
+FROM `<project>.<work_dataset>.vw_t_view_logic_diff`
 ORDER BY base;
 ```
 
