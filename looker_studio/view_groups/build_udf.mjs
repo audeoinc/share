@@ -298,7 +298,17 @@ const embed = VIEW_GROUP_INFO(views, JSON.stringify({ suffixParts: S.SUFFIX_PART
 const css = VIEW_GROUP_CSS(JSON.stringify({ suffixParts: S.SUFFIX_PARTS }));
 
 const text = html.replace(/<[^>]*>/g, '');
-const used = [...new Set([...classed.matchAll(/class="(d[0-9a-z]+)"/g)].map((m) => m[1]))];
+// クラスの網羅は全レイアウトで見る。タブ（3 グループ）だけを見ていると、
+// 1 ペインや suffix 未認識の描き分けで増えたクラスを取りこぼす。
+// 取りこぼすと、テンプレートに貼った CSS を貼り直すまでそこだけ素で表示される。
+const classedAll = [
+  classed,
+  VIEW_GROUP_INFO(views.filter((v) => v.view_name.includes('_ab')),
+    JSON.stringify({ suffixParts: S.SUFFIX_PARTS, mode: 'class' })).html,
+  VIEW_GROUP_INFO([{ view_name: 'no_suffix_here', ddl: 'SELECT 1' }],
+    JSON.stringify({ suffixParts: S.SUFFIX_PARTS, mode: 'class' })).html,
+].join('');
+const used = [...new Set([...classedAll.matchAll(/class="(d[0-9a-z]+)"/g)].map((m) => m[1]))];
 const defined = new Set([...css.matchAll(/^\.(d[0-9a-z]+)\{/gm)].map((m) => m[1]));
 
 const checks = [
