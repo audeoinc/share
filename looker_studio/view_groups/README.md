@@ -293,7 +293,7 @@ BigQuery に実データを作って試せる。
 
 ```bash
 node build_sample_sql.mjs   # sample_data.sql / sample_teardown.sql を生成
-node test.mjs               # アナライザの検証（105 アサーション）
+node test.mjs               # アナライザの検証（140 アサーション）
 ```
 
 | ファイル | 内容 |
@@ -301,6 +301,27 @@ node test.mjs               # アナライザの検証（105 アサーション�
 | `sample_data.sql` | データセット 4 つ・ソース テーブル 18 本・View 9 本を作る |
 | `sample_teardown.sql` | 片付け（データセットごと DROP） |
 | `sample_views.js` | サンプルの定義。**SQL 生成とテストが同じものを参照する** |
+| `sample_complex.js` | 判定を痛めつけるための複雑な View 1 本（BigQuery には作らない） |
+
+### 複雑な SQL での検証
+
+単純な `SELECT` だけだと、実体名の検出（`FROM` / `JOIN` の位置判定）が素通りして
+しまう。`sample_complex.js` に**多段 CTE / CTE の相互参照 / UNNEST を伴うカンマ結合 /
+名前付きウィンドウ / QUALIFY / LEFT JOIN … USING / スカラー サブクエリ /
+EXISTS 相関サブクエリ / CASE / STRUCT / UNION ALL / バッククォートあり・なしの参照**
+を 1 本に詰めた View を置いて、次の両方を見ている。
+
+- **取りこぼしていないか** — 実体名を拾い損ねると、環境差なのに別グループに割れる
+- **拾いすぎていないか** — 実体名でないものを拾うと、本物の差を見逃す
+
+これで実際に 2 件の取りこぼしが見つかった。
+
+| 症状 | 原因 |
+|---|---|
+| `FROM a AS x, b AS y` の **2 つ目以降を拾えない** | 別名を読み飛ばしていなかった。suffix の伏せ字が効いていると症状が隠れる |
+| `ML.PREDICT(…)` を**実体名として拾う** | ドット区切りのパスを先に印付けしてから `(` を見ていた。関数が差し替わっても同じロジックに見えてしまう |
+
+`node preview.mjs` の最後のケースで、複雑な SQL の差分表示を目で確認できる。
 
 `PROJECT` を自分のプロジェクト ID に置換して実行する。
 ロケーションは `asia-northeast1` にしてあるので、必要なら書き換える。
@@ -381,7 +402,7 @@ ORDER BY table_name;
 強力なので、当否を人が確認できるようにしておく。
 
 ```bash
-node preview.mjs          # dist/preview.html を生成して検証（34 アサーション）
+node preview.mjs          # dist/preview.html を生成して検証（37 アサーション）
 node preview.mjs --check  # 生成せず検証だけ
 ```
 
@@ -389,7 +410,7 @@ node preview.mjs --check  # 生成せず検証だけ
 
 ```bash
 node build_udf.mjs          # 検証して view_group_html.sql を生成
-node build_udf.mjs --check  # 生成せず検証だけ（35 アサーション）
+node build_udf.mjs --check  # 生成せず検証だけ（39 アサーション）
 node check_sql.mjs          # build_table.sql と view_group_html.sql の突き合わせ
 ```
 
@@ -408,7 +429,7 @@ node check_sql.mjs          # build_table.sql と view_group_html.sql の突き�
 `render_groups` だけ）ので、2 つの UDF に分けて枠を 2 つ使う。
 
 ```
-viewlgc_analyze     素 21.6 KB → 最小化 10.1 KB（上限比 34%）
+viewlgc_analyze     素 22.2 KB → 最小化 10.4 KB（上限比 35%）
 viewlgc_render      素 31.9 KB → 最小化 21.6 KB（上限比 72%）
 viewlgc_group_css   素 33.2 KB → 最小化 22.3 KB（上限比 74%）
 ```

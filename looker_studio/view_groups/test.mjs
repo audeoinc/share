@@ -407,6 +407,137 @@ checks.push(['語の一部が一致しても別ロジックのままにする',
     ent('SELECT a FROM (SELECT 1) AS x') === '']);
   checks.push(['列参照は実体名にしない',
     ent('SELECT o.amount FROM d.t AS o WHERE o.k = 1') === 'd,t']);
+
+  // 実際の View に出てくる書き方で、拾いすぎ・取りこぼしが無いか
+  checks.push(['ワイルドカード テーブルを拾う',
+    ent('SELECT 1 FROM `p.d.events_*`') === '`p.d.events_*`']);
+  checks.push(['FOR SYSTEM_TIME AS OF が続いても拾う',
+    ent('SELECT 1 FROM `p.d.t` FOR SYSTEM_TIME AS OF ts') === '`p.d.t`']);
+  checks.push(['PIVOT / UNPIVOT が続いても拾う',
+    ent('SELECT * FROM `p.d.t` PIVOT(SUM(v) FOR k IN ("a"))') === '`p.d.t`' &&
+    ent('SELECT * FROM `p.d.t` UNPIVOT(v FOR k IN (a, b))') === '`p.d.t`']);
+  checks.push(['JOIN UNNEST は実体名にしない',
+    ent('SELECT 1 FROM `p.d.t` AS t JOIN UNNEST(t.a) AS x ON TRUE') === '`p.d.t`']);
+  checks.push(['テーブル関数（ML.PREDICT など）は実体名にしない',
+    ent('SELECT * FROM ML.PREDICT(MODEL `p.d.m`, TABLE `p.d.t`)') === '']);
+  checks.push(['UNION の両側から拾う',
+    ent('SELECT 1 FROM d.a UNION ALL SELECT 1 FROM d.b') === 'd,a,d,b']);
+  checks.push(['IN (SELECT … FROM …) の中も拾う',
+    ent('SELECT 1 FROM d.a WHERE k IN (SELECT k FROM d.b)') === 'd,a,d,b']);
+  checks.push(['入れ子の WITH の中も拾う',
+    ent('SELECT 1 FROM (WITH z AS (SELECT 1 FROM d.inner_t) SELECT * FROM z) AS s')
+      === 'd,inner_t,z']);
+  checks.push(['コメントの中の FROM に釣られない',
+    ent('SELECT 1 -- FROM fake_t\nFROM d.real_t') === 'd,real_t']);
+  checks.push(['文字列の中の FROM に釣られない',
+    ent("SELECT 'FROM fake_t' AS s FROM d.real_t") === 'd,real_t']);
+
+  // テーブル関数を実体名にすると、関数が差し替わっても同じロジックに見えてしまう
+  checks.push(['テーブル関数が違えば別グループ',
+    A.analyze([
+      { view_name: 'v_f_abjp', ddl: 'SELECT * FROM ML.PREDICT(MODEL `p.d.m`, TABLE `p.d.t`)' },
+      { view_name: 'v_f_abus', ddl: 'SELECT * FROM ML.FORECAST(MODEL `p.d.m`, TABLE `p.d.t`)' },
+    ], { suffixParts: [['ab'], ['jp', 'us']] }).bases[0].groupCount === 2]);
+}
+
+// --- 複雑な SQL での検証 ------------------------------------------------
+// 単純な SELECT だけだと実体名の検出が素通りしてしまうので、多段 CTE /
+// 名前付きウィンドウ / QUALIFY / UNION / UNNEST / 相関サブクエリを入れた
+// 1 本で、取りこぼしと拾いすぎの両方を見る。
+{
+  const C = require(join(here, 'sample_complex.js'));
+  const P = { suffixParts: C.COMPLEX_PARTS };
+  const groups = (muts) => A.analyze(C.complexRows(muts), P).bases[0];
+
+  const plain = groups();
+  checks.push(['複雑な SQL でもコピー展開なら 1 グループ', plain.groupCount === 1]);
+  checks.push(['複雑な SQL のパラメータは実体名と値だけ',
+    plain.groups[0].params.every((p) => ['entity', 'string', 'number'].includes(p.kind))]);
+  checks.push(['複雑な SQL で参照先が全部パラメータになる',
+    plain.groups[0].params.filter((p) => p.kind === 'entity').length >= 4]);
+  checks.push(['suffix と連動する国コードもパラメータになる',
+    plain.groups[0].params.some((p) => p.kind === 'string' &&
+      Object.values(p.values).join(',') === "'JP','UK','US'")]);
+
+  // 差を入れたら割れること。理由まで見て、意図した検出かを確かめる。
+  const split = (label, mutate, reason, kind) => {
+    const b = groups({ abus: mutate });
+    const g = b.groups.find((x) => x.miss);
+    const okReason = !reason || (g && g.miss.detail.reason === reason);
+    const okKind = !kind || (g && g.miss.detail.kind === kind);
+    checks.push([`複雑な SQL: ${label}`, b.groupCount === 2 && okReason && okKind]);
+  };
+  split('列名を変えると割れる',
+    (q) => q.replace('AS gross_amount', 'AS total_amount'), 'not-substitutable', 'ident');
+  split('CTE 名を変えると割れる',
+    (q) => q.split('daily').join('dly'), 'not-substitutable', 'ident');
+  split('別名を変えると割れる',
+    (q) => q.replace('AS o\n', 'AS ord\n'), 'not-substitutable', 'ident');
+  split('ウィンドウ名を変えると割れる',
+    (q) => q.split(' w ').join(' win ').replace('OVER w\n', 'OVER win\n'),
+    'not-substitutable', 'ident');
+  split('集約関数を変えると割れる',
+    (q) => q.replace('COUNT(DISTINCT r.order_id)', 'COUNT(r.order_id)'), 'length');
+  split('JOIN 種別を変えると割れる',
+    (q) => q.replace('LEFT JOIN', 'INNER JOIN'), 'not-substitutable', 'keyword');
+  split('条件を 1 本足すと割れる',
+    (q) => q.replace("AND o.status = 'CONFIRMED'",
+      "AND o.status = 'CONFIRMED'\n    AND o.is_test = FALSE"), 'length');
+  split('バッククォートを外すと割れる',
+    (q) => q.replace('`PRJ.ref_abus.calendar_abus`', 'PRJ.ref_abus.calendar_abus'), 'length');
+
+  // 方針どおり「同じグループのまま」になるもの。
+  // 差が消えるわけではなく、パラメータ一覧に出る。
+  const merged = (label, mutate, paramValue) => {
+    const b = groups({ abus: mutate });
+    const shown = JSON.stringify(b.groups[0] && b.groups[0].params);
+    checks.push([`複雑な SQL: ${label}`,
+      b.groupCount === 1 && (!paramValue || shown.includes(paramValue))]);
+  };
+  merged('しきい値の差は値としてパラメータ化する',
+    (q) => q.replace('>= 10000', '>= 20000'), '20000');
+  merged('参照先の差は実体名としてパラメータ化する',
+    (q) => q.replace('returns_abus', 'refunds_abus'), 'refunds_abus');
+
+  // 実体名の検出。取りこぼすと誤って割れ、拾いすぎると差を見逃す。
+  const ents = A.markEntities(A.tokenizeSql(C.complexSql('abjp')))
+    .filter((t) => t.kind === 'entity').map((t) => t.text);
+  checks.push(['複雑な SQL: バッククォートの参照を拾う',
+    ents.includes('`PRJ.mart_abjp.orders_abjp`') &&
+    ents.includes('`PRJ.ref_abjp.calendar_abjp`')]);
+  checks.push(['複雑な SQL: 裸の参照もドット区切りで拾う',
+    ents.includes('mart_abjp') && ents.includes('returns_abjp')]);
+  checks.push(['複雑な SQL: 相関サブクエリの中の参照も拾う',
+    ents.includes('`PRJ.mart_abjp.customers_abjp`')]);
+  checks.push(['複雑な SQL: UNNEST を実体名にしない', !ents.includes('UNNEST')]);
+  checks.push(['複雑な SQL: 別名を実体名にしない',
+    !ents.includes('o') && !ents.includes('cal') && !ents.includes('rt')]);
+  checks.push(['複雑な SQL: 列名を実体名にしない',
+    !ents.includes('order_date') && !ents.includes('gross_amount')]);
+}
+
+// カンマで並べたソースの取りこぼし（FROM a AS x, b AS y の b）
+// 別名を読み飛ばさないと 2 つ目以降にたどり着けない。suffix の伏せ字が
+// 効いていると症状が隠れるので、伏せ字を切って確かめる。
+{
+  const P = { suffixParts: [['ab'], ['jp', 'us']], suffixAware: false };
+  const two = (a, b) => A.analyze(
+    [{ view_name: 'v_c_abjp', ddl: a }, { view_name: 'v_c_abus', ddl: b }], P
+  ).bases[0].groupCount;
+  checks.push(['FROM a AS x, b AS y の 2 つ目も実体名として拾う',
+    two('SELECT 1 FROM t_abjp AS x, u_abjp AS y',
+        'SELECT 1 FROM t_abus AS x, u_abus AS y') === 1]);
+  checks.push(['AS を省いた別名でも 2 つ目を拾う',
+    two('SELECT 1 FROM t_abjp x, u_abjp y',
+        'SELECT 1 FROM t_abus x, u_abus y') === 1]);
+  checks.push(['3 つ並べても全部拾う',
+    two('SELECT 1 FROM a_abjp AS x, b_abjp AS y, c_abjp AS z',
+        'SELECT 1 FROM a_abus AS x, b_abus AS y, c_abus AS z') === 1]);
+  checks.push(['suffix と無関係な名前でも拾う',
+    A.analyze([
+      { view_name: 'v_c_abjp', ddl: 'SELECT 1 FROM t_abjp AS x, ref_alpha AS y' },
+      { view_name: 'v_c_abus', ddl: 'SELECT 1 FROM t_abus AS x, ref_beta AS y' },
+    ], { suffixParts: [['ab'], ['jp', 'us']] }).bases[0].groupCount === 1]);
 }
 
 // suffix を認識できなかった View

@@ -378,6 +378,16 @@ const embed = VIEW_GROUP_INFO(views, JSON.stringify({ suffixParts: S.SUFFIX_PART
 const css = VIEW_GROUP_CSS(JSON.stringify({ suffixParts: S.SUFFIX_PARTS }));
 
 const text = html.replace(/<[^>]*>/g, '');
+
+// 複雑な SQL を最小化後の本体に通す（多段 CTE / 名前付きウィンドウ / QUALIFY /
+// UNION / UNNEST / 相関サブクエリ）。素の analyze.js では test.mjs が見ている。
+const C = require(join(here, 'sample_complex.js'));
+const COMPLEX_OPTS = JSON.stringify({ suffixParts: C.COMPLEX_PARTS });
+const COMPLEX = VIEW_GROUP_INFO(
+  C.complexRows().map((r) => ({ view_name: r.view_name, ddl: r.ddl })), COMPLEX_OPTS);
+const COMPLEX_SPLIT = VIEW_GROUP_INFO(
+  C.complexRows({ abus: (q) => q.replace('AS gross_amount', 'AS total_amount') })
+    .map((r) => ({ view_name: r.view_name, ddl: r.ddl })), COMPLEX_OPTS);
 // クラスの網羅は全レイアウトで見る。タブ（3 グループ）だけを見ていると、
 // 1 ペインや suffix 未認識の描き分けで増えたクラスを取りこぼす。
 // 取りこぼすと、テンプレートに貼った CSS を貼り直すまでそこだけ素で表示される。
@@ -483,6 +493,16 @@ const checks = [
     !/"tokens"|"ddl"|"raw"/.test(VIEWLGC_ANALYZE(views, OPTS))],
   ['render は壊れた JSON でも落ちない',
     typeof VIEWLGC_RENDER('{ broken', OPTS) === 'string'],
+  // 複雑な SQL（多段 CTE / ウィンドウ / UNION / UNNEST / 相関サブクエリ）が
+  // 最小化した本体でも通ること。単純な SELECT だけだと実体名の検出が素通りする。
+  ['複雑な SQL でもコピー展開なら 1 グループ', COMPLEX.group_count === 1],
+  ['複雑な SQL でも HTML を返す',
+    COMPLEX.html.includes('vg-root') &&
+    COMPLEX.html.replace(/<[^>]*>/g, '').includes('QUALIFY')],
+  ['複雑な SQL のパラメータは実体名と値だけ',
+    COMPLEX.group_labels.length === 1 &&
+    /orders_/.test(JSON.stringify(COMPLEX.suffixes)) === false],
+  ['複雑な SQL で列名を変えると割れる', COMPLEX_SPLIT.group_count === 2],
 ];
 
 // サイズ検証

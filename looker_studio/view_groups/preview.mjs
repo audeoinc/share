@@ -50,12 +50,21 @@ const baseOdd = A.analyze([
     ddl: 'SELECT\n  order_date,\n  SUM(amount) AS amount\nFROM `p.legacy.orders`\nGROUP BY order_date' },
 ], OPTS).bases[0];
 
+// 複雑な SQL（多段 CTE / 名前付きウィンドウ / QUALIFY / UNION / UNNEST /
+// 相関サブクエリ）。1 本だけ列名を変えて、実際の差分表示を目で見られるようにする。
+const C = require(join(here, 'sample_complex.js'));
+const baseComplex = A.analyze(
+  C.complexRows({ abus: (q) => q.replace('AS gross_amount', 'AS total_amount') }),
+  { suffixParts: C.COMPLEX_PARTS }
+).bases[0];
+
 const cases = [
   { title: '3 グループ（既定 = タブ）', b: base3, opts: {} },
   { title: '2 グループ（基準 ＋ 比較 1 枚）', b: base2, opts: {} },
   { title: '1 グループ（基準タブのみ）', b: base1, opts: {} },
   { title: `${baseMany.groupCount} グループ（既定 = タブ）`, b: baseMany, opts: {} },
   { title: 'suffix 未認識（単独表示）', b: baseOdd, opts: {} },
+  { title: '複雑な SQL（多段 CTE / ウィンドウ / UNION）', b: baseComplex, opts: {} },
 ];
 
 const parts = cases.map((c) => ({ ...c, html: R.renderBase(c.b, c.opts) }));
@@ -133,6 +142,14 @@ const checks = [
       { view_name: 'v_v_abus', ddl: "SELECT a FROM t_abus WHERE z = 'amer'" },
     ], { suffixParts: [['ab'], ['jp', 'us']], substitutable: ['entity'] }).bases[0], {})
       .includes('equivalentLiterals')],
+  ['複雑な SQL も描ける',
+    parts[5].html.includes('vg-root') &&
+    parts[5].html.replace(/<[^>]*>/g, '').includes('QUALIFY')],
+  ['複雑な SQL は 2 グループでタブが 2 枚',
+    baseComplex.groupCount === 2 &&
+    (parts[5].html.match(/class="vg-tab /g) || []).length === 2],
+  ['複雑な SQL のパラメータに実体名の種別が出る',
+    parts[5].html.includes('実体名')],
   ['伏せ字は診断で見える表記に戻す',
     R.renderBase(A.analyze([
       { view_name: 'v_w_abjp', ddl: "SELECT a FROM t WHERE c = 'abjp'" },

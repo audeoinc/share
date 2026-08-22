@@ -149,12 +149,14 @@ function markEntities(tokens) {
         out[j] = { kind: 'entity', text: s.text };
         j = skip(j);
       } else if (s.kind === 'ident') {
-        // 直後が '(' なら関数呼び出し（UNNEST など）。実体名ではない。
-        const after = skip(j);
-        if (after < out.length && out[after].text === '(') break;
+        // ドット区切りのパスを集めてから決める。末尾の直後が '(' なら
+        // 実体名ではなく関数呼び出し（UNNEST(x) / ML.PREDICT(…) など）。
+        // 先に印を付けてしまうと ML.PREDICT が置換可能になり、
+        // 別の関数に差し替わっていても同じロジックに見えてしまう。
+        const path = [];
         let k = j;
         for (;;) {
-          out[k] = { kind: 'entity', text: out[k].text };
+          path.push(k);
           const dot = skip(k);
           if (dot < out.length && out[dot].text === '.') {
             const nm = skip(dot);
@@ -162,8 +164,19 @@ function markEntities(tokens) {
           }
           break;
         }
-        j = skip(k);
+        const end = skip(k);
+        if (end < out.length && out[end].text === '(') break;
+        for (const idx of path) out[idx] = { kind: 'entity', text: out[idx].text };
+        j = end;
       } else break;
+      // 別名（AS x / x）を読み飛ばす。読み飛ばさないと 'FROM a AS x, b AS y' の
+      // b にたどり着けず、2 つ目以降の実体名を取りこぼす。
+      if (j < out.length && out[j].kind === 'keyword' && out[j].text.toUpperCase() === 'AS') {
+        const nm = skip(j);
+        if (nm < out.length && (out[nm].kind === 'ident' || out[nm].kind === 'quoted')) j = skip(nm);
+      } else if (j < out.length && out[j].kind === 'ident') {
+        j = skip(j);
+      }
       // 'FROM a, b' のようにカンマで続くことがある
       if (j < out.length && out[j].text === ',') { j = skip(j); continue; }
       break;
