@@ -127,12 +127,12 @@ const checks = [
       { view_name: 'v_x_abjp', ddl: "SELECT a FROM t_abjp WHERE c = 'JP'" },
       { view_name: 'v_x_abus', ddl: "SELECT a FROM t_abus WHERE c = 'US'" },
     ], { suffixParts: [['ab'], ['jp', 'us']] }).bases[0].groupCount === 1],
-  ['literalGroups の案内を出す',
+  ['同値リテラルの案内を出す',
     R.renderBase(A.analyze([
       { view_name: 'v_v_abjp', ddl: "SELECT a FROM t_abjp WHERE z = 'apac'" },
       { view_name: 'v_v_abus', ddl: "SELECT a FROM t_abus WHERE z = 'amer'" },
     ], { suffixParts: [['ab'], ['jp', 'us']] }).bases[0], {})
-      .includes('literalGroups')],
+      .includes('equivalentLiterals')],
   ['伏せ字は診断で見える表記に戻す',
     R.renderBase(A.analyze([
       { view_name: 'v_w_abjp', ddl: "SELECT a FROM t WHERE c = 'abjp'" },

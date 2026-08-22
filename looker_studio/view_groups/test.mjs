@@ -233,6 +233,46 @@ checks.push(['数値リテラルも並べれば同一視できる',
     { view_name: 'v_m_abjp', ddl: 'SELECT a FROM t_abjp WHERE region_id = 1' },
     { view_name: 'v_m_abus', ddl: 'SELECT a FROM t_abus WHERE region_id = 2' },
   ], { ...OPTS, literalGroups: [['1', '2']] }).bases[0].groupCount === 1]);
+
+// 同値リテラルの一覧を 1 本にまとめる（equivalentLiterals）
+// "suffix" は「その View 自身の suffix とその区分」を表す予約語。
+// これだけは View ごとに中身が変わるので値を並べて書けない。
+const eqRows = [
+  { view_name: 'v_e_abjp', ddl: "SELECT 'aa' AS id, 'JP' AS c FROM t_abjp" },
+  { view_name: 'v_e_abus', ddl: "SELECT 'bb' AS id, 'US' AS c FROM t_abus" },
+];
+const eqCount = (o) => A.analyze(eqRows, { ...OPTS, ...o }).bases[0].groupCount;
+checks.push(['一覧に suffix と組を並べれば両方効く',
+  eqCount({ equivalentLiterals: ['suffix', ['aa', 'bb']] }) === 1]);
+checks.push(['suffix を書かなければ suffix 語彙は効かない',
+  eqCount({ equivalentLiterals: [['aa', 'bb']] }) === 2]);
+checks.push(['suffix だけなら連動しない値は残る',
+  eqCount({ equivalentLiterals: ['suffix'] }) === 2]);
+checks.push(['組が違えば同一視しない（一覧でも）',
+  A.analyze([
+    { view_name: 'v_e_abjp', ddl: "SELECT 'aa' AS id FROM t_abjp" },
+    { view_name: 'v_e_abus', ddl: "SELECT 'cc' AS id FROM t_abus" },
+  ], { ...OPTS, equivalentLiterals: ['suffix', ['aa', 'bb'], ['cc', 'dd']] })
+    .bases[0].groupCount === 2]);
+checks.push(['1 組だけを 1 段で書いても受ける',
+  A.analyze([
+    { view_name: 'v_e_abjp', ddl: "SELECT 'aa' AS id FROM t_abjp" },
+    { view_name: 'v_e_abus', ddl: "SELECT 'bb' AS id FROM t_abus" },
+  ], { ...OPTS, equivalentLiterals: ['aa', 'bb'] }).bases[0].groupCount === 1]);
+checks.push(['equivalentLiterals が無ければ従来の 2 つの設定で動く',
+  A.analyze(manual, { ...OPTS, literalGroups: [['apac', 'amer', 'emea']] })
+    .bases[0].groupCount === 1]);
+checks.push(['equivalentLiterals を書くと literalGroups は見ない',
+  A.analyze(manual, {
+    ...OPTS,
+    literalGroups: [['apac', 'amer', 'emea']],
+    equivalentLiterals: ['suffix'],
+  }).bases[0].groupCount === 3]);
+checks.push(['parseEquivalents: 予約語と組を仕分ける',
+  (() => {
+    const r = A.parseEquivalents({ equivalentLiterals: ['suffix', ['aa', 'bb']] });
+    return r.useWords === true && r.groups.length === 1 && r.groups[0][1] === 'bb';
+  })()]);
 checks.push(['語の一部には効かせない',
   A.maskTokens(A.tokenizeSql("SELECT 'apacific' AS x"), null, null,
     { literalGroups: [['apac']] })

@@ -86,32 +86,48 @@ WHERE country = 'US'   -- v_x_abus
 
 `literalSuffixWords: false` で無効化できる。
 
-#### suffix から導けない対応は手で並べる（literalGroups）
+#### 同値とみなす文字列は 1 本の一覧で持つ（equivalentLiterals）
 
-`'apac'` ↔ `'amer'` のように、**suffix とは別の語彙で連動している**値は
-機械的には導けない。数が多くないのなら、並べて持つのが確実で見通しもよい。
+`'aa'` ↔ `'bb'` や `'apac'` ↔ `'amer'` のように、**suffix とは別の語彙で連動して
+いる**値は機械的には導けない。数が多くないのなら、並べて持つのが確実で
+見通しもよい。**suffix 由来の語彙も含めて 1 本の配列**に並べる。
 
 ```json
-"literalGroups": [
-  ["apac", "amer", "emea"],
-  ["JPY", "USD", "GBP"]
+"equivalentLiterals": [
+  "suffix",
+  ["aa", "bb"],
+  ["cc", "dd"]
 ]
 ```
 
+- **`"suffix"` は予約語**で、「その View 自身の suffix とその区分」を表す
+  （`v_x_abjp` なら `abjp` / `ab` / `jp`）。**View ごとに中身が変わるので値を
+  並べて書けない**。これがこの一覧で唯一、View に依存する要素
+- **明示の組は View に依存しない。** `['aa','bb']` はどの View でも効く
 - **1 つの配列が 1 つの同値類**。別の配列どうしは同一視しないので、
-  `'apac'` と `'JPY'` が意図せず同じになることはない
-- 照合は suffix 語彙と同じ規則。**文字列リテラルと数値リテラルの値そのもの**を
-  大文字小文字を無視して見る。`'x_apac_y'` の `apac` は巻き込まない
-- 1 段の配列（`["apac","amer"]`）も 1 組として受ける
+  `'aa'` と `'cc'` が意図せず同じになることはない
+- 照合は**文字列リテラルと数値リテラルの値そのもの**を大文字小文字を無視して
+  見る。`'x_aa_y'` の `aa` は巻き込まない
 - 数値も並べられる（`["1","2","3"]`）
-- `suffixAware` とは独立に効く
+- 組を 1 つだけ書くつもりで `["aa","bb"]` と書いても、配列が 1 つも無ければ
+  全体を 1 組として受ける（黙って無視しない）
+- `suffixAware`（識別子の中の suffix 置換）とは独立に効く
+
+> **`"suffix"` と明示の組では、取り違えの検知力が違う。** `"suffix"` は
+> その View 自身の suffix としか照合しないので、`v_x_abus` に `'JP'` と
+> 書いてあれば差として残る（＝取り違えに気づける）。明示の組は View に
+> 依存しないので、`v_x_abjp` に `'bb'`、`v_x_abus` に `'aa'` という**入れ違いも
+> 吸収してしまう**。位置まで対応づけたい場合は言ってもらえれば足せる。
+
+旧い書き方（`literalSuffixWords` と `literalGroups` を別々に持つ）もそのまま
+動く。`equivalentLiterals` を書いたときだけ、そちらが一覧の唯一の定義になる。
 
 並べていない値は従来どおりロジック差として残る。
 **すべての**リテラル差を無視したいなら `substitutable` に `string` / `number` を
 足すが、そちらは `'A'` と `'B'` の差も消える。
 
 何を伏せ字にしたかは「なぜ別グループになったか」に
-`⟨suffix⟩` / `⟨literalGroups[1]⟩` として出るので、効きすぎていないか確かめられる。
+`⟨suffix⟩` / `⟨同値リテラル 1 組目⟩` として出るので、効きすぎていないか確かめられる。
 
 ### 取得元は VIEWS.view_definition を使う
 
@@ -212,7 +228,7 @@ node build_udf.mjs
 3. 表示に関わる設定（`mode` や色）を変えたら `template_style.html` も貼り直す
 
 > UDF は `analyze_options` を実行時に受け取るので、**suffix 規則や
-> `literalGroups` を変えるだけなら UDF の作り直しは不要**。
+> `equivalentLiterals` を変えるだけなら UDF の作り直しは不要**。
 > `build_table.sql` の再実行だけでよい。
 
 `analyze_options` に書けるキーは `view_group_html.sql` の冒頭に一覧がある。
@@ -239,7 +255,7 @@ BigQuery に実データを作って試せる。
 
 ```bash
 node build_sample_sql.mjs   # sample_data.sql / sample_teardown.sql を生成
-node test.mjs               # アナライザの検証（72 アサーション）
+node test.mjs               # アナライザの検証（80 アサーション）
 ```
 
 | ファイル | 内容 |
@@ -353,11 +369,12 @@ HTML とメタデータを 1 回の呼び出しで返すのは、事前生成テ
 素の連結は約 45 KB あって確実に弾かれるので、esbuild で最小化してから埋め込む。
 
 ```
-viewlgc_group_info  素 48.4 KB → 最小化 28.7 KB（上限比 96%）
-viewlgc_group_css   素 48.1 KB → 最小化 28.4 KB（上限比 95%）
+viewlgc_group_info  素 49.5 KB → 最小化 29.3 KB（上限比 98%）
+viewlgc_group_css   素 49.2 KB → 最小化 29.0 KB（上限比 97%）
 ```
 
-3-way 系と `alphaMap` を外しているが、**残りは 32 KB に対して 3.2 KB ほど**。
+3-way 系と `alphaMap` を外しているが、**残りは 32 KB に対して 2.7 KB ほど**
+（生成器の自主規制 30 KB に対しては 0.7 KB）。
 これ以上大きく機能を足すなら `OPTIONS(library=["gs://…"])` への移行を検討する。それでも枠は広くないので、
 大きく機能を足すときは `OPTIONS(library=["gs://…"])` への移行を検討する。
 
@@ -408,7 +425,7 @@ DECLARE snapshot_time_zone STRING DEFAULT 'Asia/Tokyo';
 DECLARE partition_expiration_days INT64 DEFAULT 400;
 DECLARE suffix_pattern  STRING        DEFAULT r'_([A-Za-z]{4})$';
 DECLARE suffix_list     ARRAY<STRING> DEFAULT [];
-DECLARE analyze_options STRING        DEFAULT '{"literalGroups":[],"mode":"class"}';
+DECLARE analyze_options STRING        DEFAULT '{"equivalentLiterals":["suffix"],"mode":"class"}';
 
 -- [C] 導出・内部用。編集しない
 DECLARE job_region STRING DEFAULT @@location;
@@ -485,7 +502,7 @@ DECLARE target_project_id STRING DEFAULT NULL;
 | `analysis_exclude_object_patterns` | 落とす View 名。include のあとに効く |
 | `suffix_pattern` | データセット名から suffix を切り出す正規表現（1 つ目のキャプチャ） |
 | `suffix_list` | suffix 一覧。空なら `suffix_pattern` で自動抽出。データセット名から導けないときだけ並べる |
-| `analyze_options` | UDF に渡す解析オプション（JSON）。`literalGroups` をここで足せば再生成が要らない |
+| `analyze_options` | UDF に渡す解析オプション（JSON）。`equivalentLiterals` をここで足せば再生成が要らない |
 | `snapshot_time_zone` | `snapshot_date` の基準タイムゾーン |
 | `partition_expiration_days` | 履歴の保持日数 |
 

@@ -252,6 +252,41 @@ function buildLiteralMap(groups) {
 }
 
 /**
+ * 「同じグループとみなす文字列の組」を 1 本の配列で受ける。
+ *
+ *   equivalentLiterals: ["suffix", ["aa","bb"], ["cc","dd"]]
+ *
+ * "suffix" は予約語で、**その View 自身の** suffix とその区分（前後半）を表す。
+ * これだけは View ごとに中身が変わる（v_x_abjp なら abjp / ab / jp）ので、
+ * 値を並べて書けない。ほかの組は View に関係なく、値が一致すれば効く。
+ *
+ * 旧い書き方（literalSuffixWords と literalGroups を別々に持つ）も受ける。
+ * equivalentLiterals を書いたときだけ、そちらが一覧の唯一の定義になる。
+ */
+function parseEquivalents(opts) {
+  const o = opts || {};
+  const list = o.equivalentLiterals;
+  if (Array.isArray(list)) {
+    let useWords = false;
+    const groups = [];
+    const loose = [];
+    for (const e of list) {
+      if (Array.isArray(e)) groups.push(e);
+      else if (String(e).toLowerCase() === 'suffix') useWords = true;
+      else if (e != null) loose.push(e);
+    }
+    // 組を 1 つだけ書くときに ["aa","bb"] と書いてしまうのはありがちなので、
+    // 配列が 1 つも無ければ全体を 1 組として受ける（黙って無視しない）。
+    if (groups.length === 0 && loose.length > 0) groups.push(loose);
+    return { useWords, groups: groups.length > 0 ? groups : null };
+  }
+  return {
+    useWords: o.literalSuffixWords !== false,
+    groups: Array.isArray(o.literalGroups) ? o.literalGroups : null,
+  };
+}
+
+/**
  * 比較用のトークン列から「差ではないと分かっている違い」を伏せ字にする。
  *
  * 1. その View 自身の suffix（文字列として、どのトークンでも）
@@ -276,9 +311,9 @@ function maskTokens(tokens, suffix, parts, opts) {
   const s = String(suffix || '');
   const useSuffix = s.length >= 2;
   // リテラルの値の照合。suffix と連動する国コードなどを吸収する。
-  const words = (useSuffix && !(opts && opts.literalSuffixWords === false))
-    ? suffixWords(s, parts) : [];
-  const map = buildLiteralMap(opts && opts.literalGroups);
+  const eq = parseEquivalents(opts);
+  const words = (useSuffix && eq.useWords) ? suffixWords(s, parts) : [];
+  const map = buildLiteralMap(eq.groups);
   if (!useSuffix && words.length === 0 && !map) return tokens;
   return tokens.map((t) => {
     if (t.kind === 'space') return t;
@@ -484,6 +519,7 @@ function analyze(rows, opts) {
 
 module.exports = {
   tokenizeSql, normalizeSpace, stripOptionsClause, maskTokens, suffixWords, buildLiteralMap,
+  parseEquivalents,
   extractSuffix, expandSuffixParts, alphaMap, alphaMapDetail,
   parameterize, groupByLogic, analyze,
   DEFAULT_SUFFIX_RE, DEFAULT_SUBSTITUTABLE, KEYWORDS,

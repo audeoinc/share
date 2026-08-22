@@ -111,7 +111,7 @@ function missTable(groups) {
   // 見えるので、何を伏せたか分かる表記に戻す。
   const unmask = (s) => String(s == null ? '' : s)
     .split('\u0000').join('⟨suffix⟩')
-    .replace(/\u0001(\d+)\u0001/g, '⟨literalGroups[$1]⟩');
+    .replace(/\u0001(\d+)\u0001/g, '⟨同値リテラル $1 組目⟩');
   const rows = groups.filter((g) => g.miss).map((g) => {
     const d = g.miss.detail;
     const what = d.reason === 'length'
@@ -137,8 +137,9 @@ function missTable(groups) {
       ` を指定すると<b>すべての</b>リテラル差が無視されます` +
       `（<code class="vg-mcode">'A'</code> と <code class="vg-mcode">'B'</code> の差も消えます）。` +
       `<br>特定の値だけ同一視したいなら、` +
-      `<code class="vg-mcode">"literalGroups": [["apac","amer","emea"]]</code>` +
-      ` のように組で並べます。</div>`
+      `<code class="vg-mcode">"equivalentLiterals": ["suffix", ["apac","amer","emea"]]</code>` +
+      ` のように組で並べます（<code class="vg-mcode">"suffix"</code> は` +
+      `その View 自身の suffix を表す予約語）。</div>`
     : '';
   return `<details class="vg-params vg-miss"><summary class="vg-psummary">` +
     `なぜ別グループになったか</summary>${hint}` +

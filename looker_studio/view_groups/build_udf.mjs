@@ -557,13 +557,19 @@ ASSERT REGEXP_CONTAINS(udf_render_function_name, r'^[A-Za-z0-9_]+$') AS
 --                 ["ident","quoted","number","string"]
 --   suffixAware   比較の前に自分の suffix を伏せ字にする（既定 true）。
 --                 リテラルに入った suffix でグループが割れるのを防ぐ
---   literalSuffixWords リテラルの値を suffix 語彙と照合する（既定 true）。
---                 'JP' / 'US' のように suffix そのものではないが連動する値を、
---                 引用符の中身がまるごと一致したときだけ吸収する
---   literalGroups suffix から導けない同値リテラルを手で並べる。
---                 [["apac","amer","emea"], ["JPY","USD","GBP"]]
---                 1 つの配列が 1 つの同値類。別の配列どうしは同一視しない。
---                 こちらも値の全体が一致したときだけ効く
+--   equivalentLiterals 同じグループとみなす文字列の組を 1 本の配列で並べる。
+--                 ["suffix", ["aa","bb"], ["cc","dd"]]
+--                 "suffix" は予約語で、その View 自身の suffix とその区分
+--                 （abjp なら abjp / ab / jp）を表す。View ごとに中身が変わる
+--                 ので値を並べて書けない。ほかの組は View に関係なく効く。
+--                 1 つの配列が 1 つの同値類で、別の配列どうしは同一視しない
+--                 （'aa' と 'cc' は別のまま）。照合は値の全体が一致したとき
+--                 だけで、'x_aa_y' の aa は巻き込まない。大文字小文字は無視。
+--                 文字列リテラルと数値リテラルが対象。
+--   literalSuffixWords / literalGroups
+--                 equivalentLiterals を書く前の旧い書き方。前者が "suffix"、
+--                 後者が組の並びに当たる。equivalentLiterals を書くと
+--                 そちらが一覧の唯一の定義になり、この 2 つは見ない
 --   includeUnmatched suffix を認識できなかった View を単独の base として
 --                 表示する（既定 true）。false で従来どおり除外
 --   stripOptions  OPTIONS( … ) 句を落としてから比較する（既定 true）
