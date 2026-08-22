@@ -42,15 +42,14 @@ DECLARE tz           STRING DEFAULT 'Asia/Tokyo'; -- snapshot_date の基準
 DECLARE partition_expiration_days INT64 DEFAULT 400;  -- 履歴の保持日数
 
 -- 作るオブジェクトの名前。命名規則に沿って組み立てる。
---   テーブル: object_prefix + <kind>_ + object_base_name + object_suffix
---   ビュー  : object_prefix + vw_<kind>_ + object_base_name + object_suffix
+--   テーブル: object_prefix + object_base_name + object_suffix
+--   ビュー  : object_prefix + vw_ + object_base_name + object_suffix
 --   UDF     : udf_prefix + <関数の基本名> + udf_suffix
--- kind は 't'（transaction）か 'm'（master）。
--- このテーブルは日次のスナップショットを積むので 't'。
+-- object_base_name の先頭の t_ / m_ は transaction / master の区分。
+-- このテーブルは日次のスナップショットを積むので t_。
 DECLARE object_prefix    STRING DEFAULT '';
 DECLARE object_suffix    STRING DEFAULT '';
-DECLARE object_kind      STRING DEFAULT 't';
-DECLARE object_base_name STRING DEFAULT 'view_logic_diff';
+DECLARE object_base_name STRING DEFAULT 't_view_logic_diff';
 
 -- UDF 側は view_group_html.sql と同じ値にすること。食い違うと関数が見つからない。
 DECLARE udf_prefix   STRING DEFAULT '';
@@ -100,17 +99,14 @@ DECLARE view_name_cond STRING;  -- view の include/exclude から組み立て�
 DECLARE n_datasets  INT64;
 DECLARE n_views     INT64;
 
-IF object_kind NOT IN ('t', 'm') THEN
-  RAISE USING MESSAGE = "object_kind は 't'（transaction）か 'm'（master）にしてください。";
-END IF;
 IF object_base_name = '' OR info_fn_base = '' OR css_fn_base = '' THEN
   RAISE USING MESSAGE = 'object_base_name / info_fn_base / css_fn_base は空にできません。';
 END IF;
 
 -- 命名規則どおりに組み立てる。ビューは最新スナップショットだけを返すが、
 -- テーブルと同じ base 名で vw_ が付く形にそろえてある。
-SET table_name = CONCAT(object_prefix, object_kind, '_', object_base_name, object_suffix);
-SET view_name  = CONCAT(object_prefix, 'vw_', object_kind, '_', object_base_name, object_suffix);
+SET table_name = CONCAT(object_prefix, object_base_name, object_suffix);
+SET view_name  = CONCAT(object_prefix, 'vw_', object_base_name, object_suffix);
 SET info_fn    = CONCAT(udf_prefix, info_fn_base, udf_suffix);
 SET css_fn     = CONCAT(udf_prefix, css_fn_base, udf_suffix);
 
@@ -321,7 +317,7 @@ USING suffix_list AS suffix_list, analyze_options AS analyze_options;
 
 -- ---------------------------------------------------------------------
 -- 3. Looker Studio が読むビュー（最新スナップショットだけ・初回のみ）
---    名前は object_prefix + vw_<kind>_ + object_base_name + object_suffix。
+--    名前は object_prefix + vw_ + object_base_name + object_suffix。
 -- ---------------------------------------------------------------------
 EXECUTE IMMEDIATE REPLACE(REPLACE(REPLACE(REPLACE(r"""
 CREATE OR REPLACE VIEW `@@PROJECT@@.@@WORK@@.@@VIEW@@` AS

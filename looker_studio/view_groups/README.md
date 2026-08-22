@@ -373,8 +373,7 @@ DECLARE analyze_options          STRING        DEFAULT '{"literalGroups":[],"mod
 -- 作るオブジェクトの名前
 DECLARE object_prefix    STRING DEFAULT '';
 DECLARE object_suffix    STRING DEFAULT '';
-DECLARE object_kind      STRING DEFAULT 't';   -- t=transaction / m=master
-DECLARE object_base_name STRING DEFAULT 'view_logic_diff';
+DECLARE object_base_name STRING DEFAULT 't_view_logic_diff';  -- t_=transaction / m_=master
 DECLARE udf_prefix       STRING DEFAULT '';
 DECLARE udf_suffix       STRING DEFAULT '';
 DECLARE info_fn_base     STRING DEFAULT 'VIEW_GROUP_INFO';
@@ -387,12 +386,12 @@ DECLARE css_fn_base      STRING DEFAULT 'VIEW_GROUP_CSS';
 
 | 種別 | 組み立て |
 |---|---|
-| テーブル | `object_prefix` + `<kind>_` + `object_base_name` + `object_suffix` |
-| ビュー | `object_prefix` + `vw_<kind>_` + `object_base_name` + `object_suffix` |
+| テーブル | `object_prefix` + `object_base_name` + `object_suffix` |
+| ビュー | `object_prefix` + `vw_` + `object_base_name` + `object_suffix` |
 | UDF | `udf_prefix` + `<関数の基本名>` + `udf_suffix` |
 
-`<kind>` は `t`（transaction）か `m`（master）。既定は `t`
-（日次のスナップショットを積むテーブルのため）。それ以外を書くと `RAISE` で止まる。
+`object_base_name` の先頭の `t_` / `m_` は transaction / master の区分。
+既定は `t_`（日次のスナップショットを積むテーブルのため）。
 
 既定値のままなら `t_view_logic_diff` / `vw_t_view_logic_diff` /
 `VIEW_GROUP_INFO` / `VIEW_GROUP_CSS` になる。
