@@ -1,5 +1,22 @@
 # 1.5.0-032
 
+- Fixed `WITH cte AS (...) (SELECT ...)` -- a CTE list followed by a *parenthesized*
+  main query -- throwing "QueryParser: トップレベルのSELECT Clauseが見つかりません"
+  (engine). GoogleSQL's `query_expr` is `[WITH ...] { select | ( query_expr ) | set_op }`,
+  so the parentheses after the CTE list are valid syntax, but ClauseParser only looks for
+  a depth-0 SELECT and the SELECT sits at depth 1 here. Neither existing unwrapper
+  applied: `#stripWrappingParentheses` requires the *query* to start with `(`, and
+  `#stripStatementBodyParentheses` only fires right after a depth-0 `AS`. QueryParser now
+  checks, after CTE parsing, whether the main-query tokens (from `main_start_index`) are
+  wholly wrapped in parentheses; if so it re-parses the inner query and prepends this
+  level's CTEs (outer CTEs first, so an inner `WITH` can still reference them). A
+  parenthesized body that is itself a set operation or carries its own `WITH` resolves
+  too; `WITH ... (SELECT ...) UNION ALL (SELECT ...)` still takes the set-operation path
+  because the closing parenthesis is not the last token. Known limitation (unchanged):
+  trailing clauses after the parenthesized body (`WITH a AS (...) (SELECT ...) ORDER BY 1`)
+  are still unsupported, as they are for the non-CTE form. Test: test_v1_5_0_073. Bundle
+  rebuilt (sha256 f448d53..., 463531 bytes); test:release 53 / golden 48 PASS.
+
 - Fixed untyped STRUCT field aliases `STRUCT(expr AS name, ...)` throwing
   "ExpressionParser: expected \")\", but found \"AS\"" in non-recoverable positions
   (engine). The function-call argument loop never consumed a struct field's

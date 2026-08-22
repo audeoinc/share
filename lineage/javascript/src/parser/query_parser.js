@@ -85,6 +85,39 @@ class QueryParser {
 
     const cteResult = this.#parseCommonTableExpressions(contentTokens);
 
+    /*
+     * WITH 句の後ろのメインQueryが丸ごと括弧に包まれている形。
+     *
+     *   WITH cte AS (SELECT ...) (SELECT ... FROM cte)
+     *
+     * GoogleSQL の query_expr は `[WITH ...] { select | ( query_expr ) | set_op }`
+     * なので、CTE の後ろに括弧付きクエリを置くのは正しい構文。しかし ClauseParser は
+     * 深さ0の SELECT を探すため、この形では SELECT が深さ1に入り
+     * 「トップレベルの SELECT Clause が見つかりません」になっていた。
+     * 括弧内をメインQueryとして再解析し、この階層で解析済みの CTE を前に連結する
+     * （外側 CTE のほうが先に定義されるため、内側 CTE から参照できる順序を保つ）。
+     */
+    if (cteResult.main_start_index > 0) {
+      const mainQueryTokens = contentTokens.slice(cteResult.main_start_index);
+      const innerMainTokens = this.#stripWrappingParentheses(mainQueryTokens);
+
+      if (innerMainTokens) {
+        const mainQuery = new QueryParser(this.#normalizeTokenDepth(innerMainTokens), {
+          isSubquery: this.isSubquery,
+          disableSetOperations: this.disableSetOperations
+        }).parse();
+
+        mainQuery.recursive = cteResult.recursive || Boolean(mainQuery.recursive);
+        mainQuery.common_table_expressions = [
+          ...cteResult.ctes,
+          ...(mainQuery.common_table_expressions || [])
+        ];
+        mainQuery.start_token_seq = contentTokens[0].token_seq;
+        mainQuery.end_token_seq = this.#findLastMeaningfulToken(contentTokens).token_seq;
+        return mainQuery;
+      }
+    }
+
     if (!this.disableSetOperations) {
       const mainTokens = contentTokens.slice(cteResult.main_start_index);
       const setOperation = this.#splitSetOperations(mainTokens);
