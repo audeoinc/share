@@ -531,6 +531,14 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
     部分的にしか権限が無いデータセットが STEP 1 を通過して STEP 3 で落ちるのを防ぐため。
   - コストはソースデータセット数 × 1 ジョブ／run（バイト課金なし）。FALSE で従来動作。
   - 全滅した場合は ASSERT で失敗させる。
+- **project 単位の穴も塞いだ**：`source_datasets` を解決する SCHEMATA ループ自体が
+  project 全体の Access Denied で落ちうる（データセット単位のプローブに到達する前）。
+  この `EXECUTE IMMEDIATE` も `BEGIN ... EXCEPTION WHEN ERROR THEN ... END` で包み、
+  到達不能な project は `inaccessible_source_datasets`（dataset_id = NULL）に記録して継続。
+  `skip_inaccessible_source_datasets = FALSE` のときは素の `RAISE` で元のエラーを再送出する。
+- **なぜ捕捉できるか**：ソース参照はすべて動的（`EXECUTE IMMEDIATE`）なので、権限エラーは
+  その文の**実行時エラー**として BEGIN ブロック内で発生する＝例外ハンドラで捕まる。
+  静的にテーブル名を書いていると文の検証段階で落ちて捕捉できないため、この形が前提。
 - **解析への影響**：外したデータセットのテーブルはメタデータに存在しなくなるため、
   §4.6 の分類では「消えたソース」扱い＝WARNING（公開可）であり FAILED にはならない。
 - SQL のみ／エンジン不変。**BigQuery 未検証**。

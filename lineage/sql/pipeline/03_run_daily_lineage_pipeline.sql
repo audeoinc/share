@@ -705,11 +705,27 @@ BEGIN
     dataset_id STRING
   );
 
+  -- Everything that could not be read is collected here (a whole project when its
+  -- SCHEMATA listing is denied, individual datasets from the probe below) and
+  -- reported once the source set is final. dataset_id is NULL for a whole project.
+  CREATE OR REPLACE TEMP TABLE inaccessible_source_datasets (
+    project_id STRING,
+    dataset_id STRING,
+    error_message STRING
+  );
+
   FOR src IN (
     SELECT project_id, dataset_include_patterns, dataset_exclude_patterns
     FROM UNNEST(source_project_filters)
   )
   DO
+    -- A source project whose region-wide SCHEMATA listing is denied would abort the
+    -- whole run here, before the per-dataset probe below ever gets a chance. Catch
+    -- it so an unreachable project is skipped like an unreadable dataset. The
+    -- reference is dynamic (EXECUTE IMMEDIATE), so the denial is a runtime error of
+    -- this statement and the handler sees it. When the operator asked for the strict
+    -- behavior, re-raise unchanged.
+    BEGIN
     EXECUTE IMMEDIATE FORMAT(
       'INSERT INTO source_datasets (project_id, dataset_id) '
       -- Preserve the real dataset-id case: it is used to build the
@@ -732,11 +748,18 @@ BEGIN
     USING
       COALESCE(src.dataset_include_patterns, CAST([] AS ARRAY<STRING>)) AS inc,
       COALESCE(src.dataset_exclude_patterns, CAST([] AS ARRAY<STRING>)) AS exc;
+    EXCEPTION WHEN ERROR THEN
+      IF NOT skip_inaccessible_source_datasets THEN
+        RAISE;
+      END IF;
+      INSERT INTO inaccessible_source_datasets (project_id, dataset_id, error_message)
+      VALUES (src.project_id, NULL, @@error.message);
+    END;
   END FOR;
 
   SET source_dataset_count = (SELECT COUNT(*) FROM source_datasets);
   ASSERT source_dataset_count > 0
-  AS 'No source datasets were found in the configured projects and region.';
+  AS 'No source datasets were found in the configured projects and region (if a project was skipped as unreachable, the job account is missing metadata access on it).';
 
   -- --------------------------------------------------------------------------
   -- Source-dataset access pre-check.
@@ -757,12 +780,6 @@ BEGIN
   -- from the metadata, so an object referencing one resolves as "source no longer
   -- present" (WARNING, still publishable) instead of FAILED.
   -- --------------------------------------------------------------------------
-  CREATE OR REPLACE TEMP TABLE inaccessible_source_datasets (
-    project_id STRING,
-    dataset_id STRING,
-    error_message STRING
-  );
-
   IF skip_inaccessible_source_datasets THEN
     FOR probe_ds IN (
       SELECT DISTINCT project_id, dataset_id

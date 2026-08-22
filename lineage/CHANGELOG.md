@@ -1,5 +1,20 @@
 # 1.5.0-032
 
+- Closed the remaining Access Denied hole in the source-dataset pre-check: a source
+  *project* whose region-wide INFORMATION_SCHEMA.SCHEMATA listing is denied aborted the
+  run while resolving `source_datasets`, before the per-dataset probe added above could
+  run at all. That per-project `EXECUTE IMMEDIATE` is now wrapped in
+  `BEGIN ... EXCEPTION WHEN ERROR THEN ... END`, so an unreachable project is skipped
+  like an unreadable dataset and recorded in `inaccessible_source_datasets` with a NULL
+  dataset_id (the shared temp table moved ahead of the resolution loop to hold both
+  kinds). The handler honors the same toggle: with
+  `skip_inaccessible_source_datasets = FALSE` it re-raises the original error unchanged
+  (bare `RAISE`), so strict mode is genuinely strict. The "no source datasets" ASSERT now
+  points at a skipped project as a possible cause. Both this guard and the per-dataset
+  probe rely on the reference being dynamic -- the denial is a runtime error of the
+  EXECUTE IMMEDIATE statement inside the block, which is what an exception handler can
+  catch. SQL-only; the engine bundle is unchanged. Not yet validated against BigQuery.
+
 - Stopped one unreadable source dataset from killing the whole run in
   `03_run_daily_lineage_pipeline.sql` ("Access Denied" on the
   INFORMATION_SCHEMA.TABLES union). `source_project_filters` resolves source datasets
