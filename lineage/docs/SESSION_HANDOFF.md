@@ -14,6 +14,21 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 > 一部に**古い変数名**が残る（下記「命名の変更」を最優先で参照）。
 
 ### 0.1 いまの状態（事実）
+
+> **更新（2026-08-22・新リポジトリでの再開セッション）**
+> - リポジトリ移行は**完了**。現行は `audeoinc/share` の `lineage/`、作業ブランチ
+>   `claude/lineage-project-resume-tqwrp9`。以下 0.1 の「旧リポジトリ／旧ブランチ」は
+>   移行前の記録として読むこと。
+> - 移行後の健全性確認は実施済み（`npm test` と `node test/test_v1_5_0_003.js` が
+>   記載どおり再現）。
+> - **本セッションで 1 件修正**：`WITH cte AS (...) (SELECT ...)`（CTE の後ろの
+>   メインQueryが括弧で包まれた形）の「トップレベルのSELECT Clauseが見つかりません」。
+>   `query_parser.js` に main-query の括弧剥がしを追加、テスト `test_v1_5_0_073`。
+>   → 現在のバンドル: `sha256 = f448d53c3e3b98aba209d0f0458c54e08a1c6fd20e7f724e21145d811bccacb0`、
+>   `463531` bytes。`test:release` **53 本 PASS** / ゴールデン 48 ケース PASS。
+>   **エンジン変更のため GCS 再アップロードが必要**。
+> - **本ドキュメントは §4.20 までしか追随していない**。§0.7 を参照。
+
 - バージョン: **1.5.0-032**。作業ブランチ: `claude/direct-file-visibility-check-6qztqm`
   （旧リポジトリ `audeoinc/audeo-share`、ディレクトリ `lineage/`）。
 - バンドル: `javascript/dist/lineage_udf_bundle.js`
@@ -394,6 +409,10 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 
 ## 4.19 UDF out of memory 対策：STEP 3 UDF のチャンク分割（4.18 の続き・SQLのみ）
 
+> **⚠ 撤回済み（現行ソースには存在しない）**：このチャンク分割は後続作業で
+> **完全に撤去**され、**データセット単位のループ**へ置き換えられた。`analysis_udf_chunk_size`
+> などの DECLARE も `udf_chunk` 列も現在の `03_...sql` には無い。詳細は §4.21。
+
 - **4.18 では解消せず**（メタデータ縮小では効かなかった）。実データ診断で原因を確定：
   対象 **2667 件**、最大 SQL **64KB**、中央値 192B、p95 9KB。**単一の巨大 SQL は無く**、
   全件を 1 クエリで UDF 実行する際の**スロット上の V8 ヒープ蓄積（集約ピーク）**が原因。
@@ -410,6 +429,9 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 - **※4.19 だけでは解消せず**：03 には UDF 全件パスが2つあり、探索パス（下記 4.20）が未分割で残っていた。
 
 ## 4.20 UDF out of memory 対策：ソース探索パスのチャンク分割（4.19 の続き・SQLのみ）
+
+> **⚠ 撤回済み（現行ソースには存在しない）**：`discovery_udf_chunk_size` を含め撤去され、
+> ソース探索も**データセット単位のループ**（探索プリパス）になっている。詳細は §4.21。
 
 - **症状の継続**：4.19（STEP 3 チャンク分割）を入れても、対象増加時にまだ "UDF out of memory"。
   `analysis_udf_chunk_size` を下げても効かない。
@@ -430,13 +452,76 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   `... changed_definitions_with_discovery ... source_discovery_json` なら①、
   `INSERT INTO batch_udf_results` なら②。エンジン不変・**BigQuery 未検証**。
 
-## 5. 現在地（引き継ぎ時点）
+## 4.21 UDF out of memory 対策の最終形：データセット単位ループ（4.18〜4.20 を置換）
 
-- バンドル: `sha256 = 37aec3cd5cb25d8bb4cf8a6975bc6e1c34ba67ee3f352527e05137b8781a2b7b`、`459728` bytes
-- `test:release` 41 本 PASS / ゴールデン 48 ケース PASS
-- 二本ツリー（-031 / -032）同期済み
-- 03 STEP 3：フルバッチ化済み（上記 §4.5 ①②③）。集合ベースに全面置換、ジョブ数は
-  N 非依存。**BigQuery 未検証**（本番前に staging 実行＋旧ループとの出力 diff が必要）。
+- **結論**：固定件数チャンク（§4.19 / §4.20）は**撤回**。現行 03 は STEP 3 全体を
+  **`FOR ds_row IN (SELECT ds FROM UNNEST(changed_datasets) ...) DO ... END FOR`**
+  というデータセット単位のループで回す。`grep -i chunk sql/pipeline/03_...sql` は**0 件**。
+- **撤回理由**：行数チャンクは 1 ジョブあたりの UDF 呼び出し回数は抑えるが、
+  大きいオブジェクトが同じチャンクに固まると**合計メモリは抑えられず** OOM が再発した。
+  実機で「1 データセットずつなら通る」ことが確認できたため、分割軸を行数から
+  **データセット**へ変更した。
+- **現行の構造（`03_run_daily_lineage_pipeline.sql`）**：
+  1. `changed_datasets`（解析対象の変更オブジェクトを持つ dataset）を軽量プローブで取得。
+     空なら STEP 3 の高コスト処理を丸ごとスキップ（`has_analysis_work`）。
+  2. **探索プリパス**（1698〜1792 付近）：`changed_datasets` を 1 つずつ回し、
+     `source_discovery_only` の UDF を単一クエリで実行 → `all_changed_with_discovery` に
+     蓄積しつつ、参照されたソース dataset 名を `referenced_source_datasets` に集める。
+  3. **メタデータ走査の絞り込み**（1823〜1901 付近）：`current_target_columns` /
+     `current_target_column_field_paths` /（TABLES 実在集合）を、**参照された dataset だけ**に
+     絞って STEP 3 内でロードする（従来はリージョン全 dataset を無条件ロード）。
+  4. **解析ループ**（1934〜3541 付近）：再び dataset 単位で回し、各周回は
+     `all_changed_with_discovery` から自 dataset 行を読み直すだけ（**探索 UDF の 2 回目実行は無い**）。
+     周回内部は §4.5 の**フルバッチ（集合ベース）**のまま。
+  5. STEP 4（impact 再構築）は dataset 横断のためループ**外**で 1 回だけ実行。
+- **効果の要点**：dataset 単位に絞ることで UDF の行バッチだけでなく
+  `changed_definitions_with_discovery` / `batch_object_metadata` / `batch_analysis_input` /
+  `batch_udf_results` といった中間テーブルもすべて小さくなる。
+- **§4.18 は現行でも有効**：UDF へ渡す `physical_columns_json` から `data_type` /
+  `is_nullable` を落とす縮小は**残っている**（03 の agg、2263〜2287 付近）。
+  固定テストは `test_v1_5_0_061.js`。
+- **未検証**：この一連の変更も **BigQuery 実機での検証は完了していない**（CHANGELOG の
+  各エントリ末尾に "Not yet validated against BigQuery"）。
+
+## 4.22 本ドキュメントと実装の乖離（重要）
+
+`docs/SESSION_HANDOFF.md` の §1〜§4.20 は **1.5.0-032 の途中まで**しか追随していない。
+その後 CHANGELOG に追記された変更（テスト `test_v1_5_0_061`〜`073` に対応）は本書に
+節が無い。**経緯を追うときは `CHANGELOG.md` の冒頭から読むのが正**（本書は
+「なぜそう決めたか」の補助資料と割り切る）。§4.20 以降で入っている主なもの：
+
+- §4.21 のデータセット単位ループ＋メタデータ走査の絞り込み＋無変更時スキップ（SQL）
+- `script_variables` オプション（親スクリプトの `DECLARE` 変数を子ジョブ SQL の解析に渡す）
+  … `test_v1_5_0_067`
+- 位置パラメータ `?` の PARAMETER トークン化 … `test_v1_5_0_066`
+- `UNNEST` 配列引数の可視範囲を先行ソースへ限定（誤 AMBIGUOUS 解消）… `test_v1_5_0_065`
+- 相関 UNNEST の非修飾配列引数の解決 … `test_v1_5_0_063`
+- HAVING EXISTS 内の相関 UNNEST が外側集約エイリアスを指す形 … `test_v1_5_0_062`
+- 消えた一時テーブル参照を ERROR ではなく WARNING にする判定 … `test_v1_5_0_064`
+- FROM 位置の `EXTERNAL_QUERY` / TVF を不透明ソースとして解析 … `test_v1_5_0_068`
+- `column_usages` エクスポート追加（全句の解決済み物理カラム参照を1参照=1行で出力）
+  … `test_v1_5_0_069`
+- FROM サブクエリが `WITH` / セット演算で始まる形 … `test_v1_5_0_070`
+- 式パーサのエラーに位置情報を付与 … `test_v1_5_0_071`
+- 無型 STRUCT のフィールド別名 … `test_v1_5_0_072`
+- CTE の後ろの括弧付きメインQuery … `test_v1_5_0_073`（本セッション）
+- SQL 追加：`sql/maintenance/08_view_last_access.sql`、
+  `sql/maintenance/09_unanalyzed_object_definitions.sql`、
+  `definition_registry` の `labels` 列（§4.12）
+
+## 5. 現在地（2026-08-22 更新）
+
+- リポジトリ: `audeoinc/share` の `lineage/`。ブランチ `claude/lineage-project-resume-tqwrp9`。
+- バージョン表記: `1.5.0-032`（`release_manifest.json` / `package.json`）。
+  テスト番号は版数と独立で、現在 `test_v1_5_0_073` まで。
+- バンドル: `sha256 = f448d53c3e3b98aba209d0f0458c54e08a1c6fd20e7f724e21145d811bccacb0`、`463531` bytes
+  （`release_manifest.json` と一致）。
+- テスト: `test:release` **53 本 PASS** / ゴールデン（`test_v1_5_0_003`）48 ケース PASS。
+- 03 STEP 3：**データセット単位ループ ＋ 周回内フルバッチ**（§4.21）。チャンク分割は撤去済み。
+- **BigQuery 実機検証は未完了**。§4.5 のバッチ化、§4.6、§4.21 の各変更はいずれも未検証。
+  本番前に staging 実行と旧実装との出力 diff（direct_dependency / lineage_diagnostic /
+  definition_registry）で確認すること。
+- **デプロイ時**：エンジンを変更しているため GCS の `lineage_udf_bundle.js` を再アップロード。
 
 ## 6. Claude Code で続きを進める手順
 
