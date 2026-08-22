@@ -98,8 +98,9 @@ DECLARE dag_service_accounts ARRAY<STRING> DEFAULT [
 --   project_token_pattern
 --     Project-token substitution. A token extracted from the auto-detected project
 --     id by this regex (REGEXP_EXTRACT; group 1 if present) replaces every literal
---     '{project_token}' placeholder in the dataset names and the table/UDF prefixes
---     & suffixes. E.g. project id 'mycompany-prod-123' with r'-([^-]+)-' -> 'prod',
+--     '{project_token}' placeholder in the dataset names, the table/UDF prefixes &
+--     suffixes, the source_project_filters entries (project_id and both dataset
+--     pattern arrays), and the Scheduled Query / DAG service account arrays. E.g. project id 'mycompany-prod-123' with r'-([^-]+)-' -> 'prod',
 --     so table_name_prefix='{project_token}_' becomes 'prod_'. Keep in step with
 --     01. The default takes the first hyphen-delimited segment; an unmatched
 --     pattern yields '' and any leftover '{project_token}' fails the name ASSERTs.
@@ -394,6 +395,40 @@ SET table_name_suffix =
   REPLACE(table_name_suffix, '{project_token}', project_token);
 SET udf_name_prefix = REPLACE(udf_name_prefix, '{project_token}', project_token);
 SET udf_name_suffix = REPLACE(udf_name_suffix, '{project_token}', project_token);
+
+-- source_project_filters is a STRUCT array, so its substitution is a rebuild rather
+-- than a plain REPLACE -- which is why the placeholder used to miss it entirely. The
+-- project id is a natural place for the token (physical sources usually live in a
+-- sibling project of the same environment), and a '{project_token}' left there
+-- survived all the way to STEP 1's "Invalid source project_id" ASSERT, because '{'
+-- and '}' are not legal project-id characters. The dataset patterns are substituted
+-- too, so an environment-named source dataset can be matched the same way.
+SET source_project_filters = ARRAY(
+  SELECT AS STRUCT
+    REPLACE(project_id, '{project_token}', project_token) AS project_id,
+    ARRAY(
+      SELECT REPLACE(pattern, '{project_token}', project_token)
+      FROM UNNEST(COALESCE(dataset_include_patterns, CAST([] AS ARRAY<STRING>))) AS pattern
+    ) AS dataset_include_patterns,
+    ARRAY(
+      SELECT REPLACE(pattern, '{project_token}', project_token)
+      FROM UNNEST(COALESCE(dataset_exclude_patterns, CAST([] AS ARRAY<STRING>))) AS pattern
+    ) AS dataset_exclude_patterns
+  FROM UNNEST(source_project_filters)
+);
+
+-- Service account emails embed the project id in practice
+-- ('<project>@appspot.gserviceaccount.com', '<name>@<project>.iam.gserviceaccount.com'),
+-- so the placeholder reaches them as well. Leaving these out would make the token
+-- work for some [A] inputs and silently not for others.
+SET scheduled_query_service_accounts = ARRAY(
+  SELECT REPLACE(account, '{project_token}', project_token)
+  FROM UNNEST(scheduled_query_service_accounts) AS account
+);
+SET dag_service_accounts = ARRAY(
+  SELECT REPLACE(account, '{project_token}', project_token)
+  FROM UNNEST(dag_service_accounts) AS account
+);
 
 -- Guard: an unsubstituted '{project_token}' (or any invalid character) in a dataset
 -- name is surfaced here instead of failing later at DDL time. (Prefix/suffix feed
@@ -712,7 +747,7 @@ BEGIN
   )
   DO
     ASSERT REGEXP_CONTAINS(src.project_id, r'^[A-Za-z0-9._:-]+$')
-    AS 'Invalid source project_id in source_project_filters.';
+    AS 'Invalid source project_id in source_project_filters (check for an unsubstituted {project_token}: it is replaced from the auto-detected project id via project_token_pattern, which yields an empty string when the pattern does not match).';
   END FOR;
 
   CREATE OR REPLACE TEMP TABLE source_datasets (
@@ -861,6 +896,10 @@ BEGIN
       'PREVIEW_SETTINGS' AS section,
       target_project_id AS target_project,
       job_region,
+      -- Shown because '{project_token}' substitution is the easiest [A] setting to
+      -- get wrong: an unmatched project_token_pattern yields an empty token silently.
+      default_project_id AS detected_project_id,
+      project_token,
       ARRAY_TO_STRING(analysis_include_dataset_patterns, ', ') AS analysis_include_dataset_patterns,
       ARRAY_TO_STRING(analysis_exclude_dataset_patterns, ', ') AS analysis_exclude_dataset_patterns,
       ARRAY_TO_STRING(analysis_include_object_patterns, ', ') AS analysis_include_object_patterns,

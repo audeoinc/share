@@ -1,5 +1,23 @@
 # 1.5.0-032
 
+- Made `{project_token}` reach `source_project_filters` in
+  `03_run_daily_lineage_pipeline.sql`. Putting the placeholder in an entry's
+  `project_id` failed with "Invalid source project_id in source_project_filters":
+  the substitution block covered `repository_dataset`, `udf_dataset` and the
+  table/UDF prefixes & suffixes, but not this one, so the literal `{project_token}`
+  survived to STEP 1's project-id ASSERT, where `{` and `}` are not legal characters.
+  It was skipped because `source_project_filters` is a STRUCT array and needs a
+  rebuild rather than a plain REPLACE; it is now rebuilt in place, substituting
+  `project_id` and both dataset pattern arrays. The Scheduled Query / DAG service
+  account arrays get the same treatment, since those emails embed the project id
+  (`<project>@appspot.gserviceaccount.com`) and a placeholder that works for some [A]
+  inputs but silently not others is worse than none. The project-id ASSERT now names
+  an unsubstituted placeholder as the likely cause and points at
+  `project_token_pattern` (which yields an empty token when it does not match), and
+  the preview's PREVIEW_SETTINGS section reports the detected project id and the
+  extracted token so a mis-set pattern is visible before the run. SQL-only; the engine
+  bundle is unchanged. Not yet validated against BigQuery.
+
 - Added a dry run to `03_run_daily_lineage_pipeline.sql`: `preview_only BOOL DEFAULT
   FALSE` in [B]. With it TRUE the script resolves the analysis scope from [A], reports
   what the run WOULD cover, and stops before anything is written -- no MERGE, no UPDATE,
