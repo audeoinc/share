@@ -12,7 +12,8 @@
 -- 「いつグループ構成が変わったか」を後から追える＝ロジック逸脱の検知に使える。
 --
 -- 前提: view_group_html.sql で UDF を作成済み。
---       udf_prefix / udf_suffix / 関数の基本名は両ファイルで一致させること。
+--       system_name / udf_prefix / udf_suffix / 関数の基本名は両ファイルで
+--       一致させること。
 -- =====================================================================
 
 
@@ -44,8 +45,9 @@ DECLARE partition_expiration_days INT64 DEFAULT 400;  -- 履歴の保持日数
 -- 作るオブジェクトの名前。prefix / suffix は UDF と テーブル・ビューで別に持つ。
 --   テーブル: object_prefix + system_name + _ + <base 名> + object_suffix
 --   ビュー  : object_prefix + system_name + _ + vw_ + <base 名> + object_suffix
---   UDF     : udf_prefix + <関数の基本名> + udf_suffix
--- system_name はこのシステムを表す文字列。t_ / vw_t_ の前に付く。
+--   UDF     : udf_prefix + UPPER(system_name) + _ + <関数の基本名> + udf_suffix
+-- system_name はこのシステムを表す文字列。テーブル・ビューでは t_ / vw_t_ の前、
+-- UDF では関数名の前に付く。関数名は大文字の慣習なので UDF 側だけ UPPER にする。
 -- 末尾の _ は自動で足すので書かない。空にすればシステム名なしになる。
 -- base 名の先頭の t_ / m_ は transaction / master の区分。
 DECLARE object_prefix STRING DEFAULT '';
@@ -62,8 +64,10 @@ DECLARE info_fn_base     STRING DEFAULT 'VIEW_GROUP_INFO'; -- 比較 HTML を返
 DECLARE css_fn_base      STRING DEFAULT 'VIEW_GROUP_CSS';  -- テンプレート用 CSS を返す UDF
 
 -- 組み立てた名前（下の SET で決まる）。データセット名は含まない。
--- UDF の 4 変数は view_group_html.sql と同じ値にすること。食い違うと見つからない。
-DECLARE system_tag  STRING;  -- system_name に区切りの _ を足したもの
+-- UDF の 5 変数（system_name / udf_prefix / udf_suffix / info_fn_base /
+-- css_fn_base）は view_group_html.sql と同じ値にすること。食い違うと見つからない。
+DECLARE system_tag     STRING;  -- system_name に区切りの _ を足したもの
+DECLARE udf_system_tag STRING;  -- 同上。関数名に合わせて大文字にしたもの
 DECLARE diff_table  STRING;
 DECLARE latest_view STRING;
 DECLARE info_fn     STRING;
@@ -112,11 +116,12 @@ END IF;
 
 -- 命名規則どおりに組み立てる。テーブルは履歴なので _hist、
 -- ビューは最新スナップショットだけなので _hist を付けない。
-SET system_tag  = IF(system_name = '', '', CONCAT(system_name, '_'));
+SET system_tag     = IF(system_name = '', '', CONCAT(system_name, '_'));
+SET udf_system_tag = IF(system_name = '', '', CONCAT(UPPER(system_name), '_'));
 SET diff_table  = CONCAT(object_prefix, system_tag, diff_table_base, object_suffix);
 SET latest_view = CONCAT(object_prefix, system_tag, 'vw_', latest_view_base, object_suffix);
-SET info_fn     = CONCAT(udf_prefix, info_fn_base, udf_suffix);
-SET css_fn      = CONCAT(udf_prefix, css_fn_base, udf_suffix);
+SET info_fn     = CONCAT(udf_prefix, udf_system_tag, info_fn_base, udf_suffix);
+SET css_fn      = CONCAT(udf_prefix, udf_system_tag, css_fn_base, udf_suffix);
 
 IF NOT REGEXP_CONTAINS(TRIM(analyze_options), r'^\{\s*"') THEN
   RAISE USING MESSAGE = 'analyze_options は 1 つ以上のキーを持つ JSON オブジェクトにしてください（例: {"mode":"class"}）。';

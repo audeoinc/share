@@ -28,14 +28,19 @@ SET @@location = 'asia-northeast1';
 DECLARE project_id  STRING DEFAULT 'my-project';
 DECLARE udf_dataset STRING DEFAULT 'ops_meta';
 
--- 関数名は udf_prefix + 基本名 + udf_suffix で組み立てる。
--- build_table.sql の同名の変数と必ず同じ値にすること。
+-- 関数名は udf_prefix + system_name + _ + 基本名 + udf_suffix で組み立てる。
+-- system_name はこのシステムを表す文字列。区切りの _ は下の SET で足すので
+-- 値には書かない。空にすればシステム名なしになる。
+-- 関数名は大文字の慣習なので、system_name は UPPER にして付ける。
+-- この 5 つは build_table.sql の同名の変数と必ず同じ値にすること。
 -- 食い違うと、作った関数を build_table.sql が見つけられない。
+DECLARE system_name  STRING DEFAULT 'viewlgc';
 DECLARE udf_prefix   STRING DEFAULT '';
 DECLARE udf_suffix   STRING DEFAULT '';
 DECLARE info_fn_base STRING DEFAULT 'VIEW_GROUP_INFO';
 DECLARE css_fn_base  STRING DEFAULT 'VIEW_GROUP_CSS';
 
+DECLARE udf_system_tag STRING;  -- system_name を大文字にして区切りの _ を足したもの
 DECLARE info_fn STRING;
 DECLARE css_fn  STRING;
 
@@ -102,8 +107,9 @@ WHERE x = 1`;function a(u,g){return u.replace(/SUF/g,g)}t([s("abjp",a(r,"abjp"))
 
 """;
 
-SET info_fn = CONCAT(udf_prefix, info_fn_base, udf_suffix);
-SET css_fn  = CONCAT(udf_prefix, css_fn_base,  udf_suffix);
+SET udf_system_tag = IF(system_name = '', '', CONCAT(UPPER(system_name), '_'));
+SET info_fn = CONCAT(udf_prefix, udf_system_tag, info_fn_base, udf_suffix);
+SET css_fn  = CONCAT(udf_prefix, udf_system_tag, css_fn_base,  udf_suffix);
 
 
 -- ---------------------------------------------------------------------

@@ -355,6 +355,12 @@ SET @@location = 'asia-northeast1';   -- DECLARE より前に置く
 DECLARE project_id  STRING DEFAULT 'my-project';
 DECLARE udf_dataset STRING DEFAULT 'ops_meta';
 
+DECLARE system_name  STRING DEFAULT 'viewlgc';  -- build_table.sql と同じ値にする
+DECLARE udf_prefix   STRING DEFAULT '';
+DECLARE udf_suffix   STRING DEFAULT '';
+DECLARE info_fn_base STRING DEFAULT 'VIEW_GROUP_INFO';
+DECLARE css_fn_base  STRING DEFAULT 'VIEW_GROUP_CSS';
+
 -- build_table.sql
 SET @@location = 'asia-northeast1';   -- DECLARE より前。region と同じ値にする
 
@@ -373,7 +379,7 @@ DECLARE analyze_options          STRING        DEFAULT '{"literalGroups":[],"mod
 -- 作るオブジェクトの名前。prefix / suffix は UDF と テーブル・ビューで別に持つ
 DECLARE object_prefix STRING DEFAULT '';
 DECLARE object_suffix STRING DEFAULT '';
-DECLARE system_name   STRING DEFAULT 'viewlgc';  -- システムを表す文字列。t_ / vw_t_ の前に付く
+DECLARE system_name   STRING DEFAULT 'viewlgc';  -- システムを表す文字列。名前の前に付く
 DECLARE udf_prefix    STRING DEFAULT '';
 DECLARE udf_suffix    STRING DEFAULT '';
 
@@ -392,9 +398,11 @@ DECLARE css_fn_base      STRING DEFAULT 'VIEW_GROUP_CSS';
 |---|---|
 | テーブル | `object_prefix` + `system_name` + `_` + `<base 名>` + `object_suffix` |
 | ビュー | `object_prefix` + `system_name` + `_` + `vw_` + `<base 名>` + `object_suffix` |
-| UDF | `udf_prefix` + `<関数の基本名>` + `udf_suffix` |
+| UDF | `udf_prefix` + `UPPER(system_name)` + `_` + `<関数の基本名>` + `udf_suffix` |
 
-`system_name` はこのシステムを表す文字列で、`t_` / `vw_t_` の**前**に付く。
+`system_name` はこのシステムを表す文字列で、テーブル・ビューでは `t_` / `vw_t_` の
+**前**、UDF では関数名の**前**に付く。**UDF 側だけ大文字**にするのは、関数名を
+大文字で書く慣習に合わせるため（`viewlgc_VIEW_GROUP_INFO` にならないように）。
 区切りの `_` は自動で足すので値には書かない。空にすればシステム名なしになる。
 
 base 名は**作るオブジェクトごとに 1 つ**持たせてある。オブジェクトが増えたときは
@@ -405,26 +413,21 @@ base 名は**作るオブジェクトごとに 1 つ**持たせてある。オ�
 |---|---|---|
 | `diff_table_base` | 日次スナップショットを積むテーブル | `viewlgc_t_diff_hist` |
 | `latest_view_base` | 最新スナップショットだけのビュー | `viewlgc_vw_t_diff` |
-| `info_fn_base` | 比較 HTML を返す UDF | `VIEW_GROUP_INFO` |
-| `css_fn_base` | テンプレート用 CSS を返す UDF | `VIEW_GROUP_CSS` |
+| `info_fn_base` | 比較 HTML を返す UDF | `VIEWLGC_VIEW_GROUP_INFO` |
+| `css_fn_base` | テンプレート用 CSS を返す UDF | `VIEWLGC_VIEW_GROUP_CSS` |
 
 base 名の先頭の `t_` / `m_` は transaction / master の区分。既定は `t_`
 （日次のスナップショットを積むテーブルのため）。システムが何かは `system_name`
 が表すので、base 名にはその中での役割（`diff`）だけを書く。
 
-> UDF には `system_name` が付かない。関数名は `udf_prefix` + 基本名 +
-> `udf_suffix` のままなので、システム名を入れたい場合は `udf_prefix` に
-> `'VIEWLGC_'` のように書く（`build_table.sql` と `view_group_html.sql` の
-> 両方に同じ値を入れること）。
+> **`system_name` は `build_table.sql` と `view_group_html.sql` の両方にある。
+> `udf_prefix` / `udf_suffix` / 関数の基本名と合わせて、必ず同じ値にすること。**
+> 食い違うと、作った関数を `build_table.sql` が見つけられない。
 
 **テーブルだけ `_hist` が付く。** 実体が日次スナップショットの積み上げ
 （`PARTITION BY snapshot_date`・過去日を消さない・`partition_expiration_days` で
 落ちる）なのに対し、ビューは最新 1 日ぶんだけを返すため。base 名を
 オブジェクトごとに分けてあるので、こういう付け分けができる。
-
-> **`udf_prefix` / `udf_suffix` / 関数の基本名は `view_group_html.sql` と
-> `build_table.sql` の両方にある。必ず同じ値にすること。** 食い違うと、
-> 作った関数を `build_table.sql` が見つけられない。
 
 > ビューの名前から `_latest` が消えているが、中身は変わらず最新スナップショットだけを
 > 返す。履歴側に `_hist` を付けて区別する形にしたため。
@@ -616,7 +619,7 @@ CSS は **`template_style.html`**（`build_udf.mjs` の生成物）をそのま�
 BigQuery から取る。中身は同じ。
 
 ```sql
-SELECT `<project>.<udf_dataset>.VIEW_GROUP_CSS`('{"mode": "class"}');
+SELECT `<project>.<udf_dataset>.VIEWLGC_VIEW_GROUP_CSS`('{"mode": "class"}');
 ```
 
 `<style> … </style>` で囲んでテンプレートの先頭に置き、その下に
