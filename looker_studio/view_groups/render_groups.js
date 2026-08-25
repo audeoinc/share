@@ -24,31 +24,9 @@
 
 const { splitLines, build2Way } = require('../ddl_diff_viz/src/lib/diff');
 const { renderFragment1, renderFragment2 } = require('../ddl_diff_viz/src/lib/render');
-
-const MAX_TABS = 12; // 静的 CSS が面倒を見るタブ数の上限
-
-function esc(s) {
-  return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-
-/** ラジオの id / name をレコードごとに一意にするための短いハッシュ。 */
-function hashId(s) {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < String(s).length; i++) {
-    h ^= String(s).charCodeAt(i);
-    h = Math.imul(h, 0x01000193) >>> 0;
-  }
-  return h.toString(36);
-}
-
-/**
- * ペイン見出し。通常は同じロジックを持つ suffix の列記。
- * suffix を認識できなかった View は suffix が null なので、View 名で出す。
- */
-const label = (g) => g.suffixes
-  .map((s, i) => s || (g.members[i] && g.members[i].viewName) || '(suffix なし)')
-  .join(', ');
+const {
+  MAX_TABS, esc, hashId, label, header, notice, kindText, referenceIndex,
+} = require('./chrome.js');
 
 /**
  * ペインの副題を差し替える。
@@ -69,36 +47,6 @@ function relabelPanes(html, subs) {
 
 /** 「3 View」のような、系統の規模が分かる副題。 */
 const paneSub = (g) => `${g.members.length} View`;
-
-function badge(txt, fg, bg) {
-  return `<span class="vg-badge" style="color:${fg};background:${bg}">${esc(txt)}</span>`;
-}
-
-function header(base, viewCount, groupCount, unmatched) {
-  const warn = groupCount > 1;
-  return (
-    `<div class="vg-header">` +
-    `<span class="vg-title">${esc(base)}</span>` +
-    badge(`${viewCount} View`, '#57606A', '#EAEEF2') +
-    badge(`${groupCount} グループ`,
-      warn ? '#9A6700' : '#1A7F37',
-      warn ? '#FFF8C5' : '#DAFBE1') +
-    // 命名規則から外れていること自体が情報なので、一覧で拾えるようにする
-    (unmatched ? badge('suffix 未認識', '#9A6700', '#FFF8C5') : '') +
-    `</div>`
-  );
-}
-
-function notice(text) {
-  return `<div class="vg-notice">${esc(text)}</div>`;
-}
-
-/** トークン種別の表示名。生の kind をそのまま出しても読めないため。 */
-const KIND_TEXT = {
-  entity: '実体名', string: '値（文字列）', number: '値（数値）',
-  ident: '名前', quoted: '名前', keyword: '予約語', punct: '記号', comment: 'コメント',
-};
-const kindText = (k) => KIND_TEXT[k] || k;
 
 const REASON_TEXT = {
   'length': 'トークン数が違う（構造そのものが別）',
@@ -266,8 +214,7 @@ function renderBase(b, opts) {
   // レポート側で選べるよう、基準ごとに 1 レコードを作り置きする。
   // 範囲外や数値でない指定は既定（0）に戻す。中途半端に丸めると、
   // 指定を間違えたときに「別の基準の絵」が出て気づけない。
-  const ri = Math.trunc(Number(o.referenceIndex));
-  const refIndex = Number.isFinite(ri) && ri >= 0 && ri < n ? ri : 0;
+  const refIndex = referenceIndex(b, o);
   // id はレコード内で一意であればよいが、同じページに複数レコードが並ぶ場合に
   // 備えて、base 名・グループ構成・基準を混ぜてハッシュする。
   // （同一内容を 2 回描画した場合は衝突しうる。1 チャート 1 レコードが前提。）
@@ -293,6 +240,8 @@ function renderBase(b, opts) {
     paramsTable(groups) +
     `</div>`;
 }
+
+
 
 // ---------------------------------------------------------------------
 // 見出し・タブ・パラメータ表の CSS。
@@ -366,6 +315,29 @@ function chromeCss() {
     `.vg-ph:hover::after{display:block}`,
     // 右端では左に出さないと枠の外へ出てしまう。最後の 2 ペインぶんだけ寄せる。
     `.vg-ph.vg-phr::after{left:auto;right:0}`,
+    // 外側タブ（ロジック差分 / 参照関係）。内側のタブと同じ仕組みだが、
+    // クラスを分けてある。同じクラスだと内側のラジオが外側の :checked ~ に
+    // 引っかかり、片方を押すともう片方も切り替わる。
+    `.vg-or{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}`,
+    `.vg-otablist{display:flex;gap:6px;margin:0 0 12px}`,
+    `.vg-otab{display:inline-flex;align-items:center;padding:5px 16px;border:1px solid #D0D7DE;` +
+      `border-radius:16px;color:#57606A;cursor:pointer;user-select:none;font-weight:600;font-size:12px}`,
+    `.vg-otab:hover{background:#EAEEF2;color:#24292F}`,
+    `.vg-opanel{display:none}`,
+    `.vg-or1:checked ~ .vg-opanels > .vg-op1{display:block}`,
+    `.vg-or2:checked ~ .vg-opanels > .vg-op2{display:block}`,
+    `.vg-or1:checked ~ .vg-otablist > .vg-ot1,` +
+      `.vg-or2:checked ~ .vg-otablist > .vg-ot2` +
+      `{background:#24292F;border-color:#24292F;color:#fff}`,
+    // 参照関係図。図は横に伸びるので、カードではなく図だけを横スクロールさせる。
+    `.vg-erdbox{overflow-x:auto;padding:4px 0}`,
+    `.vg-legend{display:flex;flex-wrap:wrap;gap:14px;margin:8px 0 10px;color:#57606A;font-size:11px}`,
+    `.vg-lg{display:inline-flex;align-items:center;gap:5px}`,
+    `.vg-lgm{display:inline-block;width:10px;height:10px;border-radius:2px;border:1px solid #8C96A0}`,
+    `.vg-lgt{background:#C9A227;border-color:#8C6D3F}`,
+    `.vg-lgc{background:#4E8FBF;border-color:#3F6D8C}`,
+    `.vg-lgo{background:#8250DF;border-color:#6D3F8C}`,
+    `.vg-lgd{display:inline-block;width:18px;border-top:1.5px dashed #8C96A0}`,
   ];
   // タブ本体。ID ではなくクラスで書くので、CSS を静的に保てる。
   for (let i = 1; i <= MAX_TABS; i++) {

@@ -14,6 +14,8 @@ const require = createRequire(import.meta.url);
 const A = require(join(here, 'analyze.js'));
 const S = require(join(here, 'sample_views.js'));
 const R = require(join(here, 'render_groups.js'));
+const E = require(join(here, 'erd.js'));
+const Ch = require(join(here, 'chrome.js'));
 
 const OPTS = { suffixParts: S.SUFFIX_PARTS };
 
@@ -73,6 +75,14 @@ const cases = [
 
 const parts = cases.map((c) => ({ ...c, html: R.renderBase(c.b, c.opts) }));
 
+// 実際に Looker へ渡すのは、差分と参照関係を外側タブで束ねた 1 枚。
+// プレビューの先頭にその形も置いて、束ねた状態で崩れないかを見る。
+const pageCases = [
+  { title: '外側タブ（ロジック差分 / 参照関係）', b: baseComplex, opts: {} },
+  { title: '外側タブ・基準を変えた場合', b: base3, opts: { referenceIndex: 1 } },
+].map((c) => ({ ...c,
+  html: Ch.wrapPage(R.renderBase(c.b, c.opts), E.renderErdBase(c.b, c.opts), c.b.base) }));
+
 // --- 検証 --------------------------------------------------------------
 const h3 = parts[0].html;
 const h1 = parts[2].html;
@@ -116,7 +126,8 @@ const checks = [
       .every((sel) => !sel.includes('#'))],
   ['タブ CSS が MAX_TABS 分ある',
     (R.chromeCss().match(/\.vg-r\d+:checked ~ \.vg-panels/g) || []).length === R.MAX_TABS],
-  ['script タグを含まない', !/<script/i.test(parts.map((p) => p.html).join(''))],
+  ['script タグを含まない',
+    !/<script/i.test(parts.concat(pageCases).map((p) => p.html).join(''))],
   ['誤解を招く副題 (after)/(reference) が残っていない',
     !/\((?:before|after|base|reference)\)/.test(parts.map((p) => p.html).join(''))],
   ['副題が View 数になっている', h3.includes('基準 / 3 View')],
@@ -227,6 +238,46 @@ const checks = [
     base3.groups.every((g, i) => g.missBy.length === base3.groupCount &&
       g.missBy[i] === null &&
       g.missBy.filter((m) => m).length === base3.groupCount - 1)],
+  // --- 参照関係（ERD） --------------------------------------------------
+  ['外側タブが 2 枚出る',
+    (pageCases[0].html.match(/class="vg-otab /g) || []).length === 2],
+  ['外側と内側でラジオのクラスを分けている（片方を押しても連動しない）',
+    /class="vg-or vg-or1"/.test(pageCases[0].html) &&
+    !/class="vg-r vg-or/.test(pageCases[0].html)],
+  ['参照関係が SVG で描かれる',
+    (pageCases[0].html.match(/<svg /g) || []).length === baseComplex.groupCount],
+  ['SVG は style 属性を使わない（class モードでクラスが増えない）',
+    !/<(svg|rect|path|text|g|marker)[^>]*\sstyle=/.test(pageCases[0].html)],
+  ['実テーブルも CTE も節になる', (() => {
+    const g = E.buildGraph(baseComplex.groups[0].sql, baseComplex.groups[0].params);
+    const kinds = new Set(g.nodes.map((n) => n.kind));
+    return kinds.has('table') && kinds.has('cte') && kinds.has('output');
+  })()],
+  ['サブクエリの中の参照も拾う（EXISTS の相関サブクエリ）', (() => {
+    const g = E.buildGraph(baseComplex.groups[0].sql, baseComplex.groups[0].params);
+    const n = g.nodes.find((x) => /customers/.test(x.label));
+    if (!n) return false;
+    return g.edges.some((e) => e.from === n.id && e.nested);
+  })()],
+  ['JOIN の種別と結合キーが辺に付く', (() => {
+    const g = E.buildGraph(baseComplex.groups[0].sql, baseComplex.groups[0].params);
+    return g.edges.some((e) => e.joinType === 'LEFT' && e.keys.indexOf('order_date') >= 0);
+  })()],
+  ['どの辺も 1 段しかまたがない（箱の上を横切らない）', (() => {
+    const lay = E.layout(E.buildGraph(baseComplex.groups[0].sql, baseComplex.groups[0].params));
+    const step = E.BOX_W + 108;
+    return lay.edges.every((e) => Math.round((e.b.x - e.a.x) / step) === 1);
+  })()],
+  ['パラメータ化した名前は基準の値で出す', (() => {
+    const g = E.buildGraph(baseComplex.groups[0].sql, baseComplex.groups[0].params);
+    return !/\{\{P/.test(g.nodes.map((n) => n.label).join(' ')) &&
+      g.nodes.some((n) => n.params.length > 0);
+  })()],
+  ['ERD のタブは全グループぶん（基準も押して切り替えられる）',
+    (pageCases[1].html.match(/class="vg-tab vg-t\d/g) || []).length >=
+      base3.groupCount],
+  ['ERD の CSS が chrome 側にある',
+    R.chromeCss().includes('.vg-otab') && R.chromeCss().includes('.vg-erdbox')],
   ['伏せ字は診断で見える表記に戻す',
     R.renderBase(A.analyze([
       { view_name: 'v_w_abjp', ddl: "SELECT a FROM t WHERE c = 'abjp'" },
@@ -250,7 +301,7 @@ if (!process.argv.includes('--check')) {
     'h2{font:600 14px/1.6 Roboto,system-ui,sans-serif;color:#57606A;' +
     'margin:32px 0 12px;padding-top:16px;border-top:1px solid #D0D7DE}\n' +
     chromeCss() + '\n</style>\n</head>\n<body>\n' +
-    parts.map((p) => `<h2>${p.title}</h2>\n${p.html}`).join('\n') +
+    pageCases.concat(parts).map((p) => `<h2>${p.title}</h2>\n${p.html}`).join('\n') +
     '\n</body>\n</html>\n';
   await mkdir(join(here, 'dist'), { recursive: true });
   const out = join(here, 'dist', 'preview.html');

@@ -47,6 +47,22 @@
 .vg-ph::after{content:attr(data-tip);display:none;position:absolute;z-index:20;left:0;top:calc(100% + 5px);width:max-content;max-width:340px;padding:6px 10px;border-radius:6px;background:#24292F;color:#fff;font:11px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;text-align:left;box-shadow:0 2px 10px rgba(0,0,0,.30);pointer-events:none}
 .vg-ph:hover::after{display:block}
 .vg-ph.vg-phr::after{left:auto;right:0}
+.vg-or{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}
+.vg-otablist{display:flex;gap:6px;margin:0 0 12px}
+.vg-otab{display:inline-flex;align-items:center;padding:5px 16px;border:1px solid #D0D7DE;border-radius:16px;color:#57606A;cursor:pointer;user-select:none;font-weight:600;font-size:12px}
+.vg-otab:hover{background:#EAEEF2;color:#24292F}
+.vg-opanel{display:none}
+.vg-or1:checked ~ .vg-opanels > .vg-op1{display:block}
+.vg-or2:checked ~ .vg-opanels > .vg-op2{display:block}
+.vg-or1:checked ~ .vg-otablist > .vg-ot1,.vg-or2:checked ~ .vg-otablist > .vg-ot2{background:#24292F;border-color:#24292F;color:#fff}
+.vg-erdbox{overflow-x:auto;padding:4px 0}
+.vg-legend{display:flex;flex-wrap:wrap;gap:14px;margin:8px 0 10px;color:#57606A;font-size:11px}
+.vg-lg{display:inline-flex;align-items:center;gap:5px}
+.vg-lgm{display:inline-block;width:10px;height:10px;border-radius:2px;border:1px solid #8C96A0}
+.vg-lgt{background:#C9A227;border-color:#8C6D3F}
+.vg-lgc{background:#4E8FBF;border-color:#3F6D8C}
+.vg-lgo{background:#8250DF;border-color:#6D3F8C}
+.vg-lgd{display:inline-block;width:18px;border-top:1.5px dashed #8C96A0}
 .vg-r1:checked ~ .vg-panels > .vg-p1{display:block}
 .vg-r1:checked ~ .vg-tablist > .vg-t1{background:#fff;border-color:#D0D7DE;color:#24292F}
 .vg-r1:checked ~ .vg-tablist > .vg-t1 .vg-tabn{background:#DDF4FF;color:#0969DA}

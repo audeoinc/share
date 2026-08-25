@@ -491,7 +491,7 @@ SQL 中の `{{P1}}` にカーソルを合わせると、種別と suffix ごと�
 - パラメータ名はグループごとに振り直すので、左右のペインには別の対応表を渡す。
 
 ```bash
-node preview.mjs          # dist/preview.html を生成して検証（54 アサーション）
+node preview.mjs          # dist/preview.html を生成して検証（65 アサーション）
 node preview.mjs --check  # 生成せず検証だけ
 ```
 
@@ -499,14 +499,15 @@ node preview.mjs --check  # 生成せず検証だけ
 
 ```bash
 node build_udf.mjs          # 検証して view_group_html.sql を生成
-node build_udf.mjs --check  # 生成せず検証だけ（40 アサーション）
+node build_udf.mjs --check  # 生成せず検証だけ（41 アサーション）
 node check_sql.mjs          # build_table.sql と view_group_html.sql の突き合わせ
 ```
 
 | 関数 | 戻り値 |
 |---|---|
 | `viewlgc_analyze(views, options_json)` | 解析結果の JSON（`viewCount` / `groupCount` / `groupLabels` / `groupSizes` / `suffixes` / `unmatchedCount` / `bases`） |
-| `viewlgc_render(analysis_json, options_json)` | 比較 HTML |
+| `viewlgc_render(analysis_json, options_json)` | ロジック差分のカード |
+| `viewlgc_page(analysis_json, diff_html, options_json)` | 参照関係の図を作り、差分と外側タブで束ねた 1 枚 |
 | `viewlgc_group_css(options_json)` | `mode='class'` でテンプレートに貼る CSS |
 | `viewlgc_render_dynamic_sql(sql_template, …)` | `build_table.sql` の `__…__` を展開した SQL（JavaScript ではなく SQL 関数） |
 
@@ -652,6 +653,7 @@ DECLARE target_project_id STRING DEFAULT NULL;
 | `view_diff_by_ref` | 同上。基準ごとに 1 行 | `viewlgc_vw_t_diff_by_ref` |
 | `udf_analyze_function_name` | View 群を解析して JSON を返す UDF | `viewlgc_analyze` |
 | `udf_render_function_name` | その JSON を比較 HTML にする UDF | `viewlgc_render` |
+| `udf_page_function_name` | 参照関係を作り差分と束ねる UDF | `viewlgc_page` |
 | `udf_css_function_name` | テンプレート用 CSS を返す UDF | `viewlgc_group_css` |
 | `udf_sql_function_name` | 動的 SQL を展開する UDF | `viewlgc_render_dynamic_sql` |
 
@@ -889,6 +891,45 @@ JavaScript が使えない以上、切り替えられるのは「作り置きし
 「最初の差」を `missBy` として返し、描画側が選ばれた基準の列を読む
 （向きによって理由が変わりうるので対称にはしていない）。グループ数はせいぜい
 数個なので、G² でも走査は実質ゼロ。
+
+### 参照関係の図（ERD タブ）
+
+カードは**外側のタブ 2 枚**でできている。`ロジック差分` と `参照関係`。
+1 レコードに両方入れてあるので、`base` / `ref_label` のコントロールは
+どちらのタブにも同じように効く。別のチャートに分けると、コントロールを
+2 組そろえる必要が出て、片方だけずれた状態を作れてしまう。
+
+図は `FROM` / `JOIN` から起こす。節は実体（実テーブル / CTE / サブクエリ）、
+辺は「読んで作る」向き。JOIN の種別と結合キーは、読む側へ入る辺の注記にする。
+
+```
+orders_abjp ──▶ base_orders ──▶ tagged ──▶ ranked ──▶ daily ──▶ (最終 SELECT)
+customers_abjp ┄┄▶ base_orders          calendar_abjp ──▶ daily
+     （EXISTS の相関サブクエリ経由）        （LEFT JOIN / order_date）
+```
+
+**これは厳密には ER 図ではなく参照関係図。** SQL からはカーディナリティも
+主キーも分からないので描いていない。それらしく描くと、確かめていないことを
+確かめたように見せてしまう。1:N を出すなら `TABLE_CONSTRAINTS` /
+`KEY_COLUMN_USAGE` から PK/FK を読む必要がある（宣言していれば取れる）。
+
+実装で押さえている点:
+
+- **入れ子のスコープは平らにする。** `EXISTS (SELECT … FROM customers)` や
+  `FROM (SELECT …)` の参照は、囲んでいる CTE の入力として扱い、辺を破線にする。
+  図でも入れ子にすると読めなくなるうえ、「この CTE は何を読むか」という
+  問いには平らな形のほうが答えている
+- **段は「できるだけ遅く」置く（ALAP）。** 最長路で前詰めにすると参照テーブルが
+  左端に並び、消費する CTE まで線が何段もまたいで箱の上を横切る。消費する側の
+  直前に置けば、どの辺も 1 段しかまたがない
+- **`{{Pn}}` は先に代表 View の値へ戻してから解析する。** そのままだと
+  `{` `{` `P1` `}` `}` の 5 トークンに割れて実体名として読めない
+- **SVG は `style` 属性を使わず表示属性で書く。** `style` を使うと
+  `mode='class'` がハッシュしてクラス名にするので、CSS を貼り直すまで
+  素の見た目になる
+- **UDF は差分側と分けてある。** 図の解析にはトークナイザが要るが、差分エンジンと
+  一緒に積むとインラインの 32 KB に収まらない。共通の外枠は `chrome.js` に出して
+  両方から使う
 
 パーティションに日付を積むので**履歴が残る**。「いつグループ構成が変わったか」を
 後から追えるので、ロジック逸脱の検知に使える（`build_table.sql` の末尾に例あり）。

@@ -11,7 +11,7 @@
 -- パーティションに日付を積むので、履歴が残る。
 -- 「いつグループ構成が変わったか」を後から追える＝ロジック逸脱の検知に使える。
 --
--- 前提: view_group_html.sql で 4 つの UDF を作成済み。
+-- 前提: view_group_html.sql で 5 つの UDF を作成済み。
 --       system_name / udf_dataset / udf_name_prefix / udf_name_suffix は
 --       両ファイルで一致させること。食い違うと関数が見つからない。
 --
@@ -32,6 +32,7 @@
 --   __V_DIFF_BY_REF__      同上。基準ごとに 1 行あるほう
 --   __UDF_ANALYZE__        analyze 関数（project.dataset.function）
 --   __UDF_RENDER__         render 関数（同上）
+--   __UDF_PAGE__           参照関係を作り差分と束ねる関数（同上）
 --   __UDF_CSS__            group_css 関数（同上）
 --   __TZ__                 snapshot_date の基準タイムゾーン
 --   __RETENTION_DAYS__     パーティションの保持日数
@@ -191,6 +192,7 @@ DECLARE view_diff_by_ref STRING;  -- 同上。基準ごとに 1 行（レポー�
 -- までのため。JS UDF から別の UDF は呼べないので、つなぐのはこの SQL の仕事。
 DECLARE udf_analyze_function_name STRING;
 DECLARE udf_render_function_name  STRING;
+DECLARE udf_page_function_name    STRING;
 DECLARE udf_css_function_name     STRING;
 DECLARE udf_sql_function_name     STRING;
 
@@ -261,6 +263,8 @@ SET udf_analyze_function_name =
   udf_name_prefix || system_name || '_' || 'analyze' || udf_name_suffix;
 SET udf_render_function_name =
   udf_name_prefix || system_name || '_' || 'render' || udf_name_suffix;
+SET udf_page_function_name =
+  udf_name_prefix || system_name || '_' || 'page' || udf_name_suffix;
 SET udf_css_function_name =
   udf_name_prefix || system_name || '_' || 'group_css' || udf_name_suffix;
 SET udf_sql_function_name =
@@ -269,6 +273,8 @@ ASSERT REGEXP_CONTAINS(udf_analyze_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_analyze_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_render_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_render_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_page_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_page_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_css_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_css_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_sql_function_name, r'^[A-Za-z0-9_]+$') AS
@@ -309,12 +315,13 @@ SET view_name_condition = CONCAT(
 -- 固定の設定はここで焼き込み、テンプレートだけを @sql_template で渡す。
 -- 値は %T で埋める。条件文には引用符が入るので、%s だと壊れる。
 SET render_call_sql = FORMAT(
-  """SELECT `%s.%s.%s`(@sql_template, %T, %T, %T, %T, %T, %T, STRUCT(%T AS diff_hist, %T AS diff_latest, %T AS diff_by_ref, %T AS analyze_function, %T AS render_function, %T AS css_function), STRUCT(%T AS time_zone, %T AS retention_days, %T AS suffix_pattern), STRUCT(%T AS schema_condition, %T AS view_dataset_condition, %T AS view_name_condition))""",
+  """SELECT `%s.%s.%s`(@sql_template, %T, %T, %T, %T, %T, %T, STRUCT(%T AS diff_hist, %T AS diff_latest, %T AS diff_by_ref, %T AS analyze_function, %T AS render_function, %T AS page_function, %T AS css_function), STRUCT(%T AS time_zone, %T AS retention_days, %T AS suffix_pattern), STRUCT(%T AS schema_condition, %T AS view_dataset_condition, %T AS view_name_condition))""",
   udf_project_id, udf_dataset, udf_sql_function_name,
   work_project_id, work_dataset, udf_project_id, udf_dataset,
   target_project_id, job_region,
   table_diff_hist, view_diff, view_diff_by_ref,
-  udf_analyze_function_name, udf_render_function_name, udf_css_function_name,
+  udf_analyze_function_name, udf_render_function_name,
+  udf_page_function_name, udf_css_function_name,
   snapshot_time_zone, CAST(partition_expiration_days AS STRING), suffix_pattern,
   schema_condition, view_dataset_condition, view_name_condition);
 
@@ -498,8 +505,19 @@ SELECT
   CAST(JSON_VALUE(analysis, '$.unmatchedCount') AS INT64) AS unmatched_count,
   -- どのグループを基準にするかを設定に足して渡す。opts と同じ組み立て方
   -- （先頭の '{' を落として前に足す）にそろえてある。
-  `__UDF_RENDER__`(
+  --
+  -- 描画は 2 段。render がロジック差分のカードを作り、page がそれを受け取って
+  -- 参照関係の図を足し、外側タブで 1 枚に束ねる。JS UDF から別の UDF は
+  -- 呼べないので、つなぐのは SQL の仕事。
+  `__UDF_PAGE__`(
     analysis,
+    `__UDF_RENDER__`(
+      analysis,
+      CONCAT(
+        '{"referenceIndex":', CAST(ref_index AS STRING), ',',
+        SUBSTR(TRIM((SELECT options_json FROM opts)), 2)
+      )
+    ),
     CONCAT(
       '{"referenceIndex":', CAST(ref_index AS STRING), ',',
       SUBSTR(TRIM((SELECT options_json FROM opts)), 2)

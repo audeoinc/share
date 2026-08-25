@@ -44,9 +44,17 @@ const ANALYZE_SOURCES = [
   ['analyze.js', join(here, 'analyze.js')],
 ];
 const RENDER_SOURCES = [
+  ['chrome.js', join(here, 'chrome.js')],
   ['lib/diff.js', join(here, '..', 'ddl_diff_viz', 'src', 'lib', 'diff.js')],
   ['lib/render.js', join(here, '..', 'ddl_diff_viz', 'src', 'lib', 'render.js')],
   ['render_groups.js', join(here, 'render_groups.js')],
+];
+// 参照関係の UDF。差分エンジン（diff.js / render.js）は要らないので積まない。
+// 積むと 1 個 32 KB のインライン上限に収まらなくなる。
+const ERD_SOURCES = [
+  ['chrome.js', join(here, 'chrome.js')],
+  ['analyze.js', join(here, 'analyze.js')],
+  ['erd.js', join(here, 'erd.js')],
 ];
 
 /**
@@ -77,6 +85,10 @@ function dropFunctions(src, names) {
 // build3Way / mapToBase / baseCell / segsText は 3-way 専用。
 // alphaMap は alphaMapDetail の薄い包み。UDF は Detail 側しか呼ばない。
 const UNUSED_ANALYZE = ['alphaMap'];
+// ERD 側はグループ化もパラメータ化もしない。トークナイザと実体名の判定だけ使う。
+const UNUSED_ERD = ['alphaMap', 'alphaMapDetail', 'parameterize', 'groupByLogic',
+  'analyze', 'maskTokens', 'buildLiteralMap', 'suffixWords', 'parseEquivalents',
+  'extractSuffix', 'expandSuffixParts', 'normalizeSpace'];
 const UNUSED_RENDER = ['renderFragment3', 'build3Way', 'mapToBase', 'baseCell', 'segsText'];
 
 /** CommonJS の体裁を落として素の関数群にする。 */
@@ -104,6 +116,7 @@ async function bundle(sources, unused) {
 }
 const analyzeLib = await bundle(ANALYZE_SOURCES, UNUSED_ANALYZE);
 const renderLib = await bundle(RENDER_SOURCES, UNUSED_RENDER);
+const erdLib = await bundle(ERD_SOURCES, UNUSED_ERD);
 
 // --- 共通ヘルパ（DIFF_HTML と同じ考え方） ------------------------------
 // 両方の UDF に入れるもの。
@@ -266,6 +279,26 @@ function __run(analysis_json, options_json) {
 return __run(analysis_json, options_json);
 `.trim();
 
+// --- page のドライバ ---------------------------------------------------
+// 解析結果から参照関係の図を作り、渡された差分 HTML と外側タブで束ねる。
+// 差分そのものは作らない（差分エンジンを積むと 32 KB に収まらないため）。
+const pageDriver = `
+function __run(analysis_json, diff_html, options_json) {
+  var opts = __opts(options_json);
+  var a;
+  try { a = JSON.parse(analysis_json); } catch (e) { a = null; }
+  if (!a) return String(diff_html || __notice('解析結果を読み取れませんでした。'));
+
+  var erd = '';
+  var bases = a.bases || [];
+  for (var i = 0; i < bases.length; i++) erd += renderErdBase(bases[i], opts);
+  if (!erd) erd = __notice('図にできる View がありません。');
+  return wrapPage(String(diff_html || ''), erd, a.bases && a.bases.length ? a.bases[0].base : '');
+}
+
+return __run(analysis_json, diff_html, options_json);
+`.trim();
+
 // --- group_css のドライバ ----------------------------------------------
 // 全パターンを描画して、そこに出る規則を集める。markup と同じコードから作るので
 // クラス名が食い違わない。chromeCss() はもともとクラス方式なのでそのまま足す。
@@ -347,6 +380,7 @@ function pack(driver, label, lib, extra) {
 const analyzePack = pack(analyzeDriver, 'viewlgc_analyze', analyzeLib);
 const renderPack = pack(renderDriver, 'viewlgc_render', renderLib, sharedRender);
 const cssPack = pack(cssDriver, 'viewlgc_group_css', renderLib, sharedRender);
+const pagePack = pack(pageDriver, 'viewlgc_page', erdLib);
 
 // --- 検証: 最小化した本体をそのまま実行する -----------------------------
 const S = require(join(here, 'sample_views.js'));
@@ -525,7 +559,7 @@ const checks = [
 ];
 
 // サイズ検証
-for (const p of [analyzePack, renderPack, cssPack]) {
+for (const p of [analyzePack, renderPack, pagePack, cssPack]) {
   const size = Buffer.byteLength(p.code);
   checks.push([`${p.label} が ${(SIZE_LIMIT / 1024).toFixed(0)} KB 以内`, size <= SIZE_LIMIT]);
 }
@@ -539,7 +573,7 @@ for (const [name, ok] of checks) {
 const kb = (n) => (n / 1024).toFixed(1) + ' KB';
 console.log(`\n${checks.length - failed}/${checks.length} passed\n`);
 console.log('UDF 本体のサイズ（インライン上限 32 KB）');
-for (const p of [analyzePack, renderPack, cssPack]) {
+for (const p of [analyzePack, renderPack, pagePack, cssPack]) {
   console.log(`  ${p.label.padEnd(20)} 素 ${kb(p.raw).padStart(8)} → ` +
     (p.min === null ? '最小化なし' : `最小化 ${kb(p.min).padStart(8)}`) +
     `  （上限比 ${(Buffer.byteLength(p.code) / SIZE_LIMIT * 100).toFixed(0)}%）`);
@@ -559,9 +593,10 @@ const sql = `-- ================================================================
 --    本体は esbuild で最小化してある（インラインのコード ブロブは
 --    32 KB までに制限されるため。素の連結は約 48 KB で確実に弾かれる）。
 --
--- 作る関数は 4 つ。名前はすべて CONFIGURATION の値から組み立てる。
+-- 作る関数は 5 つ。名前はすべて CONFIGURATION の値から組み立てる。
 --   viewlgc_analyze             View 群を解析して JSON を返す（JavaScript）
 --   viewlgc_render              その JSON を比較 HTML にする（JavaScript）
+--   viewlgc_page                参照関係の図を作り、差分と外側タブで束ねる（JavaScript）
 --   viewlgc_group_css           テンプレートに貼る CSS を返す（JavaScript）
 --   viewlgc_render_dynamic_sql  build_table.sql の __…__ を展開する（SQL）
 --
@@ -633,6 +668,7 @@ DECLARE udf_name_suffix STRING DEFAULT '';
 DECLARE udf_analyze_function_name STRING;
 DECLARE udf_render_function_name  STRING;
 DECLARE udf_css_function_name     STRING;
+DECLARE udf_page_function_name    STRING;
 DECLARE udf_sql_function_name     STRING;
 
 -- [C] 導出・内部用。編集しない ----------------------------------------
@@ -655,6 +691,9 @@ DECLARE js_render STRING DEFAULT r"""
 ${renderPack.code}
 """;
 
+DECLARE js_page STRING DEFAULT r"""
+${pagePack}
+""";
 DECLARE js_css STRING DEFAULT r"""
 ${cssPack.code}
 """;
@@ -689,12 +728,16 @@ SET udf_render_function_name =
   udf_name_prefix || system_name || '_' || 'render' || udf_name_suffix;
 SET udf_css_function_name =
   udf_name_prefix || system_name || '_' || 'group_css' || udf_name_suffix;
+SET udf_page_function_name =
+  udf_name_prefix || system_name || '_' || 'page' || udf_name_suffix;
 SET udf_sql_function_name =
   udf_name_prefix || system_name || '_' || 'render_dynamic_sql' || udf_name_suffix;
 ASSERT REGEXP_CONTAINS(udf_analyze_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_analyze_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_render_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_render_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_page_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_page_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_css_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_css_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_sql_function_name, r'^[A-Za-z0-9_]+$') AS
@@ -792,7 +835,28 @@ LANGUAGE js AS %s
 
 
 -- ---------------------------------------------------------------------
--- 3. viewlgc_group_css
+-- 3. viewlgc_page
+--    参照関係の図を作り、渡された差分 HTML と外側タブで束ねて 1 枚にする
+--
+-- 差分は作らない。viewlgc_render の出力をそのまま受け取って包むだけ。
+-- 図の解析にはトークナイザが要るので、差分側とは別の UDF にしてある
+-- （両方を 1 つに積むとインラインの 32 KB に収まらない）。
+-- ---------------------------------------------------------------------
+EXECUTE IMMEDIATE FORMAT('''
+CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
+  analysis_json STRING,
+  diff_html STRING,
+  options_json STRING
+)
+RETURNS STRING
+LANGUAGE js AS %s
+''',
+  udf_project_id, udf_dataset, udf_page_function_name,
+  TO_JSON_STRING(js_page));
+
+
+-- ---------------------------------------------------------------------
+-- 4. viewlgc_group_css
 --    mode='class' のときテンプレートへ貼る CSS を返す
 --
 --   SELECT \`<project>.<udf_dataset>.viewlgc_group_css\`(NULL);
@@ -815,7 +879,7 @@ LANGUAGE js AS %s
 
 
 -- ---------------------------------------------------------------------
--- 4. viewlgc_render_dynamic_sql
+-- 5. viewlgc_render_dynamic_sql
 --    build_table.sql の SQL テンプレートに含まれる __…__ を展開する
 --
 -- BigQuery は識別子（プロジェクト・データセット・テーブル・関数名）を
@@ -834,6 +898,7 @@ LANGUAGE js AS %s
 --   __V_DIFF_BY_REF__      同上。基準ごとに 1 行あるほう
 --   __UDF_ANALYZE__        analyze 関数（project.dataset.function）
 --   __UDF_RENDER__         render 関数（同上）
+--   __UDF_PAGE__           page 関数（同上）
 --   __UDF_CSS__            group_css 関数（同上）
 --   __TZ__                 snapshot_date の基準タイムゾーン
 --   __RETENTION_DAYS__     パーティションの保持日数
@@ -860,6 +925,7 @@ CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
     diff_by_ref      STRING,
     analyze_function STRING,
     render_function  STRING,
+    page_function    STRING,
     css_function     STRING
   >,
   options STRUCT<
@@ -889,6 +955,7 @@ AS (
   REPLACE(
   REPLACE(
   REPLACE(
+  REPLACE(
     sql_template,
     '__TARGET_PROJECT__', target_project_id),
     '__JOB_REGION__', job_region),
@@ -902,6 +969,8 @@ AS (
       udf_project_id || '.' || udf_dataset || '.' || objects.analyze_function),
     '__UDF_RENDER__',
       udf_project_id || '.' || udf_dataset || '.' || objects.render_function),
+    '__UDF_PAGE__',
+      udf_project_id || '.' || udf_dataset || '.' || objects.page_function),
     '__UDF_CSS__',
       udf_project_id || '.' || udf_dataset || '.' || objects.css_function),
     '__TZ__', options.time_zone),
@@ -915,10 +984,11 @@ AS (
   udf_project_id, udf_dataset, udf_sql_function_name);
 
 
--- 作った 4 つの名前を出す。build_table.sql に同じ値を入れる。
+-- 作った 5 つの名前を出す。build_table.sql に同じ値を入れる。
 SELECT
   FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_analyze_function_name) AS analyze_function,
   FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_render_function_name)  AS render_function,
+  FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_page_function_name)    AS page_function,
   FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_css_function_name)     AS css_function,
   FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_sql_function_name)     AS sql_function,
   CURRENT_TIMESTAMP() AS created_at;
@@ -936,8 +1006,8 @@ END;
   // FORMAT のテンプレートに素の % があると書式指定と解釈される。
   // 引数側（JS 本体）の % は無関係なので、''' … ''' の中だけを見る。
   const templates = [...sql.matchAll(/FORMAT\('''([\s\S]*?)'''/g)].map((m) => m[1]);
-  if (templates.length !== 4) {
-    console.log(`  FAIL  FORMAT のテンプレートが 4 つ見つかりません（${templates.length} 個）`);
+  if (templates.length !== 5) {
+    console.log(`  FAIL  FORMAT のテンプレートが 5 つ見つかりません（${templates.length} 個）`);
     process.exit(1);
   }
   for (const t of templates) {
