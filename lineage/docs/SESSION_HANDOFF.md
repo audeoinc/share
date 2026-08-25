@@ -608,6 +608,15 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   6（スモークテスト）をスキップし、**新設のセクション 4a（ビュー）だけ**を再作成する。
   ビュー DDL を別スクリプトに複製せずに済むのが要点。
   setup summary は `views_only_run` を出力し、`smoke_test_status` は NULL になる。
+- **usage の SQL 本文も同ビューに追加**（`usage_definition_text` / `usage_definition_is_current`）。
+  両ブランチで definition_registry を **object キー（project/dataset/name/type）** で LEFT JOIN。
+  このキーは registry の MERGE キーそのもので **1 オブジェクト＝1 行**なので行の増殖が起きない
+  （`definition_hash` だけで結合すると、同一 SQL の別オブジェクトと多重マッチしうる）。
+  本文を返すのは `d.definition_hash = u.definition_hash` のときだけ：オブジェクトが再定義されると
+  registry の現在のテキストは**別の SQL** で `line_number` が合わなくなるため、
+  それらしい誤情報を返さず NULL にする。`usage_definition_is_current` が
+  TRUE=一致 / FALSE=再定義済み / NULL=registry 行なし を区別する。
+  ビューなので、選択しないクエリでは BigQuery が列を刈り取りコストはかからない。
 - SQL のみ／エンジン不変。**BigQuery 未検証**。
 
 ## 4.22 本ドキュメントと実装の乖離（重要）

@@ -598,7 +598,7 @@ EXECUTE IMMEDIATE FORMAT(
   '''
   CREATE OR REPLACE VIEW `%s.%s`
   OPTIONS (
-    description = 'Column usage joined to impact: for a chosen origin column, every downstream usage site with a depth (1 = direct reference; impact_rank + 1 deeper) and the value-flow path. line_text has its leading indentation stripped (line_indent_width = how much was removed); column_number is the position in the original, untrimmed line.'
+    description = 'Column usage joined to impact: for a chosen origin column, every downstream usage site with a depth (1 = direct reference; impact_rank + 1 deeper) and the value-flow path. line_text has its leading indentation stripped (line_indent_width = how much was removed); column_number is the position in the original, untrimmed line. usage_definition_text is the full SQL of the object containing the reference, joined from the definition registry and returned only while that registry row still holds the analyzed definition (usage_definition_is_current).'
   )
   AS
   -- depth = 1: the usage references the origin column directly.
@@ -638,8 +638,23 @@ EXECUTE IMMEDIATE FORMAT(
     LTRIM(u.line_text) AS line_text,
     LENGTH(u.line_text) - LENGTH(LTRIM(u.line_text)) AS line_indent_width,
     u.resolution_status,
+    -- The SQL the reference lives in, so line_number / line_text can be read in
+    -- context without a second query. Only returned when the registry still holds
+    -- the very definition that was analyzed (definition_hash match): if the object
+    -- has been redefined since, the current text is a DIFFERENT SQL and its line
+    -- numbers would not line up, so NULL is returned instead of something
+    -- plausible but wrong. usage_definition_is_current says which case you are in.
+    CASE
+      WHEN d.definition_hash = u.definition_hash THEN d.definition_text
+    END AS usage_definition_text,
+    (d.definition_hash = u.definition_hash) AS usage_definition_is_current,
     CAST(NULL AS ARRAY<STRING>) AS dependency_path
   FROM `%s.%s` AS u
+  LEFT JOIN `%s.%s` AS d
+    ON  LOWER(d.object_project) = LOWER(u.object_project)
+    AND LOWER(d.object_dataset) = LOWER(u.object_dataset)
+    AND LOWER(d.object_name)    = LOWER(u.object_name)
+    AND d.object_type           = u.object_type
   UNION ALL
   -- depth = impact_rank + 1: the usage references a column impacted by the origin.
   SELECT
@@ -668,6 +683,10 @@ EXECUTE IMMEDIATE FORMAT(
     LTRIM(u.line_text) AS line_text,
     LENGTH(u.line_text) - LENGTH(LTRIM(u.line_text)) AS line_indent_width,
     u.resolution_status,
+    CASE
+      WHEN d.definition_hash = u.definition_hash THEN d.definition_text
+    END AS usage_definition_text,
+    (d.definition_hash = u.definition_hash) AS usage_definition_is_current,
     i.dependency_path
   FROM `%s.%s` AS i
   JOIN `%s.%s` AS u
@@ -675,11 +694,20 @@ EXECUTE IMMEDIATE FORMAT(
     AND LOWER(u.source_dataset) = LOWER(i.impacted_dataset)
     AND LOWER(u.source_object)  = LOWER(i.impacted_object)
     AND LOWER(u.source_column)  = LOWER(i.impacted_column)
+  LEFT JOIN `%s.%s` AS d
+    ON  LOWER(d.object_project) = LOWER(u.object_project)
+    AND LOWER(d.object_dataset) = LOWER(u.object_dataset)
+    AND LOWER(d.object_name)    = LOWER(u.object_name)
+    AND d.object_type           = u.object_type
   ''',
+  -- Argument order follows the %s placeholders in text order:
+  -- CREATE VIEW target, branch 1 (usage, registry), branch 2 (impact, usage, registry).
   repository_dataset_full_name, view_column_usage_impact,
   repository_dataset_full_name, table_column_usage,
+  repository_dataset_full_name, table_definition_registry,
   repository_dataset_full_name, table_impact,
-  repository_dataset_full_name, table_column_usage
+  repository_dataset_full_name, table_column_usage,
+  repository_dataset_full_name, table_definition_registry
 );
 
 IF NOT recreate_views_only THEN
