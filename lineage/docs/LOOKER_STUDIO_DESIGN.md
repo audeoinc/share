@@ -54,6 +54,9 @@ Repositoryの健全性、解析量、失敗、変更、Impactを運用者が日�
 
 基本はRepositoryテーブルまたは運用向けViewを使用します。Looker Studioから複雑な再帰処理を行わず、必要な集計はBigQuery Viewとして準備します。
 
+カラム影響分析ビュー `lnge_vw_t_column_usage_impact` のカラム定義・粒度・集計時の注意は
+[`VIEW_COLUMN_USAGE_IMPACT.md`](VIEW_COLUMN_USAGE_IMPACT.md) を参照してください（レポート作成者向け）。
+
 ## 4. 完成条件
 
 - 運用担当者がERRORを一画面で把握できる
