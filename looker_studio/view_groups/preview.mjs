@@ -65,6 +65,10 @@ const cases = [
   { title: `${baseMany.groupCount} グループ（既定 = タブ）`, b: baseMany, opts: {} },
   { title: 'suffix 未認識（単独表示）', b: baseOdd, opts: {} },
   { title: '複雑な SQL（多段 CTE / ウィンドウ / UNION）', b: baseComplex, opts: {} },
+  // 基準はレポート側で選べる（テーブルは base × 基準で 1 行）。
+  // 同じ解析結果から基準だけ変えて描いたもの。
+  { title: '基準を 2 番目のグループにした場合', b: base3, opts: { referenceIndex: 1 } },
+  { title: '基準を 3 番目のグループにした場合', b: base3, opts: { referenceIndex: 2 } },
 ];
 
 const parts = cases.map((c) => ({ ...c, html: R.renderBase(c.b, c.opts) }));
@@ -190,6 +194,39 @@ const checks = [
     const tips = [...parts[0].html.matchAll(/data-tip="(P1: [^"]*)"/g)].map((m) => m[1]);
     return new Set(tips).size > 1;
   })()],
+  // --- 基準の切り替え -----------------------------------------------
+  ['基準を変えると基準タブが入れ替わる', (() => {
+    const tabsOf = (h) => [...h.matchAll(/class="vg-tab (?:vg-tbase|vg-t\d+)"[^>]*>(?:<span[^>]*>基準<\/span>)?([^<]*)/g)]
+      .map((m) => m[1].trim());
+    const t0 = tabsOf(h3), t1 = tabsOf(parts[6].html), t2 = tabsOf(parts[7].html);
+    return t0[0] === 'abjp, abuk, abus' && t1[0] === 'cdjp, cduk, cdus' &&
+      t2[0] === 'efjp, efuk, efus' &&
+      // 枚数はどの基準でも同じ＝グループ数
+      t0.length === 3 && t1.length === 3 && t2.length === 3;
+  })()],
+  ['基準を変えても中身の量は変わらない（1 レコードは基準 1 つぶん）', (() => {
+    const panes = (h) => (h.match(/<th colspan=/g) || []).length;
+    return panes(h3) === panes(parts[6].html) &&
+      panes(h3) === panes(parts[7].html);
+  })()],
+  ['「なぜ別グループになったか」が選んだ基準に対する差になる',
+    /vs cdjp, cduk, cdus/.test(parts[6].html) &&
+    !/vs abjp, abuk, abus/.test(parts[6].html) &&
+    /vs efjp, efuk, efus/.test(parts[7].html)],
+  ['基準そのものは「なぜ別グループ」に出ない', (() => {
+    const names = [...parts[6].html.matchAll(/class="vg-mname">([^<]*)</g)].map((m) => m[1]);
+    return names.length === 2 && !names.includes('cdjp, cduk, cdus');
+  })()],
+  ['radio の id が基準ごとに変わる（同じページに並べても衝突しない）',
+    new Set([h3, parts[6].html, parts[7].html]
+      .map((h) => (h.match(/id="([^"-]+)-1"/) || [])[1])).size === 3],
+  ['範囲外の基準は 0 に丸める',
+    R.renderBase(base3, { referenceIndex: 99 }) === R.renderBase(base3, {}) &&
+    R.renderBase(base3, { referenceIndex: -3 }) === R.renderBase(base3, {})],
+  ['解析は全順序対の差を持つ（基準ごとに出し分けられる）',
+    base3.groups.every((g, i) => g.missBy.length === base3.groupCount &&
+      g.missBy[i] === null &&
+      g.missBy.filter((m) => m).length === base3.groupCount - 1)],
   ['伏せ字は診断で見える表記に戻す',
     R.renderBase(A.analyze([
       { view_name: 'v_w_abjp', ddl: "SELECT a FROM t WHERE c = 'abjp'" },

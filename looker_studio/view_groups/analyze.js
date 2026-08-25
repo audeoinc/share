@@ -554,32 +554,41 @@ function groupByLogic(views, opts) {
   for (const v of prepared) {
     // α 等価は推移的（全単射の合成）なので、代表 1 本と比べれば足りる
     let hit = null;
-    let firstMiss = null;
     for (const g of groups) {
-      const d = alphaMapDetail(g.members[0].tokens, v.tokens, opts);
-      if (d.ok) { hit = g; break; }
-      if (!firstMiss) firstMiss = { vs: g.members[0].suffix, detail: d };
+      if (alphaMapDetail(g.members[0].tokens, v.tokens, opts).ok) { hit = g; break; }
     }
     if (hit) hit.members.push(v);
-    else groups.push({ members: [v], miss: firstMiss });
+    else groups.push({ members: [v] });
   }
 
   // 大きいグループを先頭に（比較の基準に使う）
   groups.sort((a, b) => b.members.length - a.members.length ||
     String(a.members[0].suffix).localeCompare(String(b.members[0].suffix)));
 
-  return groups.map((g) => {
+  // 基準はレポート側で選べるので、「なぜ別グループになったか」も
+  // 基準ごとに要る。全順序対の「最初の差」を持っておく。
+  // グループ数はせいぜい数個なので、G² でも走査は実質ゼロ。
+  // 向きで理由が変わりうる（inconsistent / not-injective）ため対称にはしない。
+  const reps = groups.map((g) => g.members[0]);
+
+  return groups.map((g, i) => {
     const members = g.members
       .slice()
       .sort((x, y) => String(x.suffix).localeCompare(String(y.suffix)));
     const p = parameterize(members);
+    // missBy[k] = 「グループ k を基準にしたとき、この群がなぜ別扱いか」
+    const missBy = reps.map((r, k) => (k === i ? null : {
+      vs: r.suffix,
+      detail: alphaMapDetail(r.tokens, g.members[0].tokens, opts),
+    }));
     return {
       suffixes: members.map((m) => m.suffix),
       members,
       sql: p.sql,
       params: p.params,
-      // 先頭グループ以外は「なぜ別グループになったか」を持つ
-      miss: g.miss || null,
+      missBy,
+      // 既定（基準 = 先頭グループ）の分。先頭グループ自身は null。
+      miss: missBy[0],
     };
   });
 }

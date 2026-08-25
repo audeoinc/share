@@ -28,7 +28,8 @@
 --   __TARGET_PROJECT__     読み取り対象のプロジェクト
 --   __JOB_REGION__         region- を除いたロケーション
 --   __T_DIFF_HIST__        履歴テーブル（project.dataset.table）
---   __V_DIFF__             最新スナップショットのビュー（同上）
+--   __V_DIFF__             最新スナップショットのビュー（基準 = 先頭グループ）
+--   __V_DIFF_BY_REF__      同上。基準ごとに 1 行あるほう
 --   __UDF_ANALYZE__        analyze 関数（project.dataset.function）
 --   __UDF_RENDER__         render 関数（同上）
 --   __UDF_CSS__            group_css 関数（同上）
@@ -181,8 +182,9 @@ DECLARE project_token      STRING;
 -- 作るオブジェクトの物理名（下の SET で組み立てる）。データセット名は含まない。
 -- オブジェクトが増えたらここに 1 行足し、SET と本文の __…__ を対で増やし、
 -- viewlgc_render_dynamic_sql にも置換を 1 段足す。
-DECLARE table_diff_hist STRING;  -- 日次スナップショットを積むテーブル
-DECLARE view_diff       STRING;  -- 最新スナップショットだけのビュー
+DECLARE table_diff_hist  STRING;  -- 日次スナップショットを積むテーブル
+DECLARE view_diff        STRING;  -- 最新スナップショット。基準 = 先頭グループの 1 行だけ
+DECLARE view_diff_by_ref STRING;  -- 同上。基準ごとに 1 行（レポートで基準を選ぶ用）
 
 -- view_group_html.sql が作った関数名。同じ規則で組み立てて突き合わせる。
 -- 解析と描画が別の UDF なのは、インラインのコード ブロブが 1 個あたり 32 KB
@@ -244,10 +246,14 @@ SET table_diff_hist =
   table_name_prefix || system_name || '_' || 't_' || 'diff_hist' || table_name_suffix;
 SET view_diff =
   table_name_prefix || system_name || '_' || 'vw_' || 't_' || 'diff' || table_name_suffix;
+SET view_diff_by_ref =
+  table_name_prefix || system_name || '_' || 'vw_' || 't_' || 'diff_by_ref' || table_name_suffix;
 ASSERT REGEXP_CONTAINS(table_diff_hist, r'^[A-Za-z0-9_-]+$') AS
   'table_diff_hist の名前が不正です。';
 ASSERT REGEXP_CONTAINS(view_diff, r'^[A-Za-z0-9_-]+$') AS
   'view_diff の名前が不正です。';
+ASSERT REGEXP_CONTAINS(view_diff_by_ref, r'^[A-Za-z0-9_-]+$') AS
+  'view_diff_by_ref の名前が不正です。';
 
 -- UDF: udf_prefix + system_name + '_' + 基本名 + udf_suffix
 --      （view_group_html.sql と同じ。system_name も同じ値でなければ見つからない）
@@ -303,11 +309,11 @@ SET view_name_condition = CONCAT(
 -- 固定の設定はここで焼き込み、テンプレートだけを @sql_template で渡す。
 -- 値は %T で埋める。条件文には引用符が入るので、%s だと壊れる。
 SET render_call_sql = FORMAT(
-  """SELECT `%s.%s.%s`(@sql_template, %T, %T, %T, %T, %T, %T, STRUCT(%T AS diff_hist, %T AS diff_latest, %T AS analyze_function, %T AS render_function, %T AS css_function), STRUCT(%T AS time_zone, %T AS retention_days, %T AS suffix_pattern), STRUCT(%T AS schema_condition, %T AS view_dataset_condition, %T AS view_name_condition))""",
+  """SELECT `%s.%s.%s`(@sql_template, %T, %T, %T, %T, %T, %T, STRUCT(%T AS diff_hist, %T AS diff_latest, %T AS diff_by_ref, %T AS analyze_function, %T AS render_function, %T AS css_function), STRUCT(%T AS time_zone, %T AS retention_days, %T AS suffix_pattern), STRUCT(%T AS schema_condition, %T AS view_dataset_condition, %T AS view_name_condition))""",
   udf_project_id, udf_dataset, udf_sql_function_name,
   work_project_id, work_dataset, udf_project_id, udf_dataset,
   target_project_id, job_region,
-  table_diff_hist, view_diff,
+  table_diff_hist, view_diff, view_diff_by_ref,
   udf_analyze_function_name, udf_render_function_name, udf_css_function_name,
   snapshot_time_zone, CAST(partition_expiration_days AS STRING), suffix_pattern,
   schema_condition, view_dataset_condition, view_name_condition);
@@ -347,6 +353,8 @@ CREATE OR REPLACE TABLE `__T_DIFF_HIST__`
 (
   snapshot_date   DATE           OPTIONS (description = '生成日'),
   base            STRING         OPTIONS (description = 'suffix を除いた View 名。Looker のキー。suffix を認識できなかった View は View 名そのもの'),
+  ref_index       INT64          OPTIONS (description = '基準にしたグループの番号（0 = 既定 / 最大のグループ）。base と組で 1 行'),
+  ref_label       STRING         OPTIONS (description = '基準グループの見出し。レポートのプルダウンに出す値'),
   view_count      INT64          OPTIONS (description = 'この base に属する View 数'),
   group_count     INT64          OPTIONS (description = 'ロジックのグループ数。1 なら全部同一'),
   has_multiple    BOOL           OPTIONS (description = 'group_count > 1。ロジック逸脱の検知用'),
@@ -357,7 +365,7 @@ CREATE OR REPLACE TABLE `__T_DIFF_HIST__`
   diff_html       STRING         OPTIONS (description = '比較 HTML。Templated Record に渡す')
 )
 PARTITION BY snapshot_date
-CLUSTER BY base
+CLUSTER BY base, ref_index
 OPTIONS (
   description = 'suffix 違い View のロジック グループ比較（事前生成）',
   partition_expiration_days = __RETENTION_DAYS__
@@ -458,10 +466,26 @@ analyzed AS (
     ) AS analysis
   FROM keyed
   GROUP BY base
+),
+-- 基準はレポート側で選ぶので、グループの数だけ行を作る。
+-- 解析はここまでで 1 回だけ。増えるのは描画（下の __UDF_RENDER__）の回数で、
+-- 1 行あたりの HTML の大きさは基準が 1 つのときと変わらない。
+refs AS (
+  SELECT
+    a.base,
+    a.analysis,
+    ref_index,
+    JSON_VALUE_ARRAY(a.analysis, '$.groupLabels')[SAFE_OFFSET(ref_index)] AS ref_label
+  FROM analyzed AS a,
+  UNNEST(GENERATE_ARRAY(
+    0, CAST(JSON_VALUE(a.analysis, '$.groupCount') AS INT64) - 1
+  )) AS ref_index
 )
 SELECT
   CURRENT_DATE('__TZ__') AS snapshot_date,
   base,
+  ref_index,
+  ref_label,
   CAST(JSON_VALUE(analysis, '$.viewCount')  AS INT64) AS view_count,
   CAST(JSON_VALUE(analysis, '$.groupCount') AS INT64) AS group_count,
   CAST(JSON_VALUE(analysis, '$.groupCount') AS INT64) > 1 AS has_multiple,
@@ -472,8 +496,16 @@ SELECT
   ) AS group_sizes,
   JSON_VALUE_ARRAY(analysis, '$.suffixes') AS suffixes,
   CAST(JSON_VALUE(analysis, '$.unmatchedCount') AS INT64) AS unmatched_count,
-  `__UDF_RENDER__`(analysis, (SELECT options_json FROM opts)) AS diff_html
-FROM analyzed
+  -- どのグループを基準にするかを設定に足して渡す。opts と同じ組み立て方
+  -- （先頭の '{' を落として前に足す）にそろえてある。
+  `__UDF_RENDER__`(
+    analysis,
+    CONCAT(
+      '{"referenceIndex":', CAST(ref_index AS STRING), ',',
+      SUBSTR(TRIM((SELECT options_json FROM opts)), 2)
+    )
+  ) AS diff_html
+FROM refs
 """;
 EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
 ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
@@ -484,10 +516,33 @@ USING suffix_list AS suffix_list, analyze_options AS analyze_options;
 
 -- ---------------------------------------------------------------------
 -- 3. Looker Studio が読むビュー（最新スナップショットだけ・初回のみ）
---    名前は table_name_prefix + system_name + '_vw_t_diff' + table_name_suffix。
+--    ビューは 2 本ある。読む側が 1 レコードに絞れる形で渡すのが目的。
+--
+--    __V_DIFF__        base で 1 行。基準は既定（いちばん大きいグループ）。
+--                      base のコントロール 1 つで 1 レコードに決まる。
+--    __V_DIFF_BY_REF__ base × 基準で 1 行。基準も選びたいとき。
+--                      base と ref_label の 2 つで 1 レコードに決まる。
+--
+--    分けてあるのは、基準を選ばないレポートで 1 レコードに絞れなくなるのを
+--    避けるため。Templated Record は 1 行を描くチャートなので、複数行が
+--    来ると何が出るか読めない。
 -- ---------------------------------------------------------------------
 SET sql_template = """
 CREATE OR REPLACE VIEW `__V_DIFF__` AS
+SELECT * EXCEPT (ref_index, ref_label)
+FROM `__T_DIFF_HIST__`
+WHERE snapshot_date = (
+  SELECT MAX(snapshot_date) FROM `__T_DIFF_HIST__`
+)
+  AND ref_index = 0
+""";
+EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+  'CREATE VIEW の SQL に未展開のプレースホルダが残っています。';
+EXECUTE IMMEDIATE rendered_sql;
+
+SET sql_template = """
+CREATE OR REPLACE VIEW `__V_DIFF_BY_REF__` AS
 SELECT *
 FROM `__T_DIFF_HIST__`
 WHERE snapshot_date = (
@@ -496,7 +551,7 @@ WHERE snapshot_date = (
 """;
 EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
 ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
-  'CREATE VIEW の SQL に未展開のプレースホルダが残っています。';
+  'CREATE VIEW（基準ごと）の SQL に未展開のプレースホルダが残っています。';
 EXECUTE IMMEDIATE rendered_sql;
 
 
@@ -536,8 +591,11 @@ SELECT
   group_count                       AS logic_group_count,
   group_labels                      AS logic_groups_by_suffix,
   unmatched_count                   AS suffix_unrecognized_views,
-  LENGTH(diff_html)                 AS diff_html_length_chars
-FROM `__V_DIFF__`
+  LENGTH(diff_html)                 AS diff_html_length_chars,
+  -- 基準ごとの行がそろっているか。group_count と同じ数になるはず。
+  (SELECT COUNT(*) FROM `__V_DIFF_BY_REF__` AS r
+   WHERE r.base = v.base)           AS rows_by_reference
+FROM `__V_DIFF__` AS v
 ORDER BY base_view_name
 """;
 EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
@@ -656,6 +714,9 @@ FROM (
     LAG(TO_JSON_STRING(group_labels)) OVER w AS prev_labels,
     TO_JSON_STRING(group_labels)      AS curr_labels
   FROM `__T_DIFF_HIST__`
+  -- 基準ごとに行があるが、グループ構成はどの行でも同じ。
+  -- 絞らないと同じ日の別の基準の行と比べてしまう。
+  WHERE ref_index = 0
   WINDOW w AS (PARTITION BY base ORDER BY snapshot_date)
 )
 WHERE prev_labels IS NOT NULL AND prev_labels != curr_labels

@@ -115,27 +115,31 @@ const REASON_TEXT = {
  * グループが想定より細かく割れたとき、原因が「リテラル差を既定でロジック差に
  * している」なのか本物の差なのかを、画面だけで切り分けられるようにする。
  */
-function missTable(groups) {
+function missTable(groups, refIndex, refLabel) {
   // 比較用トークンでは伏せ字が制御文字になっている。そのまま出すと消えて
   // 見えるので、何を伏せたか分かる表記に戻す。
   const unmask = (s) => String(s == null ? '' : s)
     .split('\u0000').join('⟨suffix⟩')
     .replace(/\u0001(\d+)\u0001/g, '⟨同値リテラル $1 組目⟩');
-  const rows = groups.filter((g) => g.miss).map((g) => {
-    const d = g.miss.detail;
+  // 基準はレポート側で選べるので、いま選ばれている基準に対する差を出す。
+  // 向きで理由が変わりうるため、基準ごとに別の内容になる。
+  // missBy が無い（分割前の解析結果）ときは既定の miss で代用する。
+  const missOf = (g) => (g.missBy ? g.missBy[refIndex] : g.miss);
+  const rows = groups.filter((g) => missOf(g)).map((g) => {
+    const d = missOf(g).detail;
     const what = d.reason === 'length'
       ? `${d.aLen} 対 ${d.bLen}`
       : `<code class="vg-mcode">${esc(unmask(d.aText))}</code> ↔ ` +
         `<code class="vg-mcode">${esc(unmask(d.bText))}</code>` +
         `<span class="vg-mkind">${esc(kindText(d.kind))}</span>`;
     return `<tr><th class="vg-mname">${esc(label(g))}</th>` +
-      `<td class="vg-mvs">vs ${esc(g.miss.vs)}</td>` +
+      `<td class="vg-mvs">vs ${esc(refLabel)}</td>` +
       `<td class="vg-mreason">${esc(REASON_TEXT[d.reason] || d.reason)}<br>${what}</td></tr>`;
   }).join('');
   if (!rows) return '';
-  const literal = groups.some((g) => g.miss &&
-    g.miss.detail.reason === 'not-substitutable' &&
-    (g.miss.detail.kind === 'string' || g.miss.detail.kind === 'number'));
+  const literal = groups.some((g) => missOf(g) &&
+    missOf(g).detail.reason === 'not-substitutable' &&
+    (missOf(g).detail.kind === 'string' || missOf(g).detail.kind === 'number'));
   const hint = literal
     ? `<div class="vg-mhint">値の違いで割れています。` +
       `既定では値はパラメータ化して同じグループにするので、` +
@@ -223,8 +227,9 @@ function baseTab(g) {
  *
  * 1 グループのときもタブを 1 枚出す。比較相手がいないので中身は SQL 1 ペイン。
  */
-function tabs(groups, opts, idPrefix) {
-  const [base, ...others] = groups;
+function tabs(groups, refIndex, opts, idPrefix) {
+  const base = groups[refIndex];
+  const others = groups.filter((_, i) => i !== refIndex);
   const shown = others.slice(0, MAX_TABS);
   const radios = shown.map((g, i) =>
     `<input class="vg-r vg-r${i + 1}" type="radio" name="${idPrefix}"` +
@@ -257,10 +262,16 @@ function renderBase(b, opts) {
   const o = opts || {};
   const groups = b.groups;
   const n = groups.length;
+  // どのグループを基準（左ペインに出しっぱなしにする側）にするか。
+  // レポート側で選べるよう、基準ごとに 1 レコードを作り置きする。
+  // 範囲外や数値でない指定は既定（0）に戻す。中途半端に丸めると、
+  // 指定を間違えたときに「別の基準の絵」が出て気づけない。
+  const ri = Math.trunc(Number(o.referenceIndex));
+  const refIndex = Number.isFinite(ri) && ri >= 0 && ri < n ? ri : 0;
   // id はレコード内で一意であればよいが、同じページに複数レコードが並ぶ場合に
-  // 備えて、base 名だけでなくグループ構成も混ぜてハッシュする。
+  // 備えて、base 名・グループ構成・基準を混ぜてハッシュする。
   // （同一内容を 2 回描画した場合は衝突しうる。1 チャート 1 レコードが前提。）
-  const idPrefix = 'vgt' + hashId(b.base + '|' + groups.map(label).join('|'));
+  const idPrefix = 'vgt' + hashId(b.base + '|' + groups.map(label).join('|') + '|' + refIndex);
 
   // グループ数によらずタブで出す。タブを数えればグループ数になる形にそろえる。
   let body;
@@ -272,13 +283,13 @@ function renderBase(b, opts) {
     const lead = n > 1 ? '' : notice(b.unmatched
       ? 'suffix を認識できなかった View です。比較相手がないので単独で表示しています。'
       : `${b.viewCount} View すべてが同一ロジックです。比較の必要がないので SQL だけ出しています。`);
-    body = lead + tabs(groups, o, idPrefix);
+    body = lead + tabs(groups, refIndex, o, idPrefix);
   }
 
   return `<div class="vg-root">` +
     header(b.base, b.viewCount, n, b.unmatched) +
     body +
-    missTable(groups) +
+    missTable(groups, refIndex, n > 0 ? label(groups[refIndex]) : '') +
     paramsTable(groups) +
     `</div>`;
 }

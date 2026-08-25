@@ -173,7 +173,9 @@ function __trimBase(bs) {
     }
     groups.push({
       suffixes: g.suffixes, members: members,
-      sql: g.sql, params: g.params, miss: g.miss
+      // missBy は「どのグループを基準にしたときの差か」の行列。基準を
+      // レポート側で選べるようにしたので、描画側にも渡す必要がある。
+      sql: g.sql, params: g.params, miss: g.miss, missBy: g.missBy
     });
   }
   return {
@@ -828,7 +830,8 @@ LANGUAGE js AS %s
 --   __TARGET_PROJECT__     読み取り対象のプロジェクト
 --   __JOB_REGION__         region- を除いたロケーション
 --   __T_DIFF_HIST__        履歴テーブル（project.dataset.table）
---   __V_DIFF__             最新スナップショットのビュー（同上）
+--   __V_DIFF__             最新スナップショットのビュー（基準 = 先頭グループ）
+--   __V_DIFF_BY_REF__      同上。基準ごとに 1 行あるほう
 --   __UDF_ANALYZE__        analyze 関数（project.dataset.function）
 --   __UDF_RENDER__         render 関数（同上）
 --   __UDF_CSS__            group_css 関数（同上）
@@ -854,6 +857,7 @@ CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
   objects STRUCT<
     diff_hist        STRING,
     diff_latest      STRING,
+    diff_by_ref      STRING,
     analyze_function STRING,
     render_function  STRING,
     css_function     STRING
@@ -884,11 +888,14 @@ AS (
   REPLACE(
   REPLACE(
   REPLACE(
+  REPLACE(
     sql_template,
     '__TARGET_PROJECT__', target_project_id),
     '__JOB_REGION__', job_region),
     '__T_DIFF_HIST__',
       work_project_id || '.' || work_dataset || '.' || objects.diff_hist),
+    '__V_DIFF_BY_REF__',
+      work_project_id || '.' || work_dataset || '.' || objects.diff_by_ref),
     '__V_DIFF__',
       work_project_id || '.' || work_dataset || '.' || objects.diff_latest),
     '__UDF_ANALYZE__',

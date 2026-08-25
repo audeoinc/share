@@ -491,7 +491,7 @@ SQL 中の `{{P1}}` にカーソルを合わせると、種別と suffix ごと�
 - パラメータ名はグループごとに振り直すので、左右のペインには別の対応表を渡す。
 
 ```bash
-node preview.mjs          # dist/preview.html を生成して検証（44 アサーション）
+node preview.mjs          # dist/preview.html を生成して検証（54 アサーション）
 node preview.mjs --check  # 生成せず検証だけ
 ```
 
@@ -648,7 +648,8 @@ DECLARE target_project_id STRING DEFAULT NULL;
 | SET する変数 | 作られるもの | 既定でできる名前 |
 |---|---|---|
 | `table_diff_hist` | 日次スナップショットを積むテーブル | `viewlgc_t_diff_hist` |
-| `view_diff` | 最新スナップショットだけのビュー | `viewlgc_vw_t_diff` |
+| `view_diff` | 最新スナップショット。基準 = 先頭グループの 1 行だけ | `viewlgc_vw_t_diff` |
+| `view_diff_by_ref` | 同上。基準ごとに 1 行 | `viewlgc_vw_t_diff_by_ref` |
 | `udf_analyze_function_name` | View 群を解析して JSON を返す UDF | `viewlgc_analyze` |
 | `udf_render_function_name` | その JSON を比較 HTML にする UDF | `viewlgc_render` |
 | `udf_css_function_name` | テンプレート用 CSS を返す UDF | `viewlgc_group_css` |
@@ -854,13 +855,40 @@ Looker の操作のたびに UDF を回すのは重いので、スケジュー�
 `INFORMATION_SCHEMA` の中身は View をデプロイしたときしか変わらない。
 
 ```
-viewlgc_t_diff_hist  PARTITION BY snapshot_date CLUSTER BY base
-  base / view_count / group_count / has_multiple
+viewlgc_t_diff_hist  PARTITION BY snapshot_date CLUSTER BY base, ref_index
+  base / ref_index / ref_label
+  view_count / group_count / has_multiple
   group_labels / group_sizes / suffixes / unmatched_count / diff_html
 ```
 
-Looker Studio は `viewlgc_vw_t_diff` を読むだけ。`base` をプルダウンにして
-`diff_html` を Templated Record に渡す。パラメータもカスタムクエリも UDF も不要。
+Looker Studio はビューを読むだけ。`diff_html` を Templated Record に渡す。
+パラメータもカスタムクエリも UDF も不要。
+
+### 基準は行として持つ
+
+**どのグループを基準（左ペインに出しっぱなしにする側）にするかは、
+行の粒度で表す。** `base × 基準` で 1 行あり、基準はレポートのプルダウンで選ぶ。
+比較相手の選択は今までどおりカード内のタブ。
+
+JavaScript が使えない以上、切り替えられるのは「作り置きしてある絵」だけ。
+全組み合わせを 1 レコードに詰めることもできるが、**表示していないぶんも
+ブラウザが読む**ことになる。実測（96 行の SQL、class モード）で比べると：
+
+| | 1 レコードの大きさ（G=4） | 1 レコードの大きさ（G=6） |
+|---|---|---|
+| 全ペアを 1 レコードに詰める | 400 KB | 990 KB |
+| 基準ごとに 1 行（この設計） | 100 KB | 165 KB |
+
+ペア 1 枚がおよそ 33 KB で、枚数に対して線形。BigQuery に置く総量はどちらも
+同じ G(G−1) 枚なので、**違うのはブラウザに届く量だけ**。
+
+行数は Σ グループ数。100 base・平均 3 グループなら 1 スナップショット 20 MB
+程度で、保持日数の既定（400 日）でも BigQuery としては小さい。
+
+**「なぜ別グループになったか」も基準ごとに出し分ける。** 解析側が全順序対の
+「最初の差」を `missBy` として返し、描画側が選ばれた基準の列を読む
+（向きによって理由が変わりうるので対称にはしていない）。グループ数はせいぜい
+数個なので、G² でも走査は実質ゼロ。
 
 パーティションに日付を積むので**履歴が残る**。「いつグループ構成が変わったか」を
 後から追えるので、ロジック逸脱の検知に使える（`build_table.sql` の末尾に例あり）。
@@ -872,13 +900,16 @@ base の切り出しと UDF に渡す `suffixList` は、同じ 1 つの `suffix
 
 事前生成テーブルができていれば、あとは読むだけ。
 
-1. **データを追加 → BigQuery** で `viewlgc_vw_t_diff`（`latest_view_base` から
-   組み立てた名前）を選ぶ
+1. **データを追加 → BigQuery** でビューを選ぶ
    （カスタムクエリではなくテーブル選択でよい）
+   - 基準を切り替えないなら `viewlgc_vw_t_diff`
+   - 切り替えるなら `viewlgc_vw_t_diff_by_ref`
 2. **Templated Record** を配置し、表示対象のカラムに `diff_html` を指定
 3. **コントロール → プルダウン リスト**を置き、コントロール フィールドに `base`。
    **「単一選択にする」をオン**（1 レコード＝1 base を表示するため）
-4. `mode='class'` で生成した場合は、テンプレートに CSS を貼る
+4. `viewlgc_vw_t_diff_by_ref` を使う場合は、`ref_label` のプルダウンをもう 1 つ置く。
+   こちらも**単一選択**。base と 2 つそろって 1 レコードに決まる
+5. `mode='class'` で生成した場合は、テンプレートに CSS を貼る
 
 CSS は **`template_style.html`**（`build_udf.mjs` の生成物）をそのまま貼るか、
 BigQuery から取る。中身は同じ。
