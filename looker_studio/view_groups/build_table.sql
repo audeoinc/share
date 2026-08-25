@@ -208,6 +208,7 @@ DECLARE view_dataset_condition STRING;  -- VIEWS.table_schema
 DECLARE view_name_condition    STRING;  -- VIEWS.table_name
 DECLARE target_dataset_count INT64;
 DECLARE target_view_count    INT64;
+DECLARE udf_found_count      INT64;
 
 
 -- 実行中のプロジェクトを INFORMATION_SCHEMA.SCHEMATA から自動検出する
@@ -324,6 +325,20 @@ SET render_call_sql = FORMAT(
   udf_page_function_name, udf_css_function_name,
   snapshot_time_zone, CAST(partition_expiration_days AS STRING), suffix_pattern,
   schema_condition, view_dataset_condition, view_name_condition);
+
+
+-- 前提の確認。UDF を作り直す前にこのファイルを流すと、動的 SQL の展開や
+-- 関数の引数が食い違って、原因の分かりにくいエラーになる。先に数えておく。
+-- ここは render_call_sql を通さない。その仕組み自体が UDF に依存しているので、
+-- 依存する前に確かめる必要がある（プロジェクト自動検出と同じ書き方）。
+EXECUTE IMMEDIATE FORMAT(
+  "SELECT COUNT(*) FROM `%s.%s.INFORMATION_SCHEMA.ROUTINES` WHERE routine_name IN UNNEST(%T)",
+  udf_project_id, udf_dataset,
+  [udf_analyze_function_name, udf_render_function_name, udf_page_function_name,
+   udf_css_function_name, udf_sql_function_name]
+) INTO udf_found_count;
+ASSERT udf_found_count = 5 AS
+  'UDF が 5 つそろっていません。先に view_group_html.sql を実行してください（system_name / udf_dataset / udf_name_prefix / udf_name_suffix は両ファイルで同じ値に）。';
 
 
 -- 事前チェック。0 件のまま進むと空のテーブルができ、設定の間違いに気づけない。
