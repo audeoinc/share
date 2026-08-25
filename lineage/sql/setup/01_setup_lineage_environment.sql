@@ -598,9 +598,62 @@ EXECUTE IMMEDIATE FORMAT(
   '''
   CREATE OR REPLACE VIEW `%s.%s`
   OPTIONS (
-    description = 'Column usage joined to impact: for a chosen origin column, every downstream usage site with a depth (1 = direct reference; impact_rank + 1 deeper) and the value-flow path. line_text has its leading indentation stripped (line_indent_width = how much was removed); column_number is the position in the original, untrimmed line. usage_definition_text is the full SQL of the object containing the reference, joined from the definition registry and returned only while that registry row still holds the analyzed definition (usage_definition_is_current).'
+    description = 'Column usage joined to impact: for a chosen origin column, every downstream usage site with a depth (1 = direct reference; impact_rank + 1 deeper) and the value-flow path. Locating a reference: line_number, then word_number (1-based index of the whitespace-delimited word holding it -- unaffected by indentation) or column_number (1-based CHARACTER position in the original line, indentation included, a tab counting as one). line_text has its leading indentation stripped; line_indent_width is how much was removed, so the character position within it is column_number - line_indent_width. usage_definition_text is the full SQL of the object containing the reference, returned only while the registry still holds the analyzed definition (usage_definition_is_current).'
   )
   AS
+  -- Per-usage location and definition lookup, computed once and reused by both
+  -- depth branches below. Splitting it out keeps the word/column arithmetic in one
+  -- place instead of repeating it per branch.
+  --
+  -- The registry join is on the usage object's KEY (project/dataset/name/type),
+  -- which is the registry's own MERGE key -- exactly one row per object, so no
+  -- fan-out. Joining on definition_hash alone would multiply rows whenever two
+  -- objects happen to share identical SQL, since the hash is of the text.
+  WITH usage_words AS (
+    SELECT
+      u.*,
+      d.definition_hash AS registry_definition_hash,
+      d.definition_text AS registry_definition_text,
+      -- word_number: which whitespace-delimited word of the line the reference sits
+      -- in. column_number counts every character including the indentation, which is
+      -- awkward to verify by eye; counting words is how a person actually finds the
+      -- spot. Words before the reference are counted, then 1 is added when the
+      -- reference starts a new word (nothing before it on the line, or the character
+      -- before it is whitespace). When it does NOT -- `a.col`, `f(col)` -- the
+      -- reference is part of the word already counted, so no increment: `col` in
+      -- `SELECT a.col` is word 2, the word `a.col`.
+      CASE
+        WHEN u.line_text IS NULL OR u.column_number IS NULL THEN NULL
+        ELSE
+          ARRAY_LENGTH(
+            REGEXP_EXTRACT_ALL(SUBSTR(u.line_text, 1, u.column_number - 1), r'\\S+')
+          )
+          + IF(
+              SUBSTR(u.line_text, 1, u.column_number - 1) = ''
+              OR REGEXP_CONTAINS(SUBSTR(u.line_text, 1, u.column_number - 1), r'\\s$'),
+              1,
+              0
+            )
+      END AS word_number
+    FROM `%s.%s` AS u
+    LEFT JOIN `%s.%s` AS d
+      ON  LOWER(d.object_project) = LOWER(u.object_project)
+      AND LOWER(d.object_dataset) = LOWER(u.object_dataset)
+      AND LOWER(d.object_name)    = LOWER(u.object_name)
+      AND d.object_type           = u.object_type
+  ),
+  usage_located AS (
+    SELECT
+      w.*,
+      -- The word itself, so word_number can be confirmed without opening the SQL.
+      -- Guarded rather than relying on a NULL offset behaving as a NULL element.
+      IF(
+        w.word_number IS NULL,
+        NULL,
+        REGEXP_EXTRACT_ALL(w.line_text, r'\\S+')[SAFE_OFFSET(w.word_number - 1)]
+      ) AS word_text
+    FROM usage_words AS w
+  )
   -- depth = 1: the usage references the origin column directly.
   SELECT
     u.source_project      AS origin_project,
@@ -627,34 +680,24 @@ EXECUTE IMMEDIATE FORMAT(
     u.usage_type,
     u.reference_name,
     u.line_number,
-    -- column_number is the position in the ORIGINAL source line, so it stays as
-    -- recorded and remains valid against the object's stored definition text.
+    u.word_number,
+    u.word_text,
+    -- Position in the ORIGINAL line, indentation included, so it stays valid
+    -- against the object's stored definition text.
     u.column_number,
-    -- Leading indentation is stripped: generated / formatted SQL is often indented
-    -- many levels, and the padding pushed the interesting part of the line out of
-    -- view in report tools. line_indent_width keeps what was removed, so the
-    -- position within this trimmed text is column_number - line_indent_width and
-    -- the original line can still be reconstructed.
     LTRIM(u.line_text) AS line_text,
     LENGTH(u.line_text) - LENGTH(LTRIM(u.line_text)) AS line_indent_width,
     u.resolution_status,
-    -- The SQL the reference lives in, so line_number / line_text can be read in
-    -- context without a second query. Only returned when the registry still holds
-    -- the very definition that was analyzed (definition_hash match): if the object
-    -- has been redefined since, the current text is a DIFFERENT SQL and its line
-    -- numbers would not line up, so NULL is returned instead of something
-    -- plausible but wrong. usage_definition_is_current says which case you are in.
+    -- Returned only when the registry still holds the very definition that was
+    -- analyzed: after a redefinition its text is a DIFFERENT SQL whose line numbers
+    -- would not line up, so NULL beats something plausible but wrong.
     CASE
-      WHEN d.definition_hash = u.definition_hash THEN d.definition_text
+      WHEN u.registry_definition_hash = u.definition_hash
+        THEN u.registry_definition_text
     END AS usage_definition_text,
-    (d.definition_hash = u.definition_hash) AS usage_definition_is_current,
+    (u.registry_definition_hash = u.definition_hash) AS usage_definition_is_current,
     CAST(NULL AS ARRAY<STRING>) AS dependency_path
-  FROM `%s.%s` AS u
-  LEFT JOIN `%s.%s` AS d
-    ON  LOWER(d.object_project) = LOWER(u.object_project)
-    AND LOWER(d.object_dataset) = LOWER(u.object_dataset)
-    AND LOWER(d.object_name)    = LOWER(u.object_name)
-    AND d.object_type           = u.object_type
+  FROM usage_located AS u
   UNION ALL
   -- depth = impact_rank + 1: the usage references a column impacted by the origin.
   SELECT
@@ -679,35 +722,31 @@ EXECUTE IMMEDIATE FORMAT(
     u.usage_type,
     u.reference_name,
     u.line_number,
+    u.word_number,
+    u.word_text,
     u.column_number,
     LTRIM(u.line_text) AS line_text,
     LENGTH(u.line_text) - LENGTH(LTRIM(u.line_text)) AS line_indent_width,
     u.resolution_status,
     CASE
-      WHEN d.definition_hash = u.definition_hash THEN d.definition_text
+      WHEN u.registry_definition_hash = u.definition_hash
+        THEN u.registry_definition_text
     END AS usage_definition_text,
-    (d.definition_hash = u.definition_hash) AS usage_definition_is_current,
+    (u.registry_definition_hash = u.definition_hash) AS usage_definition_is_current,
     i.dependency_path
   FROM `%s.%s` AS i
-  JOIN `%s.%s` AS u
+  JOIN usage_located AS u
     ON  LOWER(u.source_project) = LOWER(i.impacted_project)
     AND LOWER(u.source_dataset) = LOWER(i.impacted_dataset)
     AND LOWER(u.source_object)  = LOWER(i.impacted_object)
     AND LOWER(u.source_column)  = LOWER(i.impacted_column)
-  LEFT JOIN `%s.%s` AS d
-    ON  LOWER(d.object_project) = LOWER(u.object_project)
-    AND LOWER(d.object_dataset) = LOWER(u.object_dataset)
-    AND LOWER(d.object_name)    = LOWER(u.object_name)
-    AND d.object_type           = u.object_type
   ''',
-  -- Argument order follows the %s placeholders in text order:
-  -- CREATE VIEW target, branch 1 (usage, registry), branch 2 (impact, usage, registry).
+  -- Argument order follows the %s placeholders in text order: CREATE VIEW target,
+  -- usage table, definition registry, impact table.
   repository_dataset_full_name, view_column_usage_impact,
   repository_dataset_full_name, table_column_usage,
   repository_dataset_full_name, table_definition_registry,
-  repository_dataset_full_name, table_impact,
-  repository_dataset_full_name, table_column_usage,
-  repository_dataset_full_name, table_definition_registry
+  repository_dataset_full_name, table_impact
 );
 
 IF NOT recreate_views_only THEN

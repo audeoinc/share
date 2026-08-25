@@ -1,5 +1,23 @@
 # 1.5.0-032
 
+- Added `word_number` and `word_text` to the column-usage impact view, and documented
+  what `column_number` actually counts. `column_number` comes from the lexer's
+  `column_no`, which advances one per character and resets at a newline: it includes the
+  leading indentation and counts a tab as ONE column, not a tab stop. That is exact but
+  awkward to verify by eye, since nobody counts indent characters when finding a spot in
+  SQL. `word_number` is the 1-based index of the whitespace-delimited word the reference
+  sits in, so it is unaffected by indentation, and `word_text` is that word, so the
+  number can be confirmed without opening the SQL. A reference that does not start its
+  word -- `col` in `a.col`, or inside `f(col)` -- reports the word that contains it
+  (`a.col`, `f(col)`), which is what a person reading the line looks for. Computed in the
+  view from `line_text` + `column_number`, so it applies to rows already collected with
+  no bundle redeploy and no re-analysis; a true lexical token index would have to come
+  from the engine and would only appear for objects analyzed after the upgrade. The view
+  body now computes the per-usage location and the registry lookup once in a CTE that
+  both depth branches read, instead of repeating the expressions per branch (which also
+  drops the duplicated usage/registry joins: 8 FORMAT placeholders instead of 12).
+  SQL-only; the engine bundle is unchanged. Not yet validated against BigQuery.
+
 - Added `usage_definition_text` (and `usage_definition_is_current`) to the column-usage
   impact view, so a usage row carries the SQL the reference lives in and
   `line_number` / `line_text` can be read in context without a second query. Both

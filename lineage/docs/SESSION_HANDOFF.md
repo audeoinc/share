@@ -617,6 +617,17 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   それらしい誤情報を返さず NULL にする。`usage_definition_is_current` が
   TRUE=一致 / FALSE=再定義済み / NULL=registry 行なし を区別する。
   ビューなので、選択しないクエリでは BigQuery が列を刈り取りコストはかからない。
+- **`column_number` の意味と `word_number` の追加**：`column_number` は Lexer の
+  `column_no`（`advanceCharacter` で 1 文字ごとに +1、改行で 1 にリセット）由来で、
+  **行頭インデントを含む文字位置**・**タブは 1 カラム**（タブストップ換算ではない）。
+  正確だが目視で数えるには不向きなため、`word_number`（参照が入っている空白区切り
+  ワードの 1 始まり番号。インデントの影響を受けない）と `word_text`（そのワード自体）
+  を追加。`a.col` の `col` や `f(col)` の `col` のように単語の途中から始まる参照は、
+  それを含むワード（`a.col` / `f(col)`）を返す＝人が行を見て探す単位に合わせている。
+  **ビュー内で `line_text` と `column_number` から計算**しているので既存行にも効く
+  （エンジンで語彙トークン番号を持たせる案は、再デプロイ＋再解析が必要で既存行に効かない）。
+  併せてビュー本体を CTE（`usage_words` → `usage_located`）に整理し、位置計算と registry
+  参照を 2 ブランチで共有（FORMAT プレースホルダも 12→8 に減）。
 - SQL のみ／エンジン不変。**BigQuery 未検証**。
 
 ## 4.22 本ドキュメントと実装の乖離（重要）
