@@ -1,5 +1,20 @@
 # 1.5.0-032
 
+- Added `usage_definition_text` (and `usage_definition_is_current`) to the column-usage
+  impact view, so a usage row carries the SQL the reference lives in and
+  `line_number` / `line_text` can be read in context without a second query. Both
+  branches LEFT JOIN the definition registry on the usage object's key
+  (project/dataset/name/type -- the registry's MERGE key, so exactly one row per object
+  and no fan-out). The text is returned only when the registry still holds the very
+  definition that was analyzed (`d.definition_hash = u.definition_hash`): once an object
+  is redefined the registry's current text is a DIFFERENT SQL whose line numbers do not
+  line up, so the view returns NULL rather than something plausible but wrong.
+  `usage_definition_is_current` distinguishes the cases -- TRUE matched, FALSE the object
+  was redefined since analysis, NULL no registry row at all. Because this is a view,
+  BigQuery prunes the column when a query does not select it, so reports that only need
+  the metadata pay nothing for it. SQL-only; the engine bundle is unchanged. Not yet
+  validated against BigQuery.
+
 - Stripped the leading indentation from `line_text` in the column-usage impact view
   (`lnge_vw_t_column_usage_impact`, created by 01). Generated and formatted SQL is often
   indented several levels, and the padding pushed the interesting part of the line out of
