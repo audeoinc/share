@@ -1,5 +1,21 @@
 # 1.5.0-032
 
+- Fixed the HTML UDFs added above being named and placed unlike every other UDF in the
+  deployment. They were assembled from `bootstrap_table_name_prefix/suffix` and created
+  in the repository dataset -- so an environment that sets a different prefix for tables
+  than for routines got two functions carrying the table naming, sitting next to the
+  tables instead of next to `lnge_analyze_json` / `lnge_fingerprint_sql` /
+  `lnge_render_dynamic_sql`. They now follow the routine convention exactly:
+  `bootstrap_udf_name_prefix || 'lnge_' || base || bootstrap_udf_name_suffix`
+  (no marker segment, matching the other three), declared beside the other
+  `bootstrap_udf_*_function_name` variables, validated by the same
+  letters/digits/underscore ASSERTs, and created in `bootstrap_udf_project_id` /
+  `bootstrap_udf_dataset`. The names are `lnge_usage_sql_html` and
+  `lnge_usage_sql_css`. The view's call site is now a three-part reference, since the
+  function no longer lives in the view's own dataset. Documented in
+  `docs/VIEW_COLUMN_USAGE_IMPACT.md` section 6. SQL and tooling only; the engine bundle
+  is unchanged. Not yet validated against BigQuery.
+
 - Added `usage_definition_html` to the column-usage impact view: the same SQL as
   `usage_definition_text`, rendered with line numbers, the referenced line tinted, every
   referenced span marked, and light SQL syntax colouring -- for Looker Studio's

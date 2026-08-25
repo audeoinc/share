@@ -298,15 +298,18 @@ Looker Studio では「コントロール（プルダウン）」を段階的に
 ビューは既定オプションで UDF を呼んでいます。変えたい場合は、カスタムクエリで
 UDF を直接呼んでください。
 
+UDF は他の UDF（`lnge_analyze_json` など）と同じ **UDF 用データセット**にあります。
+ビューがあるリポジトリ データセットとは別なので注意してください。
+
 ```sql
 SELECT
   v.*,
-  `PROJECT.DATASET.lnge_fn_usage_sql_html`(
+  `PROJECT.UDF_DATASET.lnge_usage_sql_html`(
     v.usage_definition_text,
     [FORMAT('%d:%d:%d', v.line_number, v.column_number, LENGTH(v.reference_name))],
     '{"mode":"class","contextLines":10}'
   ) AS custom_html
-FROM `PROJECT.DATASET.lnge_vw_t_column_usage_impact` AS v
+FROM `PROJECT.REPOSITORY_DATASET.lnge_vw_t_column_usage_impact` AS v
 ```
 
 | オプション | 既定 | 内容 |
@@ -321,7 +324,7 @@ FROM `PROJECT.DATASET.lnge_vw_t_column_usage_impact` AS v
 `mode='class'` にすると HTML が小さくなります。その場合はテンプレートに CSS を貼ります。
 
 ```sql
-SELECT `PROJECT.DATASET.lnge_fn_usage_sql_css`(NULL);
+SELECT `PROJECT.UDF_DATASET.lnge_usage_sql_css`(NULL);
 ```
 
 出力を `<style> … </style>` で囲んでテンプレートに貼ってください。

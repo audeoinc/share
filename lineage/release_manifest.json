@@ -2,7 +2,7 @@
   "schema_version": 1,
   "release_name": "lineage_v1.5.0-032",
   "version": "1.5.0-032",
-  "generated_at": "2026-08-25T04:27:07.656Z",
+  "generated_at": "2026-08-25T06:18:56.502Z",
   "source_of_truth": "javascript/src",
   "bundle": {
     "path": "javascript/dist/lineage_udf_bundle.js",
@@ -25,5 +25,5 @@
     "gcs_zip_uri": null,
     "status": "NOT_REQUESTED"
   },
-  "duration_ms": 5382
+  "duration_ms": 4045
 }
