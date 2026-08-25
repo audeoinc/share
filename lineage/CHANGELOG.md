@@ -1,5 +1,35 @@
 # 1.5.0-032
 
+- Added `usage_definition_html` to the column-usage impact view: the same SQL as
+  `usage_definition_text`, rendered with line numbers, the referenced line tinted, every
+  referenced span marked, and light SQL syntax colouring -- for Looker Studio's
+  Templated Record community visualization, which draws one record from an HTML column.
+  Templated Record is a gallery-hosted visualization, so unlike a self-built one it needs
+  no publicly readable GCS bucket.
+  The renderer lives in `javascript/src/html/usage_sql_html.js` and is embedded by
+  `scripts/build_usage_html_udf.js` into a generated block in 01 as two self-contained
+  BigQuery JS UDFs, `lnge_fn_usage_sql_html` and `lnge_fn_usage_sql_css`. It is NOT part
+  of the engine bundle: the lineage UDF and its GCS deploy are untouched, and the bundle
+  hash is unchanged. 15 KB of JS, checked against BigQuery's 32 KB inline code blob limit
+  at build time (`npm run verify:usage-html-udf`, wired into `npm test`, fails the build
+  if 01's block has drifted from the source).
+  Highlights are aggregated per (origin column, usage object, definition) with an
+  analytic ARRAY_AGG, so **every** location in that object relevant to the selected
+  origin is marked, not just the one row -- which is what a one-record visualization
+  needs. Analytic functions run after WHERE, so a report filtering by origin narrows the
+  set first. Paths duplicate the same location, and overlapping ranges are possible; both
+  are collapsed inside the UDF rather than in SQL (`ARRAY_AGG(DISTINCT)` is not available
+  as an analytic function).
+  Positions are passed as `line:column:length` strings, using the stored column_number,
+  which counts indentation characters -- so tabs must not be expanded on render or the
+  offsets shift. Three modes: `embed` (default, self-contained `<style>`), `class`
+  (smallest, CSS from the companion UDF) and `inline`. `contextLines` narrows the render
+  to a window; the default is the whole SQL. Test: test_v1_5_0_075, which also pins that
+  the classes the markup emits all exist in the CSS the companion UDF returns.
+  Documented for report builders in `docs/VIEW_COLUMN_USAGE_IMPACT.md` section 6.
+  SQL and tooling only; the engine bundle is unchanged. Not yet validated against
+  BigQuery.
+
 - Added `word_number` and `word_text` to the column-usage impact view, and documented
   what `column_number` actually counts. `column_number` comes from the lexer's
   `column_no`, which advances one per character and resets at a newline: it includes the

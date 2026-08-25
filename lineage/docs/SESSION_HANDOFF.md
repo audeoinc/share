@@ -630,6 +630,39 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   参照を 2 ブランチで共有（FORMAT プレースホルダも 12→8 に減）。
 - SQL のみ／エンジン不変。**BigQuery 未検証**。
 
+## 4.28 使用箇所つき SQL の HTML 描画（Looker Studio 用・SQLとツールのみ）
+
+- **要件**：column usage impact ビューの SQL を Looker Studio で「行番号つき・該当行
+  ハイライト・該当箇所ハイライト」で表示したい。
+- **前提調査**：別ブランチ `claude/looker-studio-ddl-diff-ddqsyd` の `looker_studio/` に
+  確立された方式がある。**自作 community visualization は公開 GCS バケットが必須**で
+  （Looker Studio がサーバー側で JS を取得するため、ドメイン限定 IAM だと 403）、
+  禁止環境では使えない。ギャラリー掲載の **Templated Record**（HTML カラムを描画する
+  汎用チャート）＋ **BigQuery の JS UDF で HTML を生成**、が推奨構成。
+- **実装**：
+  - レンダラ本体 `javascript/src/html/usage_sql_html.js`（純関数・テスト可能）
+  - `javascript/scripts/build_usage_html_udf.js` が 01 の**番兵ブロック**へ差し込み、
+    自己完結の UDF `lnge_fn_usage_sql_html` / `lnge_fn_usage_sql_css` を作る。
+    **エンジン バンドルとは無関係**（GCS 再デプロイ不要・sha256 不変）。
+  - `npm test` に `verify:usage-html-udf` を組み込み、01 のブロックが src と
+    ズレていたらビルドを失敗させる。BigQuery のインライン コード ブロブ上限 32KB も
+    ここで検査（現状 15KB）。
+  - ビューは末尾に `impact_rows` CTE を足し、最終 SELECT で
+    **分析関数 ARRAY_AGG（起点カラム × オブジェクト × 定義 で PARTITION）**により
+    関連箇所を全部集めて UDF に渡す。分析関数は WHERE の後に評価されるので、
+    レポートが起点で絞れば対象も絞られる。
+- **設計上の判断**：
+  - ハイライトは 1 箇所ではなく**関連する全箇所**（1 レコード表示の Templated Record 向け）
+  - 位置は `line:column:length` 文字列。`column_number` はインデントを含む文字位置なので
+    **タブを空白に展開してはならない**（位置がずれる）
+  - 経路違いの重複と範囲の重なりは **UDF 側で畳む**（分析関数では
+    `ARRAY_AGG(DISTINCT)` が使えないため）
+  - モードは `embed`（既定・自己完結）/ `class`（最小）/ `inline`
+  - 既定は**全文**。`contextLines` で窓にできる
+- テスト `test_v1_5_0_075`（class の markup が使う class が CSS に全部あることも固定）。
+  レポート作成者向けの説明は `docs/VIEW_COLUMN_USAGE_IMPACT.md` §6。
+- SQL とツールのみ／エンジン不変。**BigQuery 未検証**。
+
 ## 4.22 本ドキュメントと実装の乖離（重要）
 
 `docs/SESSION_HANDOFF.md` の §1〜§4.20 は **1.5.0-032 の途中まで**しか追随していない。
@@ -658,6 +691,7 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 - 03 実行前の対象確認 `preview_only`（§4.25・本セッション、SQLのみ）
 - `{project_token}` を `source_project_filters` / SA 配列へ拡張（§4.26・本セッション、SQLのみ）
 - column usage impact ビューの `line_text` トリム＋01 の `recreate_views_only`（§4.27・本セッション、SQLのみ）
+- 使用箇所つき SQL の HTML 描画 UDF（§4.28・本セッション、SQLとツールのみ）
 - SQL 追加：`sql/maintenance/08_view_last_access.sql`、
   `sql/maintenance/09_unanalyzed_object_definitions.sql`、
   `definition_registry` の `labels` 列（§4.12）
