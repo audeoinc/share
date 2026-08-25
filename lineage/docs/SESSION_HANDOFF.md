@@ -661,6 +661,13 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   - 既定は**全文**。`contextLines` で窓にできる
 - テスト `test_v1_5_0_075`（class の markup が使う class が CSS に全部あることも固定）。
   レポート作成者向けの説明は `docs/VIEW_COLUMN_USAGE_IMPACT.md` §6。
+- **命名は他の UDF と同一扱い**（初版はテーブル用 prefix/suffix ＋ リポジトリ
+  データセットに作っていたので修正）：
+  `bootstrap_udf_name_prefix || 'lnge_' || base || bootstrap_udf_name_suffix`
+  （marker 無し。`analyze_json` / `fingerprint_sql` / `render_dynamic_sql` と同じ）。
+  作成先も `bootstrap_udf_project_id` / `bootstrap_udf_dataset`。
+  よってビューからの呼び出しは 3 部構成（`project.udf_dataset.function`）。
+  関数名は `lnge_usage_sql_html` / `lnge_usage_sql_css`。
 - SQL とツールのみ／エンジン不変。**BigQuery 未検証**。
 
 ## 4.22 本ドキュメントと実装の乖離（重要）

@@ -102,6 +102,10 @@ DECLARE bootstrap_default_project_id STRING;
 DECLARE bootstrap_udf_function_name STRING;
 DECLARE bootstrap_udf_fingerprint_function_name STRING;
 DECLARE bootstrap_udf_render_function_name STRING;
+-- Looker Studio 向けの HTML 生成 UDF（本体は下の生成ブロックが SET する JS）。
+-- 他の UDF と同じ udf prefix/suffix・同じ bootstrap_udf_dataset に作る。
+DECLARE bootstrap_udf_usage_sql_html_function_name STRING;
+DECLARE bootstrap_udf_usage_sql_css_function_name STRING;
 -- Target dataset(s) used only by the UDF smoke test below (to build a
 -- representative physical-column identity). The pipeline's own scan scope is set
 -- in 03_run_daily_lineage_pipeline.sql.
@@ -140,10 +144,7 @@ DECLARE table_diagnostic STRING;
 DECLARE table_job_registry STRING;
 DECLARE table_column_usage STRING;
 DECLARE view_column_usage_impact STRING;
--- Repository 内の HTML 生成 UDF（Looker Studio の Templated Record 用）と、
--- その本体 JS。JS は build_usage_html_udf.js が生成ブロックで SET する。
-DECLARE udf_usage_sql_html STRING;
-DECLARE udf_usage_sql_css STRING;
+-- HTML 生成 UDF の本体 JS。build_usage_html_udf.js が生成ブロックで SET する。
 DECLARE usage_html_udf_js STRING;
 
 DECLARE repository_dataset_full_name STRING;
@@ -217,12 +218,20 @@ SET bootstrap_udf_fingerprint_function_name =
   bootstrap_udf_name_prefix || 'lnge_' || 'fingerprint_sql' || bootstrap_udf_name_suffix;
 SET bootstrap_udf_render_function_name =
   bootstrap_udf_name_prefix || 'lnge_' || 'render_dynamic_sql' || bootstrap_udf_name_suffix;
+SET bootstrap_udf_usage_sql_html_function_name =
+  bootstrap_udf_name_prefix || 'lnge_' || 'usage_sql_html' || bootstrap_udf_name_suffix;
+SET bootstrap_udf_usage_sql_css_function_name =
+  bootstrap_udf_name_prefix || 'lnge_' || 'usage_sql_css' || bootstrap_udf_name_suffix;
 ASSERT REGEXP_CONTAINS(bootstrap_udf_function_name, r'^[A-Za-z0-9_]+$')
 AS 'Invalid udf function name (letters/digits/_ only; no hyphen in udf prefix/suffix).';
 ASSERT REGEXP_CONTAINS(bootstrap_udf_fingerprint_function_name, r'^[A-Za-z0-9_]+$')
 AS 'Invalid udf fingerprint function name (letters/digits/_ only; no hyphen).';
 ASSERT REGEXP_CONTAINS(bootstrap_udf_render_function_name, r'^[A-Za-z0-9_]+$')
 AS 'Invalid udf render function name (letters/digits/_ only; no hyphen).';
+ASSERT REGEXP_CONTAINS(bootstrap_udf_usage_sql_html_function_name, r'^[A-Za-z0-9_]+$')
+AS 'Invalid udf usage_sql_html function name (letters/digits/_ only; no hyphen).';
+ASSERT REGEXP_CONTAINS(bootstrap_udf_usage_sql_css_function_name, r'^[A-Za-z0-9_]+$')
+AS 'Invalid udf usage_sql_css function name (letters/digits/_ only; no hyphen).';
 
 -- Physical table names: prefix + marker + canonical base + suffix.
 -- The 'm_' / 't_' marker literal is inline; edit it to reclassify a table.
@@ -264,21 +273,8 @@ ASSERT REGEXP_CONTAINS(table_job_registry, r'^[A-Za-z0-9_-]+$')
 AS 'Invalid table_job_registry name.';
 ASSERT REGEXP_CONTAINS(table_column_usage, r'^[A-Za-z0-9_-]+$')
 AS 'Invalid table_column_usage name.';
--- Repository 内の UDF。命名は prefix + 'lnge_' + 'fn_' + base + suffix。
--- ルーチン名は英数字と '_' のみ（'-' 不可）なので、テーブル名より厳しく検査する。
-SET udf_usage_sql_html =
-  bootstrap_table_name_prefix || 'lnge_' || 'fn_' || 'usage_sql_html'
-    || bootstrap_table_name_suffix;
-SET udf_usage_sql_css =
-  bootstrap_table_name_prefix || 'lnge_' || 'fn_' || 'usage_sql_css'
-    || bootstrap_table_name_suffix;
-
 ASSERT REGEXP_CONTAINS(view_column_usage_impact, r'^[A-Za-z0-9_-]+$')
 AS 'Invalid view_column_usage_impact name.';
-ASSERT REGEXP_CONTAINS(udf_usage_sql_html, r'^[A-Za-z0-9_]+$')
-AS 'Invalid udf_usage_sql_html name (routine names allow only letters, digits and underscore).';
-ASSERT REGEXP_CONTAINS(udf_usage_sql_css, r'^[A-Za-z0-9_]+$')
-AS 'Invalid udf_usage_sql_css name (routine names allow only letters, digits and underscore).';
 
 SET repository_dataset_full_name = FORMAT(
   '%s.%s',
@@ -613,7 +609,10 @@ END IF;  -- NOT recreate_views_only (section 4: repository tables)
 -- HTML カラムとして渡す用途。GCS も外部ライブラリも使わない自己完結の関数なので、
 -- エンジン バンドル (lineage_udf_bundle.js) とは無関係で再デプロイも不要。
 --
--- LNGE_USAGE_SQL_HTML(sql_text, highlights, options_json)
+-- 他の UDF（analyze_json / fingerprint_sql / render_dynamic_sql）と同じ扱いで、
+-- 同じ udf prefix/suffix・同じ bootstrap_udf_dataset に作られる。
+--
+-- <udf_prefix>lnge_usage_sql_html<udf_suffix>(sql_text, highlights, options_json)
 --   sql_text     対象オブジェクトの SQL 本文
 --   highlights   'line:column:length' の配列。重複と重なりは関数側で畳む
 --   options_json 表示オプション。NULL / '{}' で既定
@@ -624,7 +623,7 @@ END IF;  -- NOT recreate_views_only (section 4: repository tables)
 --     maxLines     描画する最大行数（既定 5000）
 --     fontSize / lineHeight / colors.* / syntax.*
 --
--- LNGE_USAGE_SQL_CSS(options_json)
+-- <udf_prefix>lnge_usage_sql_css<udf_suffix>(options_json)
 --   mode='class' のときテンプレートに貼る CSS。色を変えたら同じ options_json を
 --   渡して作り直すこと（markup と CSS は同じコードから作られるので食い違わない）。
 -- 変数はスクリプト先頭の [C] で DECLARE 済み（BigQuery は DECLARE を
@@ -1081,19 +1080,21 @@ function renderUsageSqlHtml(sqlText, highlights, optionsJson) {
 ''';
 
 EXECUTE IMMEDIATE FORMAT(
-  'CREATE OR REPLACE FUNCTION `%s.%s`('
+  'CREATE OR REPLACE FUNCTION `%s.%s.%s`('
   || 'sql_text STRING, highlights ARRAY<STRING>, options_json STRING'
   || ') RETURNS STRING LANGUAGE js AS r"""%s',
-  repository_dataset_full_name,
-  udf_usage_sql_html,
+  bootstrap_udf_project_id,
+  bootstrap_udf_dataset,
+  bootstrap_udf_usage_sql_html_function_name,
   usage_html_udf_js || '\nreturn renderUsageSqlHtml(sql_text, highlights, options_json);\n"""'
 );
 
 EXECUTE IMMEDIATE FORMAT(
-  'CREATE OR REPLACE FUNCTION `%s.%s`(options_json STRING)'
+  'CREATE OR REPLACE FUNCTION `%s.%s.%s`(options_json STRING)'
   || ' RETURNS STRING LANGUAGE js AS r"""%s',
-  repository_dataset_full_name,
-  udf_usage_sql_css,
+  bootstrap_udf_project_id,
+  bootstrap_udf_dataset,
+  bootstrap_udf_usage_sql_css_function_name,
   usage_html_udf_js || '\nreturn buildUsageSqlCss(options_json);\n"""'
 );
 -- END GENERATED: usage SQL HTML UDF
@@ -1271,7 +1272,7 @@ EXECUTE IMMEDIATE FORMAT(
     --
     -- 経路違いで同じ箇所が何度も入るが、重複と重なりの結合は UDF 側で行う。
     -- line_number / column_number が無い行は空文字にしておき、UDF が読み飛ばす。
-    `%s.%s`(
+    `%s.%s.%s`(
       r.usage_definition_text,
       ARRAY_AGG(
         CASE
@@ -1298,11 +1299,13 @@ EXECUTE IMMEDIATE FORMAT(
   ''',
   -- Argument order follows the %s placeholders in text order: CREATE VIEW target,
   -- usage table, definition registry, impact table, HTML UDF.
+  -- HTML UDF は他の UDF と同じく bootstrap_udf_dataset 側にあるため 3 部構成。
   repository_dataset_full_name, view_column_usage_impact,
   repository_dataset_full_name, table_column_usage,
   repository_dataset_full_name, table_definition_registry,
   repository_dataset_full_name, table_impact,
-  repository_dataset_full_name, udf_usage_sql_html
+  bootstrap_udf_project_id, bootstrap_udf_dataset,
+  bootstrap_udf_usage_sql_html_function_name
 );
 
 IF NOT recreate_views_only THEN
