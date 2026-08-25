@@ -213,6 +213,11 @@ SELECT o.amount AS total FROM `p.d.orders_abjp` AS o JOIN d.items_abjp AS i ON o
 | `view_group_html.sql` | `build_udf.mjs` の生成物。JS を最小化して埋めるため。設定は先頭の `DECLARE` |
 | `template_style.html` | `build_udf.mjs` の生成物（CSS） |
 
+**両ファイルで必ず同じ値にする `DECLARE`** は `system_name` / `udf_dataset` /
+`udf_name_prefix` / `udf_name_suffix` / `project_token_pattern` の 5 つ。
+食い違うと `build_table.sql` が関数を見つけられない。`node check_sql.mjs` が
+名前の組み立てと `system_name` の既定値を突き合わせる。
+
 ## suffix はデータセット名から自動で拾う（既定）
 
 suffix の一覧を人が書いて維持するのは、**View が増えたときに黙って壊れる**種類の
@@ -570,6 +575,7 @@ SET @@location = 'asia-northeast1';   -- DECLARE より前。ここが唯一の�
 BEGIN
 -- [A] 環境ごとに必ず見るもの
 DECLARE project_token_pattern STRING DEFAULT r'^([^-]+)';
+DECLARE system_name     STRING DEFAULT 'viewlgc';      -- build_table.sql と同じ値に
 DECLARE udf_dataset     STRING DEFAULT 'ops_meta';
 DECLARE udf_name_prefix STRING DEFAULT '';
 DECLARE udf_name_suffix STRING DEFAULT '';
@@ -580,6 +586,7 @@ SET @@location = 'asia-northeast1';   -- DECLARE より前。ここが唯一の�
 BEGIN
 -- [A] 環境ごとに必ず見るもの
 DECLARE project_token_pattern STRING DEFAULT r'^([^-]+)';
+DECLARE system_name       STRING DEFAULT 'viewlgc';    -- 全オブジェクト名の先頭
 DECLARE work_dataset      STRING DEFAULT 'ops_meta';   -- テーブル / ビューの置き場所
 DECLARE udf_dataset       STRING DEFAULT 'ops_meta';   -- UDF の置き場所
 DECLARE table_name_prefix STRING DEFAULT '';
@@ -624,14 +631,19 @@ DECLARE target_project_id STRING DEFAULT NULL;
 
 | 種別 | 組み立て |
 |---|---|
-| テーブル | `table_name_prefix` + `viewlgc_` + 区分 + 基本名 + `table_name_suffix` |
-| ビュー | `table_name_prefix` + `viewlgc_` + `vw_` + 区分 + 基本名 + `table_name_suffix` |
-| UDF | `udf_name_prefix` + `viewlgc_` + 基本名 + `udf_name_suffix` |
+| テーブル | `table_name_prefix` + `system_name` + `_` + 区分 + 基本名 + `table_name_suffix` |
+| ビュー | `table_name_prefix` + `system_name` + `_` + `vw_` + 区分 + 基本名 + `table_name_suffix` |
+| UDF | `udf_name_prefix` + `system_name` + `_` + 基本名 + `udf_name_suffix` |
 
-**変数なのは prefix と suffix だけ。** `viewlgc_`（システムの識別子）と区分
-（`t_` = transaction / `m_` = master）と基本名は `SET` の行に**リテラルで書く**。
-環境ごとに変わるのは prefix / suffix だけで、区分は分類を変えるときにしか
-動かないため。区切りの `_` は prefix / suffix の値に含めて書く。
+**変数は `system_name` と prefix / suffix。** 区分（`t_` = transaction /
+`m_` = master）と基本名は `SET` の行に**リテラルで書く**。区分は分類を変える
+ときにしか動かないため。区切りの `_` は prefix / suffix の値に含めて書く。
+
+`system_name`（既定 `viewlgc`）は **[A] の `DECLARE`** にあり、同じプロジェクトに
+別のシステムが同居したときに名前だけで見分けるためのもの。**`build_table.sql` と
+`view_group_html.sql` で必ず同じ値にすること。** 食い違うと関数が見つからない。
+既定値が揃っているかは `node check_sql.mjs` が突き合わせる。ルーチン名には
+`-` が使えないので、英数字と `_` だけ（`ASSERT` で落ちる）。
 
 | SET する変数 | 作られるもの | 既定でできる名前 |
 |---|---|---|

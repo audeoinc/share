@@ -12,8 +12,8 @@
 -- 「いつグループ構成が変わったか」を後から追える＝ロジック逸脱の検知に使える。
 --
 -- 前提: view_group_html.sql で 4 つの UDF を作成済み。
---       udf_dataset / udf_name_prefix / udf_name_suffix は両ファイルで
---       一致させること。食い違うと関数が見つからない。
+--       system_name / udf_dataset / udf_name_prefix / udf_name_suffix は
+--       両ファイルで一致させること。食い違うと関数が見つからない。
 --
 -- 命名と設定の書き方、動的 SQL の組み立ては lineage プロジェクト
 -- （lineage/sql/pipeline/03_run_daily_lineage_pipeline.sql）にそろえてある。
@@ -65,6 +65,8 @@ BEGIN
 --
 -- プロジェクト トークンの置換
 DECLARE project_token_pattern STRING DEFAULT r'^([^-]+)';
+-- このシステムを表す名前。すべてのオブジェクト名の先頭に入る
+DECLARE system_name STRING DEFAULT 'viewlgc';
 -- データセット（作る先 / UDF）
 DECLARE work_dataset STRING DEFAULT 'ops_meta';
 DECLARE udf_dataset  STRING DEFAULT 'ops_meta';
@@ -92,21 +94,29 @@ DECLARE snapshot_time_zone STRING DEFAULT 'Asia/Tokyo';
 --     table_name_prefix='{project_token}_' が 'prod_' になる。既定は最初の
 --     ハイフン区切り。一致しなければ '' になり、残った '{project_token}' は
 --     下の ASSERT で落ちる。view_group_html.sql と合わせること。
+--   system_name
+--     このシステムを表す名前。テーブルもビューも関数も、この名前と '_' が
+--     先頭に入る（既定なら viewlgc_t_diff_hist / viewlgc_analyze）。
+--     同じプロジェクトに別のシステムを同居させたときに、どのオブジェクトが
+--     どのシステムのものかを名前だけで見分けるためのもの。
+--     環境ではなくシステムを表すので、prefix / suffix とは別に持つ。
+--     **view_group_html.sql の同名の変数と必ず同じ値にすること。**
+--     違う値だと関数が見つからない。英数字と '_' だけ（ルーチン名に '-' は不可）。
 --   work_dataset / udf_dataset
 --     テーブルとビューを作るデータセット / UDF が置いてあるデータセット。
 --     udf_dataset は view_group_html.sql と同じ値にすること。
 --   table_name_prefix / table_name_suffix
 --     テーブル・ビューの命名。物理名は下の SET で
---       prefix + 'viewlgc_' + 区分 + 基本名 + suffix
---     と組み立てる。'viewlgc_' はこのシステムの識別子、区分は 'm_'（master）/
---     't_'（transaction）でどちらもリテラル。環境ごとに変わるのは prefix と
---     suffix だけなので、変数はこの 2 つ。区切りの '_' は値に含めて書く。
+--       prefix + system_name + '_' + 区分 + 基本名 + suffix
+--     と組み立てる。区分は 'm_'（master）/ 't_'（transaction）でリテラル。
+--     環境ごとに変わるのは prefix と suffix だけなので、変数はこの 2 つ。
+--     区切りの '_' は値に含めて書く。
 --     例: prefix='ope_' / suffix='_tky' で ope_viewlgc_t_diff_hist_tky。
 --     使える文字は英数字と '_' と '-'（参照はすべてバッククォート引用なので
 --     '-tky' のようなハイフンも安全）。データセット名と UDF 名は '-' 不可。
 --   udf_name_prefix / udf_name_suffix
 --     UDF の命名。関数名は [C] で
---       udf_prefix + 'viewlgc_' + 基本名 + udf_suffix
+--       udf_prefix + system_name + '_' + 基本名 + udf_suffix
 --     と組み立て、view_group_html.sql が作った名前と一致させる必要がある。
 --     ルーチン名は英数字と '_' しか使えない（'-' 不可）ので、テーブル側の
 --     prefix / suffix とは別に持つ。ハイフンは下の ASSERT で落ちる。
@@ -224,28 +234,31 @@ ASSERT REGEXP_CONTAINS(work_dataset, r'^[A-Za-z0-9_]+$') AS
 ASSERT REGEXP_CONTAINS(udf_dataset, r'^[A-Za-z0-9_]+$') AS
   'udf_dataset は英数字と _ だけにしてください（置換されていない {project_token} が残っていませんか）。';
 
--- テーブル: prefix + 'viewlgc_' + 区分 + 基本名 + suffix
--- ビュー  : prefix + 'viewlgc_' + 'vw_' + 区分 + 基本名 + suffix
+-- テーブル: prefix + system_name + '_' + 区分 + 基本名 + suffix
+-- ビュー  : prefix + system_name + '_' + 'vw_' + 区分 + 基本名 + suffix
 -- 区分 't_' は transaction（'m_' は master）。テーブルは日次スナップショットの
 -- 積み上げなので基本名に _hist を付け、ビューは最新 1 日ぶんなので付けない。
+ASSERT REGEXP_CONTAINS(system_name, r'^[A-Za-z0-9_]+$') AS
+  'system_name は英数字と _ だけにしてください（ルーチン名に - は使えません）。';
 SET table_diff_hist =
-  table_name_prefix || 'viewlgc_' || 't_' || 'diff_hist' || table_name_suffix;
+  table_name_prefix || system_name || '_' || 't_' || 'diff_hist' || table_name_suffix;
 SET view_diff =
-  table_name_prefix || 'viewlgc_' || 'vw_' || 't_' || 'diff' || table_name_suffix;
+  table_name_prefix || system_name || '_' || 'vw_' || 't_' || 'diff' || table_name_suffix;
 ASSERT REGEXP_CONTAINS(table_diff_hist, r'^[A-Za-z0-9_-]+$') AS
   'table_diff_hist の名前が不正です。';
 ASSERT REGEXP_CONTAINS(view_diff, r'^[A-Za-z0-9_-]+$') AS
   'view_diff の名前が不正です。';
 
--- UDF: udf_prefix + 'viewlgc_' + 基本名 + udf_suffix（view_group_html.sql と同じ）
+-- UDF: udf_prefix + system_name + '_' + 基本名 + udf_suffix
+--      （view_group_html.sql と同じ。system_name も同じ値でなければ見つからない）
 SET udf_analyze_function_name =
-  udf_name_prefix || 'viewlgc_' || 'analyze' || udf_name_suffix;
+  udf_name_prefix || system_name || '_' || 'analyze' || udf_name_suffix;
 SET udf_render_function_name =
-  udf_name_prefix || 'viewlgc_' || 'render' || udf_name_suffix;
+  udf_name_prefix || system_name || '_' || 'render' || udf_name_suffix;
 SET udf_css_function_name =
-  udf_name_prefix || 'viewlgc_' || 'group_css' || udf_name_suffix;
+  udf_name_prefix || system_name || '_' || 'group_css' || udf_name_suffix;
 SET udf_sql_function_name =
-  udf_name_prefix || 'viewlgc_' || 'render_dynamic_sql' || udf_name_suffix;
+  udf_name_prefix || system_name || '_' || 'render_dynamic_sql' || udf_name_suffix;
 ASSERT REGEXP_CONTAINS(udf_analyze_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_analyze_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_render_function_name, r'^[A-Za-z0-9_]+$') AS
@@ -471,7 +484,7 @@ USING suffix_list AS suffix_list, analyze_options AS analyze_options;
 
 -- ---------------------------------------------------------------------
 -- 3. Looker Studio が読むビュー（最新スナップショットだけ・初回のみ）
---    名前は table_name_prefix + viewlgc_vw_t_diff + table_name_suffix。
+--    名前は table_name_prefix + system_name + '_vw_t_diff' + table_name_suffix。
 -- ---------------------------------------------------------------------
 SET sql_template = """
 CREATE OR REPLACE VIEW `__V_DIFF__` AS

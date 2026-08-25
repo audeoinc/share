@@ -18,7 +18,7 @@
 --
 -- 命名と設定の書き方は lineage プロジェクト（lineage/sql/setup/
 -- 01_setup_lineage_environment.sql）にそろえてある。
---   UDF 名: udf_name_prefix + 'viewlgc_' + 基本名 + udf_name_suffix
+--   UDF 名: udf_name_prefix + system_name + '_' + 基本名 + udf_name_suffix
 -- =====================================================================
 
 
@@ -43,6 +43,8 @@ BEGIN
 --
 -- プロジェクト トークンの置換
 DECLARE project_token_pattern STRING DEFAULT r'^([^-]+)';
+-- このシステムを表す名前。すべてのオブジェクト名の先頭に入る
+DECLARE system_name STRING DEFAULT 'viewlgc';
 -- UDF の置き場所
 DECLARE udf_dataset STRING DEFAULT 'ops_meta';
 -- UDF の命名（prefix / suffix）
@@ -57,11 +59,18 @@ DECLARE udf_name_suffix STRING DEFAULT '';
 --     'mycompany-prod-123' に r'-([^-]+)-' なら 'prod' になるので、
 --     udf_name_suffix='_{project_token}' が '_prod' になる。
 --     一致しなければ '' になり、残った '{project_token}' は下の ASSERT で落ちる。
+--   system_name
+--     このシステムを表す名前。関数もテーブルもビューも、この名前と '_' が
+--     先頭に入る（既定なら viewlgc_analyze / viewlgc_t_diff_hist）。
+--     同じプロジェクトに別のシステムを同居させたときに、どのオブジェクトが
+--     どのシステムのものかを名前だけで見分けるためのもの。
+--     **build_table.sql の同名の変数と必ず同じ値にすること。**
+--     違う値だと関数が見つからない。英数字と '_' だけ（'-' は不可）。
 --   udf_dataset
 --     3 つの関数を作るデータセット。build_table.sql の同名の変数と合わせること。
 --   udf_name_prefix / udf_name_suffix
---     関数名は udf_name_prefix + 'viewlgc_' + 基本名 + udf_name_suffix で
---     組み立てる。'viewlgc_' はこのシステムの識別子なのでリテラルのまま。
+--     関数名は udf_name_prefix + system_name + '_' + 基本名 + udf_name_suffix で
+--     組み立てる。system_name は環境ではなくシステムを表すので、prefix とは別。
 --     ルーチン名は英数字と '_' しか使えない（'-' は不可）ので、テーブル側の
 --     prefix / suffix とは別に持つ。build_table.sql の同名の変数と合わせること。
 
@@ -170,15 +179,17 @@ SET udf_name_suffix = REPLACE(udf_name_suffix, '{project_token}', project_token)
 ASSERT REGEXP_CONTAINS(udf_dataset, r'^[A-Za-z0-9_]+$') AS
   'udf_dataset は英数字と _ だけにしてください（置換されていない {project_token} が残っていませんか）。';
 
--- 関数名: udf_name_prefix + 'viewlgc_' + 基本名 + udf_name_suffix
+-- 関数名: udf_name_prefix + system_name + '_' + 基本名 + udf_name_suffix
+ASSERT REGEXP_CONTAINS(system_name, r'^[A-Za-z0-9_]+$') AS
+  'system_name は英数字と _ だけにしてください（ルーチン名に - は使えません）。';
 SET udf_analyze_function_name =
-  udf_name_prefix || 'viewlgc_' || 'analyze' || udf_name_suffix;
+  udf_name_prefix || system_name || '_' || 'analyze' || udf_name_suffix;
 SET udf_render_function_name =
-  udf_name_prefix || 'viewlgc_' || 'render' || udf_name_suffix;
+  udf_name_prefix || system_name || '_' || 'render' || udf_name_suffix;
 SET udf_css_function_name =
-  udf_name_prefix || 'viewlgc_' || 'group_css' || udf_name_suffix;
+  udf_name_prefix || system_name || '_' || 'group_css' || udf_name_suffix;
 SET udf_sql_function_name =
-  udf_name_prefix || 'viewlgc_' || 'render_dynamic_sql' || udf_name_suffix;
+  udf_name_prefix || system_name || '_' || 'render_dynamic_sql' || udf_name_suffix;
 ASSERT REGEXP_CONTAINS(udf_analyze_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_analyze_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_render_function_name, r'^[A-Za-z0-9_]+$') AS

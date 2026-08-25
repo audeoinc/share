@@ -141,9 +141,24 @@ add('IF … RAISE ではなく ASSERT を使っている',
 
 // --- 6. 両ファイルで一致させる必要がある値 -----------------------------
 for (const base of ['analyze', 'render', 'group_css', 'render_dynamic_sql']) {
-  const line = `udf_name_prefix || 'viewlgc_' || '${base}' || udf_name_suffix`;
+  const line = `udf_name_prefix || system_name || '_' || '${base}' || udf_name_suffix`;
   add(`${base} の名前の組み立てが両ファイルで同じ`,
     table.includes(line) && udf.includes(line));
+}
+
+// system_name が食い違うと関数が見つからない。既定値まで突き合わせる。
+{
+  const re = /^DECLARE system_name STRING DEFAULT '([^']*)';$/m;
+  const t = table.match(re), u = udf.match(re);
+  add('system_name の既定値が両ファイルで同じ',
+    t !== null && u !== null && t[1] === u[1],
+    `build_table=${t ? t[1] : 'なし'} / view_group_html=${u ? u[1] : 'なし'}`);
+}
+
+// 'viewlgc' を直に書いた組み立てが残っていないか（system_name の付け忘れ）
+for (const [name, src] of [['build_table.sql', table], ['view_group_html.sql', udf]]) {
+  add(`${name} に 'viewlgc_' のリテラル連結が残っていない`,
+    !/\|\|\s*'viewlgc_?'/.test(src));
 }
 
 // --- 結果 --------------------------------------------------------------
