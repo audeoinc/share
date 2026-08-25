@@ -386,6 +386,7 @@ const pagePack = pack(pageDriver, 'viewlgc_page', erdLib);
 const S = require(join(here, 'sample_views.js'));
 const VIEWLGC_ANALYZE = new Function('views', 'options_json', analyzePack.code);
 const VIEWLGC_RENDER = new Function('analysis_json', 'options_json', renderPack.code);
+const VIEWLGC_PAGE = new Function('analysis_json', 'diff_html', 'options_json', pagePack.code);
 const VIEW_GROUP_CSS = new Function('options_json', cssPack.code);
 
 // JS UDF から別の UDF は呼べないので、つなぐのは呼び出し側の SQL の仕事。
@@ -402,6 +403,9 @@ function VIEW_GROUP_INFO(views, options_json) {
     suffixes: j.suffixes,
     unmatched_count: j.unmatchedCount,
     html: VIEWLGC_RENDER(a, options_json),
+    // build_table.sql は render の結果をさらに page へ渡す。ここも同じ順で通し、
+    // 最小化した page 本体が実際に動くことを確かめる。
+    page: VIEWLGC_PAGE(a, VIEWLGC_RENDER(a, options_json), options_json),
   };
 }
 
@@ -439,6 +443,9 @@ const defined = new Set([...css.matchAll(/^\.(d[0-9a-z]+)\{/gm)].map((m) => m[1]
 
 const checks = [
   ['最小化後も動く（HTML を生成）', html.includes('vg-root')],
+  ['page も最小化後に動く（外側タブと図が出る）',
+    info.page.includes('vg-otab') && info.page.includes('<svg ') &&
+    info.page.includes(html)],
   ['タイトルが base 名', text.includes('v_daily_sales')],
   ['3 グループでタブになる', html.includes('vg-tablist')],
   ['ペイン見出しに suffix が列記される', text.includes('abjp, abuk, abus')],
@@ -692,7 +699,7 @@ ${renderPack.code}
 """;
 
 DECLARE js_page STRING DEFAULT r"""
-${pagePack}
+${pagePack.code}
 """;
 DECLARE js_css STRING DEFAULT r"""
 ${cssPack.code}
@@ -1003,6 +1010,24 @@ END;
     console.log(`  FAIL  三重引用符の数が合いません（開始 ${opens} 個に対して ${triples} 個）`);
     process.exit(1);
   }
+  // 埋め込んだ JS が本物か。上の JS 検証は pack の .code を直接評価するので、
+  // SQL に埋めるときに .code を書き忘れて '[object Object]' が入っても
+  // 素通りしてしまう。BigQuery まで持っていって初めて JS の構文エラーになる。
+  const marker = 'DECLARE (js_[a-z_]+) STRING DEFAULT r' + '"'.repeat(3) + '\\n';
+  const blobs = [...sql.matchAll(
+    new RegExp(marker + '([\\s\\S]*?)\\n' + '"'.repeat(3), 'g'))];
+  if (blobs.length !== 4) {
+    console.log(`  FAIL  埋め込んだ JS が 4 つ見つかりません（${blobs.length} 個）`);
+    process.exit(1);
+  }
+  for (const [, name, code] of blobs) {
+    if (!code.includes('function ') || code.length < 1000) {
+      console.log(`  FAIL  ${name} の中身が JS になっていません: ${code.slice(0, 40)}`);
+      process.exit(1);
+    }
+  }
+  console.log('  PASS  埋め込んだ JS が 4 つとも本物');
+
   // FORMAT のテンプレートに素の % があると書式指定と解釈される。
   // 引数側（JS 本体）の % は無関係なので、''' … ''' の中だけを見る。
   const templates = [...sql.matchAll(/FORMAT\('''([\s\S]*?)'''/g)].map((m) => m[1]);
