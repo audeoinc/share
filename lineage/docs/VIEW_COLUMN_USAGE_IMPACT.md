@@ -155,8 +155,9 @@ CONCAT(usage_object_project,'.',usage_object_dataset,'.',usage_object_name,
 
 | カラム | 型 | 意味 |
 |---|---|---|
-| `usage_definition_text` | STRING | **使用箇所を含むオブジェクトの SQL 全文** |
+| `usage_definition_text` | STRING | **使用箇所を含むオブジェクトの SQL 全文**（素のテキスト） |
 | `usage_definition_is_current` | BOOL | 下表参照 |
+| `usage_definition_html` | STRING | **同じ SQL を、行番号つき・該当箇所ハイライトつきの HTML にしたもの**。第 7 章参照 |
 
 `usage_definition_is_current` の値：
 
@@ -168,9 +169,10 @@ CONCAT(usage_object_project,'.',usage_object_dataset,'.',usage_object_name,
 
 `FALSE` の行は、日次パイプラインが次回そのオブジェクトを再解析すれば `TRUE` に戻ります。
 
-> **コストについて**：`usage_definition_text` は SQL 全文なので大きくなり得ます。
-> ただしビューなので、**この列をレポートで使わなければ読み込まれず課金対象になりません。**
-> 一覧表には出さず、ドリルダウン用の詳細ページだけで使うのがおすすめです。
+> **コストについて**：`usage_definition_text` / `usage_definition_html` は SQL 全文なので
+> 大きくなり得ます。ただしビューなので、**これらの列をレポートで使わなければ
+> 読み込まれず課金対象になりません。**一覧表には出さず、ドリルダウン用の詳細ページ
+> だけで使うのがおすすめです。
 
 ### グループ E：経路 — どうやってそこに影響が及ぶか
 
@@ -256,7 +258,89 @@ Looker Studio では「コントロール（プルダウン）」を段階的に
 
 ---
 
-## 6. 用語
+## 6. SQL をハイライト表示する（`usage_definition_html`）
+
+`usage_definition_text` をそのまま `<pre>` で出すと、行番号が無く、どこが該当箇所か
+分かりません。`usage_definition_html` は同じ SQL を**表示用の HTML** にした列です。
+
+- 各行に**行番号**が付く
+- **該当行**が背景色で光る（左端にもバーが出る）
+- **該当箇所**が文字単位でハイライトされる
+- SQL の**構文ハイライト**（予約語・リテラル・コメント）が付く
+
+### ⚠ ハイライトされるのは「1 箇所」ではなく「関連する全箇所」
+
+この列は、**同じ起点カラム × 同じオブジェクト × 同じ定義**の行をまとめて見て、
+**そのオブジェクト内の関連箇所を全部ハイライトします**。
+
+つまり、あるオブジェクトが起点カラムを 5 箇所で使っていれば、**5 箇所すべてが光った
+同じ HTML** が、その 5 行すべてに入ります。1 レコードだけ表示する Templated Record で
+使うことを想定した作りです。
+
+集約はレポートのフィルタが効いた**後**に行われるので、`origin_column` を絞れば、
+その起点に関係する箇所だけがハイライトされます。
+
+### Looker Studio での設定
+
+コミュニティ ビジュアライゼーション **Templated Record** を使います
+（ギャラリー掲載品なので公開元がホストしており、GCS バケットを公開する必要がありません）。
+
+1. Templated Record を配置する
+2. **表示対象のカラムに `usage_definition_html` を指定する**
+3. フィルタで `origin_*` を 1 つのカラムに、`usage_object_*` を 1 つのオブジェクトに絞る
+   （1 レコード表示なので、絞らないと最初の 1 件しか見えません）
+
+既定では `<style>` を同梱した**自己完結の HTML** を返すので、テンプレート側に CSS を
+貼る必要はありません。
+
+### 見た目を変えたい / サイズを削りたい場合
+
+ビューは既定オプションで UDF を呼んでいます。変えたい場合は、カスタムクエリで
+UDF を直接呼んでください。
+
+```sql
+SELECT
+  v.*,
+  `PROJECT.DATASET.lnge_fn_usage_sql_html`(
+    v.usage_definition_text,
+    [FORMAT('%d:%d:%d', v.line_number, v.column_number, LENGTH(v.reference_name))],
+    '{"mode":"class","contextLines":10}'
+  ) AS custom_html
+FROM `PROJECT.DATASET.lnge_vw_t_column_usage_impact` AS v
+```
+
+| オプション | 既定 | 内容 |
+|---|---|---|
+| `mode` | `embed` | `embed` `<style>` 同梱で自己完結／`class` markup のみ（**最小**。CSS は下記）／`inline` すべてインライン CSS |
+| `contextLines` | なし（全文） | 該当行の前後 N 行だけ描画する |
+| `maxLines` | `5000` | 描画する最大行数。超えた分は省略する |
+| `fontSize` / `lineHeight` | 12 / 1.45 | |
+| `colors.hitBg` / `.markBg` / `.hitBar` ほか | | 該当行の背景・該当箇所の背景・左バー |
+| `syntax.keyword` / `.literal` / `.comment` | | 構文ハイライトの色 |
+
+`mode='class'` にすると HTML が小さくなります。その場合はテンプレートに CSS を貼ります。
+
+```sql
+SELECT `PROJECT.DATASET.lnge_fn_usage_sql_css`(NULL);
+```
+
+出力を `<style> … </style>` で囲んでテンプレートに貼ってください。
+**色やフォントを変えた場合は、CSS 側にも同じ options_json を渡して作り直すこと。**
+
+### 注意点
+
+- **1 行の生成 SQL**：DAG が実行する SQL は改行が無く 1 行だけ、ということがよくあります。
+  その場合、行番号は常に 1 になり行ハイライトは意味を持ちませんが、**該当箇所の
+  ハイライトは効きます**（折り返して表示されます）。
+- **`usage_definition_text` が NULL のとき**（`usage_definition_is_current` が `TRUE` 以外）は
+  この列も空文字になります。
+- **ハイライトの終端**は `reference_name` の文字数で決めています。バッククォート付きの
+  識別子など、書かれ方によっては数文字ずれることがあります。その場合でも**行の
+  ハイライトは必ず正しい位置**に出ます。
+
+---
+
+## 7. 用語
 
 | 用語 | 意味 |
 |---|---|
