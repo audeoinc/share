@@ -110,6 +110,15 @@ DECLARE bootstrap_target_datasets ARRAY<STRING> DEFAULT ['dataset'];
 DECLARE bootstrap_parser_strict_mode BOOL DEFAULT FALSE;
 DECLARE bootstrap_compact_export BOOL DEFAULT TRUE;
 
+-- Views-only re-deploy. Section 4 recreates the repository TABLES with
+-- CREATE OR REPLACE, which DESTROYS their contents -- so once a repository is live
+-- this script must not be re-run just to pick up a view change. Set TRUE to skip
+-- everything destructive or slow (the table DDL in section 4, the renderer / UDF
+-- deploy in 4b and 5, and the smoke tests in 6) and only recreate the views in
+-- section 4a. The naming knobs above still apply, so the views are rebuilt over
+-- exactly the tables this deployment uses. Leave FALSE for a first-time setup.
+DECLARE recreate_views_only BOOL DEFAULT FALSE;
+
 -- ----------------------------------------------------------------------------
 -- [C] DERIVED / INTERNAL -- computed from [A] or @@location; DO NOT edit
 -- ----------------------------------------------------------------------------
@@ -303,7 +312,11 @@ AS 'bootstrap_target_datasets must contain at least one dataset.';
 
 -- ============================================================================
 -- 4. Repository tables
+--
+-- CREATE OR REPLACE TABLE: every statement here DROPS AND RECREATES its table, so
+-- the whole section is skipped when recreate_views_only is TRUE.
 -- ============================================================================
+IF NOT recreate_views_only THEN
 EXECUTE IMMEDIATE FORMAT(
   '''
   CREATE OR REPLACE TABLE `%s.%s`
@@ -566,6 +579,12 @@ EXECUTE IMMEDIATE FORMAT(
   table_column_usage
 );
 
+END IF;  -- NOT recreate_views_only (section 4: repository tables)
+
+-- ============================================================================
+-- 4a. Repository views -- always recreated (CREATE OR REPLACE VIEW is safe)
+-- ============================================================================
+
 -- Column-usage x impact depth view. Joins the usage index to the impact graph so
 -- a report can pick an ORIGIN column and see every downstream usage site with a
 -- DEPTH (relative to that origin: 1 = direct reference, impact_rank + 1 deeper)
@@ -579,7 +598,7 @@ EXECUTE IMMEDIATE FORMAT(
   '''
   CREATE OR REPLACE VIEW `%s.%s`
   OPTIONS (
-    description = 'Column usage joined to impact: for a chosen origin column, every downstream usage site with a depth (1 = direct reference; impact_rank + 1 deeper) and the value-flow path.'
+    description = 'Column usage joined to impact: for a chosen origin column, every downstream usage site with a depth (1 = direct reference; impact_rank + 1 deeper) and the value-flow path. line_text has its leading indentation stripped (line_indent_width = how much was removed); column_number is the position in the original, untrimmed line.'
   )
   AS
   -- depth = 1: the usage references the origin column directly.
@@ -608,8 +627,16 @@ EXECUTE IMMEDIATE FORMAT(
     u.usage_type,
     u.reference_name,
     u.line_number,
+    -- column_number is the position in the ORIGINAL source line, so it stays as
+    -- recorded and remains valid against the object's stored definition text.
     u.column_number,
-    u.line_text,
+    -- Leading indentation is stripped: generated / formatted SQL is often indented
+    -- many levels, and the padding pushed the interesting part of the line out of
+    -- view in report tools. line_indent_width keeps what was removed, so the
+    -- position within this trimmed text is column_number - line_indent_width and
+    -- the original line can still be reconstructed.
+    LTRIM(u.line_text) AS line_text,
+    LENGTH(u.line_text) - LENGTH(LTRIM(u.line_text)) AS line_indent_width,
     u.resolution_status,
     CAST(NULL AS ARRAY<STRING>) AS dependency_path
   FROM `%s.%s` AS u
@@ -638,7 +665,8 @@ EXECUTE IMMEDIATE FORMAT(
     u.reference_name,
     u.line_number,
     u.column_number,
-    u.line_text,
+    LTRIM(u.line_text) AS line_text,
+    LENGTH(u.line_text) - LENGTH(LTRIM(u.line_text)) AS line_indent_width,
     u.resolution_status,
     i.dependency_path
   FROM `%s.%s` AS i
@@ -653,6 +681,8 @@ EXECUTE IMMEDIATE FORMAT(
   repository_dataset_full_name, table_impact,
   repository_dataset_full_name, table_column_usage
 );
+
+IF NOT recreate_views_only THEN
 
 -- ============================================================================
 -- 4b. Persistent dynamic-SQL renderer
@@ -891,6 +921,8 @@ INTO fingerprint_smoke_result;
 ASSERT fingerprint_smoke_result
 AS 'Persistent fingerprint UDF smoke test did not behave as expected.';
 
+END IF;  -- NOT recreate_views_only (sections 4b/5/6: renderer, UDF, smoke tests)
+
 -- ============================================================================
 -- 7. Setup summary
 -- ============================================================================
@@ -926,5 +958,7 @@ SELECT
   bootstrap_target_datasets,
   bootstrap_parser_strict_mode,
   bootstrap_compact_export,
+  -- NULL on a views-only run: the smoke tests live in the section that run skips.
   smoke_test_status,
+  recreate_views_only AS views_only_run,
   CURRENT_TIMESTAMP() AS setup_finished_at;

@@ -590,6 +590,26 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   実行前にトークン抽出の成否が見えるようにした。
 - SQL のみ／エンジン不変。**BigQuery 未検証**。
 
+## 4.27 column usage impact ビューの `line_text` から行頭インデントを除去（SQLのみ）
+
+- **要望**：`lnge_vw_t_column_usage_impact` の `line_text` の行頭インデントが邪魔。
+- **対応（ビュー側）**：両ブランチ（depth=1 / depth=impact_rank+1）で
+  `LTRIM(u.line_text) AS line_text` に変更し、`line_indent_width`
+  （`LENGTH(line_text) - LENGTH(LTRIM(line_text))`）を追加。
+  - **エンジン側ではなくビュー側**にしたのは、収集済みの行にも即座に効き、バンドル再デプロイも
+    03 の再解析も不要なため。
+  - `column_number` は**元の行における位置**のまま据え置き（definition_registry の
+    定義本文と突き合わせたときに整合する）。トリム後テキスト内の位置は
+    `column_number - line_indent_width`。
+- **併せて 01 に `recreate_views_only BOOL DEFAULT FALSE` を追加**：
+  01 のセクション 4 は `CREATE OR REPLACE TABLE` でテーブルを作り直す（＝データ消去）ため、
+  稼働中の環境ではビュー変更を取り込むために 01 を再実行できなかった＝**ビューを貼り直す
+  安全な手段が存在しなかった**。TRUE でセクション 4（テーブル DDL）・4b/5（renderer・UDF）・
+  6（スモークテスト）をスキップし、**新設のセクション 4a（ビュー）だけ**を再作成する。
+  ビュー DDL を別スクリプトに複製せずに済むのが要点。
+  setup summary は `views_only_run` を出力し、`smoke_test_status` は NULL になる。
+- SQL のみ／エンジン不変。**BigQuery 未検証**。
+
 ## 4.22 本ドキュメントと実装の乖離（重要）
 
 `docs/SESSION_HANDOFF.md` の §1〜§4.20 は **1.5.0-032 の途中まで**しか追随していない。
@@ -617,6 +637,7 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 - ソースデータセットのアクセス事前チェック（§4.24・本セッション、SQLのみ）
 - 03 実行前の対象確認 `preview_only`（§4.25・本セッション、SQLのみ）
 - `{project_token}` を `source_project_filters` / SA 配列へ拡張（§4.26・本セッション、SQLのみ）
+- column usage impact ビューの `line_text` トリム＋01 の `recreate_views_only`（§4.27・本セッション、SQLのみ）
 - SQL 追加：`sql/maintenance/08_view_last_access.sql`、
   `sql/maintenance/09_unanalyzed_object_definitions.sql`、
   `definition_registry` の `labels` 列（§4.12）

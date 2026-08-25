@@ -1,5 +1,30 @@
 # 1.5.0-032
 
+- Stripped the leading indentation from `line_text` in the column-usage impact view
+  (`lnge_vw_t_column_usage_impact`, created by 01). Generated and formatted SQL is often
+  indented several levels, and the padding pushed the interesting part of the line out of
+  view in report tools. Both branches of the view (depth = 1 and depth = impact_rank + 1)
+  now select `LTRIM(u.line_text)` and add `line_indent_width`
+  (`LENGTH(line_text) - LENGTH(LTRIM(line_text))`), so nothing is lost: the position
+  within the trimmed text is `column_number - line_indent_width`, and the original line
+  can be reconstructed. `column_number` itself is left as recorded -- it is the position
+  in the original source line and stays valid against the object's stored definition
+  text. Done in the view rather than in the engine's usage extraction so it applies to
+  rows already collected, with no bundle redeploy and no re-analysis. The view
+  description states both conventions.
+
+- Added `recreate_views_only BOOL DEFAULT FALSE` to `01_setup_lineage_environment.sql`.
+  Section 4 creates the repository tables with `CREATE OR REPLACE TABLE`, which destroys
+  their contents, so a live deployment could not re-run 01 to pick up a view change --
+  there was no safe path to redeploy a view at all. With the toggle TRUE the run skips
+  the table DDL (section 4), the renderer and UDF deploy (4b, 5) and the smoke tests (6),
+  and recreates only the views, now split out as section 4a. The naming knobs still
+  apply, so the views are rebuilt over exactly the tables that deployment uses, and the
+  view DDL stays in one place instead of being duplicated into a separate maintenance
+  script. The setup summary reports `views_only_run` and leaves `smoke_test_status` NULL
+  on such a run. SQL-only; the engine bundle is unchanged. Not yet validated against
+  BigQuery.
+
 - Made `{project_token}` reach `source_project_filters` in
   `03_run_daily_lineage_pipeline.sql`. Putting the placeholder in an entry's
   `project_id` failed with "Invalid source project_id in source_project_filters":
