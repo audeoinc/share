@@ -160,6 +160,17 @@ const checks = [
   ['tooltip の CSS が chrome 側にある',
     R.chromeCss().includes('.vg-ph::after{content:attr(data-tip)') &&
     R.chromeCss().includes('.vg-ph:hover::after')],
+  ['目印がチップとして目立つ（紫の地色）',
+    /\.vg-ph\{[^}]*background:#F1E8FD[^}]*color:#6639BA/.test(R.chromeCss())],
+  ['チップの枠は border ではなく inset の box-shadow（桁がずれない）',
+    /\.vg-ph\{[^}]*box-shadow:inset/.test(R.chromeCss()) &&
+    !/\.vg-ph\{[^}]*border:/.test(R.chromeCss())],
+  ['チップの padding を負の margin で打ち消している（桁がずれない）', (() => {
+    const m = R.chromeCss().match(/\.vg-ph\{([^}]*)\}/);
+    const pad = m && m[1].match(/padding:0 (\d+)px/);
+    const mar = m && m[1].match(/margin:0 -(\d+)px/);
+    return !!(pad && mar && pad[1] === mar[1]);
+  })()],
   ['すべての目印に tooltip が付く（タグで割れた分も含む）', (() => {
     // 行内差分は語単位で切るので、値が違う位置では {{ と P1 の間にタグが入る。
     // 左右でパラメータ名の振られ方がずれる形を作って、その経路も通す。

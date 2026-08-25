@@ -336,7 +336,14 @@ function chromeCss() {
     // SQL 中の {{P1}}。中身は data-tip 属性にあり、ここで content:attr() で出す。
     // 子要素として置かないのは、この CSS を貼り忘れたときに値が SQL 本文に
     // 流れ出さないようにするため（属性なら何も出ないだけで済む）。
-    `.vg-ph{position:relative;border-bottom:1px dotted #8250DF;cursor:help}`,
+    // 本文と同じ色だと SQL に埋もれるので、パラメータ名と同じ紫のチップにする。
+    // 枠は border ではなく inset の box-shadow で描く。border は幅を取るので、
+    // 等幅で組んだコードの桁がずれる。padding の左右は同じ幅の負の margin で
+    // 打ち消して、桁を保ったまま字面だけ広げている。
+    `.vg-ph{position:relative;margin:0 -2px;padding:0 2px;border-radius:3px;` +
+      `background:#F1E8FD;color:#6639BA;font-weight:700;` +
+      `box-shadow:inset 0 0 0 1px #CDB6F2;cursor:help}`,
+    `.vg-ph:hover{background:#E4D3FB}`,
     `.vg-ph::after{content:attr(data-tip);display:none;position:absolute;z-index:20;` +
       // 絶対配置の既定の幅は「収まる幅」＝目印の幅しかない。max-content にしないと
       // 1 文字ずつ折り返した細長い吹き出しになる。
