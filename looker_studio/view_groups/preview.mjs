@@ -265,8 +265,30 @@ const checks = [
   })()],
   ['どの辺も 1 段しかまたがない（箱の上を横切らない）', (() => {
     const lay = E.layout(E.buildGraph(baseComplex.groups[0].sql, baseComplex.groups[0].params));
-    const step = E.BOX_W + 108;
-    return lay.edges.every((e) => Math.round((e.b.x - e.a.x) / step) === 1);
+    // 段の x は溝の幅ぶんまちまちなので、実際に置かれた列で数える
+    const xs = [...new Set(lay.nodes.map((n) => n.x))].sort((a, b) => a - b);
+    const col = (x) => xs.indexOf(x);
+    return lay.edges.every((e) => col(e.b.x) - col(e.a.x) === 1);
+  })()],
+  ['辺の注記を省略しない（溝を注記の幅に合わせる）', (() => {
+    // 結合キーが長くても、詰めずに溝を広げて全部出す
+    const sql = 'WITH d AS (SELECT o.id FROM `p.m.orders` AS o ' +
+      'LEFT JOIN `p.m.customers` AS c ' +
+      'ON o.customer_identifier = c.external_customer_id) SELECT * FROM d';
+    const lay = E.layout(E.buildGraph(sql, []));
+    const svg = E.toSvg(lay);
+    return svg.includes('customer_identifier = external_customer_id') &&
+      !svg.includes('…') &&
+      Math.max(...lay.gaps) > 200;
+  })()],
+  ['注記は JOIN 種別と結合キーを行に分ける',
+    JSON.stringify(E.edgeLines({ joinType: 'LEFT', keys: ['a', 'b'] })) ===
+      JSON.stringify(['LEFT JOIN', 'a', 'b'])],
+  ['箱もいちばん長い名前に合わせて広げる', (() => {
+    const sql = 'SELECT x FROM `p.m.a_very_long_source_table_name`';
+    const lay = E.layout(E.buildGraph(sql, []));
+    return lay.nodes.every((n) => n.w > E.BOX_W_MIN) &&
+      !E.toSvg(lay).includes('…');
   })()],
   ['パラメータ化した名前は基準の値で出す', (() => {
     const g = E.buildGraph(baseComplex.groups[0].sql, baseComplex.groups[0].params);

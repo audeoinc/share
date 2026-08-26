@@ -24,9 +24,15 @@
 const { tokenizeSql, markEntities } = require('./analyze.js');
 const { esc, label, header, notice, referenceIndex } = require('./chrome.js');
 
-const BOX_W = 188;
+const BOX_W_MIN = 188;
+const BOX_W_MAX = 380;   // これを超える名前だけは詰める（<title> で全体を出す）
+const NAME_CHAR_W = 6.65; // 11px の等幅 1 文字ぶん
 const BOX_H = 42;
-const GAP_X = 108;  // 段の間隔。辺の注記をこの溝に収めるので、狭いと箱に重なる
+// 段の間隔は固定ではなく、その溝に置く注記の幅から決める（layout が計算する）。
+// 固定にすると長い結合キーが収まらず、詰めるか箱に重ねるかしか無くなる。
+const GAP_MIN = 76;
+const CHAR_W = 5.9;  // 10px の等幅 1 文字ぶん
+const LINE_H = 12;
 const GAP_Y = 16;
 const PAD = 10;
 
@@ -359,13 +365,34 @@ function layout(graph) {
     col.forEach((n, ri) => row.set(n.id, ri));
   });
 
+  const boxW = boxWidth(nodes);
+
+  // 段の番号を引けるようにしておく（溝の幅を決めるのに要る）
+  const colOf = new Map();
+  cols.forEach((col, ci) => (col || []).forEach((n) => colOf.set(n.id, ci)));
+
+  // 溝の幅は、そこに置く注記のいちばん長い行で決める。
+  // 辺は 1 段しかまたがない（ALAP）ので、注記は必ず相手の直前の溝に入る。
+  const gaps = new Array(Math.max(0, cols.length - 1)).fill(GAP_MIN);
+  for (const e of edges) {
+    const ci = (colOf.get(e.to) || 0) - 1;
+    if (ci < 0 || ci >= gaps.length) continue;
+    gaps[ci] = Math.max(gaps[ci], linesWidth(edgeLines(e)) + 16);
+  }
+  const colX = [];
+  let x = PAD;
+  for (let ci = 0; ci < cols.length; ci++) {
+    colX[ci] = x;
+    x += boxW + (gaps[ci] || 0);
+  }
+
   const placed = [];
   cols.forEach((col, ci) => {
     (col || []).forEach((n, ri) => {
       placed.push({ ...n,
-        x: PAD + ci * (BOX_W + GAP_X),
+        x: colX[ci],
         y: PAD + ri * (BOX_H + GAP_Y),
-        w: BOX_W, h: BOX_H });
+        w: boxW, h: BOX_H });
     });
   });
   const pos = new Map(placed.map((n) => [n.id, n]));
@@ -373,7 +400,9 @@ function layout(graph) {
   return {
     nodes: placed,
     edges: edges.map((e) => ({ ...e, a: pos.get(e.from), b: pos.get(e.to) })).filter((e) => e.a && e.b),
-    width: PAD * 2 + cols.length * BOX_W + Math.max(0, cols.length - 1) * GAP_X,
+    gaps,
+    colOf,
+    width: (colX[cols.length - 1] || PAD) + boxW + PAD,
     height: PAD * 2 + rows * BOX_H + Math.max(0, rows - 1) * GAP_Y + 6,
   };
 }
@@ -393,23 +422,48 @@ function shortName(s) {
   return i >= 0 ? bare.slice(i + 1) : bare;
 }
 
-// 箱に収まる文字数。SVG のテキストは箱からはみ出しても切られないので、
-// ここで詰めておかないと隣の箱に重なる。全体は <title> で読める。
-const MAX_CHARS = 23;
-// 辺の注記が溝（GAP_X）に収まる文字数。10px の等幅で 1 文字およそ 5.9px。
-const LABEL_CHARS = Math.floor(GAP_X / 5.9);
-function fit(s) {
-  const t = String(s);
-  return t.length > MAX_CHARS ? t.slice(0, MAX_CHARS - 1) + '…' : t;
+// 箱の幅は、図の中でいちばん長い名前に合わせて決める。SVG のテキストは
+// 箱からはみ出しても切られないので、合わせないと隣に重なる。
+// 全部の箱を同じ幅にするのは、段がそろっていないと図が読みにくいため。
+function boxWidth(nodes) {
+  let w = BOX_W_MIN;
+  for (const n of nodes) w = Math.max(w, shortName(n.label).length * NAME_CHAR_W + 26);
+  return Math.min(w, BOX_W_MAX);
 }
 
-/** 辺の注記。JOIN 種別と結合キー。 */
+// 上限を超える名前だけ詰める。全体は <title> で読める。
+function fit(s, w) {
+  const t = String(s);
+  const max = Math.floor((w - 26) / NAME_CHAR_W);
+  return t.length > max ? t.slice(0, max - 1) + '…' : t;
+}
+
+/**
+ * 辺の注記。JOIN 種別と結合キーを 1 行ずつに分ける。
+ *
+ * 1 行に詰めると溝に収まらず、省略するか箱に重ねるかになる。行に割れば
+ * いちばん長い行のぶんだけ溝を広げれば済み、全部を出せる。
+ */
+function edgeLines(e) {
+  const out = [];
+  if (e.joinType) out.push(e.joinType === 'INNER' ? 'JOIN' : e.joinType + ' JOIN');
+  for (const k of (e.keys || [])) out.push(k);
+  if (!out.length && e.nested) out.push('サブクエリ');
+  return out;
+}
+
+/** 注記のいちばん長い行の幅。 */
+function linesWidth(ls) {
+  let w = 0;
+  for (const t of ls) w = Math.max(w, t.length * CHAR_W);
+  return w;
+}
+
+/** 1 行に均した注記。tooltip と検査で使う。 */
 function edgeLabel(e) {
-  const parts = [];
-  if (e.joinType) parts.push(e.joinType === 'INNER' ? 'JOIN' : e.joinType + ' JOIN');
-  if (e.keys && e.keys.length) parts.push(e.keys.join(', '));
-  if (!parts.length && e.nested) parts.push('サブクエリ');
-  return parts.join(' / ');
+  const ls = edgeLines(e);
+  if (!ls.length) return '';
+  return ls.length > 1 ? ls[0] + ' / ' + ls.slice(1).join(', ') : ls[0];
 }
 
 /**
@@ -431,24 +485,29 @@ function toSvg(lay) {
   for (const e of lay.edges) {
     const x1 = e.a.x + e.a.w, y1 = e.a.y + e.a.h / 2;
     const x2 = e.b.x, y2 = e.b.y + e.b.h / 2;
-    // 縦に折れる位置は相手の直前の溝。段をまたぐ辺でも箱の上を横切らない。
-    const mid = x2 > x1 ? x2 - GAP_X / 2 : x1 + GAP_X / 2;
+    // 縦に折れる位置は相手の直前の溝の真ん中。段をまたぐ辺でも箱の上を
+    // 横切らない。溝の幅は注記に合わせて段ごとに違うので、そこから取る。
+    const gap = (lay.gaps && lay.gaps[(lay.colOf.get(e.to) || 0) - 1]) || GAP_MIN;
+    const mid = x2 > x1 ? x2 - gap / 2 : x1 + gap / 2;
     const d = `M${x1},${y1} H${mid} V${y2} H${x2}`;
-    const full = edgeLabel(e);
+    const lines = edgeLines(e);
     out.push(`<path d="${d}" fill="none" stroke="#8C96A0" stroke-width="1.2" ` +
       `${e.nested ? 'stroke-dasharray="4 3" ' : ''}marker-end="url(#vgarrow)">` +
-      (full ? `<title>${esc(full)}</title>` : '') + '</path>');
-    if (full) labels.push({ x: mid, y: (y1 + y2) / 2 - 5, text: full });
+      (lines.length ? `<title>${esc(edgeLabel(e))}</title>` : '') + '</path>');
+    if (lines.length) labels.push({ x: mid, y: (y1 + y2) / 2, lines });
   }
   for (const l of labels) {
-    // 溝に収まる長さに詰める。全体は線の <title> で読める。
-    const t = l.text.length > LABEL_CHARS ? l.text.slice(0, LABEL_CHARS - 1) + '…' : l.text;
-    const w = t.length * 5.9 + 6;
-    out.push(`<rect x="${(l.x - w / 2).toFixed(1)}" y="${l.y - 9}" width="${w.toFixed(1)}" ` +
-      `height="12" rx="2" fill="#FFFFFF" opacity="0.92"/>`);
-    out.push(`<text x="${l.x}" y="${l.y}" text-anchor="middle" ` +
+    // 溝は注記が収まる幅にしてあるので、詰めない。全部そのまま出す。
+    const w = linesWidth(l.lines) + 8;
+    const h = l.lines.length * LINE_H;
+    const top = l.y - h / 2;
+    out.push(`<rect x="${(l.x - w / 2).toFixed(1)}" y="${top.toFixed(1)}" ` +
+      `width="${w.toFixed(1)}" height="${h}" rx="2" fill="#FFFFFF" opacity="0.92"/>`);
+    const tspans = l.lines.map((t, i) =>
+      `<tspan x="${l.x}" y="${(top + LINE_H * i + 9).toFixed(1)}">${esc(t)}</tspan>`).join('');
+    out.push(`<text text-anchor="middle" ` +
       `font-family="ui-monospace,SFMono-Regular,Consolas,monospace" font-size="10" ` +
-      `fill="#57606A">${esc(t)}</text>`);
+      `fill="#57606A">${tspans}</text>`);
   }
 
   for (const n of lay.nodes) {
@@ -462,7 +521,7 @@ function toSvg(lay) {
       `fill="${k.fill}" stroke="${k.stroke}" stroke-width="1"/>`);
     out.push(`<rect x="${n.x}" y="${n.y}" width="4" height="${n.h}" rx="2" fill="${k.bar}"/>`);
     out.push(`<text x="${n.x + 12}" y="${n.y + 18}" font-family="ui-monospace,SFMono-Regular,Consolas,monospace" ` +
-      `font-size="11" font-weight="600" fill="#24292F">${esc(fit(shortName(n.label)))}</text>`);
+      `font-size="11" font-weight="600" fill="#24292F">${esc(fit(shortName(n.label), n.w))}</text>`);
     out.push(`<text x="${n.x + 12}" y="${n.y + 32}" font-family="Roboto,system-ui,sans-serif" ` +
       `font-size="9" fill="#8C96A0">${esc(k.text)}${n.params.length ? ' ・パラメータ' : ''}</text>`);
     out.push('</g>');
@@ -531,6 +590,6 @@ function renderErdBase(b, opts) {
 
 module.exports = {
   prepare, cteRanges, scanScope, buildGraph, layout, toSvg, groupSvg,
-  renderErdBase, erdStack, erdLegend,
-  shortName, edgeLabel, BOX_W, BOX_H,
+  renderErdBase, erdStack, erdLegend, edgeLines, linesWidth,
+  shortName, edgeLabel, boxWidth, BOX_W_MIN, BOX_H,
 };
