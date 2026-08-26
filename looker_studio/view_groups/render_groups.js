@@ -331,7 +331,8 @@ function chromeCss() {
       `{background:#24292F;border-color:#24292F;color:#fff}`,
     // 参照関係図。グループごとの図を縦に積む。差分と違って「比べる」ものでは
     // なく系統ごとの構造そのものなので、並べて一望できたほうが読みやすい。
-    `.vg-erdblock{margin:0 0 14px;border:1px solid #D0D7DE;border-radius:6px;background:#fff}`,
+    `.vg-erdblock{margin:0 0 28px;border:1px solid #D0D7DE;border-radius:6px;background:#fff}`,
+    `.vg-erdblock:last-child{margin-bottom:0}`,
     `.vg-erdhead{display:flex;align-items:center;gap:6px;padding:7px 12px;` +
       `border-bottom:1px solid #EAEEF2;background:#F6F8FA;border-radius:6px 6px 0 0}`,
     `.vg-erdname{font-weight:600;color:#24292F;font-size:12px}`,

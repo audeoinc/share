@@ -24,17 +24,17 @@
 const { tokenizeSql, markEntities } = require('./analyze.js');
 const { esc, label, header, notice, referenceIndex } = require('./chrome.js');
 
-const BOX_W_MIN = 188;
+const BOX_W_MIN = 158;
 const BOX_W_MAX = 380;   // これを超える名前だけは詰める（<title> で全体を出す）
 const NAME_CHAR_W = 7.25; // 12px の等幅 1 文字ぶん
 const BOX_H = 58;
 // 段の間隔は固定ではなく、その溝に置く注記の幅から決める（layout が計算する）。
 // 固定にすると長い結合キーが収まらず、詰めるか箱に重ねるかしか無くなる。
-const GAP_MIN = 124;
+const GAP_MIN = 78;
 const CHAR_W = 6.5;  // 11px の等幅 1 文字ぶん
 const LINE_H = 14;
-const GAP_Y = 40;
-const PAD = 14;
+const GAP_Y = 18;
+const PAD = 10;
 
 const kw = (t) => (t && t.kind === 'keyword' ? t.text.toUpperCase() : null);
 
