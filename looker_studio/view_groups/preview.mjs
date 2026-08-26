@@ -244,7 +244,7 @@ const checks = [
   ['外側と内側でラジオのクラスを分けている（片方を押しても連動しない）',
     /class="vg-or vg-or1"/.test(pageCases[0].html) &&
     !/class="vg-r vg-or/.test(pageCases[0].html)],
-  ['参照関係が SVG で描かれる',
+  ['参照関係が SVG で描かれる（グループの数だけ）',
     (pageCases[0].html.match(/<svg /g) || []).length === baseComplex.groupCount],
   ['SVG は style 属性を使わない（class モードでクラスが増えない）',
     !/<(svg|rect|path|text|g|marker)[^>]*\sstyle=/.test(pageCases[0].html)],
@@ -273,9 +273,18 @@ const checks = [
     return !/\{\{P/.test(g.nodes.map((n) => n.label).join(' ')) &&
       g.nodes.some((n) => n.params.length > 0);
   })()],
-  ['ERD のタブは全グループぶん（基準も押して切り替えられる）',
-    (pageCases[1].html.match(/class="vg-tab vg-t\d/g) || []).length >=
-      base3.groupCount],
+  ['ERD は全グループを縦に積む（切り替え操作が要らない）', (() => {
+    const blocks = (pageCases[1].html.match(/class="vg-erdblock"/g) || []).length;
+    const svgs = (pageCases[1].html.match(/<svg /g) || []).length;
+    return blocks === base3.groupCount && svgs === base3.groupCount;
+  })()],
+  ['ERD の並びは差分と同じ（基準が先頭）', (() => {
+    const names = [...pageCases[1].html.matchAll(/class="vg-erdname">([^<]*)</g)]
+      .map((m) => m[1]);
+    return names[0] === 'cdjp, cduk, cdus' && names.length === base3.groupCount;
+  })()],
+  ['ERD にラジオを置かない（外側タブと干渉しない）',
+    !/class="vg-r vg-r\d+" type="radio"[^>]*name="vge/.test(pageCases[1].html)],
   ['ERD の CSS が chrome 側にある',
     R.chromeCss().includes('.vg-otab') && R.chromeCss().includes('.vg-erdbox')],
   ['伏せ字は診断で見える表記に戻す',

@@ -22,7 +22,7 @@
  */
 
 const { tokenizeSql, markEntities } = require('./analyze.js');
-const { MAX_TABS, esc, hashId, label, header, notice, referenceIndex } = require('./chrome.js');
+const { esc, label, header, notice, referenceIndex } = require('./chrome.js');
 
 const BOX_W = 188;
 const BOX_H = 42;
@@ -477,33 +477,27 @@ function groupSvg(group) {
 }
 
 /**
- * 参照関係図（ERD）のカード。グループごとに 1 枚。
+ * 参照関係図（ERD）のカード。グループごとに 1 枚を縦に積む。
  *
- * タブの並びは差分と同じ（基準が先頭で、基準の印が付く）。同じ base を
- * 見ているのに差分と ERD で並びが違うと、対応を取り直す手間が要る。
+ * 差分はタブだが、こちらは積む。差分は「基準と 1 つを見比べる」ものなので
+ * 一度に 2 つ出れば足りるのに対し、参照関係は系統ごとの構造そのものなので、
+ * 並べて一望できたほうが読みやすい。切り替えの操作も要らない。
  *
- * 差分と違って基準との比較ではないので、基準のタブも押して切り替えられる。
+ * 並びは差分と同じで基準が先頭。同じ base を見ているのに差分と ERD で
+ * 並びが違うと、対応を取り直す手間が要る。
  */
-function erdTabs(groups, refIndex, idPrefix) {
+function erdStack(groups, refIndex) {
+  // 基準を先頭に、残りは元の順のまま。差分タブと並びをそろえる。
   const order = [groups[refIndex], ...groups.filter((_, i) => i !== refIndex)];
-  const shown = order.slice(0, MAX_TABS);
-  const radios = shown.map((g, i) =>
-    `<input class="vg-r vg-r${i + 1}" type="radio" name="${idPrefix}"` +
-    ` id="${idPrefix}-${i + 1}"${i === 0 ? ' checked' : ''}>`).join('');
-  const tablist = shown.map((g, i) =>
-    `<label class="vg-tab vg-t${i + 1}" for="${idPrefix}-${i + 1}">` +
+  return order.map((g, i) =>
+    `<div class="vg-erdblock">` +
+    `<div class="vg-erdhead">` +
     (i === 0 ? `<span class="vg-tbadge">基準</span>` : '') +
-    `${esc(label(g))}<span class="vg-tabn">${g.members.length}</span></label>`).join('');
-  const panels = shown.map((g, i) =>
-    `<div class="vg-panel vg-p${i + 1}"><div class="vg-erdbox">${groupSvg(g)}</div></div>`).join('');
-  const over = order.length > shown.length
-    ? notice(`グループが多いため先頭 ${MAX_TABS} 件のみタブ表示しています` +
-      `（全 ${order.length} 件）。`)
-    : '';
-  return over +
-    `<div class="vg-tabs">${radios}` +
-    `<div class="vg-tablist">${tablist}</div>` +
-    `<div class="vg-panels">${panels}</div></div>`;
+    `<span class="vg-erdname">${esc(label(g))}</span>` +
+    `<span class="vg-tabn">${g.members.length}</span>` +
+    `</div>` +
+    `<div class="vg-erdbox">${groupSvg(g)}</div>` +
+    `</div>`).join('');
 }
 
 /** 図の読み方。凡例が無いと線種と色が何を指すか分からない。 */
@@ -517,28 +511,26 @@ function erdLegend() {
     `</div>`;
 }
 
-function renderErd(b, refIndex, idPrefix) {
+function renderErd(b, refIndex) {
   if (!b.groups.length) return notice('View が見つかりません。');
   return notice(
     'FROM / JOIN から起こした参照関係です。矢印は「読んで作る」向き、' +
     '注記は JOIN の種別と結合キー。カーディナリティと主キーは SQL からは' +
     '分からないので描いていません。' +
     'パラメータ化した名前は、基準の View の値で表示しています。'
-  ) + erdLegend() + erdTabs(b.groups, refIndex, idPrefix);
+  ) + erdLegend() + erdStack(b.groups, refIndex);
 }
 
 /** base 1 件分の ERD カード。 */
 function renderErdBase(b, opts) {
-  const refIndex = referenceIndex(b, opts);
-  const idPrefix = 'vge' + hashId(b.base + '|' + b.groups.map(label).join('|') + '|' + refIndex);
   return `<div class="vg-root">` +
     header(b.base, b.viewCount, b.groups.length, b.unmatched) +
-    renderErd(b, refIndex, idPrefix) +
+    renderErd(b, referenceIndex(b, opts)) +
     `</div>`;
 }
 
 module.exports = {
   prepare, cteRanges, scanScope, buildGraph, layout, toSvg, groupSvg,
-  renderErdBase, erdTabs, erdLegend,
+  renderErdBase, erdStack, erdLegend,
   shortName, edgeLabel, BOX_W, BOX_H,
 };

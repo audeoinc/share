@@ -329,8 +329,14 @@ function chromeCss() {
     `.vg-or1:checked ~ .vg-otablist > .vg-ot1,` +
       `.vg-or2:checked ~ .vg-otablist > .vg-ot2` +
       `{background:#24292F;border-color:#24292F;color:#fff}`,
-    // 参照関係図。図は横に伸びるので、カードではなく図だけを横スクロールさせる。
-    `.vg-erdbox{overflow-x:auto;padding:4px 0}`,
+    // 参照関係図。グループごとの図を縦に積む。差分と違って「比べる」ものでは
+    // なく系統ごとの構造そのものなので、並べて一望できたほうが読みやすい。
+    `.vg-erdblock{margin:0 0 14px;border:1px solid #D0D7DE;border-radius:6px;background:#fff}`,
+    `.vg-erdhead{display:flex;align-items:center;gap:6px;padding:7px 12px;` +
+      `border-bottom:1px solid #EAEEF2;background:#F6F8FA;border-radius:6px 6px 0 0}`,
+    `.vg-erdname{font-weight:600;color:#24292F;font-size:12px}`,
+    // 図は横に伸びるので、カードではなく図だけを横スクロールさせる。
+    `.vg-erdbox{overflow-x:auto;padding:6px 10px 10px}`,
     `.vg-legend{display:flex;flex-wrap:wrap;gap:14px;margin:8px 0 10px;color:#57606A;font-size:11px}`,
     `.vg-lg{display:inline-flex;align-items:center;gap:5px}`,
     `.vg-lgm{display:inline-block;width:10px;height:10px;border-radius:2px;border:1px solid #8C96A0}`,
