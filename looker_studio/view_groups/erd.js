@@ -26,15 +26,15 @@ const { esc, label, header, notice, referenceIndex } = require('./chrome.js');
 
 const BOX_W_MIN = 188;
 const BOX_W_MAX = 380;   // これを超える名前だけは詰める（<title> で全体を出す）
-const NAME_CHAR_W = 6.65; // 11px の等幅 1 文字ぶん
-const BOX_H = 42;
+const NAME_CHAR_W = 7.25; // 12px の等幅 1 文字ぶん
+const BOX_H = 58;
 // 段の間隔は固定ではなく、その溝に置く注記の幅から決める（layout が計算する）。
 // 固定にすると長い結合キーが収まらず、詰めるか箱に重ねるかしか無くなる。
-const GAP_MIN = 76;
-const CHAR_W = 5.9;  // 10px の等幅 1 文字ぶん
-const LINE_H = 12;
-const GAP_Y = 16;
-const PAD = 10;
+const GAP_MIN = 92;
+const CHAR_W = 6.5;  // 11px の等幅 1 文字ぶん
+const LINE_H = 14;
+const GAP_Y = 26;
+const PAD = 14;
 
 const kw = (t) => (t && t.kind === 'keyword' ? t.text.toUpperCase() : null);
 
@@ -377,7 +377,7 @@ function layout(graph) {
   for (const e of edges) {
     const ci = (colOf.get(e.to) || 0) - 1;
     if (ci < 0 || ci >= gaps.length) continue;
-    gaps[ci] = Math.max(gaps[ci], linesWidth(edgeLines(e)) + 16);
+    gaps[ci] = Math.max(gaps[ci], linesWidth(edgeLines(e)) + 22);
   }
   const colX = [];
   let x = PAD;
@@ -427,14 +427,14 @@ function shortName(s) {
 // 全部の箱を同じ幅にするのは、段がそろっていないと図が読みにくいため。
 function boxWidth(nodes) {
   let w = BOX_W_MIN;
-  for (const n of nodes) w = Math.max(w, shortName(n.label).length * NAME_CHAR_W + 26);
+  for (const n of nodes) w = Math.max(w, shortName(n.label).length * NAME_CHAR_W + 30);
   return Math.min(w, BOX_W_MAX);
 }
 
 // 上限を超える名前だけ詰める。全体は <title> で読める。
 function fit(s, w) {
   const t = String(s);
-  const max = Math.floor((w - 26) / NAME_CHAR_W);
+  const max = Math.floor((w - 30) / NAME_CHAR_W);
   return t.length > max ? t.slice(0, max - 1) + '…' : t;
 }
 
@@ -498,15 +498,15 @@ function toSvg(lay) {
   }
   for (const l of labels) {
     // 溝は注記が収まる幅にしてあるので、詰めない。全部そのまま出す。
-    const w = linesWidth(l.lines) + 8;
+    const w = linesWidth(l.lines) + 12;
     const h = l.lines.length * LINE_H;
     const top = l.y - h / 2;
     out.push(`<rect x="${(l.x - w / 2).toFixed(1)}" y="${top.toFixed(1)}" ` +
       `width="${w.toFixed(1)}" height="${h}" rx="2" fill="#FFFFFF" opacity="0.92"/>`);
     const tspans = l.lines.map((t, i) =>
-      `<tspan x="${l.x}" y="${(top + LINE_H * i + 9).toFixed(1)}">${esc(t)}</tspan>`).join('');
+      `<tspan x="${l.x}" y="${(top + LINE_H * i + 11).toFixed(1)}">${esc(t)}</tspan>`).join('');
     out.push(`<text text-anchor="middle" ` +
-      `font-family="ui-monospace,SFMono-Regular,Consolas,monospace" font-size="10" ` +
+      `font-family="ui-monospace,SFMono-Regular,Consolas,monospace" font-size="11" ` +
       `fill="#57606A">${tspans}</text>`);
   }
 
@@ -517,13 +517,13 @@ function toSvg(lay) {
         Object.keys(p.values).map((k) => k + ' = ' + p.values[k]).join(' / ')).join('\n')
       : '');
     out.push(`<g><title>${esc(tip)}</title>`);
-    out.push(`<rect x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h}" rx="5" ` +
+    out.push(`<rect x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h}" rx="6" ` +
       `fill="${k.fill}" stroke="${k.stroke}" stroke-width="1"/>`);
-    out.push(`<rect x="${n.x}" y="${n.y}" width="4" height="${n.h}" rx="2" fill="${k.bar}"/>`);
-    out.push(`<text x="${n.x + 12}" y="${n.y + 18}" font-family="ui-monospace,SFMono-Regular,Consolas,monospace" ` +
-      `font-size="11" font-weight="600" fill="#24292F">${esc(fit(shortName(n.label), n.w))}</text>`);
-    out.push(`<text x="${n.x + 12}" y="${n.y + 32}" font-family="Roboto,system-ui,sans-serif" ` +
-      `font-size="9" fill="#8C96A0">${esc(k.text)}${n.params.length ? ' ・パラメータ' : ''}</text>`);
+    out.push(`<rect x="${n.x}" y="${n.y}" width="5" height="${n.h}" rx="2.5" fill="${k.bar}"/>`);
+    out.push(`<text x="${n.x + 14}" y="${n.y + 25}" font-family="ui-monospace,SFMono-Regular,Consolas,monospace" ` +
+      `font-size="12" font-weight="600" fill="#24292F">${esc(fit(shortName(n.label), n.w))}</text>`);
+    out.push(`<text x="${n.x + 14}" y="${n.y + 43}" font-family="Roboto,system-ui,sans-serif" ` +
+      `font-size="10" fill="#8C96A0">${esc(k.text)}${n.params.length ? ' ・パラメータ' : ''}</text>`);
     out.push('</g>');
   }
   out.push('</svg>');
