@@ -576,7 +576,15 @@ EXECUTE IMMEDIATE rendered_sql;
 
 SET sql_template = """
 CREATE OR REPLACE VIEW `__V_DIFF_BY_REF__` AS
-SELECT *
+SELECT
+  *,
+  -- base の属性を「基準ごとの行」に持たせているので、そのまま集計すると
+  -- 行数ぶん膨らむ（3 グループなら 3 行 x 3 = 9）。基準の行にだけ値を置き、
+  -- 他は NULL にしておけば、既定の SUM でも 1 回しか足されない。
+  -- コントロールや一覧にはこちらを使う。
+  IF(ref_index = 0, group_count, NULL)     AS group_count_once,
+  IF(ref_index = 0, view_count, NULL)      AS view_count_once,
+  IF(ref_index = 0, unmatched_count, NULL) AS unmatched_count_once
 FROM `__T_DIFF_HIST__`
 WHERE snapshot_date = (
   SELECT MAX(snapshot_date) FROM `__T_DIFF_HIST__`

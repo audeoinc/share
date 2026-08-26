@@ -962,6 +962,15 @@ base の切り出しと UDF に渡す `suffixList` は、同じ 1 つの `suffix
    こちらも**単一選択**。base と 2 つそろって 1 レコードに決まる
 5. `mode='class'` で生成した場合は、テンプレートに CSS を貼る
 
+> **コントロールや一覧に数値を出すときは `*_once` の列を使う。**
+> `group_count` / `view_count` / `unmatched_count` は base の属性なのに、
+> 基準ごとの行に複製されている。そのまま集計すると行数ぶん膨らむ
+> （3 グループなら 3 行 × 3 = 9）。`viewlgc_vw_t_diff_by_ref` は基準の行にだけ
+> 値を置いた `group_count_once` / `view_count_once` / `unmatched_count_once` を
+> 返すので、Looker Studio の既定の SUM でも 1 回しか足されない。
+> 既存のレポートを触りたくないなら、データソース側で集計を「最大値」に
+> 変えても同じ結果になる。
+
 CSS は **`template_style.html`**（`build_udf.mjs` の生成物）をそのまま貼るか、
 BigQuery から取る。中身は同じ。
 
