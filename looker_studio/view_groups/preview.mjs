@@ -16,6 +16,7 @@ const S = require(join(here, 'sample_views.js'));
 const R = require(join(here, 'render_groups.js'));
 const E = require(join(here, 'erd.js'));
 const Ch = require(join(here, 'chrome.js'));
+const Md = require(join(here, 'markdown.js'));
 
 const OPTS = { suffixParts: S.SUFFIX_PARTS };
 
@@ -82,6 +83,49 @@ const pageCases = [
   { title: '外側タブ・基準を変えた場合', b: base3, opts: { referenceIndex: 1 } },
 ].map((c) => ({ ...c,
   html: Ch.wrapPage(R.renderBase(c.b, c.opts), E.renderErdBase(c.b, c.opts), c.b.base) }));
+
+// base ごとのメモ。実物は Looker のもう 1 枚の Templated Record に出る。
+// Confluence から移ってくる書き方（見出し・表・箇条書き・コード・引用）を
+// ひととおり入れて、CSS が全部そろっているかを目で見られるようにする。
+const NOTE_MD = [
+  '# v_daily_sales について',
+  '',
+  '各リージョンの日次売上。**jp だけ税込** で、ほかは税抜き。',
+  '詳細は [設計メモ](https://example.com/design?id=1&rev=2) を参照。',
+  '',
+  '## 参照元',
+  '',
+  '| suffix | 参照元 | 更新 | 備考 |',
+  '|:--|:--|:-:|--:|',
+  '| abjp | `orders_abjp` | 03:00 | 税込 |',
+  '| abus | `orders_abus` | 04:00 | — |',
+  '',
+  '## 注意点',
+  '',
+  '- 一次集計は CTE `daily` で行う',
+  '  - `region` は 2 段目で付与する',
+  '  - 列名 `gross_amount` は 2026-04 に変更予定',
+  '- 月次との突き合わせは `v_monthly_sales_*` を見る',
+  '',
+  '1. 抽出',
+  '2. 集計',
+  '3. 出力',
+  '',
+  '> 廃止予定: ~~`v_daily_sales_zzjp`~~ は 2026-06 に削除済み。',
+  '',
+  '```sql',
+  "SELECT * FROM `prj.mart_abjp.orders_abjp` WHERE order_date = CURRENT_DATE()",
+  '```',
+  '',
+  '---',
+  '',
+  'snake_case_name は斜体にしない。',
+].join('\n');
+
+const memoCases = [
+  { title: 'メモ（Markdown）', html: Md.markdownHtml(NOTE_MD) },
+  { title: 'メモ（未登録）', html: Md.markdownHtml(null) },
+];
 
 // --- 検証 --------------------------------------------------------------
 const h3 = parts[0].html;
@@ -309,6 +353,40 @@ const checks = [
     !/class="vg-r vg-r\d+" type="radio"[^>]*name="vge/.test(pageCases[1].html)],
   ['ERD の CSS が chrome 側にある',
     R.chromeCss().includes('.vg-otab') && R.chromeCss().includes('.vg-erdbox')],
+  // メモ（Markdown）。ビューの中から呼ぶので、崩れても落ちないことが要件。
+  ['メモは見出し・表・入れ子リスト・コードを出す', (() => {
+    const h = memoCases[0].html;
+    return h.includes('<h1 class="vg-mdh1">') && h.includes('<table class="vg-mdtable">') &&
+      h.includes('<ul class="vg-mdul"><li class="vg-mdli">') &&
+      h.includes('<ul class="vg-mdul">', h.indexOf('<li class="vg-mdli">')) &&
+      h.includes('<pre class="vg-mdpre">') && h.includes('<ol class="vg-mdol">');
+  })()],
+  ['メモの表は列ごとの寄せを引き継ぐ',
+    memoCases[0].html.includes('vg-mdth vg-mdtc') &&
+    memoCases[0].html.includes('vg-mdtd vg-mdtr')],
+  ['メモは _ を強調にしない（名前が斜体にならない）',
+    memoCases[0].html.includes('snake_case_name') &&
+    !memoCases[0].html.includes('<em>case</em>')],
+  ['メモのリンクは別タブで開く（レポートは iframe の中）',
+    memoCases[0].html.includes('target="_blank" rel="noopener noreferrer"') &&
+    memoCases[0].html.includes('rev=2')],
+  ['メモは生の HTML を通さない', (() => {
+    const h = Md.markdownHtml('<b>x</b> <img src=y onerror=z>\n\n<script>bad()</script>');
+    // 素通ししていれば <b> や <img が markup として出る。全部実体参照になる。
+    return !/<(b|img|script)\b/i.test(h) &&
+      h.includes('&lt;img src=y onerror=z&gt;') && h.includes('&lt;script&gt;');
+  })()],
+  ['メモの画像はリンクにする（外部から引かない）', (() => {
+    const h = Md.markdownHtml('![図](https://example.com/a.png)');
+    return !h.includes('<img') && h.includes('>図</a>');
+  })()],
+  ['メモは javascript: を出さない',
+    !/javascript/i.test(Md.markdownHtml('[x](javascript:alert(1))'))],
+  ['メモが空なら未登録の枠を返す',
+    Md.markdownHtml('').includes('vg-mdempty') &&
+    Md.markdownHtml('  \n  ').includes('vg-mdempty')],
+  ['メモの CSS は markdown.js 側にある（差分の UDF に積まない）',
+    Md.memoCss().includes('.vg-mdtable') && !R.chromeCss().includes('.vg-mdtable')],
   ['伏せ字は診断で見える表記に戻す',
     R.renderBase(A.analyze([
       { view_name: 'v_w_abjp', ddl: "SELECT a FROM t WHERE c = 'abjp'" },
@@ -331,8 +409,8 @@ if (!process.argv.includes('--check')) {
     '<title>view groups preview</title>\n<style>\nbody{margin:16px;background:#fff}\n' +
     'h2{font:600 14px/1.6 Roboto,system-ui,sans-serif;color:#57606A;' +
     'margin:32px 0 12px;padding-top:16px;border-top:1px solid #D0D7DE}\n' +
-    chromeCss() + '\n</style>\n</head>\n<body>\n' +
-    pageCases.concat(parts).map((p) => `<h2>${p.title}</h2>\n${p.html}`).join('\n') +
+    chromeCss() + '\n' + Md.memoCss() + '\n</style>\n</head>\n<body>\n' +
+    pageCases.concat(parts, memoCases).map((p) => `<h2>${p.title}</h2>\n${p.html}`).join('\n') +
     '\n</body>\n</html>\n';
   await mkdir(join(here, 'dist'), { recursive: true });
   const out = join(here, 'dist', 'preview.html');

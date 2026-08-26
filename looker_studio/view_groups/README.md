@@ -491,7 +491,7 @@ SQL 中の `{{P1}}` にカーソルを合わせると、種別と suffix ごと�
 - パラメータ名はグループごとに振り直すので、左右のペインには別の対応表を渡す。
 
 ```bash
-node preview.mjs          # dist/preview.html を生成して検証（70 アサーション）
+node preview.mjs          # dist/preview.html を生成して検証（79 アサーション）
 node preview.mjs --check  # 生成せず検証だけ
 ```
 
@@ -499,7 +499,7 @@ node preview.mjs --check  # 生成せず検証だけ
 
 ```bash
 node build_udf.mjs          # 検証して view_group_html.sql を生成
-node build_udf.mjs --check  # 生成せず検証だけ（41 アサーション）
+node build_udf.mjs --check  # 生成せず検証だけ（47 アサーション）
 node check_sql.mjs          # build_table.sql と view_group_html.sql の突き合わせ
 ```
 
@@ -508,6 +508,7 @@ node check_sql.mjs          # build_table.sql と view_group_html.sql の突き�
 | `viewlgc_analyze(views, options_json)` | 解析結果の JSON（`viewCount` / `groupCount` / `groupLabels` / `groupSizes` / `suffixes` / `unmatchedCount` / `bases`） |
 | `viewlgc_render(analysis_json, options_json)` | ロジック差分のカード |
 | `viewlgc_page(analysis_json, diff_html, options_json)` | 参照関係の図を作り、差分と外側タブで束ねた 1 枚 |
+| `viewlgc_markdown(md)` | base ごとのメモ（Markdown）の HTML。**ビューの中から呼ぶ** |
 | `viewlgc_group_css(options_json)` | `mode='class'` でテンプレートに貼る CSS |
 | `viewlgc_render_dynamic_sql(sql_template, …)` | `build_table.sql` の `__…__` を展開した SQL（JavaScript ではなく SQL 関数） |
 
@@ -519,10 +520,18 @@ node check_sql.mjs          # build_table.sql と view_group_html.sql の突き�
 `render_groups` だけ）ので、2 つの UDF に分けて枠を 2 つ使う。
 
 ```
-viewlgc_analyze     素 23.3 KB → 最小化 10.6 KB（上限比 35%）
-viewlgc_render      素 31.9 KB → 最小化 21.6 KB（上限比 72%）
-viewlgc_group_css   素 33.2 KB → 最小化 22.3 KB（上限比 74%）
+viewlgc_analyze     素 23.7 KB → 最小化 10.7 KB（上限比 36%）
+viewlgc_render      素 38.9 KB → 最小化 25.1 KB（上限比 84%）
+viewlgc_page        素 33.8 KB → 最小化 17.0 KB（上限比 57%）
+viewlgc_markdown    素 10.9 KB → 最小化  6.4 KB（上限比 21%）
+viewlgc_group_css   素 44.5 KB → 最小化 27.8 KB（上限比 93%）
 ```
+
+`viewlgc_group_css` が上限（生成時の閾値 30 KB）に近い。CSS を足すときは
+`node build_udf.mjs` の最後に出るサイズを見ること。**メモの CSS を
+`markdown.js` の `memoCss()` に置いてあるのはこのため**で、差分側の
+`chromeCss()` に混ぜると `viewlgc_render` にも使わない CSS が乗る。
+配る 1 枚は `viewlgc_group_css` が両方を連結して作る。
 
 **JS UDF の中から別の UDF は呼べない。** JS は V8 のサンドボックスで動き、
 SQL に戻る手段が無い。つなぐのは呼び出し側の SQL の仕事で、`build_table.sql` が
@@ -649,11 +658,13 @@ DECLARE target_project_id STRING DEFAULT NULL;
 | SET する変数 | 作られるもの | 既定でできる名前 |
 |---|---|---|
 | `table_diff_hist` | 日次スナップショットを積むテーブル | `viewlgc_t_diff_hist` |
+| `table_base_note` | base ごとのメモ（スプレッドシートの外部テーブル） | `viewlgc_m_base_note` |
 | `view_diff` | 最新スナップショット。基準 = 先頭グループの 1 行だけ | `viewlgc_vw_t_diff` |
 | `view_diff_by_ref` | 同上。基準ごとに 1 行 | `viewlgc_vw_t_diff_by_ref` |
 | `udf_analyze_function_name` | View 群を解析して JSON を返す UDF | `viewlgc_analyze` |
 | `udf_render_function_name` | その JSON を比較 HTML にする UDF | `viewlgc_render` |
 | `udf_page_function_name` | 参照関係を作り差分と束ねる UDF | `viewlgc_page` |
+| `udf_markdown_function_name` | メモの Markdown を HTML にする UDF | `viewlgc_markdown` |
 | `udf_css_function_name` | テンプレート用 CSS を返す UDF | `viewlgc_group_css` |
 | `udf_sql_function_name` | 動的 SQL を展開する UDF | `viewlgc_render_dynamic_sql` |
 
@@ -692,6 +703,8 @@ DECLARE target_project_id STRING DEFAULT NULL;
 | `snapshot_time_zone` | `snapshot_date` の基準タイムゾーン。リージョンごとに変える（[A]） |
 | `analyze_options` | UDF に渡す解析オプション（JSON）。`substitutable` などをここで足せば再生成が要らない |
 | `partition_expiration_days` | 履歴の保持日数 |
+| `note_sheet_url` | base ごとのメモを置くスプレッドシートの URL（[A]）。空ならメモを使わない |
+| `note_sheet_range` | その中の読み取り範囲。既定 `notes!A:E`（[A]） |
 
 4 つとも同じ形で、**include は OR、そのあと exclude を `AND NOT` で足す**。
 複数書けるので 1 本の正規表現に詰め込む必要はない。
@@ -861,6 +874,10 @@ viewlgc_t_diff_hist  PARTITION BY snapshot_date CLUSTER BY base, ref_index
   base / ref_index / ref_label
   view_count / group_count / has_multiple
   group_labels / group_sizes / suffixes / unmatched_count / diff_html
+
+viewlgc_vw_t_diff(_by_ref)  上に加えて
+  group_count_once / view_count_once / unmatched_count_once
+  has_note / note_md / note_html / note_updated_at / note_updated_by
 ```
 
 Looker Studio はビューを読むだけ。`diff_html` を Templated Record に渡す。
@@ -947,6 +964,78 @@ customers_abjp ┄┄▶ base_orders          calendar_abjp ──▶ daily
 base の切り出しと UDF に渡す `suffixList` は、同じ 1 つの `suffixes` から作る。
 別々に持つ場所がないので、ズレようがない。
 
+### base ごとのメモ（Markdown）
+
+`INFORMATION_SCHEMA` から出てこない補足（なぜこの形なのか、いつ何を直す予定か）を
+base ごとに添える。元が Confluence の文章なので、見出し・表組・箇条書きが要る。
+スプレッドシートのセルに 1 行ずつ書かせるのは書き手の負担が大きいので、
+**1 セルに Markdown を書いてもらい、表示側で HTML にする**。
+
+```
+スプレッドシート（1 base = 1 行）
+  └ Drive
+      └ viewlgc_m_base_note（外部テーブル・列は全部 STRING）
+          └ viewlgc_vw_t_diff / _by_ref が base で LEFT JOIN
+              └ note_html = viewlgc_markdown(note_md)
+```
+
+シートの列は左から **`base` / `note_md` / `updated_at` / `updated_by` /
+`is_hidden`** の 5 列。1 行目は見出しで、**この順序が唯一の取り決め**
+（`skip_leading_rows = 1` なので見出しの文言は見ない）。
+
+| 列 | 中身 |
+|---|---|
+| `base` | メモを付ける base 名。ビューの `base` と完全一致で突き合わせる |
+| `note_md` | Markdown 本文 |
+| `updated_at` | 更新時刻（ISO 8601）。同じ base が複数行あるとき、いちばん新しい 1 行だけを採る |
+| `updated_by` | 更新者。表示にだけ使う |
+| `is_hidden` | `TRUE` / `1` / `yes` なら出さない。消さずに下書きへ戻すためのもの |
+
+ビューが増やす列は `has_note` / `note_md` / `note_html` / `note_updated_at` /
+`note_updated_by`。
+
+**HTML にするのは事前生成ではなくビューの中。** `diff_html` と同じように
+`INSERT` で焼き込むと、シートを直しても次の日次実行までレポートが古いままになる。
+1 件が数 KB の Markdown なので、クエリのたびに変換しても実行時間には響かない。
+
+**同じデータソースに載せる**のは、Looker Studio のコントロールが
+データソースを跨がないため。別データソースにすると `base` のプルダウンを
+2 組そろえることになり、片方だけずれた状態を作れてしまう。
+
+`note_sheet_url` が空のときは、外部テーブルの代わりに**同じ列を持つ空のテーブル**を
+作る。ビューの形は変わらないので、メモを使わない環境でもそのまま動く
+（`note_html` が「未登録」の枠になるだけ）。あとから URL を入れてセクション 1 を
+流し直せば出るようになる。
+
+> **スプレッドシートの外部テーブルを読むには Drive のスコープが要る。**
+> スケジュールドクエリを作るときに Drive を許可し、Looker Studio の
+> データソースの認証にもそのシートを開ける権限を持たせること。
+> シートを共有していない人がビューを引くと、メモだけでなく
+> **ビュー全体が権限エラーになる**（`note_sheet_url` を空にすれば回避できる）。
+
+`markdown.js` が対応するのは Markdown の部分集合。
+
+- 見出し（`#`〜`######`）/ 段落 / 罫線 / 引用 / 箇条書き（入れ子可）/ 番号付き
+- 表（`|` 区切り。`:--` `:-:` `--:` の寄せに対応）
+- コード ブロック（``` / `~~~`）と行内コード
+- 強調 `**` `*`、打ち消し `~~`、リンク `[t](url)`
+
+意図して外してあるもの:
+
+- **生の HTML は通さない。** 必ずエスケープしてから組み立てる。書き手は SQL の
+  人であってフロントの人ではないので、貼り付けた HTML がカードの CSS を壊したり
+  `<script>` が混ざったりするのを避ける
+- **`_` を強調に使わない。** メモには `table_name_abjp` のような名前が頻出する
+  ので、`_` を強調にすると巻き添えで斜体になる。強調は `*` と `**` だけ
+- **画像は読み込まない。** `![alt](url)` はリンクとして出す。カードを開くたびに
+  外部のファイルを引きにいくことになるため
+- **リンクは `http(s)` と `mailto` だけ。** `javascript:` は素通りさせない
+- **段落の中の改行はそのまま `<br>`。** 「空行までは 1 段落」という Markdown 本来の
+  規則より、書いたとおりに折り返るほうが書き手の期待に合う
+
+`markdown.js` は依存を持たない素の関数だけで書いてある。BigQuery の UDF に
+埋めるのと、あとで編集画面（GAS）にプレビューとして貼るのとで、同じものを使うため。
+
 ## Looker Studio への配線
 
 事前生成テーブルができていれば、あとは読むだけ。
@@ -961,6 +1050,8 @@ base の切り出しと UDF に渡す `suffixList` は、同じ 1 つの `suffix
 4. `viewlgc_vw_t_diff_by_ref` を使う場合は、`ref_label` のプルダウンをもう 1 つ置く。
    こちらも**単一選択**。base と 2 つそろって 1 レコードに決まる
 5. `mode='class'` で生成した場合は、テンプレートに CSS を貼る
+6. メモを出すなら、**もう 1 枚 Templated Record** を置いて `note_html` を指定する。
+   同じデータソースなので、3・4 で置いたコントロールがそのまま効く
 
 > **コントロールや一覧に数値を出すときは `*_once` の列を使う。**
 > `group_count` / `view_count` / `unmatched_count` は base の属性なのに、
@@ -986,6 +1077,8 @@ SELECT `<project>.<udf_dataset>.viewlgc_group_css`('{"mode": "class"}');
 > `.vg-*` 規則を含まないため、タブが動かない。
 
 補助として、`has_multiple` でフィルタした表を並べると「要確認の base」の一覧になる。
+メモの登録状況は `build_table.sql` の 5-8（`has_note` の一覧と、
+「シートにあるのにどの base にも当たらない行」）で見られる。
 
 ### 確認クエリ
 

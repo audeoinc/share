@@ -252,7 +252,7 @@ function chromeCss() {
   const rules = [
     `.vg-root{font:13px/1.6 'Roboto','Segoe UI',system-ui,-apple-system,sans-serif;color:#24292F}`,
     `.vg-header{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 10px}`,
-    `.vg-title{font:600 15px/1.6 inherit;color:#1A1A1A}`,
+    `.vg-title{font-weight:600;font-size:15px;line-height:1.6;color:#1A1A1A}`,
     `.vg-badge{display:inline-block;padding:1px 8px;border-radius:10px;font-weight:600;font-size:12px}`,
     `.vg-notice{margin:8px 0;padding:8px 12px;border:1px solid #D0D7DE;border-left:4px solid #57606A;` +
       `border-radius:4px;background:#F6F8FA;color:#57606A}`,
@@ -275,7 +275,7 @@ function chromeCss() {
     `.vg-params{margin:12px 0 0;border:1px solid #D0D7DE;border-radius:6px;background:#F6F8FA}`,
     `.vg-psummary{padding:8px 12px;cursor:pointer;color:#57606A;font-weight:600;font-size:12px}`,
     `.vg-pblock{padding:0 12px 10px}`,
-    `.vg-plabel{font:600 12px/1.8 inherit;color:#24292F}`,
+    `.vg-plabel{font-weight:600;font-size:12px;line-height:1.8;color:#24292F}`,
     `.vg-pnone{color:#57606A;font-size:12px}`,
     `.vg-ptable{border-collapse:collapse;width:100%}`,
     `.vg-pname{width:44px;text-align:left;vertical-align:top;padding:3px 8px 3px 0;` +
@@ -287,7 +287,7 @@ function chromeCss() {
     // 常時出るものを警告色にすると、見るべきときの手がかりにならない。
     `.vg-mhint{padding:0 12px 8px;color:#57606A;font-size:12px}`,
     `.vg-mname{text-align:left;vertical-align:top;padding:3px 10px 3px 0;` +
-      `font:600 12px/1.6 inherit;color:#24292F;white-space:nowrap}`,
+      `font-weight:600;font-size:12px;line-height:1.6;color:#24292F;white-space:nowrap}`,
     `.vg-mvs{vertical-align:top;padding:3px 10px 3px 0;color:#57606A;font-size:12px;white-space:nowrap}`,
     `.vg-mreason{padding:3px 0;color:#57606A;font-size:12px}`,
     `.vg-mcode{padding:1px 5px;border-radius:3px;background:#FFEBE9;color:#82071E;` +

@@ -1,0 +1,319 @@
+'use strict';
+/**
+ * Markdown の部分集合を HTML にする。
+ *
+ * 用途は base ごとのメモ。元は Confluence にあった文章なので、見出し・箇条書き・
+ * 表組・コード・強調が出せれば実用になる。段組（カラム レイアウト）は Markdown に
+ * 記法が無いので出せない。表で代用する。
+ *
+ * 方針:
+ *   - 生の HTML は通さない。入力は必ずエスケープしてから組み立てる。
+ *     メモの書き手は SQL の人であってフロントの人ではないので、貼り付けた
+ *     HTML がカードの CSS を壊すのは避ける。<script> の混入も同時に防げる。
+ *   - 画像は読み込まない。![alt](url) はリンクとして出す。外部から画像を
+ *     引くと、社外に置いたファイルへの参照が閲覧のたびに飛ぶことになる。
+ *   - 強調は * と ** と ~~ だけ。_ は使わない。メモには table_name_abjp の
+ *     ような名前が頻出するので、_ を強調に使うと巻き添えで斜体になる。
+ *   - 段落の中の改行はそのまま <br> にする。書いたとおりに折り返る方が、
+ *     Markdown の規則（空行までは 1 段落）より書き手の期待に合う。
+ *
+ * 依存を持たない素の関数だけで書いてある。BigQuery の JS UDF に埋めるのと、
+ * 後で GAS の編集画面にプレビューとして貼るのと、両方で同じものを使うため。
+ * chrome.js の esc とは名前を分けてある（同じ UDF に積んでも衝突しない）。
+ */
+
+/** コード スパンの退避に使う目印。本文に現れない制御文字を使う。 */
+const MD_MARK = '\u0002';
+
+function mdEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/**
+ * リンクの href。http(s) と mailto 以外は出さない（null を返す）。
+ * javascript: を弾くのが目的。相対パスはカードの中では意味を持たないので同じ扱い。
+ *
+ * 引数はエスケープ済みの文字列なので、いったん実体参照を戻してから判定し、
+ * 属性値として入れ直す。戻さずに判定すると &amp; を含む URL を落としてしまう。
+ */
+function mdUrl(u) {
+  const raw = String(u == null ? '' : u)
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+    .replace(/&amp;/g, '&').trim();
+  if (!/^(https?:\/\/|mailto:)/i.test(raw)) return null;
+  return mdEsc(raw);
+}
+
+/** リンク 1 個ぶんの markup。URL を出せないときは文字列のまま返す。 */
+function mdLink(url, text) {
+  const href = mdUrl(url);
+  if (!href) return text;
+  // レポートは iframe の中に出るので、target が無いとカードの中で開こうとする。
+  return `<a class="vg-mda" href="${href}" target="_blank" rel="noopener noreferrer">${text}</a>`;
+}
+
+/**
+ * 行の中の記法。エスケープしてから組み立てる。
+ *
+ * コード スパンだけは先に退避する。`SELECT *` の * を強調と読ませないため。
+ */
+function mdInline(text) {
+  const codes = [];
+  let s = String(text == null ? '' : text).replace(/`([^`]+)`/g, (m, code) => {
+    codes.push(code);
+    return MD_MARK + (codes.length - 1) + MD_MARK;
+  });
+  s = mdEsc(s);
+
+  // 画像はリンクにする。alt が空なら URL をそのまま見出しにする。
+  s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)[^)]*\)/g, (m, alt, url) => mdLink(url, alt || url));
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)[^)]*\)/g, (m, t, url) => mdLink(url, t));
+  // 裸の URL。直前が空白か行頭か ( のときだけ拾う。上で作った href="…" の
+  // 中身は直前が " なので二重にリンクにならない。
+  s = s.replace(/(^|[\s(])(https?:\/\/[^\s<>"')]+)/g, (m, pre, url) => pre + mdLink(url, url));
+
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+  s = s.replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
+
+  return s.replace(new RegExp(MD_MARK + '(\\d+)' + MD_MARK, 'g'),
+    (m, i) => `<code class="vg-mdcode">${mdEsc(codes[Number(i)])}</code>`);
+}
+
+/** インデントの幅。タブは 2 桁とみなす（箇条書きの入れ子の判定にだけ使う）。 */
+function mdIndent(line) {
+  return (String(line).match(/^[\t ]*/)[0] || '').replace(/\t/g, '  ').length;
+}
+
+const MD_FENCE = /^ {0,3}(`{3,}|~{3,})\s*[^`]*$/;
+const MD_HEAD = /^ {0,3}(#{1,6})\s+(.*?)\s*#*\s*$/;
+const MD_HR = /^ {0,3}([-*_])[ \t]*(?:\1[ \t]*){2,}$/;
+const MD_QUOTE = /^ {0,3}>/;
+const MD_LI = /^([\t ]*)([-*+]|\d{1,9}[.)])[ \t]+(.*)$/;
+const MD_DELIM = /^[ \t]*\|?[ \t]*:?-+:?[ \t]*(\|[ \t]*:?-+:?[ \t]*)+\|?[ \t]*$/;
+
+/**
+ * その行から始まるブロックの種類。段落は「どれでもないもの」なので、
+ * 段落を読み進める側もこの判定を使う。ここと本体で判定がズレると、
+ * 見出しの直前に空行が無いときに見出しが段落に飲まれる。
+ */
+function mdKind(lines, i) {
+  const line = lines[i];
+  if (!line || !line.trim()) return 'blank';
+  if (MD_FENCE.test(line)) return 'fence';
+  if (MD_HEAD.test(line)) return 'head';
+  if (line.indexOf('|') >= 0 && i + 1 < lines.length && MD_DELIM.test(lines[i + 1])) return 'table';
+  if (MD_HR.test(line)) return 'hr';
+  if (MD_QUOTE.test(line)) return 'quote';
+  if (MD_LI.test(line)) return 'list';
+  return 'p';
+}
+
+/** 表の 1 行を升目に割る。前後の | は飾りなので落とす。 */
+function mdCells(line) {
+  let s = String(line).trim();
+  if (s.charAt(0) === '|') s = s.slice(1);
+  if (s.charAt(s.length - 1) === '|') s = s.slice(0, -1);
+  return s.split('|').map((c) => c.trim());
+}
+
+/** 区切り行から各列の寄せを読む。:--- 左 / ---: 右 / :---: 中央。 */
+function mdAligns(line) {
+  return mdCells(line).map((c) => {
+    const l = c.charAt(0) === ':';
+    const r = c.charAt(c.length - 1) === ':';
+    if (l && r) return ' vg-mdtc';
+    if (r) return ' vg-mdtr';
+    if (l) return ' vg-mdtl';
+    return '';
+  });
+}
+
+/**
+ * 箇条書きを入れ子に組む。items は { indent, ordered, text } の並び。
+ * 呼び出しごとに 1 つのリストを作り、次に読むべき位置を返す。
+ */
+function mdList(items, pos) {
+  const indent = items[pos].indent;
+  const ordered = items[pos].ordered;
+  const tag = ordered ? 'ol' : 'ul';
+  let html = `<${tag} class="vg-md${tag}">`;
+  let i = pos;
+  while (i < items.length && items[i].indent === indent && items[i].ordered === ordered) {
+    let inner = items[i].text.map(mdInline).join('<br>');
+    i++;
+    // より深い項目が続くならこの項目の中に入れる。同じ深さに戻るまで。
+    while (i < items.length && items[i].indent > indent) {
+      const sub = mdList(items, i);
+      inner += sub.html;
+      i = sub.next;
+    }
+    html += `<li class="vg-mdli">${inner}</li>`;
+  }
+  return { html: html + `</${tag}>`, next: i };
+}
+
+/** 行の並びを HTML にする。引用の中身はここを再帰で通る。 */
+function mdBlocks(lines) {
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const kind = mdKind(lines, i);
+
+    if (kind === 'blank') { i++; continue; }
+
+    if (kind === 'fence') {
+      const mark = lines[i].match(MD_FENCE)[1];
+      const close = new RegExp('^ {0,3}' + mark.charAt(0) + '{' + mark.length + ',}[ \t]*$');
+      const body = [];
+      i++;
+      while (i < lines.length && !close.test(lines[i])) body.push(lines[i++]);
+      if (i < lines.length) i++;  // 閉じ記号
+      out.push(`<pre class="vg-mdpre"><code>${mdEsc(body.join('\n'))}</code></pre>`);
+      continue;
+    }
+
+    if (kind === 'head') {
+      const m = lines[i].match(MD_HEAD);
+      const n = m[1].length;
+      out.push(`<h${n} class="vg-mdh${n}">${mdInline(m[2])}</h${n}>`);
+      i++;
+      continue;
+    }
+
+    if (kind === 'table') {
+      const aligns = mdAligns(lines[i + 1]);
+      const head = mdCells(lines[i]).map((c, k) =>
+        `<th class="vg-mdth${aligns[k] || ''}">${mdInline(c)}</th>`).join('');
+      i += 2;
+      const body = [];
+      while (i < lines.length && lines[i].indexOf('|') >= 0 && lines[i].trim()) {
+        body.push(`<tr>${mdCells(lines[i]).map((c, k) =>
+          `<td class="vg-mdtd${aligns[k] || ''}">${mdInline(c)}</td>`).join('')}</tr>`);
+        i++;
+      }
+      // 表は横に伸びる。カードごと横スクロールさせず、表だけを流す。
+      out.push(`<div class="vg-mdtw"><table class="vg-mdtable">` +
+        `<thead><tr>${head}</tr></thead><tbody>${body.join('')}</tbody></table></div>`);
+      continue;
+    }
+
+    if (kind === 'hr') { out.push('<hr class="vg-mdhr">'); i++; continue; }
+
+    if (kind === 'quote') {
+      const body = [];
+      while (i < lines.length && MD_QUOTE.test(lines[i])) {
+        body.push(lines[i].replace(/^ {0,3}> ?/, ''));
+        i++;
+      }
+      out.push(`<blockquote class="vg-mdq">${mdBlocks(body)}</blockquote>`);
+      continue;
+    }
+
+    if (kind === 'list') {
+      const items = [];
+      while (i < lines.length && lines[i].trim()) {
+        const m = lines[i].match(MD_LI);
+        if (m) {
+          items.push({
+            indent: mdIndent(m[1]), ordered: /\d/.test(m[2]), text: [m[3]],
+          });
+        } else if (items.length && mdIndent(lines[i]) > items[items.length - 1].indent) {
+          // 項目の続き（ぶら下げた行）。同じ項目の中で改行して出す。
+          items[items.length - 1].text.push(lines[i].trim());
+        } else {
+          break;
+        }
+        i++;
+      }
+      let pos = 0;
+      while (pos < items.length) {
+        const r = mdList(items, pos);
+        out.push(r.html);
+        pos = r.next;
+      }
+      continue;
+    }
+
+    // 段落。次のブロックが始まるか空行になるまで読む。
+    const buf = [];
+    while (i < lines.length && mdKind(lines, i) === 'p') buf.push(lines[i++]);
+    out.push(`<p class="vg-mdp">${buf.map(mdInline).join('<br>')}</p>`);
+  }
+  return out.join('');
+}
+
+/** Markdown を HTML にする（外枠なし）。 */
+function mdRender(md) {
+  return mdBlocks(String(md == null ? '' : md).replace(/\r\n?/g, '\n').split('\n'));
+}
+
+/**
+ * カードに差し込む形。空のときも枠を返す。
+ * NULL を返すと Looker Studio 側で「値なし」の表示になり、メモが未登録なのか
+ * 取得に失敗したのかが読む人に区別できない。
+ */
+function markdownHtml(md) {
+  const s = String(md == null ? '' : md);
+  if (!s.trim()) {
+    return '<div class="vg-md vg-mdempty">この base のメモはまだ登録されていません。</div>';
+  }
+  return `<div class="vg-md">${mdRender(s)}</div>`;
+}
+
+/**
+ * このファイルが出す markup に対応する CSS。
+ *
+ * 規則をここに置いてあるのは、クラス名を付けているのがこのファイルだから。
+ * 差分カード側の chromeCss() に混ぜると、差分の UDF が使わない CSS まで
+ * 積むことになる（インラインのコード ブロブは 1 個 32 KB しか無い）。
+ * 配る CSS は viewlgc_group_css が chromeCss() とこれを連結して 1 枚にする。
+ *
+ * style 属性は使っていないので、mode='class' のハッシュ化（style 属性だけが
+ * 対象）とは無関係に効く。
+ */
+function memoCss() {
+  return [
+    `.vg-md{font:13px/1.75 'Roboto','Segoe UI',system-ui,-apple-system,sans-serif;` +
+      `color:#24292F;overflow-wrap:anywhere}`,
+    `.vg-mdempty{color:#8C959F}`,
+    `.vg-md>:first-child{margin-top:0}`,
+    `.vg-md>:last-child,.vg-mdq>:last-child{margin-bottom:0}`,
+    // 見出しはカードの中に収まる大きさにそろえる。h1 を素のままにすると
+    // メモ 1 枚がカードの見出しより大きくなって、並べたときに主客が逆転する。
+    // 見出しは font の一括指定にしない。font: … inherit は書体名として
+    // 不正なので宣言ごと捨てられ、h1 が既定の 2em のまま出てしまう。
+    // 書体は .vg-md から継いでほしいので、長い書き方で並べる。
+    `.vg-mdh1{font-weight:600;font-size:15px;line-height:1.6;color:#1A1A1A;margin:18px 0 8px}`,
+    `.vg-mdh2{font-weight:600;font-size:14px;line-height:1.6;color:#1A1A1A;margin:16px 0 8px;` +
+      `padding-bottom:4px;border-bottom:1px solid #EAEEF2}`,
+    `.vg-mdh3{font-weight:600;font-size:13px;line-height:1.6;color:#24292F;margin:14px 0 6px}`,
+    `.vg-mdh4,.vg-mdh5,.vg-mdh6{font-weight:600;font-size:12px;line-height:1.6;` +
+      `color:#57606A;margin:12px 0 6px}`,
+    `.vg-mdp{margin:0 0 10px}`,
+    `.vg-mdul,.vg-mdol{margin:0 0 10px;padding-left:22px}`,
+    `.vg-mdli{margin:2px 0}`,
+    `.vg-mdli>.vg-mdul,.vg-mdli>.vg-mdol{margin:2px 0 0}`,
+    // 表は横に伸びる。カードごと横スクロールさせず、表だけを流す。
+    `.vg-mdtw{overflow-x:auto;margin:0 0 12px}`,
+    `.vg-mdtable{border-collapse:collapse;font-size:12px}`,
+    `.vg-mdth{border:1px solid #D0D7DE;padding:5px 10px;background:#F6F8FA;` +
+      `font-weight:600;text-align:left;white-space:nowrap}`,
+    `.vg-mdtd{border:1px solid #D0D7DE;padding:5px 10px;vertical-align:top}`,
+    `.vg-mdtl{text-align:left}`,
+    `.vg-mdtc{text-align:center}`,
+    `.vg-mdtr{text-align:right}`,
+    `.vg-mdpre{margin:0 0 12px;padding:10px 12px;border:1px solid #D0D7DE;border-radius:6px;` +
+      `background:#F6F8FA;overflow-x:auto}`,
+    `.vg-mdpre code{font:11px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;color:#24292F}`,
+    `.vg-mdcode{padding:1px 5px;border-radius:3px;background:#EFF1F3;color:#24292F;` +
+      `font:11px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace}`,
+    `.vg-mdq{margin:0 0 12px;padding:2px 0 2px 12px;border-left:3px solid #D0D7DE;color:#57606A}`,
+    `.vg-mdhr{margin:14px 0;border:none;border-top:1px solid #D0D7DE}`,
+    `.vg-mda{color:#0969DA;text-decoration:none}`,
+    `.vg-mda:hover{text-decoration:underline}`,
+  ].join('\n');
+}
+
+module.exports = { markdownHtml, memoCss, mdRender, mdInline, mdEsc, mdUrl, mdCells, mdAligns };

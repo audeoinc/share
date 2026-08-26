@@ -21,7 +21,8 @@ const add = (name, ok, detail) => checks.push([name, ok, detail]);
 // --- テンプレートを取り出す -------------------------------------------
 // SET sql_template = """ … """; の中身。
 // コメント行（-- で始まる例示）は数えない。
-const templates = [...table.matchAll(/^SET sql_template = """([\s\S]*?)""";/gm)]
+// 行頭の空白は許す。IF … THEN の中に置く 4 手は字下げしてあるため。
+const templates = [...table.matchAll(/^ *SET sql_template = """([\s\S]*?)""";/gm)]
   .map((m) => m[1]);
 add('sql_template が 1 つ以上ある', templates.length > 0, `${templates.length} 個`);
 
@@ -50,10 +51,10 @@ add('render 関数の置換に使われていないものが無い',
 // --- 2. 4 手の型を守っているか ----------------------------------------
 // SET sql_template → render → ASSERT → EXECUTE の並びを数で確かめる。
 const renderCalls = (table.match(
-  /^EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;/gm) || []).length;
+  /^ *EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;/gm) || []).length;
 const asserts = (table.match(
-  /^ASSERT NOT REGEXP_CONTAINS\(rendered_sql, r'__\[A-Z0-9_\]\+__'\) AS/gm) || []).length;
-const execs = (table.match(/^EXECUTE IMMEDIATE rendered_sql/gm) || []).length;
+  /^ *ASSERT NOT REGEXP_CONTAINS\(rendered_sql, r'__\[A-Z0-9_\]\+__'\) AS/gm) || []).length;
+const execs = (table.match(/^ *EXECUTE IMMEDIATE rendered_sql/gm) || []).length;
 add('テンプレートと render 呼び出しが同数', templates.length === renderCalls,
   `template ${templates.length} / render ${renderCalls}`);
 add('render 呼び出しと未展開チェックが同数', renderCalls === asserts,
@@ -140,7 +141,8 @@ add('IF … RAISE ではなく ASSERT を使っている',
 }
 
 // --- 6. 両ファイルで一致させる必要がある値 -----------------------------
-for (const base of ['analyze', 'render', 'page', 'group_css', 'render_dynamic_sql']) {
+for (const base of ['analyze', 'render', 'page', 'markdown', 'group_css',
+  'render_dynamic_sql']) {
   const line = `udf_name_prefix || system_name || '_' || '${base}' || udf_name_suffix`;
   add(`${base} の名前の組み立てが両ファイルで同じ`,
     table.includes(line) && udf.includes(line));

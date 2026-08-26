@@ -13,7 +13,7 @@
 <style>
 .vg-root{font:13px/1.6 'Roboto','Segoe UI',system-ui,-apple-system,sans-serif;color:#24292F}
 .vg-header{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 10px}
-.vg-title{font:600 15px/1.6 inherit;color:#1A1A1A}
+.vg-title{font-weight:600;font-size:15px;line-height:1.6;color:#1A1A1A}
 .vg-badge{display:inline-block;padding:1px 8px;border-radius:10px;font-weight:600;font-size:12px}
 .vg-notice{margin:8px 0;padding:8px 12px;border:1px solid #D0D7DE;border-left:4px solid #57606A;border-radius:4px;background:#F6F8FA;color:#57606A}
 .vg-r{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}
@@ -29,7 +29,7 @@
 .vg-params{margin:12px 0 0;border:1px solid #D0D7DE;border-radius:6px;background:#F6F8FA}
 .vg-psummary{padding:8px 12px;cursor:pointer;color:#57606A;font-weight:600;font-size:12px}
 .vg-pblock{padding:0 12px 10px}
-.vg-plabel{font:600 12px/1.8 inherit;color:#24292F}
+.vg-plabel{font-weight:600;font-size:12px;line-height:1.8;color:#24292F}
 .vg-pnone{color:#57606A;font-size:12px}
 .vg-ptable{border-collapse:collapse;width:100%}
 .vg-pname{width:44px;text-align:left;vertical-align:top;padding:3px 8px 3px 0;color:#8250DF;font:600 12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace}
@@ -37,7 +37,7 @@
 .vg-pv{font:11px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;color:#57606A;word-break:break-all}
 .vg-psuf{display:inline-block;min-width:44px;color:#24292F;font-weight:600}
 .vg-mhint{padding:0 12px 8px;color:#57606A;font-size:12px}
-.vg-mname{text-align:left;vertical-align:top;padding:3px 10px 3px 0;font:600 12px/1.6 inherit;color:#24292F;white-space:nowrap}
+.vg-mname{text-align:left;vertical-align:top;padding:3px 10px 3px 0;font-weight:600;font-size:12px;line-height:1.6;color:#24292F;white-space:nowrap}
 .vg-mvs{vertical-align:top;padding:3px 10px 3px 0;color:#57606A;font-size:12px;white-space:nowrap}
 .vg-mreason{padding:3px 0;color:#57606A;font-size:12px}
 .vg-mcode{padding:1px 5px;border-radius:3px;background:#FFEBE9;color:#82071E;font:11px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace}
@@ -103,6 +103,32 @@
 .vg-r12:checked ~ .vg-panels > .vg-p12{display:block}
 .vg-r12:checked ~ .vg-tablist > .vg-t12{background:#fff;border-color:#D0D7DE;color:#24292F}
 .vg-r12:checked ~ .vg-tablist > .vg-t12 .vg-tabn{background:#DDF4FF;color:#0969DA}
+.vg-md{font:13px/1.75 'Roboto','Segoe UI',system-ui,-apple-system,sans-serif;color:#24292F;overflow-wrap:anywhere}
+.vg-mdempty{color:#8C959F}
+.vg-md>:first-child{margin-top:0}
+.vg-md>:last-child,.vg-mdq>:last-child{margin-bottom:0}
+.vg-mdh1{font-weight:600;font-size:15px;line-height:1.6;color:#1A1A1A;margin:18px 0 8px}
+.vg-mdh2{font-weight:600;font-size:14px;line-height:1.6;color:#1A1A1A;margin:16px 0 8px;padding-bottom:4px;border-bottom:1px solid #EAEEF2}
+.vg-mdh3{font-weight:600;font-size:13px;line-height:1.6;color:#24292F;margin:14px 0 6px}
+.vg-mdh4,.vg-mdh5,.vg-mdh6{font-weight:600;font-size:12px;line-height:1.6;color:#57606A;margin:12px 0 6px}
+.vg-mdp{margin:0 0 10px}
+.vg-mdul,.vg-mdol{margin:0 0 10px;padding-left:22px}
+.vg-mdli{margin:2px 0}
+.vg-mdli>.vg-mdul,.vg-mdli>.vg-mdol{margin:2px 0 0}
+.vg-mdtw{overflow-x:auto;margin:0 0 12px}
+.vg-mdtable{border-collapse:collapse;font-size:12px}
+.vg-mdth{border:1px solid #D0D7DE;padding:5px 10px;background:#F6F8FA;font-weight:600;text-align:left;white-space:nowrap}
+.vg-mdtd{border:1px solid #D0D7DE;padding:5px 10px;vertical-align:top}
+.vg-mdtl{text-align:left}
+.vg-mdtc{text-align:center}
+.vg-mdtr{text-align:right}
+.vg-mdpre{margin:0 0 12px;padding:10px 12px;border:1px solid #D0D7DE;border-radius:6px;background:#F6F8FA;overflow-x:auto}
+.vg-mdpre code{font:11px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;color:#24292F}
+.vg-mdcode{padding:1px 5px;border-radius:3px;background:#EFF1F3;color:#24292F;font:11px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace}
+.vg-mdq{margin:0 0 12px;padding:2px 0 2px 12px;border-left:3px solid #D0D7DE;color:#57606A}
+.vg-mdhr{margin:14px 0;border:none;border-top:1px solid #D0D7DE}
+.vg-mda{color:#0969DA;text-decoration:none}
+.vg-mda:hover{text-decoration:underline}
 .d13bjngc{padding:0 4px;background-color:#FAFAFA;background-image:repeating-linear-gradient(45deg,rgba(120,130,140,.10),rgba(120,130,140,.10) 3px,transparent 3px,transparent 7px);}
 .d13c6wgv{padding:0 4px;text-align:center;color:#6a7d4b;}
 .d199it5c{color:#874a4a;font-weight:400;}

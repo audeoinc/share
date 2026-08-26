@@ -11,7 +11,7 @@
 -- パーティションに日付を積むので、履歴が残る。
 -- 「いつグループ構成が変わったか」を後から追える＝ロジック逸脱の検知に使える。
 --
--- 前提: view_group_html.sql で 5 つの UDF を作成済み。
+-- 前提: view_group_html.sql で 6 つの UDF を作成済み。
 --       system_name / udf_dataset / udf_name_prefix / udf_name_suffix は
 --       両ファイルで一致させること。食い違うと関数が見つからない。
 --
@@ -28,15 +28,19 @@
 --   __TARGET_PROJECT__     読み取り対象のプロジェクト
 --   __JOB_REGION__         region- を除いたロケーション
 --   __T_DIFF_HIST__        履歴テーブル（project.dataset.table）
+--   __T_BASE_NOTE__        base ごとのメモの外部テーブル（同上）
 --   __V_DIFF__             最新スナップショットのビュー（基準 = 先頭グループ）
 --   __V_DIFF_BY_REF__      同上。基準ごとに 1 行あるほう
 --   __UDF_ANALYZE__        analyze 関数（project.dataset.function）
 --   __UDF_RENDER__         render 関数（同上）
 --   __UDF_PAGE__           参照関係を作り差分と束ねる関数（同上）
+--   __UDF_MARKDOWN__       メモの Markdown を HTML にする関数（同上）
 --   __UDF_CSS__            group_css 関数（同上）
 --   __TZ__                 snapshot_date の基準タイムゾーン
 --   __RETENTION_DAYS__     パーティションの保持日数
 --   __SUFFIX_PATTERN__     suffix を切り出す正規表現
+--   __NOTE_SHEET_URL__     メモのスプレッドシートの URL
+--   __NOTE_SHEET_RANGE__   その中の読み取り範囲（シート名!A:E）
 --   __SCHEMA_COND__        SCHEMATA 用の絞り込み条件（SQL 片）
 --   __VIEW_DATASET_COND__  VIEWS 用のデータセット条件（SQL 片）
 --   __VIEW_NAME_COND__     VIEWS 用の View 名条件（SQL 片）
@@ -47,6 +51,14 @@
 --
 -- スケジュールドクエリには CONFIGURATION と セクション 2 を登録する
 -- （1 と 3 は初回だけ、5 は確認用なので不要）。
+--
+-- メモ（base ごとの補足説明）について:
+--   note_sheet_url にスプレッドシートの URL を入れると、その内容を外部テーブル
+--   として読み、base で突き合わせてビューに note_html（Markdown を HTML に
+--   したもの）として出す。未設定なら空のテーブルを作るので、ビューの形は
+--   変わらない（メモ欄が「未登録」になるだけ）。
+--   メモを HTML にするのは事前生成ではなくビューの中。書き換えた内容が次の
+--   日次実行を待たずにレポートへ出るようにするため。
 -- =====================================================================
 SET @@location = 'asia-northeast1';
 
@@ -86,6 +98,9 @@ DECLARE analysis_include_object_patterns ARRAY<STRING> DEFAULT [];
 DECLARE analysis_exclude_object_patterns ARRAY<STRING> DEFAULT [];
 -- snapshot_date の基準タイムゾーン
 DECLARE snapshot_time_zone STRING DEFAULT 'Asia/Tokyo';
+-- base ごとのメモ（Markdown）を置くスプレッドシート。空ならメモ機能を使わない
+DECLARE note_sheet_url   STRING DEFAULT '';
+DECLARE note_sheet_range STRING DEFAULT 'notes!A:E';
 --
 -- 変数の説明:
 --   project_token_pattern
@@ -116,6 +131,22 @@ DECLARE snapshot_time_zone STRING DEFAULT 'Asia/Tokyo';
 --     例: prefix='ope_' / suffix='_tky' で ope_viewlgc_t_diff_hist_tky。
 --     使える文字は英数字と '_' と '-'（参照はすべてバッククォート引用なので
 --     '-tky' のようなハイフンも安全）。データセット名と UDF 名は '-' 不可。
+--   note_sheet_url / note_sheet_range
+--     base ごとのメモを置くスプレッドシートの URL と、その中の読み取り範囲。
+--     1 行目は見出しで、列は左から base / note_md / updated_at / updated_by /
+--     is_hidden の順（この順序が唯一の取り決め。見出しの文言は見ない）。
+--       base       メモを付ける base の名前。ビューの base と完全一致で突き合わせる
+--       note_md    Markdown 本文
+--       updated_at 更新時刻。ISO 8601（2026-08-26T09:00:00Z）。同じ base が
+--                  複数行あるときは、これがいちばん新しい 1 行だけを採る
+--       updated_by 更新者。表示にだけ使う
+--       is_hidden  TRUE / 1 / yes なら出さない。消さずに下書きへ戻すためのもの
+--     URL を空にすると、外部テーブルの代わりに同じ列を持つ空のテーブルを作る。
+--     ビューの形は変わらないので、あとから URL を入れてセクション 1 を流し
+--     直せばメモが出るようになる。
+--     **注意**: スプレッドシートの外部テーブルを読むには Drive のスコープが要る。
+--     スケジュールドクエリを作るときに Drive を許可し、Looker Studio の
+--     データソースの認証にもシートを開ける権限を持たせること。
 --   udf_name_prefix / udf_name_suffix
 --     UDF の命名。関数名は [C] で
 --       udf_prefix + system_name + '_' + 基本名 + udf_suffix
@@ -184,17 +215,19 @@ DECLARE project_token      STRING;
 -- オブジェクトが増えたらここに 1 行足し、SET と本文の __…__ を対で増やし、
 -- viewlgc_render_dynamic_sql にも置換を 1 段足す。
 DECLARE table_diff_hist  STRING;  -- 日次スナップショットを積むテーブル
+DECLARE table_base_note  STRING;  -- base ごとのメモ（スプレッドシートの外部テーブル）
 DECLARE view_diff        STRING;  -- 最新スナップショット。基準 = 先頭グループの 1 行だけ
 DECLARE view_diff_by_ref STRING;  -- 同上。基準ごとに 1 行（レポートで基準を選ぶ用）
 
 -- view_group_html.sql が作った関数名。同じ規則で組み立てて突き合わせる。
 -- 解析と描画が別の UDF なのは、インラインのコード ブロブが 1 個あたり 32 KB
 -- までのため。JS UDF から別の UDF は呼べないので、つなぐのはこの SQL の仕事。
-DECLARE udf_analyze_function_name STRING;
-DECLARE udf_render_function_name  STRING;
-DECLARE udf_page_function_name    STRING;
-DECLARE udf_css_function_name     STRING;
-DECLARE udf_sql_function_name     STRING;
+DECLARE udf_analyze_function_name  STRING;
+DECLARE udf_render_function_name   STRING;
+DECLARE udf_page_function_name     STRING;
+DECLARE udf_markdown_function_name STRING;
+DECLARE udf_css_function_name      STRING;
+DECLARE udf_sql_function_name      STRING;
 
 -- 動的 SQL。render_call_sql は 1 度だけ組み立てて全テンプレートで使い回す。
 -- 呼び出しごとに変わるのは @sql_template だけ。
@@ -247,12 +280,17 @@ ASSERT REGEXP_CONTAINS(system_name, r'^[A-Za-z0-9_]+$') AS
   'system_name は英数字と _ だけにしてください（ルーチン名に - は使えません）。';
 SET table_diff_hist =
   table_name_prefix || system_name || '_' || 't_' || 'diff_hist' || table_name_suffix;
+-- メモは View のデプロイでは変わらない台帳なので 'm_'（master）。
+SET table_base_note =
+  table_name_prefix || system_name || '_' || 'm_' || 'base_note' || table_name_suffix;
 SET view_diff =
   table_name_prefix || system_name || '_' || 'vw_' || 't_' || 'diff' || table_name_suffix;
 SET view_diff_by_ref =
   table_name_prefix || system_name || '_' || 'vw_' || 't_' || 'diff_by_ref' || table_name_suffix;
 ASSERT REGEXP_CONTAINS(table_diff_hist, r'^[A-Za-z0-9_-]+$') AS
   'table_diff_hist の名前が不正です。';
+ASSERT REGEXP_CONTAINS(table_base_note, r'^[A-Za-z0-9_-]+$') AS
+  'table_base_note の名前が不正です。';
 ASSERT REGEXP_CONTAINS(view_diff, r'^[A-Za-z0-9_-]+$') AS
   'view_diff の名前が不正です。';
 ASSERT REGEXP_CONTAINS(view_diff_by_ref, r'^[A-Za-z0-9_-]+$') AS
@@ -266,6 +304,8 @@ SET udf_render_function_name =
   udf_name_prefix || system_name || '_' || 'render' || udf_name_suffix;
 SET udf_page_function_name =
   udf_name_prefix || system_name || '_' || 'page' || udf_name_suffix;
+SET udf_markdown_function_name =
+  udf_name_prefix || system_name || '_' || 'markdown' || udf_name_suffix;
 SET udf_css_function_name =
   udf_name_prefix || system_name || '_' || 'group_css' || udf_name_suffix;
 SET udf_sql_function_name =
@@ -276,10 +316,18 @@ ASSERT REGEXP_CONTAINS(udf_render_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_render_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_page_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_page_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_markdown_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_markdown_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_css_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_css_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_sql_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_sql_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+
+ASSERT note_sheet_url = '' OR
+  REGEXP_CONTAINS(note_sheet_url, r'^https://docs\.google\.com/spreadsheets/d/[A-Za-z0-9_-]+') AS
+  'note_sheet_url はスプレッドシートの URL（https://docs.google.com/spreadsheets/d/...）にしてください。メモを使わないなら空にします。';
+ASSERT REGEXP_CONTAINS(note_sheet_range, r"^[^'`]+![A-Z]+[0-9]*:[A-Z]+[0-9]*$") AS
+  'note_sheet_range は「シート名!A:E」の形にしてください。';
 
 ASSERT REGEXP_CONTAINS(TRIM(analyze_options), r'^\{\s*"') AS
   'analyze_options は 1 つ以上のキーを持つ JSON オブジェクトにしてください（例: {"mode":"class"}）。';
@@ -316,14 +364,15 @@ SET view_name_condition = CONCAT(
 -- 固定の設定はここで焼き込み、テンプレートだけを @sql_template で渡す。
 -- 値は %T で埋める。条件文には引用符が入るので、%s だと壊れる。
 SET render_call_sql = FORMAT(
-  """SELECT `%s.%s.%s`(@sql_template, %T, %T, %T, %T, %T, %T, STRUCT(%T AS diff_hist, %T AS diff_latest, %T AS diff_by_ref, %T AS analyze_function, %T AS render_function, %T AS page_function, %T AS css_function), STRUCT(%T AS time_zone, %T AS retention_days, %T AS suffix_pattern), STRUCT(%T AS schema_condition, %T AS view_dataset_condition, %T AS view_name_condition))""",
+  """SELECT `%s.%s.%s`(@sql_template, %T, %T, %T, %T, %T, %T, STRUCT(%T AS diff_hist, %T AS diff_latest, %T AS diff_by_ref, %T AS base_note, %T AS analyze_function, %T AS render_function, %T AS page_function, %T AS markdown_function, %T AS css_function), STRUCT(%T AS time_zone, %T AS retention_days, %T AS suffix_pattern, %T AS note_sheet_url, %T AS note_sheet_range), STRUCT(%T AS schema_condition, %T AS view_dataset_condition, %T AS view_name_condition))""",
   udf_project_id, udf_dataset, udf_sql_function_name,
   work_project_id, work_dataset, udf_project_id, udf_dataset,
   target_project_id, job_region,
-  table_diff_hist, view_diff, view_diff_by_ref,
+  table_diff_hist, view_diff, view_diff_by_ref, table_base_note,
   udf_analyze_function_name, udf_render_function_name,
-  udf_page_function_name, udf_css_function_name,
+  udf_page_function_name, udf_markdown_function_name, udf_css_function_name,
   snapshot_time_zone, CAST(partition_expiration_days AS STRING), suffix_pattern,
+  note_sheet_url, note_sheet_range,
   schema_condition, view_dataset_condition, view_name_condition);
 
 
@@ -335,10 +384,10 @@ EXECUTE IMMEDIATE FORMAT(
   "SELECT COUNT(*) FROM `%s.%s.INFORMATION_SCHEMA.ROUTINES` WHERE routine_name IN UNNEST(%T)",
   udf_project_id, udf_dataset,
   [udf_analyze_function_name, udf_render_function_name, udf_page_function_name,
-   udf_css_function_name, udf_sql_function_name]
+   udf_markdown_function_name, udf_css_function_name, udf_sql_function_name]
 ) INTO udf_found_count;
-ASSERT udf_found_count = 5 AS
-  'UDF が 5 つそろっていません。先に view_group_html.sql を実行してください（system_name / udf_dataset / udf_name_prefix / udf_name_suffix は両ファイルで同じ値に）。';
+ASSERT udf_found_count = 6 AS
+  'UDF が 6 つそろっていません。先に view_group_html.sql を実行してください（system_name / udf_dataset / udf_name_prefix / udf_name_suffix は両ファイルで同じ値に）。';
 
 
 -- 事前チェック。0 件のまま進むと空のテーブルができ、設定の間違いに気づけない。
@@ -397,6 +446,66 @@ EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_te
 ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
   'CREATE TABLE の SQL に未展開のプレースホルダが残っています。';
 EXECUTE IMMEDIATE rendered_sql;
+
+-- base ごとのメモ。実体はスプレッドシートで、ここでは外部テーブルとして
+-- 見えるようにするだけ。列はすべて STRING で受けて、型はビューで付ける。
+-- シートは書き手が自由に触るので、日付や真偽値の書き方を強制できない。
+-- STRING で受けて SAFE_CAST すれば、書き間違いのある 1 行がクエリ全体を
+-- 落とすことがない。
+--
+-- 列は左から base / note_md / updated_at / updated_by / is_hidden の順。
+-- この順序が唯一の取り決めで、見出しの文言は見ない（skip_leading_rows = 1）。
+--
+-- note_sheet_url が空のときは、同じ列を持つ空のテーブルを作る。ビューは
+-- どちらでも同じ形になるので、メモを使わない環境でも下のビューがそのまま通る。
+-- あとから URL を入れてこのセクションを流し直せば、メモが出るようになる。
+-- 分岐の中でも 4 手（template → render → ASSERT → EXECUTE）はそろえてある。
+--
+-- 空のテーブルと外部テーブルは種別が違う。CREATE OR REPLACE が種別をまたげず
+-- 「Cannot replace a table with a different type」になる場合は、先に
+--   DROP TABLE IF EXISTS `<work_project>.<work_dataset>.viewlgc_m_base_note`
+-- を流してからこのセクションを実行する。中身はシート側にあるので失うものはない。
+IF note_sheet_url = '' THEN
+  SET sql_template = """
+CREATE OR REPLACE TABLE `__T_BASE_NOTE__`
+(
+  base       STRING,
+  note_md    STRING,
+  updated_at STRING,
+  updated_by STRING,
+  is_hidden  STRING
+)
+OPTIONS (
+  description = 'base ごとのメモ（未設定。note_sheet_url を入れると外部テーブルに置き換わる）'
+)
+""";
+  EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+    'メモのテーブル（空）の SQL に未展開のプレースホルダが残っています。';
+  EXECUTE IMMEDIATE rendered_sql;
+ELSE
+  SET sql_template = """
+CREATE OR REPLACE EXTERNAL TABLE `__T_BASE_NOTE__`
+(
+  base       STRING,
+  note_md    STRING,
+  updated_at STRING,
+  updated_by STRING,
+  is_hidden  STRING
+)
+OPTIONS (
+  format = 'GOOGLE_SHEETS',
+  uris = ['__NOTE_SHEET_URL__'],
+  sheet_range = '__NOTE_SHEET_RANGE__',
+  skip_leading_rows = 1,
+  description = 'base ごとのメモ（Markdown）。実体は Google スプレッドシート'
+)
+""";
+  EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+    'メモの外部テーブルの SQL に未展開のプレースホルダが残っています。';
+  EXECUTE IMMEDIATE rendered_sql;
+END IF;
 
 
 -- ---------------------------------------------------------------------
@@ -559,15 +668,48 @@ USING suffix_list AS suffix_list, analyze_options AS analyze_options;
 --    分けてあるのは、基準を選ばないレポートで 1 レコードに絞れなくなるのを
 --    避けるため。Templated Record は 1 行を描くチャートなので、複数行が
 --    来ると何が出るか読めない。
+--
+--    どちらのビューも base ごとのメモを LEFT JOIN して、note_html（Markdown を
+--    HTML にしたもの）を持つ。同じデータソースに入れてあるので、レポートの
+--    base のコントロールがメモのチャートにもそのまま効く。別データソースに
+--    すると Looker Studio のコントロールが跨がらず、2 組そろえる必要が出る。
+--
+--    HTML にするのは事前生成ではなくここ（ビュー）。シートを直した内容が
+--    次の日次実行を待たずに出るようにするため。
 -- ---------------------------------------------------------------------
 SET sql_template = """
 CREATE OR REPLACE VIEW `__V_DIFF__` AS
-SELECT * EXCEPT (ref_index, ref_label)
-FROM `__T_DIFF_HIST__`
-WHERE snapshot_date = (
+WITH notes AS (
+  -- base ごとに 1 行に絞る。シートは人が手で足すので、同じ base の行が
+  -- 増えることがある。落とすのではなく、いちばん新しいものを採る。
+  SELECT
+    TRIM(base) AS base,
+    note_md,
+    SAFE_CAST(updated_at AS TIMESTAMP) AS updated_at,
+    updated_by
+  FROM `__T_BASE_NOTE__`
+  WHERE TRIM(COALESCE(base, '')) != ''
+    -- 消さずに下書きへ戻せるようにする。書き方は揺れるので広めに読む。
+    AND NOT COALESCE(LOWER(TRIM(is_hidden)) IN ('true', '1', 'yes'), FALSE)
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY TRIM(base) ORDER BY SAFE_CAST(updated_at AS TIMESTAMP) DESC
+  ) = 1
+)
+SELECT
+  d.* EXCEPT (ref_index, ref_label),
+  -- メモ。未登録なら note_html は「未登録」の枠を返す（NULL にすると
+  -- レポート側で「値なし」になり、未登録なのか取得に失敗したのか読めない）。
+  n.base IS NOT NULL            AS has_note,
+  n.note_md                     AS note_md,
+  `__UDF_MARKDOWN__`(n.note_md) AS note_html,
+  n.updated_at                  AS note_updated_at,
+  n.updated_by                  AS note_updated_by
+FROM `__T_DIFF_HIST__` AS d
+LEFT JOIN notes AS n ON n.base = d.base
+WHERE d.snapshot_date = (
   SELECT MAX(snapshot_date) FROM `__T_DIFF_HIST__`
 )
-  AND ref_index = 0
+  AND d.ref_index = 0
 """;
 EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
 ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
@@ -576,17 +718,41 @@ EXECUTE IMMEDIATE rendered_sql;
 
 SET sql_template = """
 CREATE OR REPLACE VIEW `__V_DIFF_BY_REF__` AS
+WITH notes AS (
+  -- base ごとに 1 行に絞る。シートは人が手で足すので、同じ base の行が
+  -- 増えることがある。落とすのではなく、いちばん新しいものを採る。
+  SELECT
+    TRIM(base) AS base,
+    note_md,
+    SAFE_CAST(updated_at AS TIMESTAMP) AS updated_at,
+    updated_by
+  FROM `__T_BASE_NOTE__`
+  WHERE TRIM(COALESCE(base, '')) != ''
+    -- 消さずに下書きへ戻せるようにする。書き方は揺れるので広めに読む。
+    AND NOT COALESCE(LOWER(TRIM(is_hidden)) IN ('true', '1', 'yes'), FALSE)
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY TRIM(base) ORDER BY SAFE_CAST(updated_at AS TIMESTAMP) DESC
+  ) = 1
+)
 SELECT
-  *,
+  d.*,
   -- base の属性を「基準ごとの行」に持たせているので、そのまま集計すると
   -- 行数ぶん膨らむ（3 グループなら 3 行 x 3 = 9）。基準の行にだけ値を置き、
   -- 他は NULL にしておけば、既定の SUM でも 1 回しか足されない。
   -- コントロールや一覧にはこちらを使う。
-  IF(ref_index = 0, group_count, NULL)     AS group_count_once,
-  IF(ref_index = 0, view_count, NULL)      AS view_count_once,
-  IF(ref_index = 0, unmatched_count, NULL) AS unmatched_count_once
-FROM `__T_DIFF_HIST__`
-WHERE snapshot_date = (
+  IF(d.ref_index = 0, d.group_count, NULL)     AS group_count_once,
+  IF(d.ref_index = 0, d.view_count, NULL)      AS view_count_once,
+  IF(d.ref_index = 0, d.unmatched_count, NULL) AS unmatched_count_once,
+  -- メモ。未登録なら note_html は「未登録」の枠を返す（NULL にすると
+  -- レポート側で「値なし」になり、未登録なのか取得に失敗したのか読めない）。
+  n.base IS NOT NULL            AS has_note,
+  n.note_md                     AS note_md,
+  `__UDF_MARKDOWN__`(n.note_md) AS note_html,
+  n.updated_at                  AS note_updated_at,
+  n.updated_by                  AS note_updated_by
+FROM `__T_DIFF_HIST__` AS d
+LEFT JOIN notes AS n ON n.base = d.base
+WHERE d.snapshot_date = (
   SELECT MAX(snapshot_date) FROM `__T_DIFF_HIST__`
 )
 """;
@@ -621,6 +787,7 @@ EXECUTE IMMEDIATE rendered_sql;
 --      5-5b View 名の条件で落ちた View
 --      5-6 条件から外れたデータセット
 --      5-7 グループ構成が変わった日
+--      5-8 メモの登録状況
 -- ---------------------------------------------------------------------
 
 -- 5-1 生成結果の中身
@@ -766,5 +933,32 @@ ORDER BY changed_on DESC, base_view_name
 EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
 ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
   '5-7 の SQL に未展開のプレースホルダが残っています。';
+EXECUTE IMMEDIATE rendered_sql;
+
+-- 5-8 メモの登録状況
+--     note_sheet_url が未設定なら全部 FALSE になる（＝テーブルが空）。
+--     シートの base を書き間違えるとどの行にも当たらないので、
+--     「シートにあるのにビューに出ない base」を最後に別立てで出す。
+SET sql_template = """
+SELECT
+  '5-8 メモの登録状況'                 AS check_name,
+  base                              AS base_view_name,
+  has_note                          AS note_registered,
+  note_updated_at                   AS note_updated_at,
+  note_updated_by                   AS note_updated_by,
+  LENGTH(note_md)                   AS note_length_chars
+FROM `__V_DIFF__`
+UNION ALL
+SELECT
+  '5-8 メモの登録状況（当たらない base）', TRIM(n.base), FALSE,
+  CAST(NULL AS TIMESTAMP), CAST(NULL AS STRING), CAST(NULL AS INT64)
+FROM `__T_BASE_NOTE__` AS n
+WHERE TRIM(COALESCE(n.base, '')) != ''
+  AND TRIM(n.base) NOT IN (SELECT base FROM `__V_DIFF__`)
+ORDER BY note_registered DESC, base_view_name
+""";
+EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+  '5-8 の SQL に未展開のプレースホルダが残っています。';
 EXECUTE IMMEDIATE rendered_sql;
 END;
