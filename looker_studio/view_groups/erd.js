@@ -30,10 +30,10 @@ const NAME_CHAR_W = 7.25; // 12px の等幅 1 文字ぶん
 const BOX_H = 58;
 // 段の間隔は固定ではなく、その溝に置く注記の幅から決める（layout が計算する）。
 // 固定にすると長い結合キーが収まらず、詰めるか箱に重ねるかしか無くなる。
-const GAP_MIN = 92;
+const GAP_MIN = 124;
 const CHAR_W = 6.5;  // 11px の等幅 1 文字ぶん
 const LINE_H = 14;
-const GAP_Y = 26;
+const GAP_Y = 40;
 const PAD = 14;
 
 const kw = (t) => (t && t.kind === 'keyword' ? t.text.toUpperCase() : null);
