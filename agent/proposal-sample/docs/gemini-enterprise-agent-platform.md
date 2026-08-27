@@ -2,6 +2,10 @@
 
 ## この資料の目的
 
+> **関連資料**: 同じ論点を、想定される反論への備えを含めて順に説明した**解説版**が
+> [`gemini-agent-platform-explainer.md`](./gemini-agent-platform-explainer.md) にあります。
+> 説明・説得の場ではそちらを、事実と設定項目の確認には本書を使ってください。
+
 「Gemini を業務で使うには Gemini Enterprise app（プロンプト入力型の Web アプリ）を経由しなければならないのか」という論点に対して、以下を整理する。
 
 - 自社で作る HTML + Python の Web アプリからも Gemini は問題なく利用できる
