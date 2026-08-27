@@ -102,7 +102,7 @@ const data = await res.json();
 document.querySelector("#out").textContent = data.answer;
 ```
 
-> **社内に実装済みの参考例**: 本リポジトリの [`agent/proposal-sample`](../agent/proposal-sample) が、まさにこの構成
+> **社内に実装済みの参考例**: 本リポジトリの [`agent/proposal-sample`](../README.md) が、まさにこの構成
 > （静的 HTML + FastAPI + ADK、Cloud Run に `GOOGLE_GENAI_USE_VERTEXAI=TRUE` でデプロイ）で動作している。
 > 「HTML フロントから Agent Platform が使えるのか」という問いに対しては、動いている実物を示すのが最も早い。
 
@@ -252,4 +252,4 @@ Google 側の話とは別に、**自分たちのアプリがプロンプト本�
 - [Google AI Studio から Gemini Enterprise Agent Platform に移行する（第4章の比較表の出典）](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/migrate/migrate-google-ai?authuser=1&hl=ja)
 - [Google AI Studio、Gemini Enterprise Agent Platform、Gemini Enterprise app の比較（3者の公式な位置づけ）](https://cloud.google.com/ai/gemini?hl=ja)
 - [Gemini Enterprise Agent Platform ドキュメント](https://docs.cloud.google.com/gemini-enterprise-agent-platform)
-- 社内の実装例: [`agent/proposal-sample`](../agent/proposal-sample)
+- 社内の実装例: [`agent/proposal-sample`](../README.md)
