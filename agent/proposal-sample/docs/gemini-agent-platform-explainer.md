@@ -6,10 +6,13 @@
 >   モデル選定（2.5 Flash と 3.7 Flash の差分）は要点版の第 7 章にのみ記載しています。
 
 **結論から言うと、使えます。** Gemini Enterprise app（プロンプトベースのノーコード app）を経由する必要はなく、
-自前の HTML フロント + Python バックエンドから agent platform のモデル API を直接呼べます。
+自前の HTML フロント + Python バックエンドから Gemini Enterprise agent platform（**旧 Vertex AI**）のモデル API を直接呼べます。
 さらにその構成のほうが、**Google にデータを学習利用されない**状態を明示的に担保しやすくなります。
 
 - 対象読者: 現在 Gemini Enterprise app を利用していて、自前 Web アプリ化を検討している関係者
+- **名称について**: 「Gemini Enterprise agent platform」は **旧 Vertex AI** です。社内の既存資料やコード、`gcloud` のコマンド、
+  SDK の引数（`vertexai=True`）、エンドポイント名（`aiplatform.googleapis.com`）には引き続き Vertex / aiplatform の名称が残っていますが、
+  **同じものを指しています。**「Vertex AI を使う」と「agent platform を使う」は同じ意味です
 - 参照した公式ドキュメント: [Google AI から Gemini Enterprise agent platform への移行](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/migrate/migrate-google-ai?hl=ja)
 
 ---
@@ -80,7 +83,7 @@ Google Gen AI SDK は、Google AI 側と agent platform 側の**両方に同じ�
 # pip install google-genai
 from google import genai
 
-# ── agent platform（Vertex 系）を使う。これが今回採用する経路 ──────────────
+# ── agent platform（旧 Vertex AI）を使う。これが今回採用する経路 ────────────
 client = genai.Client(
     vertexai=True,                       # ← ここが分岐点
     project="your-project-id",

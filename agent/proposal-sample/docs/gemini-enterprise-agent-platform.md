@@ -8,6 +8,10 @@
 
 「Gemini を業務で使うには Gemini Enterprise app（プロンプト入力型の Web アプリ）を経由しなければならないのか」という論点に対して、以下を整理する。
 
+> **名称について**: 本書で「Gemini Enterprise Agent Platform」と呼んでいるものは、**旧 Vertex AI** である。
+> 社内の既存資料やコード、`gcloud` のコマンド、SDK の引数（`vertexai=True`）、エンドポイント名（`aiplatform.googleapis.com`）には
+> 引き続き Vertex / aiplatform の名称が残っているが、**同じものを指している。**
+
 - 自社で作る HTML + Python の Web アプリからも Gemini は問題なく利用できる
 - その構成でも、プロンプトやデータが Google のサービス改善に使われない状態を確保できる
 
@@ -16,7 +20,7 @@
 ## 結論
 
 1. **Gemini Enterprise app の利用は、Gemini に推論させるための必須条件ではない。**
-2. **Web サーバー内の Python から Gemini Enterprise Agent Platform の API を直接呼び出せる。**
+2. **Web サーバー内の Python から Gemini Enterprise Agent Platform（旧 Vertex AI）の API を直接呼び出せる。**
 3. **GCP 内のコンポーネント同士であれば、サービスアカウントによる認証で Gemini 呼び出しと BigQuery アクセスの両方が完結する。認証キーの配布は不要。**
 4. **この構成（Agent Platform 経由）であれば、プロンプト・レスポンス・データが Google サービスの改善に使用されることはない。**
 
