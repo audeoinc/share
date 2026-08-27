@@ -84,7 +84,7 @@ from google import genai
 client = genai.Client(
     vertexai=True,                       # ← ここが分岐点
     project="your-project-id",
-    location="asia-northeast1",          # リージョンを明示（第5章）
+    location="global",                   # 現状はグローバル エンドポイント（第5章）
 )
 
 resp = client.models.generate_content(
@@ -106,7 +106,7 @@ client = genai.Client(api_key="AIza...")   # ← キーの配布・保管・ロ�
 ```bash
 GOOGLE_GENAI_USE_VERTEXAI=TRUE
 GOOGLE_CLOUD_PROJECT=your-project-id
-GOOGLE_CLOUD_LOCATION=asia-northeast1
+GOOGLE_CLOUD_LOCATION=global
 ```
 
 ```python
@@ -203,7 +203,7 @@ gcloud run deploy proposal-app \
   --project="$PROJECT" \
   --region=asia-northeast1 \
   --service-account="$SA_EMAIL" \
-  --set-env-vars=GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT,GOOGLE_CLOUD_LOCATION=asia-northeast1,GEMINI_MODEL=gemini-3.5-flash
+  --set-env-vars=GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT,GOOGLE_CLOUD_LOCATION=global,GEMINI_MODEL=gemini-2.5-flash
 ```
 
 これで、**コンテナ内のコードは資格情報を一切意識しません。** `genai.Client()` も
@@ -297,11 +297,26 @@ agent platform 側で発行する Google Cloud API キーは Cloud の契約条�
 | 主張 | 何で担保されるか | 追加でやること |
 |---|---|---|
 | **モデルの学習に使われない** | agent platform を使うこと（Cloud のデータ処理条項） | なし（経路を選ぶだけ） |
-| **データが国外に出ない** | `location` にリージョンを明示（例: `asia-northeast1`） | **`global` エンドポイントを使わない**。モデルのリージョン可用性を事前確認 |
+| **データが国外に出ない** | `location` にリージョンを明示（例: `asia-northeast1`） | **現状は `global` を選択しているため、これは担保していない**（下記参照） |
 | **プロジェクト外に持ち出せない** | VPC Service Controls でサービス境界を設定 | 境界設定と、境界越えが必要な連携の洗い出し |
 | **不正利用検知のためのログ保持** | — | **要確認事項。** 濫用検知目的の一時的なログ保持が別途規定されている場合があるため、ゼロデータ保持や検知除外の適用可否を Google 側に確認する |
 | **保管データの暗号鍵を自社管理** | CMEK | 鍵の運用体制 |
 | **外部検索にクエリが出ない** | **グラウンディング機能の設定** | 下記参照 |
+
+### リージョンについて（現状は `global`）
+
+現状は `location="global"`（グローバル エンドポイント）を使っています。ここは誤解されやすいので、はっきり分けて書きます。
+
+- **「Google のサービス改善に使われない」は global でも変わりません。** 第4章の保証はエンドポイントの選択に依存しないためです。
+  今回の説明の主眼はここなので、**global であることは主張を弱めません。**
+- **変わるのは「どのリージョンで処理されるか」だけ**です。global は空きのあるリージョンで処理されるため、処理場所が固定されません。
+  可用性が高く（容量不足による 429 が出にくい）、Gemini 3 系では料金も安いという利点があります。
+- **データを国内に留めるという明示的な要件がある場合のみ**、`asia-northeast1` 等への固定を検討します。
+  その場合、Gemini 3 系以降では料金が約 10% 増になります（2026年7月1日以降、一般提供版の Gemini 3 以降のモデルに適用）。
+
+なお、**Cloud Run のデプロイ先リージョンと Gemini の `location` は別物**です。Cloud Run を `asia-northeast1` に置いていても、
+`location="global"` であれば推論の処理リージョンは固定されません。第3章のデプロイ例で `--region=asia-northeast1` としているのは
+Cloud Run 側の話であり、Gemini の処理リージョンとは無関係です。
 
 ### グラウンディングの扱い（重要）
 
@@ -364,7 +379,8 @@ Gemini Enterprise app は、**利用者個人の ID に紐づいたアクセス�
 
 | 論点 | 内容 |
 |---|---|
-| **リージョンとモデル可用性** | `asia-northeast1` で使いたいモデルが提供されているかを事前確認。提供されていない場合、リージョン固定とモデル選定のどちらを優先するか。現時点は 2.5 Flash ベース、3.7 Flash への更新を検討する場合の差分は[要点版の第7章](./gemini-enterprise-agent-platform.md)を参照 |
+| **データ所在地の要件** | 現状は `global` で処理リージョンを固定していない。国内に留める要件があるかを確認し、ある場合はリージョン固定への切り替えと約 10% の料金増を織り込む |
+| **使用モデル** | 現時点は 2.5 Flash ベース。3.7 Flash（2026年8月に GA）への更新を検討する場合の差分は[要点版の第7章](./gemini-enterprise-agent-platform.md)を参照 |
 | **ログ保持・濫用検知の除外** | 第5章のとおり、要件が厳しい場合は Google 側への確認が必要 |
 | **監査要件** | Cloud Audit Logs で足りるか。プロンプト・応答自体の保全が必要なら、自前で BigQuery に保存する設計が要る |
 | **コスト** | app のライセンス費用 vs. agent platform のトークン従量課金。想定リクエスト数での試算が必要 |
