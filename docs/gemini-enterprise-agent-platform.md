@@ -52,6 +52,18 @@
 | **Gemini Enterprise agent platform** | モデル API・エージェント実行基盤（旧 Vertex AI）。`generateContent` などの API を提供 | **これを直接使う** |
 | **Google AI / Gemini Developer API** | API キーで叩ける開発者向けエンドポイント（AI Studio 系） | **使わない**（データ利用条件が異なるため。第4章） |
 
+この3者の違いは Google 自身が公式に区別しています
+（[Google AI Studio、Gemini Enterprise Agent Platform、Gemini Enterprise app の比較](https://cloud.google.com/ai/gemini?hl=ja)）。
+同ページの記述を引用すると:
+
+> **Gemini Enterprise Agent Platform の Gemini API** … 「企業のお客様とデベロッパーは、Agent Platform の Gemini API を介して
+> Google の最大かつ最も高性能な AI モデルを体験できます。」
+>
+> **Gemini Enterprise app** … 「直感的なチャット インターフェースを通じて Google の強力な AI モデルにアクセスしたり、（中略）
+> 強力なノーコード ワークベンチを使用して、自身の専門知識を活かした自動化を構築し、会社全体で共有することもできます。」
+
+つまり **app は「チャットUI + ノーコードのワークベンチ」という利用形態**であり、
+**モデルを呼ぶ手段そのものは Agent Platform の Gemini API** です。
 app は agent platform の上に乗っている利用形態のひとつであり、**app を通らないとモデルが使えないという依存関係はありません。**
 自前アプリからは agent platform を直接呼びます。
 
@@ -236,8 +248,8 @@ gcloud config set project your-project-id
 | 観点 | Google AI（Gemini Developer API） | Gemini Enterprise agent platform |
 |---|---|---|
 | **想定用途** | プロトタイピング・個人開発 | 本番運用・エンタープライズ |
-| **認証** | **API キー** | **IAM / Application Default Credentials（サービスアカウント）** |
-| **鍵の管理** | キーの発行・配布・保管・ローテーションが必要 | 鍵ファイル不要。IAM ロールで制御 |
+| **認証** | **API キー**（これ以外の選択肢は実質なし） | **IAM / Application Default Credentials（サービスアカウント）が本番の推奨**。テスト用途では Google Cloud API キーも利用可 |
+| **鍵の管理** | キーの発行・配布・保管・ローテーションが必要 | ADC を使えば鍵ファイル不要。IAM ロールで制御 |
 | **データの学習利用** | **無料枠ではプロンプト・応答が製品改善に利用される**（有料枠では利用されない） | **顧客データはモデルの学習・製品改善に利用されない** |
 | **アクセス制御の粒度** | キー単位（実質オール・オア・ナッシング） | IAM ロール／プリンシパル単位、リソース単位 |
 | **リージョン指定・データレジデンシー** | 限定的 | リージョンを指定可能（例: `asia-northeast1`） |
@@ -246,11 +258,16 @@ gcloud config set project your-project-id
 | **監査ログ** | なし | Cloud Audit Logs に記録される |
 | **他 GCP サービスとの連携** | 個別に実装が必要 | BigQuery / GCS / Cloud Run などとネイティブに連携 |
 | **SDK** | Google Gen AI SDK（`google-genai`） | **同じ SDK**（`vertexai=True` で切り替え） |
-| **無料枠** | あり | なし（Cloud の課金アカウントに紐づく） |
+| **無料枠** | あり（**この無料枠が、データが製品改善に利用される対象**） | なし（Cloud の課金アカウントに紐づく） |
 
-> **注記（要確認）**: 上表は移行ドキュメントの比較表を要約したものです。契約条件・データ処理条項の正確な文言は、
+> **注記（要確認）**: 上表は移行ドキュメントの比較表を要約・再構成したものです。契約条件・データ処理条項の正確な文言は、
 > 上記 URL および Google Cloud のデータ処理規約（Cloud Data Processing Addendum）の原文で最終確認してください。
 > 特に「無料枠でのデータ利用」の条件は改定されることがあります。
+>
+> なお **Google AI の無料枠**については、入力（プロンプト）と出力（応答）が製品改善のために利用され、
+> **人手によるレビューや将来の学習データへの取り込みが含まれうる**と説明されています。
+> 有料枠に移行すると製品改善には利用されない、という整理です。
+> **「無料だから」という理由で API キー経路を選ぶと、ここを踏みます。**
 
 ### この表の読み方（説明の要点）
 
@@ -261,6 +278,12 @@ gcloud config set project your-project-id
 
 そして第3章のとおり、自前 Web アプリ構成では **そもそも API キーを使う理由がない**（サービスアカウントのほうが楽）ので、
 「安全な側を選ぶために何かを我慢する」という話にはなりません。
+
+**補足（想定される突っ込み）**: 「agent platform でも API キーが使えるのでは？」というのは事実です。
+ただし決め手は**資格情報の種類ではなく、どちらのプラットフォーム（エンドポイント）を叩いているか**です。
+agent platform 側で発行する Google Cloud API キーは Cloud の契約条件の下にあり、Google AI 側の API キーとは別物です。
+とはいえ本番では **ADC（サービスアカウント）が推奨**であり、鍵の管理コストもなくなるので、
+今回の構成では ADC 一択で問題ありません。
 
 ---
 
@@ -352,6 +375,7 @@ Gemini Enterprise app は、**利用者個人の ID に紐づいたアクセス�
 ## 参考リンク
 
 - [Google AI から Gemini Enterprise agent platform への移行（比較表の出典）](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/migrate/migrate-google-ai?hl=ja)
+- [Google AI Studio、Gemini Enterprise Agent Platform、Gemini Enterprise app の比較（3者の公式な位置づけ）](https://cloud.google.com/ai/gemini?hl=ja)
 - [Gemini Enterprise Agent Platform ドキュメント](https://docs.cloud.google.com/gemini-enterprise-agent-platform)
 - [Google Gen AI SDK 概要](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/sdks/overview)
 - 本リポジトリの実装例: [`agent/proposal-sample`](../agent/proposal-sample) — 静的 HTML + FastAPI + ADK を Cloud Run にデプロイする構成
