@@ -1320,7 +1320,13 @@ EXECUTE IMMEDIATE FORMAT(
 -- up to one row per (origin object -> impacted object) pair, keeping the
 -- TRANSITIVE reach: impact_rank is the shortest hop count between the two
 -- objects (1 = direct reference), so a report can draw the whole downstream tree
--- of an object without touching columns. The column detail is kept as an
+-- of an object without touching columns. Like depth in
+-- lnge_vw_t_column_usage_impact, the rank is RELATIVE TO THE ORIGIN and not a
+-- property of the impacted object: lnge_t_impact seeds its recursion from every
+-- edge, so every node is also an origin, and the same impacted object appears
+-- once per origin at its own distance (with A -> B -> C, C is rank 2 under origin
+-- A and rank 1 under origin B). That is why the origin is part of the key rather
+-- than a single rank stored per object. The column detail is kept as an
 -- ARRAY<STRUCT> (column_dependencies) plus, because Looker Studio cannot consume
 -- ARRAY columns, a flattened STRING rendering of the same content
 -- (column_dependencies_text / origin_columns_text / impacted_columns_text /
@@ -1344,7 +1350,7 @@ EXECUTE IMMEDIATE FORMAT(
   '''
   CREATE OR REPLACE VIEW `%s.%s`
   OPTIONS (
-    description = 'Object-level (table/view) transitive dependency graph, aggregated from the column-level impact paths. One row per origin object -> impacted object pair; impact_rank is the shortest hop count (1 = direct reference). Column detail is carried both as an ARRAY<STRUCT> (column_dependencies) and as flattened STRING columns for Looker Studio, which cannot read ARRAY columns. Ephemeral, inactive and non-COMPLETED objects are excluded from both endpoints, so only the objects the pipeline actually analyzed appear; paths passing through an excluded object are still reported end to end. Objects that are referenced but never analyzed (raw sources) are kept with origin_is_analysis_target = FALSE.'
+    description = 'Object-level (table/view) transitive dependency graph, aggregated from the column-level impact paths. One row per origin object -> impacted object pair; impact_rank is the shortest hop count (1 = direct reference). impact_rank is RELATIVE TO THE CHOSEN ORIGIN, like depth in lnge_vw_t_column_usage_impact: the same impacted object appears at a different rank under a different origin (with A -> B -> C, C is rank 2 under origin A and rank 1 under origin B), so always pick an origin before reading it. Column detail is carried both as an ARRAY<STRUCT> (column_dependencies) and as flattened STRING columns for Looker Studio, which cannot read ARRAY columns. Ephemeral, inactive and non-COMPLETED objects are excluded from both endpoints, so only the objects the pipeline actually analyzed appear; paths passing through an excluded object are still reported end to end. Objects that are referenced but never analyzed (raw sources) are kept with origin_is_analysis_target = FALSE.'
   )
   AS
   -- One row per object key, so the two LEFT JOINs below cannot fan out even if the

@@ -216,7 +216,9 @@ npm test                        # build + verify:bundle + test:release を一括
   ブロックを単独実行すればよい（データを持たないので無害）。
   **オブジェクト単位の依存（lnge_vw_t_object_dependency）**：テーブル/ビュー粒度の
   推移的依存ビュー。`lnge_t_impact` を (起点object → 影響先object) に集約（1ペア=1行、
-  `impact_rank` は最短ホップ）。カラム内訳は `ARRAY<STRUCT>` と、Looker Studio が配列を
+  `impact_rank` は最短ホップ）。**rank は usage_impact の depth と同様に起点相対**
+  （impact は全 edge を再帰の起点にするので全ノードが origin になり得る。同じ影響先でも
+  起点が変われば rank が変わる）。カラム内訳は `ARRAY<STRUCT>` と、Looker Studio が配列を
   読めないため文字列版を併設（`*_text`）。`ARRAY_AGG(DISTINCT <struct>)` が使えないので
   「カラムペア粒度 → オブジェクト粒度」の2段集約にしてある（1段目が重複排除）。
   端点が EPHEMERAL/非アクティブ/未 COMPLETED なら除外するが、**経由するだけの経路は残る**
