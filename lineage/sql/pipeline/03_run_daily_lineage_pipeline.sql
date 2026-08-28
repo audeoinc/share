@@ -1427,14 +1427,31 @@ BEGIN
   normalized_definitions AS (
     SELECT
       *,
+      /*
+       * CTAS の前置き（CREATE ... AS）を落として本体のクエリだけを残す。
+       *
+       * これは解析のためではない -- エンジンは v1.5.0-076 以降、前置きが付いたままでも
+       * 本体を解析できる（#stripStatementPrefix）。ここで落とすのは definition_text が
+       * sql_fingerprint の入力だからで、フィンガープリントはリテラルを ? に正規化する
+       * 一方でテーブル識別子は残す。前置きを残すと、宛先名が毎回変わる一時テーブル
+       * （tmp_20260101, tmp_20260102, ...）が別々の指紋になり、ephemeral の集約が
+       * 効かなくなってレジストリが膨らむ。**この REGEXP_REPLACE は消さないこと。**
+       *
+       * 旧版は前置きの形を列挙していたため、`PARTITION BY` / `CLUSTER BY` 付きや
+       * 列スキーマ付き、`CREATE TEMP TABLE` を取りこぼし、それらは宛先名を含んだまま
+       * 指紋化されていた。ここでは深さの追跡はできないので、代わりに「最初に現れる
+       * ` AS ` のうち直後が SELECT / WITH / '(' のもの」を境界にし、その本体を
+       * キャプチャして書き戻す（RE2 には先読みが無いためこの形になる）。
+       * OPTIONS の文字列リテラルに ' AS SELECT' が入っていると早く切れるが、
+       * 現実的には起こらない。
+       */
       CASE
         WHEN statement_type = 'CREATE_TABLE_AS_SELECT'
           THEN REGEXP_REPLACE(
             query_text,
-            r'(?is)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+'
-            r'(?:IF\s+NOT\s+EXISTS\s+)?(?:`[^`]+`|[^\s]+)'
-            r'(?:\s+OPTIONS\s*\([^;]*?\))?\s+AS\s+',
-            ''
+            r'(?is)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?'
+            r'(?:TEMP\s+|TEMPORARY\s+)?TABLE\b.*?\sAS\s+(SELECT|WITH|\()',
+            r'\1'
           )
         ELSE query_text
       END AS definition_text

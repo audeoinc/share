@@ -670,6 +670,33 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   関数名は `lnge_usage_sql_html` / `lnge_usage_sql_css`。
 - SQL とツールのみ／エンジン不変。**BigQuery 未検証**。
 
+## 4.29 `CREATE ... AS` 前置きの解析と、03 のストリップを消してはいけない理由
+
+- **見つかった不具合**：`CREATE ... AS WITH c AS (...) SELECT ...` で**系統が静かに消える**。
+  `#parseCommonTableExpressions` は先頭 Token が `WITH` のときしか CTE を解析しないため、
+  `CREATE` で始まると CTE が読まれず、ClauseParser が拾う深さ0の SELECT だけが残って
+  CTE 名が未知ソース化 → `COMPLETED_WITH_WARNINGS`（エラーにならない）。
+  CTE の無い `CREATE ... AS SELECT` は通っていたので気づかれていなかった。
+- **エンジン修正**：`#stripStatementPrefix` を追加。先頭が `CREATE` / `EXPORT` のとき、
+  **深さ0の最初の `AS`** の直後（SELECT / WITH / `(` で始まること）から本体として再解析。
+  深さ0の AS を境界にするので、列スキーマ・`PARTITION BY`・`CLUSTER BY`・`OPTIONS(...)`
+  がどう並んでも影響を受けない（いずれも括弧内か AS より前）。
+  **CREATE / EXPORT 限定なのが肝**で、これが無いと `WITH t AS (...)` の AS を境界と
+  誤認して CTE ごと捨てる。テスト `test_v1_5_0_076`。
+- **⚠ 03 の CTAS ストリップは削除できない**：`definition_text` は `sql_fingerprint` の
+  入力で、フィンガープリントはリテラルを `?` にする一方**テーブル識別子は残す**。
+  前置きを残すと宛先名が毎回変わる一時テーブルが別指紋になり、**ephemeral の集約
+  （§2）が壊れてレジストリが膨張する**。エンジンが前置きを解析できるようになっても、
+  ストリップの役目は解析ではなく指紋の安定化なので残す。03 の該当箇所にコメント済み。
+- **併せて 03 の正規表現を汎用化**：旧版は前置きの形を列挙しており
+  `PARTITION BY` / `CLUSTER BY`・列スキーマ・`CREATE TEMP TABLE` を取りこぼしていた
+  （＝それらは宛先名込みで指紋化され、集約が効いていなかった）。RE2 に先読みが無いため、
+  「最初の ` AS ` で直後が SELECT / WITH / `(` のもの」を境界にし本体をキャプチャして
+  書き戻す形にした。**該当オブジェクトは definition_hash が変わるので一度だけ再解析される。**
+- **未対応のまま**：`MERGE` / `UPDATE` / `DELETE` / `INSERT ... VALUES`。これらは
+  書き込み先との列対列マッピングという別概念が要るうえ、03 の収集条件
+  （`collected_statement_types`）にも入っていない。
+
 ## 4.22 本ドキュメントと実装の乖離（重要）
 
 `docs/SESSION_HANDOFF.md` の §1〜§4.20 は **1.5.0-032 の途中まで**しか追随していない。

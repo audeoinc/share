@@ -337,6 +337,10 @@ SELECT `PROJECT.UDF_DATASET.lnge_usage_sql_css`(NULL);
   ハイライトは効きます**（折り返して表示されます）。
 - **`usage_definition_text` が NULL のとき**（`usage_definition_is_current` が `TRUE` 以外）は
   この列も空文字になります。
+- **生成テーブル（`usage_generation_type` が `DAG` / `SCHEDULED_QUERY`）の SQL は、
+  `CREATE … AS` の前置きが取り除かれた本体**です。したがって `line_number` は本体の
+  1 行目から数えた番号で、実際のジョブ SQL とは前置きの行数だけずれます。View
+  （`VIEW_DEFINITION`）は元から本体だけなのでずれません。
 - **ハイライトの終端**は `reference_name` の文字数で決めています。バッククォート付きの
   識別子など、書かれ方によっては数文字ずれることがあります。その場合でも**行の
   ハイライトは必ず正しい位置**に出ます。
