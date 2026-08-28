@@ -255,7 +255,7 @@ DECLARE skip_inaccessible_source_datasets BOOL DEFAULT TRUE;
 -- only Views. Cost is the SCHEMATA / VIEWS listing plus one probe per source dataset.
 DECLARE preview_only BOOL DEFAULT FALSE;
 
--- Materialized report tables (STEP 4b). The two report views created by 01 --
+-- Report cache tables (STEP 4b). The two report views created by 01 --
 -- lnge_vw_t_column_usage_impact and lnge_vw_t_object_dependency -- re-aggregate the
 -- whole impact graph on every read, which a BI tool cannot cache and cannot prune by
 -- cluster key (its filters hit computed columns like origin_full_name). When TRUE
@@ -263,19 +263,19 @@ DECLARE preview_only BOOL DEFAULT FALSE;
 -- 'vw_' dropped, so reports read a physical, clustered, BI-Engine-eligible table.
 -- The views stay the single definition; these tables are only a cache, rebuilt inside
 -- the STEP 4 gate so they are refreshed exactly when impact is. Each row carries
--- materialized_at. Set FALSE to keep reports on the views.
-DECLARE materialize_report_tables BOOL DEFAULT TRUE;
--- Whether the materialized column-usage table keeps the two full-SQL columns,
+-- cached_at. Set FALSE to keep reports on the views.
+DECLARE build_report_cache_tables BOOL DEFAULT TRUE;
+-- Whether the cached column-usage table keeps the two full-SQL columns,
 -- usage_definition_text and usage_definition_html. Both repeat the ENTIRE SQL of the
 -- object on EVERY row of that object (one row per origin column x usage site x path),
 -- so they can dominate the table's size and, under on-demand pricing, the bytes billed
 -- for any query that selects them. Keep TRUE while a report renders the highlighted SQL
 -- (the Templated Record visualization); set FALSE to drop both columns from the
--- materialized copy and read them from the view when they are actually needed.
-DECLARE materialize_usage_sql_columns BOOL DEFAULT TRUE;
--- Set by STEP 4b: whether both materialized report tables already exist. Lets the
+-- cache and read them from the view when they are actually needed.
+DECLARE cache_usage_sql_columns BOOL DEFAULT TRUE;
+-- Set by STEP 4b: whether both report cache tables already exist. Lets the
 -- first run after the views are deployed build them even when nothing else changed.
-DECLARE report_tables_present BOOL DEFAULT FALSE;
+DECLARE report_cache_tables_present BOOL DEFAULT FALSE;
 
 -- Set FALSE to skip STEP 2 (Scheduled Query / DAG generated-table collection
 -- from INFORMATION_SCHEMA.JOBS) and process only Views. STEP 1/3/4 still run.
@@ -496,7 +496,7 @@ SET table_unanalyzed_definition =
     || table_name_suffix;
 SET table_column_usage =
   table_name_prefix || 'lnge_' || 't_' || 'column_usage' || table_name_suffix;
--- Report views (must match 01) and their materialized counterparts. The table keeps
+-- Report views (must match 01) and their cache tables. The table keeps
 -- the view's name with 'vw_' dropped, so the pair is obvious at a glance.
 SET view_column_usage_impact =
   table_name_prefix || 'lnge_' || 'vw_' || 't_' || 'column_usage_impact'
@@ -4170,17 +4170,18 @@ END;
 END IF;  -- has_analysis_work OR orphan_direct_dep_deleted > 0
 
 -- ============================================================================
--- STEP 4b: Refresh the materialized report tables
+-- STEP 4b: Refresh the report cache tables
 -- ============================================================================
--- Snapshots the two report views created by 01 into physical tables so BI tools
+-- Copies the two report views created by 01 into ordinary tables so BI tools
 -- read a clustered table instead of re-running the aggregation on every request:
 --   lnge_vw_t_object_dependency    -> lnge_t_object_dependency
 --   lnge_vw_t_column_usage_impact  -> lnge_t_column_usage_impact
 -- The table name is the view name with 'vw_' dropped, so the pair is obvious.
 --
--- Why a plain table and not a MATERIALIZED VIEW: the views use ARRAY_AGG with
+-- Why an ordinary table and not a MATERIALIZED VIEW: the views use ARRAY_AGG with
 -- ORDER BY, STRING_AGG(DISTINCT ...), LEFT JOIN, analytic functions and correlated
--- ARRAY subqueries -- none of which BigQuery's materialized views accept.
+-- ARRAY subqueries -- none of which a BigQuery MATERIALIZED VIEW accepts. Nothing
+-- here uses that feature; these are plain CREATE OR REPLACE TABLE ... AS SELECT.
 --
 -- The views remain the single definition; these tables are a cache built with
 -- SELECT * over them, so changing a view in 01 changes the table's schema on the
@@ -4200,7 +4201,7 @@ END IF;  -- has_analysis_work OR orphan_direct_dep_deleted > 0
 -- ARRAY_AGG OVER (PARTITION BY origin column, usage object, usage definition).
 -- Analytic functions run after WHERE, so when a report queries the VIEW, any extra
 -- filter it adds (a depth, a single usage_type) also narrows the highlights. In the
--- materialized copy the aggregation is already fixed at build time, over the full
+-- cache table the aggregation is already fixed at build time, over the full
 -- partition. The partition key already pins the origin column and the object, so
 -- the common "pick an origin, show its SQL" case is identical; only reports that
 -- filter FURTHER and expect the highlights to follow will differ. Those should keep
@@ -4209,7 +4210,7 @@ END IF;  -- has_analysis_work OR orphan_direct_dep_deleted > 0
 -- Failure here is not allowed to take the pipeline down: the caches are derived
 -- data, and the most likely cause is a deployment whose 01 predates the views. The
 -- error is reported as a row instead.
-IF materialize_report_tables AND NOT preview_only THEN
+IF build_report_cache_tables AND NOT preview_only THEN
   -- Do the caches already exist? A run that changes nothing does not rebuild them,
   -- but the FIRST run after the views are deployed usually changes nothing either --
   -- and then reports would have no table to read. Probing for them costs one
@@ -4221,26 +4222,26 @@ IF materialize_report_tables AND NOT preview_only THEN
     """,
     table_object_dependency, table_column_usage_impact,
     repository_project_id, repository_dataset
-  ) INTO report_tables_present;
+  ) INTO report_cache_tables_present;
 END IF;
 
-IF materialize_report_tables
+IF build_report_cache_tables
    AND NOT preview_only
    AND (
      has_analysis_work
      OR orphan_direct_dep_deleted > 0
-     OR NOT report_tables_present
+     OR NOT report_cache_tables_present
    )
 THEN
   -- Progress marker: labels this step in the console's "All results" list.
-  SELECT '===== STEP 4b: refresh materialized report tables =====' AS processing_step;
+  SELECT '===== STEP 4b: refresh report cache tables =====' AS processing_step;
   BEGIN
     -- usage_definition_text / usage_definition_html repeat the object's ENTIRE SQL on
-    -- every row of that object. Dropping them keeps the materialized copy small when
+    -- every row of that object. Dropping them keeps the cache small when
     -- no report renders the SQL itself.
     DECLARE usage_impact_select_list STRING DEFAULT '*';
 
-    IF NOT materialize_usage_sql_columns THEN
+    IF NOT cache_usage_sql_columns THEN
       SET usage_impact_select_list =
         '* EXCEPT (usage_definition_text, usage_definition_html)';
     END IF;
@@ -4250,10 +4251,10 @@ THEN
       CREATE OR REPLACE TABLE `%s.%s.%s`
       CLUSTER BY origin_project, origin_dataset, origin_object
       OPTIONS (
-        description = 'Materialized snapshot of the object-level dependency view, rebuilt by 03 STEP 4b whenever the impact graph is rebuilt. Same columns as the view plus materialized_at. Clustered on the origin object so filtering by origin prunes. The view is the definition; edit it in 01 and this table follows on the next run.'
+        description = 'Cached copy of the object-level dependency view, rebuilt by 03 STEP 4b whenever the impact graph is rebuilt. An ordinary table, not a BigQuery materialized view. Same columns as the view plus cached_at. Clustered on the origin object so filtering by origin prunes. The view is the definition; edit it in 01 and this table follows on the next run.'
       )
       AS
-      SELECT *, CURRENT_TIMESTAMP() AS materialized_at
+      SELECT *, CURRENT_TIMESTAMP() AS cached_at
       FROM `%s.%s.%s`
       """,
       repository_project_id, repository_dataset, table_object_dependency,
@@ -4265,10 +4266,10 @@ THEN
       CREATE OR REPLACE TABLE `%s.%s.%s`
       CLUSTER BY origin_project, origin_dataset, origin_object, origin_column
       OPTIONS (
-        description = 'Materialized snapshot of the column usage x impact view, rebuilt by 03 STEP 4b whenever the impact graph is rebuilt. Same columns as the view plus materialized_at, unless materialize_usage_sql_columns was FALSE, which drops usage_definition_text and usage_definition_html. Clustered on the origin column so filtering by origin prunes. Highlights inside usage_definition_html are fixed at build time over the full partition; a report that filters further and needs the highlights to follow should read the view instead.'
+        description = 'Cached copy of the column usage x impact view, rebuilt by 03 STEP 4b whenever the impact graph is rebuilt. An ordinary table, not a BigQuery materialized view. Same columns as the view plus cached_at, unless cache_usage_sql_columns was FALSE, which drops usage_definition_text and usage_definition_html. Clustered on the origin column so filtering by origin prunes. Highlights inside usage_definition_html are fixed at build time over the full partition; a report that filters further and needs the highlights to follow should read the view instead.'
       )
       AS
-      SELECT %s, CURRENT_TIMESTAMP() AS materialized_at
+      SELECT %s, CURRENT_TIMESTAMP() AS cached_at
       FROM `%s.%s.%s`
       """,
       repository_project_id, repository_dataset, table_column_usage_impact,
@@ -4279,7 +4280,7 @@ THEN
     EXECUTE IMMEDIATE FORMAT(
       """
       SELECT
-        'MATERIALIZE_REPORT_TABLES' AS step_name,
+        'REFRESH_REPORT_CACHE' AS step_name,
         'COMPLETED' AS status,
         (SELECT COUNT(*) FROM `%s.%s.%s`) AS object_dependency_row_count,
         (SELECT COUNT(*) FROM `%s.%s.%s`) AS column_usage_impact_row_count
@@ -4290,10 +4291,10 @@ THEN
 
   EXCEPTION WHEN ERROR THEN
     SELECT
-      'MATERIALIZE_REPORT_TABLES' AS step_name,
+      'REFRESH_REPORT_CACHE' AS step_name,
       'FAILED' AS status,
       @@error.message AS error_message,
-      'The report views must exist first: run 01 with recreate_views_only = TRUE. Reports can keep reading the views meanwhile; set materialize_report_tables = FALSE to skip this step.' AS hint;
+      'The report views must exist first: run 01 with recreate_views_only = TRUE. Reports can keep reading the views meanwhile; set build_report_cache_tables = FALSE to skip this step.' AS hint;
   END;
 END IF;
 
