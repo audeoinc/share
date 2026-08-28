@@ -340,12 +340,24 @@ class ExpressionParser {
       normalized_token: "."
     };
 
-    return AstFactory.createFunctionCall(
+    const node = AstFactory.createFunctionCall(
       [nameToken],
       [baseNode],
       dotToken,
       fieldToken
     );
+
+    /*
+     * 後置フィールド名を残す。式の値としては不透明な STRUCT のフィールド選択なので
+     * lineage は持たないが（v1.5.0-049）、base がテーブル別名＝行値のときだけは
+     * 「その行のどの列か」を決める情報になる。
+     *   ARRAY_AGG(t ORDER BY x LIMIT 1)[OFFSET(0)].session_id -> t.session_id
+     * ColumnResolver がこの名前を使って行参照を列参照へ絞り込む。
+     */
+    node.field_access_name = fieldToken.normalized_token;
+    node.field_access_name_raw = fieldToken.token;
+
+    return node;
   }
 
   #parsePrimaryExpression() {

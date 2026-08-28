@@ -716,6 +716,31 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   決められないため従来どおり未解決のままにする（誤帰属を作らない）。
 - テスト `test_v1_5_0_077`。エンジン変更（要 GCS 再デプロイ）。
 
+## 4.31 テーブル別名を行値として使う形と、非予約 Keyword の明示 alias
+
+- **症状**：CTE 側の
+  `SELECT ARRAY_AGG(t ORDER BY aaa LIMIT 1)[OFFSET(0)].session_id FROM cte t`
+  が原因で、外側に `DERIVED_OUTPUT_COLUMN_NOT_FOUND` の警告が波及していた。
+- **本質は警告ではなく偽陰性**：`t` を列として解決しようとして失敗し、
+  **本来の依存（その行の列）が系統から丸ごと落ちていた**。`session_id` は ORDER BY キーの
+  `aaa` にしか依存せず、`session_id` を変更してもこのオブジェクトが影響先に出てこない。
+  物理表を直接参照する形では `PHYSICAL_COLUMN_NOT_FOUND`（ERROR）になっていた。
+- **修正**：ExpressionParser が後置フィールド名を Node に残し（`field_access_name`）、
+  ColumnResolver がそれを使って「スコープ内の表ソース別名に一致し、列として解決できない
+  識別子」を `別名.フィールド` の修飾あり参照へ落とす。結果、系統はその 1 列に正確に付く。
+  - **対象は PHYSICAL_TABLE / CTE / SUBQUERY のみ**。UNNEST の別名は行ではなく要素の値なので
+    除外する（外さないと `FROM d.t AS t, UNNEST(Col) AS Col` を誤認する。開発中に
+    `test_v1_5_0_065` が検出した）。
+  - **後置フィールドが無い行値（`ARRAY_AGG(t) AS xs`）は対象外のまま**。「行の全列」に
+    相当する参照を式の途中に差し込むと、SELECT 項目のワイルドカードを前提にした下流が
+    クラッシュした。`test_v1_5_0_078` で「少なくとも落ちない」ことだけ固定してある。
+- **併せて**：`SELECT x AS offset` が `SelectParser: invalid explicit alias` で解析失敗して
+  いた問題を修正。`offset` / `value` / `key` は BigQuery の予約語ではない。暗黙 alias は
+  §4.15（v1.5.0-058）で対応済みだったが、**明示 alias が IDENTIFIER 限定のまま**だった。
+  `#isAliasToken` を `#isColumnNameToken` に揃えた（明示 `AS` がある分、暗黙側より安全）。
+  真の予約語（`AS NULL` / `AS ROWS`）は従来どおり拒否、`CAST(x AS STRING)` は深さで区別。
+- テスト `test_v1_5_0_078`。エンジン変更（要 GCS 再デプロイ）。
+
 ## 4.22 本ドキュメントと実装の乖離（重要）
 
 `docs/SESSION_HANDOFF.md` の §1〜§4.20 は **1.5.0-032 の途中まで**しか追随していない。

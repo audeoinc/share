@@ -1,5 +1,35 @@
 # 1.5.0-032
 
+- Fixed a table alias used as a *row value* -- `ARRAY_AGG(t ORDER BY x LIMIT 1)[OFFSET(0)].col`,
+  the standard "representative row per group" idiom -- being resolved as a column named
+  `t` (engine). Over a CTE that produced LINEAGE_PARTIALLY_RESOLVED; over a physical table
+  it produced PHYSICAL_COLUMN_NOT_FOUND, an ERROR. Worse than either diagnostic: the
+  dependency on the row's actual column was dropped entirely, so `session_id` traced only
+  to the ORDER BY key and changing the source column would not have shown this object as
+  impacted -- a false negative in impact analysis.
+  The parser now keeps the postfix field name on the field-access node, and ColumnResolver
+  uses it: an unqualified identifier that matches a table-like source alias in scope, and
+  cannot be resolved as a column, is re-resolved as `alias.field` -- exactly the qualified
+  reference the SQL means -- so the lineage lands on that one column. Restricted to
+  PHYSICAL_TABLE / CTE / SUBQUERY sources: an UNNEST alias names an element value rather
+  than a row, and treating it as one broke `FROM d.t AS t, UNNEST(Col) AS Col`
+  (caught by test_v1_5_0_065 during development).
+  A row value with no field access (`ARRAY_AGG(t) AS xs`) stays out of scope. Emitting a
+  reference standing for "every column of the row" mid-expression crashed the downstream
+  wildcard handling, which assumes a SELECT-item position; test_v1_5_0_078 pins that this
+  shape does not take the engine down. Test: test_v1_5_0_078.
+
+- Fixed `SELECT x AS offset` failing to parse with "SelectParser: invalid explicit alias".
+  `offset`, `value`, `key` and similar are not reserved in BigQuery and are valid column
+  names. The implicit-alias path already accepted non-reserved keywords (v1.5.0-058) but
+  the explicit `AS` path still required IDENTIFIER / BACKTICK_IDENTIFIER, so the whole
+  object failed to analyze. `#isAliasToken` now uses the same `#isColumnNameToken` rule --
+  safer here than for implicit aliases, since the explicit `AS` removes the ambiguity with
+  surrounding syntax. Truly reserved words (`AS NULL`, `AS ROWS`) are still rejected, and
+  `CAST(x AS STRING)` is unaffected because that `AS` sits at a deeper paren depth.
+  Covered by test_v1_5_0_078. Bundle rebuilt (sha256 6ad84903..., 475682 bytes);
+  test:release 58 / golden 48 PASS. Engine change -- the GCS bundle must be re-uploaded.
+
 - Fixed a dotted reference to an element field of an *unaliased* `UNNEST` resolving to
   UNRESOLVED_SOURCE, which surfaced as a false
   `LINEAGE_PARTIALLY_RESOLVED ... (EXPRESSION_SUBQUERY) [UNRESOLVED_SOURCE]` on the GA4
