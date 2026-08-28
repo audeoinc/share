@@ -255,6 +255,28 @@ DECLARE skip_inaccessible_source_datasets BOOL DEFAULT TRUE;
 -- only Views. Cost is the SCHEMATA / VIEWS listing plus one probe per source dataset.
 DECLARE preview_only BOOL DEFAULT FALSE;
 
+-- Materialized report tables (STEP 4b). The two report views created by 01 --
+-- lnge_vw_t_column_usage_impact and lnge_vw_t_object_dependency -- re-aggregate the
+-- whole impact graph on every read, which a BI tool cannot cache and cannot prune by
+-- cluster key (its filters hit computed columns like origin_full_name). When TRUE
+-- (default), STEP 4b snapshots each view into a clustered table of the same name with
+-- 'vw_' dropped, so reports read a physical, clustered, BI-Engine-eligible table.
+-- The views stay the single definition; these tables are only a cache, rebuilt inside
+-- the STEP 4 gate so they are refreshed exactly when impact is. Each row carries
+-- materialized_at. Set FALSE to keep reports on the views.
+DECLARE materialize_report_tables BOOL DEFAULT TRUE;
+-- Whether the materialized column-usage table keeps the two full-SQL columns,
+-- usage_definition_text and usage_definition_html. Both repeat the ENTIRE SQL of the
+-- object on EVERY row of that object (one row per origin column x usage site x path),
+-- so they can dominate the table's size and, under on-demand pricing, the bytes billed
+-- for any query that selects them. Keep TRUE while a report renders the highlighted SQL
+-- (the Templated Record visualization); set FALSE to drop both columns from the
+-- materialized copy and read them from the view when they are actually needed.
+DECLARE materialize_usage_sql_columns BOOL DEFAULT TRUE;
+-- Set by STEP 4b: whether both materialized report tables already exist. Lets the
+-- first run after the views are deployed build them even when nothing else changed.
+DECLARE report_tables_present BOOL DEFAULT FALSE;
+
 -- Set FALSE to skip STEP 2 (Scheduled Query / DAG generated-table collection
 -- from INFORMATION_SCHEMA.JOBS) and process only Views. STEP 1/3/4 still run.
 DECLARE process_generated_tables BOOL DEFAULT TRUE;
@@ -329,6 +351,13 @@ DECLARE table_unanalyzed_definition STRING;
 -- so it is addressed by a directly-built qualified name (column_usage_fqn below).
 DECLARE table_column_usage STRING;
 DECLARE column_usage_fqn STRING;
+-- Report views created by 01, and the tables STEP 4b snapshots them into. Outside
+-- lnge_render_dynamic_sql's fixed placeholder set, so STEP 4b builds their qualified
+-- names directly from repository_project_id / repository_dataset.
+DECLARE view_column_usage_impact STRING;
+DECLARE view_object_dependency STRING;
+DECLARE table_column_usage_impact STRING;
+DECLARE table_object_dependency STRING;
 
 DECLARE repo_tables STRUCT<
   def_registry STRING,
@@ -467,6 +496,18 @@ SET table_unanalyzed_definition =
     || table_name_suffix;
 SET table_column_usage =
   table_name_prefix || 'lnge_' || 't_' || 'column_usage' || table_name_suffix;
+-- Report views (must match 01) and their materialized counterparts. The table keeps
+-- the view's name with 'vw_' dropped, so the pair is obvious at a glance.
+SET view_column_usage_impact =
+  table_name_prefix || 'lnge_' || 'vw_' || 't_' || 'column_usage_impact'
+    || table_name_suffix;
+SET view_object_dependency =
+  table_name_prefix || 'lnge_' || 'vw_' || 't_' || 'object_dependency'
+    || table_name_suffix;
+SET table_column_usage_impact =
+  table_name_prefix || 'lnge_' || 't_' || 'column_usage_impact' || table_name_suffix;
+SET table_object_dependency =
+  table_name_prefix || 'lnge_' || 't_' || 'object_dependency' || table_name_suffix;
 
 ASSERT REGEXP_CONTAINS(table_definition_registry, r'^[A-Za-z0-9_-]+$')
 AS 'Invalid table_definition_registry name.';
@@ -482,6 +523,14 @@ ASSERT REGEXP_CONTAINS(table_unanalyzed_definition, r'^[A-Za-z0-9_-]+$')
 AS 'Invalid table_unanalyzed_definition name.';
 ASSERT REGEXP_CONTAINS(table_column_usage, r'^[A-Za-z0-9_-]+$')
 AS 'Invalid table_column_usage name.';
+ASSERT REGEXP_CONTAINS(view_column_usage_impact, r'^[A-Za-z0-9_-]+$')
+AS 'Invalid view_column_usage_impact name.';
+ASSERT REGEXP_CONTAINS(view_object_dependency, r'^[A-Za-z0-9_-]+$')
+AS 'Invalid view_object_dependency name.';
+ASSERT REGEXP_CONTAINS(table_column_usage_impact, r'^[A-Za-z0-9_-]+$')
+AS 'Invalid table_column_usage_impact name.';
+ASSERT REGEXP_CONTAINS(table_object_dependency, r'^[A-Za-z0-9_-]+$')
+AS 'Invalid table_object_dependency name.';
 
 SET repo_tables = STRUCT(
   table_definition_registry AS def_registry,
@@ -4117,7 +4166,137 @@ IF has_analysis_work OR orphan_direct_dep_deleted > 0 THEN
   USING snapshot_time AS p_snapshot_time;
 END;
 
+
 END IF;  -- has_analysis_work OR orphan_direct_dep_deleted > 0
+
+-- ============================================================================
+-- STEP 4b: Refresh the materialized report tables
+-- ============================================================================
+-- Snapshots the two report views created by 01 into physical tables so BI tools
+-- read a clustered table instead of re-running the aggregation on every request:
+--   lnge_vw_t_object_dependency    -> lnge_t_object_dependency
+--   lnge_vw_t_column_usage_impact  -> lnge_t_column_usage_impact
+-- The table name is the view name with 'vw_' dropped, so the pair is obvious.
+--
+-- Why a plain table and not a MATERIALIZED VIEW: the views use ARRAY_AGG with
+-- ORDER BY, STRING_AGG(DISTINCT ...), LEFT JOIN, analytic functions and correlated
+-- ARRAY subqueries -- none of which BigQuery's materialized views accept.
+--
+-- The views remain the single definition; these tables are a cache built with
+-- SELECT * over them, so changing a view in 01 changes the table's schema on the
+-- next run with nothing to keep in step by hand.
+--
+-- Placement: right after STEP 4, on the same condition as the impact rebuild plus
+-- one escape hatch. Impact and the column-usage index only change when this run did
+-- analysis work or the orphan cleanup removed rows, so rebuilding on that condition
+-- keeps the caches exactly as fresh as what they are built from and never rebuilds
+-- them for an unchanged daily run. The escape hatch is the first run after the views
+-- are deployed, which usually changes nothing: the caches are also rebuilt when they
+-- do not exist yet. Skipped entirely under preview_only, which must not create
+-- anything.
+--
+-- ONE BEHAVIOR DIFFERENCE, in lnge_vw_t_column_usage_impact only:
+-- usage_definition_html collects its highlight positions with an analytic
+-- ARRAY_AGG OVER (PARTITION BY origin column, usage object, usage definition).
+-- Analytic functions run after WHERE, so when a report queries the VIEW, any extra
+-- filter it adds (a depth, a single usage_type) also narrows the highlights. In the
+-- materialized copy the aggregation is already fixed at build time, over the full
+-- partition. The partition key already pins the origin column and the object, so
+-- the common "pick an origin, show its SQL" case is identical; only reports that
+-- filter FURTHER and expect the highlights to follow will differ. Those should keep
+-- reading the view.
+--
+-- Failure here is not allowed to take the pipeline down: the caches are derived
+-- data, and the most likely cause is a deployment whose 01 predates the views. The
+-- error is reported as a row instead.
+IF materialize_report_tables AND NOT preview_only THEN
+  -- Do the caches already exist? A run that changes nothing does not rebuild them,
+  -- but the FIRST run after the views are deployed usually changes nothing either --
+  -- and then reports would have no table to read. Probing for them costs one
+  -- INFORMATION_SCHEMA lookup (no bytes billed) and removes that hole.
+  EXECUTE IMMEDIATE FORMAT(
+    """
+    SELECT COUNTIF(table_name IN ('%s', '%s')) = 2
+    FROM `%s.%s`.INFORMATION_SCHEMA.TABLES
+    """,
+    table_object_dependency, table_column_usage_impact,
+    repository_project_id, repository_dataset
+  ) INTO report_tables_present;
+END IF;
+
+IF materialize_report_tables
+   AND NOT preview_only
+   AND (
+     has_analysis_work
+     OR orphan_direct_dep_deleted > 0
+     OR NOT report_tables_present
+   )
+THEN
+  -- Progress marker: labels this step in the console's "All results" list.
+  SELECT '===== STEP 4b: refresh materialized report tables =====' AS processing_step;
+  BEGIN
+    -- usage_definition_text / usage_definition_html repeat the object's ENTIRE SQL on
+    -- every row of that object. Dropping them keeps the materialized copy small when
+    -- no report renders the SQL itself.
+    DECLARE usage_impact_select_list STRING DEFAULT '*';
+
+    IF NOT materialize_usage_sql_columns THEN
+      SET usage_impact_select_list =
+        '* EXCEPT (usage_definition_text, usage_definition_html)';
+    END IF;
+
+    EXECUTE IMMEDIATE FORMAT(
+      """
+      CREATE OR REPLACE TABLE `%s.%s.%s`
+      CLUSTER BY origin_project, origin_dataset, origin_object
+      OPTIONS (
+        description = 'Materialized snapshot of the object-level dependency view, rebuilt by 03 STEP 4b whenever the impact graph is rebuilt. Same columns as the view plus materialized_at. Clustered on the origin object so filtering by origin prunes. The view is the definition; edit it in 01 and this table follows on the next run.'
+      )
+      AS
+      SELECT *, CURRENT_TIMESTAMP() AS materialized_at
+      FROM `%s.%s.%s`
+      """,
+      repository_project_id, repository_dataset, table_object_dependency,
+      repository_project_id, repository_dataset, view_object_dependency
+    );
+
+    EXECUTE IMMEDIATE FORMAT(
+      """
+      CREATE OR REPLACE TABLE `%s.%s.%s`
+      CLUSTER BY origin_project, origin_dataset, origin_object, origin_column
+      OPTIONS (
+        description = 'Materialized snapshot of the column usage x impact view, rebuilt by 03 STEP 4b whenever the impact graph is rebuilt. Same columns as the view plus materialized_at, unless materialize_usage_sql_columns was FALSE, which drops usage_definition_text and usage_definition_html. Clustered on the origin column so filtering by origin prunes. Highlights inside usage_definition_html are fixed at build time over the full partition; a report that filters further and needs the highlights to follow should read the view instead.'
+      )
+      AS
+      SELECT %s, CURRENT_TIMESTAMP() AS materialized_at
+      FROM `%s.%s.%s`
+      """,
+      repository_project_id, repository_dataset, table_column_usage_impact,
+      usage_impact_select_list,
+      repository_project_id, repository_dataset, view_column_usage_impact
+    );
+
+    EXECUTE IMMEDIATE FORMAT(
+      """
+      SELECT
+        'MATERIALIZE_REPORT_TABLES' AS step_name,
+        'COMPLETED' AS status,
+        (SELECT COUNT(*) FROM `%s.%s.%s`) AS object_dependency_row_count,
+        (SELECT COUNT(*) FROM `%s.%s.%s`) AS column_usage_impact_row_count
+      """,
+      repository_project_id, repository_dataset, table_object_dependency,
+      repository_project_id, repository_dataset, table_column_usage_impact
+    );
+
+  EXCEPTION WHEN ERROR THEN
+    SELECT
+      'MATERIALIZE_REPORT_TABLES' AS step_name,
+      'FAILED' AS status,
+      @@error.message AS error_message,
+      'The report views must exist first: run 01 with recreate_views_only = TRUE. Reports can keep reading the views meanwhile; set materialize_report_tables = FALSE to skip this step.' AS hint;
+  END;
+END IF;
+
 
 -- ============================================================================
 -- STEP 5: Refresh the unanalyzed-object snapshot (report table)

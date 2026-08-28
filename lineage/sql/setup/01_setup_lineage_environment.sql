@@ -1111,6 +1111,14 @@ EXECUTE IMMEDIATE FORMAT(
 -- 4a. Repository views -- always recreated (CREATE OR REPLACE VIEW is safe)
 -- ============================================================================
 
+-- Both views below are also snapshotted into physical tables by 03 STEP 4b
+-- (lnge_vw_t_column_usage_impact -> lnge_t_column_usage_impact,
+--  lnge_vw_t_object_dependency  -> lnge_t_object_dependency), so a BI tool reads a
+-- clustered table instead of re-running the aggregation per request. The views stay
+-- the single definition -- STEP 4b builds the tables with SELECT * over them -- so a
+-- change here reaches the tables on the next 03 run with nothing to keep in step by
+-- hand. Set materialize_report_tables = FALSE in 03 to keep reports on the views.
+
 -- Column-usage x impact depth view. Joins the usage index to the impact graph so
 -- a report can pick an ORIGIN column and see every downstream usage site with a
 -- DEPTH (relative to that origin: 1 = direct reference, impact_rank + 1 deeper)
