@@ -1,5 +1,26 @@
 # 1.5.0-032
 
+- Fixed a dotted reference to an element field of an *unaliased* `UNNEST` resolving to
+  UNRESOLVED_SOURCE, which surfaced as a false
+  `LINEAGE_PARTIALLY_RESOLVED ... (EXPRESSION_SUBQUERY) [UNRESOLVED_SOURCE]` on the GA4
+  idiom `COALESCE((SELECT value.string_value FROM UNNEST(event_params) WHERE key='utm_campaign'), ...)`.
+  The expression subquery was incidental: the same SQL fails identically with the UNNEST
+  in the FROM clause. The real condition is an unaliased UNNEST plus a dotted reference.
+  ColumnResolver reads a two-part identifier as qualifier.column, so `value.string_value`
+  makes `value` a source alias; an unaliased UNNEST answers to no alias, hence
+  UNRESOLVED_SOURCE. A single-part `key` was fine because the existing single-UNNEST
+  fallback only covers unqualified references, and an aliased `ep.value.string_value` was
+  fine because the alias resolves -- which is why only this shape was left behind.
+  PhysicalColumnResolver now routes a qualified UNRESOLVED_SOURCE reference to the UNNEST
+  in scope when there is exactly one, taking the qualifier as the first segment of the
+  field path within the element (`#resolveCorrelatedUnnestReference` already treats the
+  whole reference_name as that path, so nothing else had to change). It runs after
+  `#resolveStructFieldPathReference`, so a physical nested STRUCT such as `geo.region`
+  keeps priority. With two UNNEST sources in scope the reference stays unresolved rather
+  than being attributed to an arbitrary one. Test: test_v1_5_0_077. Bundle rebuilt
+  (sha256 7d438ab3..., 470584 bytes); test:release 57 / golden 48 PASS. Engine change --
+  the GCS bundle must be re-uploaded.
+
 - Fixed `CREATE ... AS WITH cte AS (...) SELECT ...` losing its lineage silently (engine).
   `#parseCommonTableExpressions` only parses CTEs when the first token is `WITH`, so a
   statement starting with `CREATE` never had its CTEs read: ClauseParser still found the
