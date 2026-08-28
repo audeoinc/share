@@ -114,6 +114,37 @@ document.querySelector("#out").textContent = data.answer;
 > （静的 HTML + FastAPI + ADK、Cloud Run に `GOOGLE_GENAI_USE_VERTEXAI=TRUE` でデプロイ）で動作している。
 > 「HTML フロントから Agent Platform が使えるのか」という問いに対しては、動いている実物を示すのが最も早い。
 
+
+### 実行基盤の選択: Cloud Run と GKE
+
+前提として、**この判断はアプリのコードに影響しない。** `genai.Client()` は環境変数を読み、ADC は Cloud Run のサービスアカウントでも
+GKE の Workload Identity でも同じように機能する。第 1〜4 章の結論（app 経由が不要・サービスアカウントで完結・データが学習に使用されない）は
+実行基盤に依存しないため、後から入れ替えるコストは低い。
+
+| 観点 | Cloud Run | GKE |
+|---|---|---|
+| 固定費 | `min-instances=0` なら未使用時はゼロ | クラスタが常時課金。**ただし既存クラスタに空き容量があれば追加費用はほぼゼロ** |
+| サービスアカウントの割り当て | `--service-account` の 1 行 | Workload Identity の設定（KSA 作成 → GSA と紐付け → アノテーション） |
+| デプロイ | `gcloud run deploy --source .` で完結 | Artifact Registry への push、マニフェスト、`kubectl` / CI |
+| HTTPS・独自ドメイン | 自動 | ロードバランサと証明書の管理が必要 |
+| アクセス制御 | IAM（`run.invoker`）や IAP をロードバランサなしで適用可 | Ingress + IAP。**既存の構成があるならそこに追加するだけ** |
+| **VPC 境界（VPC-SC / 第 5.2 章）** | Direct VPC egress または Serverless VPC Access の構成が別途必要 | **Pod が VPC 内にあり、Private Google Access で素直に組める** |
+| 隔離 | サービス単位で独立 | 同一クラスタの他ワークロードと影響し合う可能性（Namespace・リソース制限で緩和） |
+| コールドスタート | あり（`min-instances=1` で回避、その分固定費が戻る） | なし（常駐） |
+| 運用対象 | なし | クラスタのアップグレード、ノードプール、CVE パッチ |
+| 監視・ログ・オンコール | 系統が 1 つ増える | 既存の運用にそのまま乗る |
+
+**現状の判断: 既存の GKE を運用しているため、GKE に載せる。** 理由は 2 点。
+
+1. Cloud Run の主な利点（固定費ゼロ、認証設定の簡便さ、運用対象なし）は、**クラスタと運用体制が既にある時点でほぼ相殺される。**
+2. 第 5.2 章の VPC Service Controls を導入する場合、Pod が VPC 内にある GKE のほうが境界設計が素直。
+
+ただし、**PoC 段階だけ Cloud Run で立ち上げ、本番で GKE に移す**進め方も有効。GKE 側の変更に承認プロセスがある場合は、
+そのほうが立ち上がりが速く、上記のとおり後戻りのコストも低い。
+
+**どちらを選んでも必要な対応**: `proposal_app/store.py` のインメモリ状態は、GKE でレプリカを複数にした場合も保持されない
+（Cloud Run と同様、むしろセッションアフィニティの分だけ厄介になる）。BigQuery / GCS / Firestore への永続化は、実行基盤の選択とは独立に必要。
+
 ---
 
 ## 3. 認証はサービスアカウントで完結する
@@ -138,7 +169,7 @@ Cloud Run 上では 3 が使われるため、同じコードがローカルで�
 | `roles/bigquery.jobUser` | クエリの実行 |
 | `roles/bigquery.dataViewer` | データの参照 |
 
-### 設定例
+### 設定例（Cloud Run の場合）
 
 ```bash
 gcloud iam service-accounts create app-runner
@@ -153,9 +184,62 @@ gcloud run deploy my-api \
   --service-account=app-runner@$PROJECT.iam.gserviceaccount.com
 ```
 
+### GKE の場合（Workload Identity）
+
+既存の GKE クラスタに載せる場合は、Kubernetes サービスアカウント（KSA）を Google サービスアカウント（GSA）に紐付けることで、
+Pod 内のコードから ADC が機能する。**アプリのコード側は変更不要**で、`genai.Client()` も `bigquery.Client()` もそのまま動く。
+
+```bash
+PROJECT=your-project-id
+GSA=app-runner@$PROJECT.iam.gserviceaccount.com
+NS=default          # Pod を置く Namespace
+KSA=app-runner      # Kubernetes サービスアカウント名
+
+# 1) クラスタで Workload Identity を有効化（未設定の場合のみ）
+gcloud container clusters update <cluster> \
+  --project="$PROJECT" --location=<location> \
+  --workload-pool="${PROJECT}.svc.id.goog"
+
+# 2) Kubernetes 側のサービスアカウントを作る
+kubectl create serviceaccount "$KSA" --namespace "$NS"
+
+# 3) KSA が GSA を借用できるようにする
+gcloud iam service-accounts add-iam-policy-binding "$GSA" \
+  --role="roles/iam.workloadIdentityUser" \
+  --member="serviceAccount:${PROJECT}.svc.id.goog[${NS}/${KSA}]"
+
+# 4) KSA に GSA を紐付ける
+kubectl annotate serviceaccount "$KSA" --namespace "$NS" \
+  iam.gke.io/gcp-service-account="$GSA"
+```
+
+Deployment 側では `serviceAccountName` に KSA を指定し、環境変数を渡す。
+
+```yaml
+spec:
+  template:
+    spec:
+      serviceAccountName: app-runner        # 上で作った KSA
+      containers:
+        - name: app
+          image: <region>-docker.pkg.dev/<project>/<repo>/proposal-app:<tag>
+          env:
+            - name: GOOGLE_GENAI_USE_VERTEXAI
+              value: "TRUE"
+            - name: GOOGLE_CLOUD_PROJECT
+              value: your-project-id
+            - name: GOOGLE_CLOUD_LOCATION
+              value: global
+            - name: GEMINI_MODEL
+              value: gemini-2.5-flash
+```
+
+IAM ロール（上表の `roles/aiplatform.user` ほか）は **GSA に付与する**。KSA には付けない。
+この場合も **サービスアカウントキー（JSON）は作成しない。**
+
 ### 注意点
 
-- `--service-account` を指定しないと Compute Engine のデフォルトサービスアカウント（過大な権限を持つことが多い）が使われる。専用のサービスアカウントを必ず作成する。
+- Cloud Run で `--service-account` を指定しない、または GKE で Workload Identity を設定しない場合、Compute Engine のデフォルトサービスアカウント（過大な権限を持つことが多い）が使われる。専用のサービスアカウントを必ず作成し、明示的に紐付ける。
 - **サービスアカウントキー（JSON ファイル）は作成しない。** ADC が機能する環境では不要であり、鍵ファイルは漏洩・ローテーション・保管のリスクを生む。組織のポリシーで `iam.disableServiceAccountKeyCreation` を有効にしておくとよい。
 - GCP 外（AWS・オンプレ等）にアプリを置く場合は、鍵ファイルではなく Workload Identity 連携を使う。
 - `roles/bigquery.dataViewer` はプロジェクト全体ではなく、データセット単位で付与するほうが望ましい（`bq add-iam-policy-binding`）。
@@ -338,6 +422,7 @@ Gemini 3 系（3.7 Flash を含む）は、生成パラメータの扱いが 2.5
 - **アクセス制御の粒度**: 全ユーザーが同じデータを見てよいか。ユーザーごとに閲覧範囲を変える必要がある場合は、アプリ側でのフィルタリング実装、または Agent Runtime + Agent Identity（ユーザー権限の委任）の検討が必要。BigQuery 側の行レベルセキュリティ／承認済みビューで担保する案もある
 - **推論の実行場所**: BigQuery の SQL 内（`AI.GENERATE` 等）で完結させるか、アプリケーション側から呼び出すか
 - **データ所在地の要件の有無**: 現状は `location="global"` で、処理リージョンは固定していない（第 5.1 章）。国内に留める要件があるかを確認する。ある場合は、リージョン固定への切り替えと、Gemini 3 系での約 10% の料金増（第 7.3 章）を織り込む
+- **実行基盤**: 既存 GKE に載せる方針（第 2 章）。PoC のみ Cloud Run で先行するか、最初から GKE に載せるかは要決定。GKE の場合は Namespace とリソース制限による他ワークロードからの隔離、レプリカ数、`store.py` の永続化方針を併せて決める
 - **監査要件**: Cloud Audit Logs で足りるか。プロンプトと応答自体の保全が必要な場合は、自社で BigQuery に保存する設計が必要
 - **コスト**: Gemini Enterprise app のライセンス費用と、Agent Platform のトークン従量課金の比較。想定リクエスト数での試算
 - **既存 app 資産の扱い**: 現行 app のプロンプト・データソース設定をどこまで自社アプリ側に移すか、並存させるか
