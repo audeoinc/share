@@ -697,6 +697,25 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   書き込み先との列対列マッピングという別概念が要るうえ、03 の収集条件
   （`collected_statement_types`）にも入っていない。
 
+## 4.30 別名なし UNNEST の要素フィールドをドット付きで参照した形（GA4）
+
+- **症状**：DAG SQL の
+  `COALESCE((SELECT value.string_value FROM UNNEST(event_params) WHERE key='utm_campaign'), ...)`
+  で `LINEAGE_PARTIALLY_RESOLVED ... @scope N (EXPRESSION_SUBQUERY) [UNRESOLVED_SOURCE]`。
+- **切り分け**：**式サブクエリは無関係**。FROM 句に UNNEST を書いた同じ形でも再現する。
+  真の条件は「**別名なし UNNEST × ドット付き参照**」。
+- **原因**：ColumnResolver は 2 部構成の識別子を「修飾子.列名」と読むため、
+  `value.string_value` の `value` をソース別名とみなす。別名なし UNNEST は別名を持たないので
+  UNRESOLVED_SOURCE。単一部の `key` は**修飾なし**参照として既存の単一 UNNEST フォールバックが
+  拾い、別名付き `ep.value.string_value` は別名が解決するため、この形だけが取り残されていた。
+- **修正**：`physical_column_resolver.js` で、**修飾ありかつ UNRESOLVED_SOURCE** の参照を、
+  スコープ内の UNNEST が 1 つだけのとき UNNEST 解決へ委譲する（修飾子ごと要素内フィールド
+  パス扱い。`#resolveCorrelatedUnnestReference` は `reference_name` 全体をフィールドパスとして
+  扱うので追加の細工は不要）。`#resolveStructFieldPathReference` の**後**に置いているので、
+  物理のネスト STRUCT（`geo.region`）の優先順位は不変。UNNEST が複数あるスコープでは
+  決められないため従来どおり未解決のままにする（誤帰属を作らない）。
+- テスト `test_v1_5_0_077`。エンジン変更（要 GCS 再デプロイ）。
+
 ## 4.22 本ドキュメントと実装の乖離（重要）
 
 `docs/SESSION_HANDOFF.md` の §1〜§4.20 は **1.5.0-032 の途中まで**しか追随していない。

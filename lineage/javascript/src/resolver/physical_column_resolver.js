@@ -262,6 +262,41 @@ class PhysicalColumnResolver {
       }
     }
 
+    /*
+     * 別名を付けない UNNEST の要素フィールドを、ドット付きで参照した形。
+     *
+     *   SELECT value.string_value FROM UNNEST(event_params) WHERE key = '...'
+     *
+     * GA4 系でごく普通に書かれる。ColumnResolver は 2 部構成の識別子を
+     * 「修飾子.列名」と読むため先頭の `value` をソース別名とみなし、一致する
+     * ソースが無いので UNRESOLVED_SOURCE にする。単一部の `key` は修飾なし
+     * 参照として直上の UNNEST フォールバックで解決するので、ドット付きだけが
+     * 取り残されて誤った LINEAGE_PARTIALLY_RESOLVED になっていた。
+     * 別名付き（`ep.value.string_value`）は ColumnResolver が別名を解決できるため
+     * ここには来ない。
+     *
+     * スコープ内の UNNEST が 1 つだけのときに限り、修飾子ごと要素内のフィールド
+     * パスとみなして UNNEST 解決へ委譲する（#resolveCorrelatedUnnestReference は
+     * reference_name の全体をフィールドパスとして扱うので、修飾子は自然に含まれる）。
+     * 複数あると `value` がどの要素のものか決められないため、従来どおり
+     * UNRESOLVED_SOURCE のままにする。物理のネスト STRUCT（geo.region）は直前の
+     * #resolveStructFieldPathReference が先に解決するので、優先順位は変わらない。
+     */
+    if (reference.qualifier &&
+        reference.resolution_status === "UNRESOLVED_SOURCE") {
+      const scopeSources = this.sourcesByScopeId.get(reference.scope_id) || [];
+      const unnestSources = scopeSources.filter(
+        (source) => source.source_type === "UNNEST"
+      );
+
+      if (unnestSources.length === 1) {
+        return this.#resolveCorrelatedUnnestReference(
+          { ...reference, source_id: unnestSources[0].source_id },
+          context
+        );
+      }
+    }
+
     return this.#createPhysicalReference(reference, {
       physicalStatus: reference.resolution_status,
       sourceId: reference.source_id,
