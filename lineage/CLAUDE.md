@@ -230,7 +230,7 @@ npm test                        # build + verify:bundle + test:release を一括
   走り、BI 側のフィルタが計算列（`origin_full_name` 等）に当たるためクラスタプルーニングも
   効かない。03 STEP 4b が `SELECT *` でテーブルへスナップショットする
   （`lnge_vw_t_column_usage_impact`→`lnge_t_column_usage_impact`、
-  `lnge_vw_t_object_dependency`→`lnge_t_object_dependency`、`refreshed_at` を付与、
+  `lnge_vw_t_object_dependency`→`lnge_t_object_dependency`、`updated_at` を付与、
   起点でクラスタ）。**定義の正本はビュー**なので 01 を直せば次回実行でスキーマも追従。
   **BigQuery の MATERIALIZED VIEW は使っていない**（使えない）：`ARRAY_AGG(... ORDER BY ...)` /
   `STRING_AGG(DISTINCT ...)` / LEFT JOIN / 分析関数 / 相関 ARRAY サブクエリを受け付けないため、

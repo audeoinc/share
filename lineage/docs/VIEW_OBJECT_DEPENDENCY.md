@@ -262,7 +262,7 @@ Community Visualization の **Templated Record** で `<pre>` に入れて表示�
 | | 名前 | 中身 |
 |---|---|---|
 | ビュー | `lnge_vw_t_object_dependency` | 定義の正本。常に最新 |
-| static テーブル | `lnge_t_object_dependency` | ビューを `SELECT *` でコピーした普通のテーブル。`refreshed_at` が付く |
+| static テーブル | `lnge_t_object_dependency` | ビューを `SELECT *` でコピーした普通のテーブル。`updated_at` が付く |
 
 > BigQuery の **マテリアライズドビューではありません**。このビューの定義は
 > `ARRAY_AGG(... ORDER BY ...)` などを使っておりマテリアライズドビューにはできないため、

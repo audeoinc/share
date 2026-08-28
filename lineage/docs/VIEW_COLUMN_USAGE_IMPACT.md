@@ -358,7 +358,7 @@ SELECT `PROJECT.UDF_DATASET.lnge_usage_sql_css`(NULL);
 | | 名前 | 中身 |
 |---|---|---|
 | ビュー | `lnge_vw_t_column_usage_impact` | 定義の正本。常に最新 |
-| static テーブル | `lnge_t_column_usage_impact` | ビューを `SELECT *` でコピーした普通のテーブル。`refreshed_at` が付く |
+| static テーブル | `lnge_t_column_usage_impact` | ビューを `SELECT *` でコピーした普通のテーブル。`updated_at` が付く |
 
 > BigQuery の **マテリアライズドビューではありません**。このビューの定義は
 > `ARRAY_AGG(... ORDER BY ...)` などを使っておりマテリアライズドビューにはできないため、
