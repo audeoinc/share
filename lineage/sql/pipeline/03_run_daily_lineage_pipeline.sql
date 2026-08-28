@@ -263,7 +263,7 @@ DECLARE preview_only BOOL DEFAULT FALSE;
 -- 'vw_' dropped, so reports read a physical, clustered, BI-Engine-eligible table.
 -- The views stay the single definition; these tables are only a static copy, rebuilt inside
 -- the STEP 4 gate so they are refreshed exactly when impact is. Each row carries
--- refreshed_at. Set FALSE to keep reports on the views.
+-- updated_at. Set FALSE to keep reports on the views.
 DECLARE build_static_report_tables BOOL DEFAULT TRUE;
 -- Whether the static column-usage table keeps the two full-SQL columns,
 -- usage_definition_text and usage_definition_html. Both repeat the ENTIRE SQL of the
@@ -4251,10 +4251,10 @@ THEN
       CREATE OR REPLACE TABLE `%s.%s.%s`
       CLUSTER BY origin_project, origin_dataset, origin_object
       OPTIONS (
-        description = 'Static copy of the object-level dependency view, rebuilt by 03 STEP 4b whenever the impact graph is rebuilt. An ordinary table, not a BigQuery materialized view. Same columns as the view plus refreshed_at. Clustered on the origin object so filtering by origin prunes. The view is the definition; edit it in 01 and this table follows on the next run.'
+        description = 'Static copy of the object-level dependency view, rebuilt by 03 STEP 4b whenever the impact graph is rebuilt. An ordinary table, not a BigQuery materialized view. Same columns as the view plus updated_at. Clustered on the origin object so filtering by origin prunes. The view is the definition; edit it in 01 and this table follows on the next run.'
       )
       AS
-      SELECT *, CURRENT_TIMESTAMP() AS refreshed_at
+      SELECT *, CURRENT_TIMESTAMP() AS updated_at
       FROM `%s.%s.%s`
       """,
       repository_project_id, repository_dataset, table_object_dependency,
@@ -4266,10 +4266,10 @@ THEN
       CREATE OR REPLACE TABLE `%s.%s.%s`
       CLUSTER BY origin_project, origin_dataset, origin_object, origin_column
       OPTIONS (
-        description = 'Static copy of the column usage x impact view, rebuilt by 03 STEP 4b whenever the impact graph is rebuilt. An ordinary table, not a BigQuery materialized view. Same columns as the view plus refreshed_at, unless static_tables_include_usage_sql was FALSE, which drops usage_definition_text and usage_definition_html. Clustered on the origin column so filtering by origin prunes. Highlights inside usage_definition_html are fixed at build time over the full partition; a report that filters further and needs the highlights to follow should read the view instead.'
+        description = 'Static copy of the column usage x impact view, rebuilt by 03 STEP 4b whenever the impact graph is rebuilt. An ordinary table, not a BigQuery materialized view. Same columns as the view plus updated_at, unless static_tables_include_usage_sql was FALSE, which drops usage_definition_text and usage_definition_html. Clustered on the origin column so filtering by origin prunes. Highlights inside usage_definition_html are fixed at build time over the full partition; a report that filters further and needs the highlights to follow should read the view instead.'
       )
       AS
-      SELECT %s, CURRENT_TIMESTAMP() AS refreshed_at
+      SELECT %s, CURRENT_TIMESTAMP() AS updated_at
       FROM `%s.%s.%s`
       """,
       repository_project_id, repository_dataset, table_column_usage_impact,
@@ -4382,7 +4382,7 @@ EXECUTE IMMEDIATE FORMAT(
     last_analyzed_at,
     definition_hash,
     definition_text,
-    CURRENT_TIMESTAMP() AS refreshed_at
+    CURRENT_TIMESTAMP() AS updated_at
   FROM not_covered
   QUALIFY ROW_NUMBER() OVER (
     PARTITION BY definition_hash

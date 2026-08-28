@@ -11,7 +11,7 @@
   subqueries are all unsupported -- so these are plain `CREATE OR REPLACE TABLE ... AS
   SELECT *` snapshots. The views stay the single definition: editing one in 01 changes the
   table's schema on the next run with nothing to keep in step by hand. Each row carries
-  `refreshed_at`.
+  `updated_at`.
   Rebuilt on the same condition as the impact rebuild (`has_analysis_work OR
   orphan_direct_dep_deleted > 0`) so the static tables are exactly as fresh as what they are
   built from, plus one escape hatch: they are also built when they do not exist yet, since
@@ -672,7 +672,7 @@
   `last_analyzed_hash` = `definition_hash`), each tagged with a `coverage_reason`
   (`REGISTERED_NOT_YET_ANALYZED` / `ANALYSIS_<status>` /
   `DEFINITION_CHANGED_NOT_REANALYZED`) and deduped by `definition_hash`, plus a
-  `refreshed_at`. It is built straight from the registry (whose `definition_text` /
+  `updated_at`. It is built straight from the registry (whose `definition_text` /
   `definition_hash` / `analysis_status` are already synchronized by STEP 1-2), so
   it adds no INFORMATION_SCHEMA re-scan and never piles up across runs (full
   refresh). The table's qualified name is assembled directly (backtick-quoted; it

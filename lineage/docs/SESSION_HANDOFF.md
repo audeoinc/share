@@ -793,7 +793,7 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   `lnge_vw_t_column_usage_impact` → `lnge_t_column_usage_impact`、
   `lnge_vw_t_object_dependency` → `lnge_t_object_dependency`。
 - **正本はビュー**：`SELECT *` で作るので、01 でビューを直せば次回実行でテーブルのスキーマも
-  追従する（二重管理しない）。各行に `refreshed_at` を付与。
+  追従する（二重管理しない）。各行に `updated_at` を付与。
 - **再構築条件**：STEP 4 と同じ（`has_analysis_work OR orphan_direct_dep_deleted > 0`）＋
   **テーブル未作成なら作る**。後者が無いと「ビューをデプロイした直後の、何も変わらない実行」で
   テーブルが作られず、レポートの参照先が無い状態になる。`preview_only` では実行しない。
