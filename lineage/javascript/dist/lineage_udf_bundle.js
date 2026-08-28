@@ -2385,7 +2385,15 @@ class SelectParser {
    * @returns {boolean}
    */
   #isAliasToken(token) {
-    return this.#isIdentifierToken(token);
+    /*
+     * 明示 alias（`expr AS name`）は AS があるぶん構造との区別が付くため、
+     * 暗黙 alias と同じ「非予約 Keyword も列名として使える」基準を適用する。
+     * BigQuery では `offset` / `value` / `key` などは予約語ではなく、
+     * `SELECT x AS offset` は正当な SQL。ここを IDENTIFIER 限定にしていたため
+     * "invalid explicit alias" で解析ごと失敗していた。
+     * 真の予約語（NULL / END など）は #isColumnNameToken 側で除外される。
+     */
+    return this.#isColumnNameToken(token);
   }
 
   /**
@@ -2878,12 +2886,24 @@ class ExpressionParser {
       normalized_token: "."
     };
 
-    return AstFactory.createFunctionCall(
+    const node = AstFactory.createFunctionCall(
       [nameToken],
       [baseNode],
       dotToken,
       fieldToken
     );
+
+    /*
+     * 後置フィールド名を残す。式の値としては不透明な STRUCT のフィールド選択なので
+     * lineage は持たないが（v1.5.0-049）、base がテーブル別名＝行値のときだけは
+     * 「その行のどの列か」を決める情報になる。
+     *   ARRAY_AGG(t ORDER BY x LIMIT 1)[OFFSET(0)].session_id -> t.session_id
+     * ColumnResolver がこの名前を使って行参照を列参照へ絞り込む。
+     */
+    node.field_access_name = fieldToken.normalized_token;
+    node.field_access_name_raw = fieldToken.token;
+
+    return node;
   }
 
   #parsePrimaryExpression() {
@@ -4227,6 +4247,27 @@ class ColumnResolver {
       return;
     }
 
+    /*
+     * 後置フィールドアクセス（`base.field`）の下を走査するときは、フィールド名を
+     * context に載せて降りる。base にテーブル別名（＝行値）が現れた場合だけ、
+     * その別名を修飾子・フィールド名を列名とする「修飾あり参照」として解決するため。
+     *   ARRAY_AGG(t ORDER BY x LIMIT 1)[OFFSET(0)].session_id -> t.session_id
+     * 別名に一致しない普通の列（上例の x）は従来どおり解決されるので、
+     * この文脈を持ち回っても影響しない。
+     */
+    if (node.node_type === NodeType.FUNCTION_CALL_EXPRESSION &&
+        node.field_access_name) {
+      const fieldContext = {
+        ...context,
+        pending_field_access_name: node.field_access_name
+      };
+
+      this.#collectFromAst(
+        node.arguments, fieldContext, scope, sourceResolution, result
+      );
+      return;
+    }
+
     if (node.node_type === "IDENTIFIER_EXPRESSION") {
       /*
        * BigQueryの日時関数ではDAY / MONTH / YEARなどが、文字列ではなく
@@ -4342,7 +4383,75 @@ class ColumnResolver {
     });
   }
 
+  /**
+   * 修飾なし識別子がテーブル別名（＝行値）を指しているかを見て、行参照として解決する。
+   *
+   * GoogleSQL では `SELECT t FROM tbl AS t` の `t` は行全体の STRUCT で、
+   * `ARRAY_AGG(t ORDER BY x LIMIT 1)[OFFSET(0)].field`（グループ内の代表行を取る
+   * 定番イディオム）で使われる。列として解決しようとすると当然見つからず、
+   * 物理表なら PHYSICAL_COLUMN_NOT_FOUND(ERROR)、CTE なら未解決の警告になり、
+   * さらに本来の依存（その行の列）が系統から丸ごと落ちていた。
+   *
+   * 後置フィールドが分かっているときは `別名.フィールド` の修飾あり参照へ落とす
+   * （＝列単位で正確に解決できる）。分からないときは行そのものへの参照として
+   * ソースに紐付け、下流で全列へ展開させる。
+   *
+   * 列としての解決を先に試したうえでの最後の砦なので、同名の列があればそちらが勝つ。
+   */
+  #resolveRowReference(node, context, scope, sourceResolution, columnName) {
+    const source = this.#findSource(sourceResolution, scope.scope_id, columnName);
+
+    if (!source) {
+      return null;
+    }
+
+    /*
+     * 行値になり得るのは「表」を表すソースだけ。UNNEST の別名は要素の値であって
+     * 行ではなく、TABLE_FUNCTION も同様に行集合の別名として扱わない。
+     * ここを絞らないと `FROM d.t AS t, UNNEST(Col) AS Col` の `Col` を行参照と
+     * 誤認し、本来の配列列としての系統を失う（test_v1_5_0_065）。
+     */
+    if (source.source_type !== "PHYSICAL_TABLE" &&
+        source.source_type !== "CTE" &&
+        source.source_type !== "SUBQUERY") {
+      return null;
+    }
+
+    /*
+     * 後置フィールドが無い形は扱わない（下の return null）。ある場合は
+     * `t.field` と書かれたのと同じ意味なので、GoogleSQL の解決順どおり
+     * テーブル別名を優先してよい。
+     */
+    if (context.pending_field_access_name) {
+      return this.#resolveQualifiedReference(
+        node,
+        context,
+        scope,
+        sourceResolution,
+        [columnName],
+        context.pending_field_access_name,
+        null
+      );
+    }
+
+    /*
+     * 後置フィールドが分からない行値（`SELECT t`、`ARRAY_AGG(t) AS xs` など）は対象外。
+     * 「その行の全列」に相当する参照を式の途中に差し込むと、SELECT 項目の
+     * ワイルドカードを前提にしている下流を壊す（実際にクラッシュした）。
+     * 絞り込める形だけを扱い、それ以外は従来どおりの解決に委ねる。
+     */
+    return null;
+  }
+
   #resolveUnqualifiedReference(node, context, scope, sourceResolution, columnName) {
+    const rowReference = this.#resolveRowReference(
+      node, context, scope, sourceResolution, columnName
+    );
+
+    if (rowReference) {
+      return rowReference;
+    }
+
     const outputAlias = this.#findVisibleOutputAlias(
       scope.scope_id,
       columnName,

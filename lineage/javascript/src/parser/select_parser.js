@@ -622,7 +622,15 @@ class SelectParser {
    * @returns {boolean}
    */
   #isAliasToken(token) {
-    return this.#isIdentifierToken(token);
+    /*
+     * 明示 alias（`expr AS name`）は AS があるぶん構造との区別が付くため、
+     * 暗黙 alias と同じ「非予約 Keyword も列名として使える」基準を適用する。
+     * BigQuery では `offset` / `value` / `key` などは予約語ではなく、
+     * `SELECT x AS offset` は正当な SQL。ここを IDENTIFIER 限定にしていたため
+     * "invalid explicit alias" で解析ごと失敗していた。
+     * 真の予約語（NULL / END など）は #isColumnNameToken 側で除外される。
+     */
+    return this.#isColumnNameToken(token);
   }
 
   /**
