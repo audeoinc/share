@@ -55,14 +55,14 @@
 ブラウザ（HTML + JavaScript）
         │  HTTPS（同一オリジンの /api/... を呼ぶだけ）
         ▼
-Cloud Run（Python / FastAPI）      ← アプリケーションのコードはここ
+Cloud Run / GKE（Python / FastAPI）← アプリケーションのコードはここ（基盤の選択は 2 章末）
         ├──────────────► BigQuery（業務データ）
         └──────────────► Gemini Enterprise Agent Platform（推論）
 ```
 
 処理の流れ:
 
-1. ブラウザの JavaScript が Cloud Run 上の API を呼ぶ
+1. ブラウザの JavaScript が、アプリを載せた Cloud Run / GKE 上の API を呼ぶ
 2. Python が BigQuery からデータを取得する
 3. 取得したデータをもとに Gemini に推論させる
 4. 結果を JSON で返し、ブラウザ側で表示する
@@ -95,7 +95,7 @@ def ask(q: Query):
 ```
 
 `vertexai=True` の指定が、Agent Platform のエンドポイント（`aiplatform.googleapis.com`）を使うことを意味する。
-コードに書かず、環境変数（`GOOGLE_GENAI_USE_VERTEXAI=TRUE` / `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION`）で指定することもできる。Cloud Run ではそちらのほうが扱いやすい。
+コードに書かず、環境変数（`GOOGLE_GENAI_USE_VERTEXAI=TRUE` / `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION`）で指定することもできる。Cloud Run でも GKE でも、そちらのほうが扱いやすい。
 
 ### 実装イメージ（ブラウザ側）
 
