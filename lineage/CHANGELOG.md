@@ -1,5 +1,38 @@
 # 1.5.0-032
 
+- Fixed `CREATE ... AS WITH cte AS (...) SELECT ...` losing its lineage silently (engine).
+  `#parseCommonTableExpressions` only parses CTEs when the first token is `WITH`, so a
+  statement starting with `CREATE` never had its CTEs read: ClauseParser still found the
+  depth-0 SELECT, the CTE name resolved to nothing, and the object came back
+  COMPLETED_WITH_WARNINGS with no dependencies -- data quietly missing rather than a
+  failure anyone would notice. `CREATE ... AS SELECT ...` (no CTE) always worked, which
+  is why the gap went unseen.
+  Added `#stripStatementPrefix`: when the first token is `CREATE` or `EXPORT`, parsing
+  restarts after the first depth-0 `AS` whose body begins with SELECT / WITH / `(`.
+  Anchoring on the depth-0 `AS` means the prefix's contents do not matter -- a column
+  schema, `PARTITION BY`, `CLUSTER BY` and `OPTIONS(...)` all sit inside parentheses or
+  before the `AS` -- so unlike a regex there is no shape to enumerate. Restricting it to
+  CREATE / EXPORT is what keeps `WITH t AS (...) SELECT ...` intact: without that guard
+  the CTE's own `AS` would be mistaken for the boundary and the CTE discarded.
+  Test: test_v1_5_0_076. Bundle rebuilt (sha256 242dcc8b..., 468617 bytes);
+  test:release 56 / golden 48 PASS. Engine change -- the GCS bundle must be re-uploaded.
+
+- Generalized the CTAS strip in `03_run_daily_lineage_pipeline.sql`, and documented why it
+  must stay. It is easy to read the engine fix above as making the strip redundant; it
+  does not. `definition_text` is the input to `sql_fingerprint`, and the fingerprint
+  normalizes literals but not table identifiers -- so leaving the `CREATE ... AS` prefix
+  in place gives a rotating destination (`tmp_20260101`, `tmp_20260102`, ...) a different
+  fingerprint each run, defeating the ephemeral collapsing and growing the registry
+  without bound. A comment now says so at the call site.
+  The old pattern enumerated prefix shapes and matched only a bare name optionally
+  followed by `OPTIONS(...)`, so `PARTITION BY` / `CLUSTER BY`, a column schema, and
+  `CREATE TEMP TABLE` fell through and were fingerprinted with their destination name
+  still in the text. The pattern now takes the first ` AS ` whose body starts with
+  SELECT / WITH / `(` and writes that body back through a capture group (RE2 has no
+  lookahead). Verified across all those shapes, including that two rotating destinations
+  reduce to identical bodies. Objects whose text changes as a result re-analyze once,
+  since definition_hash is the hash of definition_text.
+
 - Fixed the HTML UDFs added above being named and placed unlike every other UDF in the
   deployment. They were assembled from `bootstrap_table_name_prefix/suffix` and created
   in the repository dataset -- so an environment that sets a different prefix for tables

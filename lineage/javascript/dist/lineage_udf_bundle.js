@@ -7842,6 +7842,28 @@ class QueryParser {
     }
 
     /*
+     * DDL の前置き（CREATE ... AS / EXPORT DATA ... AS）を落として、本体のクエリだけを
+     * 解析する。ClauseParser は深さ0の SELECT を拾えるので `CREATE TABLE t AS SELECT ...`
+     * は前置きが残っていても通るが、`CREATE TABLE t AS WITH c AS (...) SELECT ...` は
+     * 通らない。#parseCommonTableExpressions が「先頭トークンが WITH」のときしか CTE を
+     * 解析しないため、CREATE で始まると CTE が読まれず、深さ0の SELECT だけが拾われて
+     * CTE 名が未知のソースになる。エラーにならず COMPLETED_WITH_WARNINGS で
+     * 系統だけが静かに欠落するので、たちが悪い。
+     *
+     * 対象テーブル名は解析メタデータ（view_project/dataset/name）で与えられるため、
+     * 前置きは lineage に寄与しない。落として問題ない。
+     */
+    const statementPrefixTokens = this.#stripStatementPrefix(this.tokens);
+
+    if (statementPrefixTokens) {
+      /* AS の後ろは新しい query_expr。理由は #stripWrappingParentheses と同じ。 */
+      return new QueryParser(this.#normalizeTokenDepth(statementPrefixTokens), {
+        isSubquery: this.isSubquery,
+        disableSetOperations: false
+      }).parse();
+    }
+
+    /*
      * CREATE [OR REPLACE] [TEMP] TABLE t AS (SELECT ...) / CREATE VIEW v AS
      * (SELECT ...) のように、文の本体が「AS (クエリ)」で括弧に包まれている場合。
      * CREATE ... AS SELECT ...（括弧なし）は ClauseParser が深さ0の SELECT を拾えるが、
@@ -8414,6 +8436,66 @@ class QueryParser {
     }
 
     return inner;
+  }
+
+  /**
+   * DDL の前置きを落として、本体のクエリ Token を返す。落とせない場合は null。
+   *
+   * 条件：先頭の非コメント Token が CREATE か EXPORT で、深さ0の 'AS' があり、その直後
+   * （コメント除く）が SELECT / WITH / '(' で始まること。
+   *
+   * 深さ0の最初の 'AS' を境界にするので、前置きの中身がどれだけ増えても影響を受けない。
+   * 列スキーマ `(id INT64, ...)`、`PARTITION BY DATE(dt)`、`CLUSTER BY id`、
+   * `OPTIONS(description='...')` はいずれも括弧の中か AS より前に現れるため、
+   * 03 側の正規表現のように形ごとに列挙する必要がない。
+   *
+   * 先頭が CREATE / EXPORT のときだけ動くのが要点で、これが無いと
+   * `WITH t AS (SELECT ...) SELECT ...` の CTE の 'AS' を境界と誤認して CTE ごと
+   * 捨ててしまう。SELECT / WITH / '(' で始まる通常のクエリには一切触れない。
+   */
+  #stripStatementPrefix(tokens) {
+    const meaningful = [];
+
+    for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex++) {
+      if (tokens[tokenIndex].token_type !== "COMMENT") {
+        meaningful.push(tokenIndex);
+      }
+    }
+
+    if (meaningful.length < 3) {
+      return null;
+    }
+
+    const firstToken = tokens[meaningful[0]];
+
+    if (firstToken.normalized_token !== "CREATE" && firstToken.normalized_token !== "EXPORT") {
+      return null;
+    }
+
+    let asPosition = -1;
+
+    for (let position = 1; position < meaningful.length; position++) {
+      const token = tokens[meaningful[position]];
+
+      if (token.normalized_token === "AS" && token.paren_depth === 0) {
+        asPosition = position;
+        break;
+      }
+    }
+
+    if (asPosition < 0 || asPosition + 1 >= meaningful.length) {
+      return null;
+    }
+
+    const bodyToken = tokens[meaningful[asPosition + 1]];
+    const isQueryStart = bodyToken.token === "(" ||
+      ["SELECT", "WITH"].includes(bodyToken.normalized_token);
+
+    if (!isQueryStart) {
+      return null;
+    }
+
+    return tokens.slice(meaningful[asPosition + 1]);
   }
 
   /**
