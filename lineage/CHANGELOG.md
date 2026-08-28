@@ -4,7 +4,11 @@
   view created by 01 alongside `lnge_vw_t_column_usage_impact`. One row per
   (origin object -> impacted object) pair -- not per path, so `COUNT(*)` is the number of
   downstream objects -- carrying `impact_rank` as the SHORTEST hop count (1 = direct
-  reference), `max_impact_rank`, `path_count` and per-object column counts. The column
+  reference), `max_impact_rank`, `path_count` and per-object column counts. The rank is
+  relative to the origin, exactly like `depth` in `lnge_vw_t_column_usage_impact`:
+  `lnge_t_impact` seeds its recursion from every edge, so every node is also an origin and
+  the same impacted object appears once per origin at its own distance. Read it with an
+  origin selected. The column
   detail is aggregated into the row twice: as `column_dependencies`
   (`ARRAY<STRUCT<origin_column, impacted_column, impact_rank, path_count,
   resolution_statuses>>`) and, because Looker Studio cannot read ARRAY fields, as the
