@@ -1,6 +1,6 @@
 # 1.5.0-032
 
-- Added report CACHE TABLES for the two report views, rebuilt by a new 03 STEP 4b:
+- Added STATIC TABLES for the two report views, rebuilt by a new 03 STEP 4b:
   `lnge_vw_t_column_usage_impact` -> `lnge_t_column_usage_impact` and
   `lnge_vw_t_object_dependency` -> `lnge_t_object_dependency` (the view name with `vw_`
   dropped). Both views re-aggregate the whole impact graph on every read, and a BI tool's
@@ -11,25 +11,25 @@
   subqueries are all unsupported -- so these are plain `CREATE OR REPLACE TABLE ... AS
   SELECT *` snapshots. The views stay the single definition: editing one in 01 changes the
   table's schema on the next run with nothing to keep in step by hand. Each row carries
-  `cached_at`.
+  `refreshed_at`.
   Rebuilt on the same condition as the impact rebuild (`has_analysis_work OR
-  orphan_direct_dep_deleted > 0`) so the caches are exactly as fresh as what they are
+  orphan_direct_dep_deleted > 0`) so the static tables are exactly as fresh as what they are
   built from, plus one escape hatch: they are also built when they do not exist yet, since
   the first run after deploying the views usually changes nothing and reports would
   otherwise have no table to read. Skipped under `preview_only`. A failure is reported as
-  a `REFRESH_REPORT_CACHE` / `FAILED` row rather than taking the pipeline down --
+  a `REFRESH_STATIC_REPORT_TABLES` / `FAILED` row rather than taking the pipeline down --
   these are derived data, and the likely cause is a deployment whose 01 predates the views.
   One behavior difference, in the column view only: `usage_definition_html` collects its
   highlight positions with an analytic `ARRAY_AGG OVER (PARTITION BY origin column, usage
   object, usage definition)`. Analytic functions run after WHERE, so against the VIEW a
-  report's extra filters also narrow the highlights; in the cache table the
+  report's extra filters also narrow the highlights; in the static table the
   aggregation is fixed at build time over the full partition. The partition key already
   pins the origin column and the object, so the ordinary "pick an origin, show its SQL"
   case is identical -- only a report that filters further and expects the highlights to
   follow needs to keep reading the view.
-  New 03 toggles: `build_report_cache_tables` (default TRUE) and
-  `cache_usage_sql_columns` (default TRUE). The latter drops
-  `usage_definition_text` / `usage_definition_html` from the cache table: both
+  New 03 toggles: `build_static_report_tables` (default TRUE) and
+  `static_tables_include_usage_sql` (default TRUE). The latter drops
+  `usage_definition_text` / `usage_definition_html` from the static table: both
   repeat the object's ENTIRE SQL on every row of that object (one row per origin column x
   usage site x path), so they can dominate the table's size and the bytes billed for any
   query that selects them.

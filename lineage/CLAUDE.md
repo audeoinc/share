@@ -87,7 +87,7 @@ npm test                        # build + verify:bundle + test:release を一括
     `m_`（master）/`t_`（transaction）、ビュー `vw_` + `t_`/`m_`。base に "lineage" は
     入れない（prefix に集約済み）。例：`lnge_m_definition_registry` /
     `lnge_t_impact` / `lnge_t_column_usage` / `lnge_vw_t_column_usage_impact` /
-    `lnge_vw_t_object_dependency`（キャッシュテーブルは `vw_` を落とした
+    `lnge_vw_t_object_dependency`（static テーブルは `vw_` を落とした
     `lnge_t_column_usage_impact` / `lnge_t_object_dependency`）。
     UDF は `lnge_analyze_json` / `lnge_fingerprint_sql` / `lnge_render_dynamic_sql`。
     データセット名（`lineage_repository` 等）・GCS バンドル・ファイル名・JS API 名は
@@ -226,23 +226,23 @@ npm test                        # build + verify:bundle + test:release を一括
   （impact は中間ノードを `dependency_path` にしか持たないため）。解析対象外の上流
   （生ソース表）は残し `origin_is_analysis_target=FALSE` で識別。registry は
   (project,dataset,name) で1行に集約してから join（`object_type` は join キーにしない）。
-  **レポート用ビューのキャッシュテーブル（03 STEP 4b）**：2つのレポートビューは読むたびに全集計が
+  **レポート用ビューの static 化（03 STEP 4b）**：2つのレポートビューは読むたびに全集計が
   走り、BI 側のフィルタが計算列（`origin_full_name` 等）に当たるためクラスタプルーニングも
   効かない。03 STEP 4b が `SELECT *` でテーブルへスナップショットする
   （`lnge_vw_t_column_usage_impact`→`lnge_t_column_usage_impact`、
-  `lnge_vw_t_object_dependency`→`lnge_t_object_dependency`、`cached_at` を付与、
+  `lnge_vw_t_object_dependency`→`lnge_t_object_dependency`、`refreshed_at` を付与、
   起点でクラスタ）。**定義の正本はビュー**なので 01 を直せば次回実行でスキーマも追従。
   **BigQuery の MATERIALIZED VIEW は使っていない**（使えない）：`ARRAY_AGG(... ORDER BY ...)` /
   `STRING_AGG(DISTINCT ...)` / LEFT JOIN / 分析関数 / 相関 ARRAY サブクエリを受け付けないため、
   `CREATE OR REPLACE TABLE ... AS SELECT *` の普通のテーブル。
   再構築条件は STEP 4 と同じ（`has_analysis_work OR orphan_direct_dep_deleted > 0`）＋
   「テーブルが未作成なら作る」。`preview_only` では実行しない。失敗しても
-  `REFRESH_REPORT_CACHE / FAILED` 行を出すだけでパイプラインは止めない（派生データのため）。
+  `REFRESH_STATIC_REPORT_TABLES / FAILED` 行を出すだけでパイプラインは止めない（派生データのため）。
   **注意**：`usage_definition_html` のハイライトは分析関数で集めるので、ビュー経由なら
-  レポート側の追加フィルタに追従するが、キャッシュテーブルでは作成時に確定する
+  レポート側の追加フィルタに追従するが、static テーブルでは作成時に確定する
   （パーティションキーに起点カラムと対象オブジェクトが入っているので通常用途では同結果）。
   `usage_definition_text`/`_html` は SQL 全文を行ごとに繰り返すため、
-  `cache_usage_sql_columns = FALSE` でキャッシュから外せる。
+  `static_tables_include_usage_sql = FALSE` で static テーブルから外せる。
   **診断の generation_type**：`lnge_t_diagnostic` に `generation_type`（nullable）を
   追加。View 定義か Job SQL かを registry と join せず判別可（'VIEW_DEFINITION'＝View、
   'SCHEDULED_QUERY'/'DAG' 等＝生成テーブル Job）。値は元々診断ステージングを流れており
