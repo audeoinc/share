@@ -252,7 +252,27 @@ Community Visualization の **Templated Record** で `<pre>` に入れて表示�
 
 ---
 
-## 9. 用語
+## 9. 実体化テーブル（パフォーマンス用）
+
+このビューは読むたびに `lnge_t_impact` を集計し直すため、BI ツールからの利用では
+**同名からの `vw_` を落としたテーブル**を読むほうが速くなります。
+
+| | 名前 | 中身 |
+|---|---|---|
+| ビュー | `lnge_vw_t_object_dependency` | 定義の正本。常に最新 |
+| テーブル | `lnge_t_object_dependency` | ビューのスナップショット。`materialized_at` が付く |
+
+- テーブルは **03 の STEP 4b が作り直します**（impact を再構築したタイミング、
+  および初回でテーブルが無いとき）。`materialize_report_tables = FALSE` で止められます。
+- クラスタリングは `origin_project, origin_dataset, origin_object`。**起点で絞ると実際にスキャン量が落ちます**。
+- ビューの定義を変えると、次の 03 実行でテーブルのスキーマも自動で追従します
+  （`SELECT *` で作っているため）。
+- BigQuery の MATERIALIZED VIEW は `ARRAY_AGG(... ORDER BY ...)` などを受け付けないので、
+  通常のテーブルとして作っています。
+
+---
+
+## 10. 用語
 
 | 用語 | 意味 |
 |---|---|
