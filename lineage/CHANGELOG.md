@@ -1,5 +1,34 @@
 # 1.5.0-032
 
+- Added `lnge_vw_t_object_dependency`, an object-level (table/view) transitive dependency
+  view created by 01 alongside `lnge_vw_t_column_usage_impact`. One row per
+  (origin object -> impacted object) pair -- not per path, so `COUNT(*)` is the number of
+  downstream objects -- carrying `impact_rank` as the SHORTEST hop count (1 = direct
+  reference), `max_impact_rank`, `path_count` and per-object column counts. The column
+  detail is aggregated into the row twice: as `column_dependencies`
+  (`ARRAY<STRUCT<origin_column, impacted_column, impact_rank, path_count,
+  resolution_statuses>>`) and, because Looker Studio cannot read ARRAY fields, as the
+  flattened `column_dependencies_text` / `origin_columns_text` / `impacted_columns_text`.
+  The route is exposed the same way, as `shortest_object_path` plus
+  `shortest_object_path_text`: the shortest column path with its trailing column segment
+  dropped and consecutive repeats of the same object collapsed to one hop.
+  Built from `lnge_t_impact` (already one row per distinct path) rather than from
+  `lnge_vw_t_column_usage_impact`, so edges whose reference never resolved to a physical
+  column are not lost and the usage join cannot multiply the aggregates. The rollup is
+  two-stage -- column-pair grain first, then object grain -- because `ARRAY_AGG(DISTINCT
+  <struct>)` is not allowed; the first stage is what keeps the array duplicate-free.
+  Scope: ephemeral (`fp_<hash>`), inactive, and non-COMPLETED objects are dropped from
+  BOTH endpoints, so only what the 03 DECLAREs actually analyzed appears. A path that
+  merely passes THROUGH an excluded object survives at its true rank, since impact keeps
+  intermediate nodes only inside `dependency_path`. Upstream objects that are referenced
+  but never analyzed (raw sources) have no registry row and are kept, flagged
+  `origin_is_analysis_target = FALSE` -- dropping them would remove every edge entering
+  the analyzed area from outside. The registry join is pre-aggregated to one row per
+  object key and does not use `object_type`, so it cannot fan out even when the type the
+  analyzer saw differs from the registry's. SQL only; no engine change, so the bundle and
+  the GCS deployment are untouched. Redeploy with `recreate_views_only = TRUE`.
+  Column reference for report builders: `docs/VIEW_OBJECT_DEPENDENCY.md`.
+
 - Fixed a table alias used as a *row value* -- `ARRAY_AGG(t ORDER BY x LIMIT 1)[OFFSET(0)].col`,
   the standard "representative row per group" idiom -- being resolved as a column named
   `t` (engine). Over a CTE that produced LINEAGE_PARTIALLY_RESOLVED; over a physical table

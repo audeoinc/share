@@ -86,7 +86,8 @@ npm test                        # build + verify:bundle + test:release を一括
     `<可変prefix> + 'lnge_' + marker + base + <可変suffix>`。marker はテーブル
     `m_`（master）/`t_`（transaction）、ビュー `vw_` + `t_`/`m_`。base に "lineage" は
     入れない（prefix に集約済み）。例：`lnge_m_definition_registry` /
-    `lnge_t_impact` / `lnge_t_column_usage` / `lnge_vw_t_column_usage_impact`。
+    `lnge_t_impact` / `lnge_t_column_usage` / `lnge_vw_t_column_usage_impact` /
+    `lnge_vw_t_object_dependency`。
     UDF は `lnge_analyze_json` / `lnge_fingerprint_sql` / `lnge_render_dynamic_sql`。
     データセット名（`lineage_repository` 等）・GCS バンドル・ファイル名・JS API 名は
     対象外。新規オブジェクトも同規則に従う。
@@ -213,6 +214,15 @@ npm test                        # build + verify:bundle + test:release を一括
   テーブル作成直後に併せて作成**（`lnge_t_column_usage`／`lnge_t_impact` の後）。
   既存デプロイでビューだけ追加/更新したい場合は 01 の該当 `CREATE OR REPLACE VIEW`
   ブロックを単独実行すればよい（データを持たないので無害）。
+  **オブジェクト単位の依存（lnge_vw_t_object_dependency）**：テーブル/ビュー粒度の
+  推移的依存ビュー。`lnge_t_impact` を (起点object → 影響先object) に集約（1ペア=1行、
+  `impact_rank` は最短ホップ）。カラム内訳は `ARRAY<STRUCT>` と、Looker Studio が配列を
+  読めないため文字列版を併設（`*_text`）。`ARRAY_AGG(DISTINCT <struct>)` が使えないので
+  「カラムペア粒度 → オブジェクト粒度」の2段集約にしてある（1段目が重複排除）。
+  端点が EPHEMERAL/非アクティブ/未 COMPLETED なら除外するが、**経由するだけの経路は残る**
+  （impact は中間ノードを `dependency_path` にしか持たないため）。解析対象外の上流
+  （生ソース表）は残し `origin_is_analysis_target=FALSE` で識別。registry は
+  (project,dataset,name) で1行に集約してから join（`object_type` は join キーにしない）。
   **診断の generation_type**：`lnge_t_diagnostic` に `generation_type`（nullable）を
   追加。View 定義か Job SQL かを registry と join せず判別可（'VIEW_DEFINITION'＝View、
   'SCHEDULED_QUERY'/'DAG' 等＝生成テーブル Job）。値は元々診断ステージングを流れており

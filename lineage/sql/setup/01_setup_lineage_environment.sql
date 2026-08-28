@@ -144,6 +144,7 @@ DECLARE table_diagnostic STRING;
 DECLARE table_job_registry STRING;
 DECLARE table_column_usage STRING;
 DECLARE view_column_usage_impact STRING;
+DECLARE view_object_dependency STRING;
 -- HTML 生成 UDF の本体 JS。build_usage_html_udf.js が生成ブロックで SET する。
 DECLARE usage_html_udf_js STRING;
 
@@ -260,6 +261,11 @@ SET table_column_usage =
 SET view_column_usage_impact =
   bootstrap_table_name_prefix || 'lnge_' || 'vw_' || 't_' || 'column_usage_impact'
     || bootstrap_table_name_suffix;
+-- Object (table/view) level dependency view, aggregated from the same transaction
+-- table as the impact view, so its marker is 't_' -> lnge_vw_t_object_dependency.
+SET view_object_dependency =
+  bootstrap_table_name_prefix || 'lnge_' || 'vw_' || 't_' || 'object_dependency'
+    || bootstrap_table_name_suffix;
 
 ASSERT REGEXP_CONTAINS(table_definition_registry, r'^[A-Za-z0-9_-]+$')
 AS 'Invalid table_definition_registry name.';
@@ -275,6 +281,8 @@ ASSERT REGEXP_CONTAINS(table_column_usage, r'^[A-Za-z0-9_-]+$')
 AS 'Invalid table_column_usage name.';
 ASSERT REGEXP_CONTAINS(view_column_usage_impact, r'^[A-Za-z0-9_-]+$')
 AS 'Invalid view_column_usage_impact name.';
+ASSERT REGEXP_CONTAINS(view_object_dependency, r'^[A-Za-z0-9_-]+$')
+AS 'Invalid view_object_dependency name.';
 
 SET repository_dataset_full_name = FORMAT(
   '%s.%s',
@@ -1306,6 +1314,253 @@ EXECUTE IMMEDIATE FORMAT(
   repository_dataset_full_name, table_impact,
   bootstrap_udf_project_id, bootstrap_udf_dataset,
   bootstrap_udf_usage_sql_html_function_name
+);
+
+-- Object (table/view) level dependency view. Rolls the column-level impact graph
+-- up to one row per (origin object -> impacted object) pair, keeping the
+-- TRANSITIVE reach: impact_rank is the shortest hop count between the two
+-- objects (1 = direct reference), so a report can draw the whole downstream tree
+-- of an object without touching columns. The column detail is kept as an
+-- ARRAY<STRUCT> (column_dependencies) plus, because Looker Studio cannot consume
+-- ARRAY columns, a flattened STRING rendering of the same content
+-- (column_dependencies_text / origin_columns_text / impacted_columns_text /
+-- shortest_object_path_text).
+--
+-- Scope: rows are restricted to what the 03 pipeline actually analyzed. Objects
+-- whose registry row is EPHEMERAL (the synthetic fp_<hash> identities used to
+-- collapse temp/rotating destinations), INACTIVE, or whose analysis did not end
+-- in COMPLETED / COMPLETED_WITH_WARNINGS are dropped from BOTH endpoints. A path
+-- that merely PASSES THROUGH an excluded object survives: lnge_t_impact stores
+-- one row per origin/impacted pair with the intermediate nodes only inside
+-- dependency_path, so the end-to-end reach is preserved at its true rank.
+-- Upstream objects that are referenced but never analyzed themselves (raw source
+-- tables) have no registry row; they are kept and flagged with
+-- origin_is_analysis_target = FALSE, since dropping them would remove every edge
+-- that enters the analyzed area from outside.
+--
+-- Impact is fully replaced by each 03 STEP 4 run, so there is no snapshot filter;
+-- snapshot_at is carried through only so a report can show the data's age.
+EXECUTE IMMEDIATE FORMAT(
+  '''
+  CREATE OR REPLACE VIEW `%s.%s`
+  OPTIONS (
+    description = 'Object-level (table/view) transitive dependency graph, aggregated from the column-level impact paths. One row per origin object -> impacted object pair; impact_rank is the shortest hop count (1 = direct reference). Column detail is carried both as an ARRAY<STRUCT> (column_dependencies) and as flattened STRING columns for Looker Studio, which cannot read ARRAY columns. Ephemeral, inactive and non-COMPLETED objects are excluded from both endpoints, so only the objects the pipeline actually analyzed appear; paths passing through an excluded object are still reported end to end. Objects that are referenced but never analyzed (raw sources) are kept with origin_is_analysis_target = FALSE.'
+  )
+  AS
+  -- One row per object key, so the two LEFT JOINs below cannot fan out even if the
+  -- registry ever held the same name under two object_types. object_type is NOT a
+  -- join key for the same reason: the impact row carries the type the analyzer saw
+  -- for that reference, which need not match the registry's.
+  WITH registry AS (
+    SELECT
+      LOWER(object_project) AS object_project,
+      LOWER(object_dataset) AS object_dataset,
+      LOWER(object_name)    AS object_name,
+      ANY_VALUE(generation_type) AS generation_type,
+      LOGICAL_OR(COALESCE(is_ephemeral, FALSE)) AS is_ephemeral,
+      LOGICAL_OR(COALESCE(is_active, FALSE))    AS is_active,
+      LOGICAL_OR(analysis_status IN ('COMPLETED', 'COMPLETED_WITH_WARNINGS'))
+        AS is_analyzed
+    FROM `%s.%s`
+    GROUP BY 1, 2, 3
+  ),
+  -- Impact rows narrowed to the analyzed scope. An endpoint with no registry row
+  -- is an upstream source that was never an analysis target: kept, and marked as
+  -- such. An endpoint WITH a registry row must be a live, successfully analyzed,
+  -- non-ephemeral object.
+  scoped_impact AS (
+    SELECT
+      i.snapshot_at,
+      i.origin_project,
+      i.origin_dataset,
+      i.origin_object,
+      i.origin_object_type,
+      i.origin_column,
+      i.impacted_project,
+      i.impacted_dataset,
+      i.impacted_object,
+      i.impacted_object_type,
+      i.impacted_column,
+      i.impact_rank,
+      i.path_hash,
+      i.dependency_path,
+      i.is_cycle,
+      i.resolution_status,
+      ro.generation_type AS origin_generation_type,
+      ri.generation_type AS impacted_generation_type,
+      (ro.object_name IS NOT NULL) AS origin_is_analysis_target,
+      (ri.object_name IS NOT NULL) AS impacted_is_analysis_target
+    FROM `%s.%s` AS i
+    LEFT JOIN registry AS ro
+      ON  ro.object_project = LOWER(i.origin_project)
+      AND ro.object_dataset = LOWER(i.origin_dataset)
+      AND ro.object_name    = LOWER(i.origin_object)
+    LEFT JOIN registry AS ri
+      ON  ri.object_project = LOWER(i.impacted_project)
+      AND ri.object_dataset = LOWER(i.impacted_dataset)
+      AND ri.object_name    = LOWER(i.impacted_object)
+    WHERE COALESCE(ro.is_ephemeral, FALSE) = FALSE
+      AND COALESCE(ri.is_ephemeral, FALSE) = FALSE
+      AND (ro.object_name IS NULL OR (ro.is_active AND ro.is_analyzed))
+      AND (ri.object_name IS NULL OR (ri.is_active AND ri.is_analyzed))
+  ),
+  -- Collapse the paths to column grain first. lnge_t_impact holds one row per
+  -- distinct PATH, so the same (origin column -> impacted column) pair appears once
+  -- per route; aggregating here is what keeps the ARRAY below free of duplicates.
+  -- A NULL column (a star reference) is rendered as '*' so it groups and displays.
+  column_pairs AS (
+    SELECT
+      origin_project,
+      origin_dataset,
+      origin_object,
+      origin_object_type,
+      origin_generation_type,
+      origin_is_analysis_target,
+      impacted_project,
+      impacted_dataset,
+      impacted_object,
+      impacted_object_type,
+      impacted_generation_type,
+      impacted_is_analysis_target,
+      COALESCE(origin_column, '*')   AS origin_column,
+      COALESCE(impacted_column, '*') AS impacted_column,
+      MIN(impact_rank)               AS column_impact_rank,
+      COUNT(DISTINCT path_hash)      AS column_path_count,
+      LOGICAL_OR(is_cycle)           AS column_has_cycle_path,
+      LOGICAL_AND(resolution_status = 'RESOLVED') AS column_is_fully_resolved,
+      STRING_AGG(DISTINCT resolution_status, ', ' ORDER BY resolution_status)
+        AS column_resolution_statuses,
+      MAX(snapshot_at) AS snapshot_at,
+      -- Shortest route for this column pair. Wrapped in a STRUCT because an ARRAY
+      -- cannot hold an ARRAY directly; the field is read back below.
+      ARRAY_AGG(
+        STRUCT(dependency_path AS path)
+        ORDER BY impact_rank, path_hash
+        LIMIT 1
+      )[OFFSET(0)].path AS shortest_column_path
+    FROM scoped_impact
+    GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14
+  ),
+  -- Roll up to object grain.
+  object_pairs AS (
+    SELECT
+      origin_project,
+      origin_dataset,
+      origin_object,
+      origin_object_type,
+      origin_generation_type,
+      origin_is_analysis_target,
+      impacted_project,
+      impacted_dataset,
+      impacted_object,
+      impacted_object_type,
+      impacted_generation_type,
+      impacted_is_analysis_target,
+      MAX(snapshot_at)          AS snapshot_at,
+      MIN(column_impact_rank)   AS impact_rank,
+      MAX(column_impact_rank)   AS max_impact_rank,
+      SUM(column_path_count)    AS path_count,
+      COUNT(*)                  AS column_pair_count,
+      COUNT(DISTINCT origin_column)   AS origin_column_count,
+      COUNT(DISTINCT impacted_column) AS impacted_column_count,
+      LOGICAL_OR(column_has_cycle_path)     AS has_cycle_path,
+      LOGICAL_AND(column_is_fully_resolved) AS is_fully_resolved,
+      ARRAY_AGG(
+        STRUCT(
+          origin_column,
+          impacted_column,
+          column_impact_rank         AS impact_rank,
+          column_path_count          AS path_count,
+          column_resolution_statuses AS resolution_statuses
+        )
+        ORDER BY origin_column, impacted_column
+      ) AS column_dependencies,
+      -- Flattened renderings: Looker Studio cannot read ARRAY columns, so the same
+      -- content is offered as text. One line per column pair; wrap the field in a
+      -- <pre> (or a Templated Record) to keep the line breaks.
+      STRING_AGG(
+        FORMAT('%%s -> %%s (rank %%d)', origin_column, impacted_column, column_impact_rank),
+        '\\n' ORDER BY origin_column, impacted_column
+      ) AS column_dependencies_text,
+      STRING_AGG(DISTINCT origin_column, ', ' ORDER BY origin_column)
+        AS origin_columns_text,
+      STRING_AGG(DISTINCT impacted_column, ', ' ORDER BY impacted_column)
+        AS impacted_columns_text,
+      -- The route of the shortest column pair represents the object pair.
+      ARRAY_AGG(
+        STRUCT(shortest_column_path AS path)
+        ORDER BY column_impact_rank, origin_column, impacted_column
+        LIMIT 1
+      )[OFFSET(0)].path AS shortest_column_path
+    FROM column_pairs
+    GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12
+  ),
+  -- dependency_path elements are 'project.dataset.object.column'. Drop the trailing
+  -- column segment to get the object route, then remove consecutive duplicates --
+  -- several columns of the same object in a row collapse to one hop.
+  object_pairs_pathed AS (
+    SELECT
+      p.* EXCEPT (shortest_column_path),
+      ARRAY(
+        SELECT REGEXP_REPLACE(element, r'\\.[^.]*$', '')
+        FROM UNNEST(p.shortest_column_path) AS element WITH OFFSET AS element_offset
+        WHERE element_offset = 0
+           OR REGEXP_REPLACE(element, r'\\.[^.]*$', '')
+              <> REGEXP_REPLACE(
+                   p.shortest_column_path[OFFSET(element_offset - 1)],
+                   r'\\.[^.]*$',
+                   ''
+                 )
+        ORDER BY element_offset
+      ) AS shortest_object_path
+    FROM object_pairs AS p
+  )
+  SELECT
+    q.snapshot_at,
+    q.origin_project,
+    q.origin_dataset,
+    q.origin_object,
+    q.origin_object_type,
+    q.origin_generation_type,
+    q.origin_is_analysis_target,
+    CONCAT(
+      COALESCE(q.origin_project, ''), '.',
+      COALESCE(q.origin_dataset, ''), '.',
+      q.origin_object
+    ) AS origin_full_name,
+    q.impacted_project,
+    q.impacted_dataset,
+    q.impacted_object,
+    q.impacted_object_type,
+    q.impacted_generation_type,
+    q.impacted_is_analysis_target,
+    CONCAT(
+      COALESCE(q.impacted_project, ''), '.',
+      COALESCE(q.impacted_dataset, ''), '.',
+      q.impacted_object
+    ) AS impacted_full_name,
+    q.impact_rank,
+    q.max_impact_rank,
+    (q.impact_rank = 1) AS is_direct,
+    q.path_count,
+    q.column_pair_count,
+    q.origin_column_count,
+    q.impacted_column_count,
+    q.has_cycle_path,
+    q.is_fully_resolved,
+    q.column_dependencies,
+    q.column_dependencies_text,
+    q.origin_columns_text,
+    q.impacted_columns_text,
+    q.shortest_object_path,
+    ARRAY_TO_STRING(q.shortest_object_path, ' -> ') AS shortest_object_path_text
+  FROM object_pairs_pathed AS q
+  ''',
+  -- Argument order follows the %s placeholders in text order: CREATE VIEW target,
+  -- definition registry, impact table.
+  repository_dataset_full_name, view_object_dependency,
+  repository_dataset_full_name, table_definition_registry,
+  repository_dataset_full_name, table_impact
 );
 
 IF NOT recreate_views_only THEN

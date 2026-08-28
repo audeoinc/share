@@ -741,6 +741,41 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   真の予約語（`AS NULL` / `AS ROWS`）は従来どおり拒否、`CAST(x AS STRING)` は深さで区別。
 - テスト `test_v1_5_0_078`。エンジン変更（要 GCS 再デプロイ）。
 
+## 4.32 オブジェクト単位の依存関係ビュー `lnge_vw_t_object_dependency`（SQLのみ）
+
+- **要件**：テーブル／ビューだけの依存関係を持つビューが欲しい。カラム情報は
+  `ARRAY<STRUCT>` で畳み込む。**推移的依存**（`impact_rank` を持つ）、出力先は
+  **Looker Studio**（配列を読めないので文字列版も併設）、**EPHEMERAL / FAILED は除外**し
+  03 の `DECLARE` で解析対象にした範囲だけを載せる。
+- **元データの選択**：`lnge_vw_t_column_usage_impact` ではなく `lnge_t_impact` から作る。
+  - usage 表は「物理カラムまで解決できた参照」しか持たないので、カラムが解決できなかった
+    オブジェクト間の辺が落ちる。
+  - usage を join すると経路×利用箇所で行が増え、`ARRAY_AGG` が汚れる。
+  - `lnge_t_impact` は既に「経路 1 本 = 1 行」で、推移的到達がそのまま入っている。
+- **2 段階ロールアップ**：`ARRAY_AGG(DISTINCT <struct>)` は BigQuery で使えないため、
+  まず (オブジェクトペア × カラムペア) 粒度に集約してから、オブジェクトペア粒度で
+  `ARRAY_AGG` する。**この 1 段目が配列の重複排除そのもの**（経路違いの同一カラムペアが
+  何本あっても要素は 1 つ）。`impact_rank` は `MIN`（最短ホップ）、`max_impact_rank` も併設。
+- **除外の効き方**：端点が EPHEMERAL / 非アクティブ / 未 COMPLETED なら除外。ただし
+  **除外オブジェクトを「経由する」経路は残る**（impact は中間ノードを `dependency_path`
+  の中にしか持たないので、端点だけ落としても到達関係は生きる）。逆に、参照されるだけで
+  解析対象ではない上流（生のソース表）は registry に行が無いので **残し**、
+  `origin_is_analysis_target = FALSE` で印を付ける。落とすと「外から解析対象領域に入る辺」が
+  全部消えるため。
+- **registry join の fan-out 防止**：registry を (project, dataset, name) で 1 行に
+  集約してから LEFT JOIN する。`object_type` は join キーにしない（impact 側の型は
+  解析器が見た型で、registry の型と一致するとは限らない）。
+- **Looker Studio 対応**：`column_dependencies` / `shortest_object_path` の配列に対して
+  `column_dependencies_text` / `origin_columns_text` / `impacted_columns_text` /
+  `shortest_object_path_text` を併設。配列でデータソース作成に失敗する場合は
+  `SELECT * EXCEPT (...)` で外す。
+- **経路の畳み込み**：`dependency_path` の要素は `project.dataset.object.column`。
+  末尾のカラム部分を落とし、連続する同一オブジェクトを 1 ホップに畳んで
+  `shortest_object_path` にしている。
+- エンジン変更なし（バンドル・GCS 再デプロイ不要）。01 を `recreate_views_only = TRUE` で
+  流すだけで反映できる。レポート作成者向けのカラム定義書は
+  `docs/VIEW_OBJECT_DEPENDENCY.md`。
+
 ## 4.22 本ドキュメントと実装の乖離（重要）
 
 `docs/SESSION_HANDOFF.md` の §1〜§4.20 は **1.5.0-032 の途中まで**しか追随していない。
