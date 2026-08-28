@@ -780,7 +780,7 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   流すだけで反映できる。レポート作成者向けのカラム定義書は
   `docs/VIEW_OBJECT_DEPENDENCY.md`。
 
-## 4.33 レポート用ビューのキャッシュテーブル（03 STEP 4b・SQLのみ）
+## 4.33 レポート用ビューの static 化（03 STEP 4b・SQLのみ）
 
 - **動機**：2つのレポートビューは読むたびに impact 全体を集計し直す。さらに Looker Studio 側の
   フィルタは `origin_full_name`（`CONCAT` の計算列）に当たるため、`lnge_t_impact` の
@@ -793,20 +793,20 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   `lnge_vw_t_column_usage_impact` → `lnge_t_column_usage_impact`、
   `lnge_vw_t_object_dependency` → `lnge_t_object_dependency`。
 - **正本はビュー**：`SELECT *` で作るので、01 でビューを直せば次回実行でテーブルのスキーマも
-  追従する（二重管理しない）。各行に `cached_at` を付与。
+  追従する（二重管理しない）。各行に `refreshed_at` を付与。
 - **再構築条件**：STEP 4 と同じ（`has_analysis_work OR orphan_direct_dep_deleted > 0`）＋
   **テーブル未作成なら作る**。後者が無いと「ビューをデプロイした直後の、何も変わらない実行」で
   テーブルが作られず、レポートの参照先が無い状態になる。`preview_only` では実行しない。
 - **失敗はパイプラインを止めない**：派生データであり、想定される原因は 01 が古くビューが
-  無いこと。`REFRESH_REPORT_CACHE / FAILED` 行と対処ヒントを出すだけ。
+  無いこと。`REFRESH_STATIC_REPORT_TABLES / FAILED` 行と対処ヒントを出すだけ。
 - **挙動差は1点だけ**：`usage_definition_html` のハイライトは
   `ARRAY_AGG OVER (PARTITION BY 起点カラム, 利用オブジェクト, 定義)` で集める。分析関数は
   WHERE の後に評価されるので、**ビュー経由ならレポートの追加フィルタにハイライトが追従**するが、
-  キャッシュテーブルでは作成時に確定する。パーティションキーに起点カラムと対象オブジェクトが
+  static テーブルでは作成時に確定する。パーティションキーに起点カラムと対象オブジェクトが
   入っているため通常用途では同結果。追従が必要なレポートだけビューを読む。
 - **サイズ**：`usage_definition_text` / `usage_definition_html` はオブジェクトの SQL 全文を
   行ごとに繰り返す（1行 = 起点カラム × 利用箇所 × 経路）。
-  `cache_usage_sql_columns = FALSE` でキャッシュから外せる。
+  `static_tables_include_usage_sql = FALSE` で static テーブルから外せる。
 
 ## 4.22 本ドキュメントと実装の乖離（重要）
 

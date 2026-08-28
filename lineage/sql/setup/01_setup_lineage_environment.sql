@@ -1111,14 +1111,14 @@ EXECUTE IMMEDIATE FORMAT(
 -- 4a. Repository views -- always recreated (CREATE OR REPLACE VIEW is safe)
 -- ============================================================================
 
--- Both views below are also copied into ordinary CACHE TABLES by 03 STEP 4b
+-- Both views below are also copied into ordinary STATIC TABLES by 03 STEP 4b
 -- (lnge_vw_t_column_usage_impact -> lnge_t_column_usage_impact,
 --  lnge_vw_t_object_dependency  -> lnge_t_object_dependency), so a BI tool reads a
 -- clustered table instead of re-running the aggregation per request. Plain tables,
 -- not BigQuery materialized views -- neither definition is expressible as one. The
 -- views stay the single definition -- STEP 4b builds the tables with SELECT * over
 -- them -- so a change here reaches the tables on the next 03 run with nothing to
--- keep in step by hand. Set build_report_cache_tables = FALSE in 03 to keep reports
+-- keep in step by hand. Set build_static_report_tables = FALSE in 03 to keep reports
 -- on the views.
 
 -- Column-usage x impact depth view. Joins the usage index to the impact graph so

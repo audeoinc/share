@@ -347,7 +347,9 @@ SELECT `PROJECT.UDF_DATASET.lnge_usage_sql_css`(NULL);
 
 ---
 
-## 7. キャッシュテーブル（パフォーマンス用）
+## 7. static テーブル（パフォーマンス用）
+
+ビューを `CREATE TABLE ... AS SELECT *` でテーブル化したもの（社内でいう **static 化**）です。
 
 このビューは読むたびに `lnge_t_column_usage` と `lnge_t_impact` を結合し直し、さらに
 各行で HTML 生成 UDF を呼びます。BI ツールからの利用では、**ビュー名から `vw_` を落とした
@@ -356,14 +358,14 @@ SELECT `PROJECT.UDF_DATASET.lnge_usage_sql_css`(NULL);
 | | 名前 | 中身 |
 |---|---|---|
 | ビュー | `lnge_vw_t_column_usage_impact` | 定義の正本。常に最新 |
-| テーブル | `lnge_t_column_usage_impact` | ビューをコピーした普通のテーブル。`cached_at` が付く |
+| static テーブル | `lnge_t_column_usage_impact` | ビューを `SELECT *` でコピーした普通のテーブル。`refreshed_at` が付く |
 
 > BigQuery の **マテリアライズドビューではありません**。このビューの定義は
 > `ARRAY_AGG(... ORDER BY ...)` などを使っておりマテリアライズドビューにはできないため、
 > `CREATE OR REPLACE TABLE ... AS SELECT *` で作った普通のテーブルです。
 
 - テーブルは **03 の STEP 4b が作り直します**（impact を再構築したタイミング、
-  および初回でテーブルが無いとき）。`build_report_cache_tables = FALSE` で止められます。
+  および初回でテーブルが無いとき）。`build_static_report_tables = FALSE` で止められます。
 - クラスタリングは `origin_project, origin_dataset, origin_object, origin_column`。
   **起点カラムで絞ると実際にスキャン量が落ちます**。
 - ビューの定義を変えると、次の 03 実行でテーブルのスキーマも自動で追従します
@@ -388,8 +390,10 @@ SELECT `PROJECT.UDF_DATASET.lnge_usage_sql_css`(NULL);
 `usage_definition_text` と `usage_definition_html` は、**そのオブジェクトの SQL 全文を
 1 行ごとに繰り返し持ちます**（1 行 = 起点カラム × 利用箇所 × 経路）。テーブルのサイズと、
 オンデマンド課金でのスキャン量がこの 2 列に支配されることがあります。SQL 表示を使わない
-レポートしか無い場合は、03 の `cache_usage_sql_columns = FALSE` でこの 2 列を
-キャッシュから外せます（必要なときはビュー側から引けます）。
+レポートしか無い場合は、03 の `static_tables_include_usage_sql = FALSE` でこの 2 列を
+static テーブルから外せます（必要なときはビュー側から引けます）。
+
+---
 
 ## 8. 用語
 
