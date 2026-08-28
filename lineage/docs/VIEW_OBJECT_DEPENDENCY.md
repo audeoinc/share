@@ -252,23 +252,26 @@ Community Visualization の **Templated Record** で `<pre>` に入れて表示�
 
 ---
 
-## 9. 実体化テーブル（パフォーマンス用）
+## 9. キャッシュテーブル（パフォーマンス用）
 
 このビューは読むたびに `lnge_t_impact` を集計し直すため、BI ツールからの利用では
-**同名からの `vw_` を落としたテーブル**を読むほうが速くなります。
+**ビュー名から `vw_` を落としたテーブル**を読むほうが速くなります。
 
 | | 名前 | 中身 |
 |---|---|---|
 | ビュー | `lnge_vw_t_object_dependency` | 定義の正本。常に最新 |
-| テーブル | `lnge_t_object_dependency` | ビューのスナップショット。`materialized_at` が付く |
+| テーブル | `lnge_t_object_dependency` | ビューをコピーした普通のテーブル。`cached_at` が付く |
+
+> BigQuery の **マテリアライズドビューではありません**。このビューの定義は
+> `ARRAY_AGG(... ORDER BY ...)` などを使っておりマテリアライズドビューにはできないため、
+> `CREATE OR REPLACE TABLE ... AS SELECT *` で作った普通のテーブルです。
 
 - テーブルは **03 の STEP 4b が作り直します**（impact を再構築したタイミング、
-  および初回でテーブルが無いとき）。`materialize_report_tables = FALSE` で止められます。
-- クラスタリングは `origin_project, origin_dataset, origin_object`。**起点で絞ると実際にスキャン量が落ちます**。
+  および初回でテーブルが無いとき）。`build_report_cache_tables = FALSE` で止められます。
+- クラスタリングは `origin_project, origin_dataset, origin_object`。
+  **起点で絞ると実際にスキャン量が落ちます**。
 - ビューの定義を変えると、次の 03 実行でテーブルのスキーマも自動で追従します
   （`SELECT *` で作っているため）。
-- BigQuery の MATERIALIZED VIEW は `ARRAY_AGG(... ORDER BY ...)` などを受け付けないので、
-  通常のテーブルとして作っています。
 
 ---
 
