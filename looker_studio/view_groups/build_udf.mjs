@@ -55,6 +55,7 @@ const ERD_SOURCES = [
   ['chrome.js', join(here, 'chrome.js')],
   ['analyze.js', join(here, 'analyze.js')],
   ['erd.js', join(here, 'erd.js')],
+  ['columns.js', join(here, 'columns.js')],
 ];
 // base ごとのメモ（Markdown）の UDF。ほかとは何も共有しない。
 // これだけビューの中から呼ぶ（＝クエリのたびに走る）ので、事前生成の
@@ -65,7 +66,10 @@ const MARKDOWN_SOURCES = [
 // テンプレートに貼る CSS は 1 枚にまとめて配る。差分カード側の chromeCss() と
 // メモ側の memoCss() を両方持つ必要があるので、CSS の UDF だけ両方を積む。
 // markdown.js の描画側は要らないので下の UNUSED_CSS で落とす。
-const CSS_SOURCES = RENDER_SOURCES.concat([['markdown.js', join(here, 'markdown.js')]]);
+const CSS_SOURCES = RENDER_SOURCES.concat([
+  ['markdown.js', join(here, 'markdown.js')],
+  ['columns.js', join(here, 'columns.js')],
+]);
 
 /**
  * 使わないトップレベル関数を落とす。
@@ -104,7 +108,9 @@ const UNUSED_RENDER = ['renderFragment3', 'build3Way', 'mapToBase', 'baseCell', 
 // する側は viewlgc_markdown が持っているので、こちらには積まない。
 const UNUSED_CSS = UNUSED_RENDER.concat([
   'markdownHtml', 'mdRender', 'mdBlocks', 'mdList', 'mdAligns', 'mdCells',
-  'mdKind', 'mdIndent', 'mdInline', 'mdLink', 'mdUrl', 'mdEsc']);
+  'mdKind', 'mdIndent', 'mdInline', 'mdLink', 'mdUrl', 'mdEsc',
+  'renderColumnsBase', 'renderColumns', 'groupColumns', 'columnOrder',
+  'cellTypes', 'mixedTip']);
 
 /** CommonJS の体裁を落として素の関数群にする。 */
 function strip(src, file) {
@@ -300,20 +306,34 @@ return __run(analysis_json, options_json);
 // 解析結果から参照関係の図を作り、渡された差分 HTML と外側タブで束ねる。
 // 差分そのものは作らない（差分エンジンを積むと 32 KB に収まらないため）。
 const pageDriver = `
-function __run(analysis_json, diff_html, options_json) {
+function __run(analysis_json, diff_html, columns_json, options_json) {
   var opts = __opts(options_json);
   var a;
   try { a = JSON.parse(analysis_json); } catch (e) { a = null; }
   if (!a) return String(diff_html || __notice('解析結果を読み取れませんでした。'));
+  // カラム定義は取れないこともある（権限や INFORMATION_SCHEMA の差）。
+  // 落とさず、そのタブだけ案内にする。
+  // SQL からは [{v: View 名, cols: [...]}] の並びで来る。View 名で引ける形に直す。
+  var byView = {};
+  try {
+    var arr = JSON.parse(columns_json) || [];
+    for (var k = 0; k < arr.length; k++) byView[arr[k].v] = arr[k].cols || [];
+  } catch (e) { byView = {}; }
 
   var erd = '';
+  var col = '';
   var bases = a.bases || [];
-  for (var i = 0; i < bases.length; i++) erd += renderErdBase(bases[i], opts);
+  for (var i = 0; i < bases.length; i++) {
+    erd += renderErdBase(bases[i], opts);
+    col += renderColumnsBase(bases[i], byView, opts);
+  }
   if (!erd) erd = __notice('図にできる View がありません。');
-  return wrapPage(String(diff_html || ''), erd, a.bases && a.bases.length ? a.bases[0] : null);
+  if (!col) col = __notice('カラム定義を出せる View がありません。');
+  return wrapPage(String(diff_html || ''), erd, col,
+    a.bases && a.bases.length ? a.bases[0] : null);
 }
 
-return __run(analysis_json, diff_html, options_json);
+return __run(analysis_json, diff_html, columns_json, options_json);
 `.trim();
 
 // --- markdown のドライバ -----------------------------------------------
@@ -379,7 +399,7 @@ function __fixtureRules(opts) {
   return rules;
 }
 
-return chromeCss() + '\\n' + memoCss() + '\\n' +
+return chromeCss() + '\\n' + memoCss() + '\\n' + columnsCss() + '\\n' +
   __rulesToCss(__fixtureRules(__opts(options_json)));
 `.trim();
 
@@ -417,13 +437,27 @@ const markdownPack = pack(markdownDriver, 'viewlgc_markdown', markdownLib);
 const S = require(join(here, 'sample_views.js'));
 const VIEWLGC_ANALYZE = new Function('views', 'options_json', analyzePack.code);
 const VIEWLGC_RENDER = new Function('analysis_json', 'options_json', renderPack.code);
-const VIEWLGC_PAGE = new Function('analysis_json', 'diff_html', 'options_json', pagePack.code);
+const VIEWLGC_PAGE = new Function(
+  'analysis_json', 'diff_html', 'columns_json', 'options_json', pagePack.code);
 const VIEWLGC_MARKDOWN = new Function('md', markdownPack.code);
 const VIEW_GROUP_CSS = new Function('options_json', cssPack.code);
 
 // JS UDF から別の UDF は呼べないので、つなぐのは呼び出し側の SQL の仕事。
 // ここではその合成を JS で再現して、分割前と同じ検証をそのまま通す。
 // build_table.sql も同じ順（analyze を 1 回 → その結果を render へ）で呼ぶ。
+// カラム定義の代わり。実際は INFORMATION_SCHEMA.COLUMNS から作った JSON が来る。
+// 1 本だけ型を変えて、グループ内で揃っていない場合も本体に通す。
+function fakeColumns(views) {
+  return JSON.stringify(views.map((v) => ({
+    v: v.view_name,
+    cols: [
+      { n: 'order_date', t: 'DATE', d: '受注日' },
+      { n: 'region', t: 'STRING', d: '' },
+      { n: 'gross_amount', t: v.view_name.endsWith('us') ? 'FLOAT64' : 'NUMERIC', d: '税抜き' },
+    ],
+  })));
+}
+
 function VIEW_GROUP_INFO(views, options_json) {
   const a = VIEWLGC_ANALYZE(views, options_json);
   const j = JSON.parse(a);
@@ -437,7 +471,8 @@ function VIEW_GROUP_INFO(views, options_json) {
     html: VIEWLGC_RENDER(a, options_json),
     // build_table.sql は render の結果をさらに page へ渡す。ここも同じ順で通し、
     // 最小化した page 本体が実際に動くことを確かめる。
-    page: VIEWLGC_PAGE(a, VIEWLGC_RENDER(a, options_json), options_json),
+    page: VIEWLGC_PAGE(a, VIEWLGC_RENDER(a, options_json),
+      fakeColumns(views), options_json),
   };
 }
 
@@ -485,6 +520,15 @@ const checks = [
     /<div class="vg-otablist"><div class="vg-header">.*?<label class="vg-otab vg-ot1"/s
       .test(info.page) &&
     info.page.indexOf('vg-otablist') < info.page.indexOf('<!--VG_NOTE-->')],
+  ['page はカラム定義の表を出す（型とグループ内の食い違い）',
+    info.page.includes('vg-ctable') &&
+    info.page.includes('gross_amount') &&
+    // 同じグループの中で jp が NUMERIC・us が FLOAT64。印が出ること
+    info.page.includes('vg-cmix') && info.page.includes('vg-cwarn')],
+  ['page はカラム定義が空でも落ちない',
+    typeof VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '{ broken', OPTS) === 'string' &&
+    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', null, OPTS)
+      .includes('カラム定義を取得できませんでした')],
   ['page はメモの目印を 1 つだけ置く（本体は焼き込まない）',
     info.page.split(require(join(here, 'chrome.js')).NOTE_MARK).length - 1 === 1 &&
     !info.page.includes('vg-md')],
@@ -635,7 +679,9 @@ const checks = [
 ];
 
 // サイズ検証
-for (const p of [analyzePack, renderPack, pagePack, markdownPack, cssPack]) {
+// cssPack は生成時に CSS を作るためだけに使う。SQL には本文を焼き込むので、
+// インラインのコード ブロブの上限とは無関係。
+for (const p of [analyzePack, renderPack, pagePack, markdownPack]) {
   const size = Buffer.byteLength(p.code);
   checks.push([`${p.label} が ${(SIZE_LIMIT / 1024).toFixed(0)} KB 以内`, size <= SIZE_LIMIT]);
 }
@@ -649,7 +695,7 @@ for (const [name, ok] of checks) {
 const kb = (n) => (n / 1024).toFixed(1) + ' KB';
 console.log(`\n${checks.length - failed}/${checks.length} passed\n`);
 console.log('UDF 本体のサイズ（インライン上限 32 KB）');
-for (const p of [analyzePack, renderPack, pagePack, markdownPack, cssPack]) {
+for (const p of [analyzePack, renderPack, pagePack, markdownPack]) {
   console.log(`  ${p.label.padEnd(20)} 素 ${kb(p.raw).padStart(8)} → ` +
     (p.min === null ? '最小化なし' : `最小化 ${kb(p.min).padStart(8)}`) +
     `  （上限比 ${(Buffer.byteLength(p.code) / SIZE_LIMIT * 100).toFixed(0)}%）`);
@@ -776,8 +822,10 @@ DECLARE js_markdown STRING DEFAULT r"""
 ${markdownPack.code}
 """;
 
-DECLARE js_css STRING DEFAULT r"""
-${cssPack.code}
+-- CSS は本文そのもの（JavaScript ではない）。生成時に組み立ててここに焼き込む。
+-- 中身は template_style.html と 1 バイトも違わない。
+DECLARE css_text STRING DEFAULT r"""
+${css}
 """;
 
 -- 実行中のプロジェクトを INFORMATION_SCHEMA.SCHEMATA から自動検出する
@@ -924,7 +972,9 @@ LANGUAGE js AS %s
 -- 3. viewlgc_page
 --    参照関係の図を作り、渡された差分 HTML と外側タブで束ねて 1 枚にする
 --
--- タブは左から メモ / ロジック差分 / 参照関係 で、既定で開くのはメモ。
+-- タブは左から note / ロジック差分 / 参照関係 / カラム定義 で、既定で開くのは note。
+-- カラム定義は columns_json（INFORMATION_SCHEMA.COLUMNS を base ごとにまとめた
+-- もの）から作る。取れなくても落とさず、そのタブだけ案内にする。
 -- 差分は作らない。viewlgc_render の出力をそのまま受け取って包むだけ。
 -- 図の解析にはトークナイザが要るので、差分側とは別の UDF にしてある
 -- （両方を 1 つに積むとインラインの 32 KB に収まらない）。
@@ -937,6 +987,7 @@ EXECUTE IMMEDIATE FORMAT('''
 CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
   analysis_json STRING,
   diff_html STRING,
+  columns_json STRING,
   options_json STRING
 )
 RETURNS STRING
@@ -977,16 +1028,24 @@ LANGUAGE js AS %s
 -- タブの CSS は ID ではなくクラスで書いてあるので、レコードが変わっても
 -- この CSS のまま使える。
 --
--- options_json は group_info と同じものを渡すこと。色やフォントを
--- 変えた場合、CSS 側も同じ設定で作り直す必要がある。
+-- **JavaScript ではなく SQL の関数で、固定の文字列を返すだけ。**
+-- 以前は描画コード一式を積んで実行時に組み立てていたが、それだと CSS を
+-- 足すたびにインラインの 32 KB 枠に近づき、実際に上限へ当たった。CSS の
+-- 中身は生成時に決まっていて実行時に変わる要素が無いので、build_udf.mjs が
+-- 組み立てた結果をそのまま焼き込む。組み立てには実物の描画コードを通して
+-- いるので、markup とクラス名が食い違わない点は変わらない
+-- （生成時のクラス網羅チェックが見張る）。
+--
+-- options_json は受け取るが見ない。色やフォントを変えたときは
+-- node build_udf.mjs で作り直し、この SQL ごと流し直すこと。
 -- ---------------------------------------------------------------------
 EXECUTE IMMEDIATE FORMAT('''
 CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(options_json STRING)
 RETURNS STRING
-LANGUAGE js AS %s
+AS (%s)
 ''',
   udf_project_id, udf_dataset, udf_css_function_name,
-  TO_JSON_STRING(js_css));
+  TO_JSON_STRING(css_text));
 
 
 -- ---------------------------------------------------------------------
@@ -1139,8 +1198,8 @@ END;
   const marker = 'DECLARE (js_[a-z_]+) STRING DEFAULT r' + '"'.repeat(3) + '\\n';
   const blobs = [...sql.matchAll(
     new RegExp(marker + '([\\s\\S]*?)\\n' + '"'.repeat(3), 'g'))];
-  if (blobs.length !== 5) {
-    console.log(`  FAIL  埋め込んだ JS が 5 つ見つかりません（${blobs.length} 個）`);
+  if (blobs.length !== 4) {
+    console.log(`  FAIL  埋め込んだ JS が 4 つ見つかりません（${blobs.length} 個）`);
     process.exit(1);
   }
   for (const [, name, code] of blobs) {
@@ -1149,7 +1208,18 @@ END;
       process.exit(1);
     }
   }
-  console.log('  PASS  埋め込んだ JS が 5 つとも本物');
+  console.log('  PASS  埋め込んだ JS が 4 つとも本物');
+
+  // CSS は JS ではないので別に見る。焼き込んだ本文が template_style.html と
+  // 食い違うと、貼った CSS と UDF が返す CSS が別物になる。
+  const cssBlob = sql.match(
+    new RegExp('DECLARE css_text STRING DEFAULT r' + '"'.repeat(3) +
+      '\\n([\\s\\S]*?)\\n' + '"'.repeat(3)));
+  if (!cssBlob || cssBlob[1] !== css) {
+    console.log('  FAIL  焼き込んだ CSS が組み立てた CSS と一致しません');
+    process.exit(1);
+  }
+  console.log('  PASS  焼き込んだ CSS が template_style.html と同じ');
 
   // FORMAT のテンプレートに素の % があると書式指定と解釈される。
   // 引数側（JS 本体）の % は無関係なので、''' … ''' の中だけを見る。

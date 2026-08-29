@@ -492,7 +492,7 @@ SQL 中の `{{P1}}` にカーソルを合わせると、種別と suffix ごと�
 - パラメータ名はグループごとに振り直すので、左右のペインには別の対応表を渡す。
 
 ```bash
-node preview.mjs          # dist/preview.html を生成して検証（87 アサーション）
+node preview.mjs          # dist/preview.html を生成して検証（93 アサーション）
 node preview.mjs --check  # 生成せず検証だけ
 ```
 
@@ -500,7 +500,7 @@ node preview.mjs --check  # 生成せず検証だけ
 
 ```bash
 node build_udf.mjs          # 検証して view_group_html.sql を生成
-node build_udf.mjs --check  # 生成せず検証だけ（49 アサーション）
+node build_udf.mjs --check  # 生成せず検証だけ（50 アサーション）
 node check_sql.mjs          # build_table.sql と view_group_html.sql の突き合わせ
 ```
 
@@ -508,9 +508,9 @@ node check_sql.mjs          # build_table.sql と view_group_html.sql の突き�
 |---|---|
 | `viewlgc_analyze(views, options_json)` | 解析結果の JSON（`viewCount` / `groupCount` / `groupLabels` / `groupSizes` / `suffixes` / `unmatchedCount` / `bases`） |
 | `viewlgc_render(analysis_json, options_json)` | ロジック差分のカード |
-| `viewlgc_page(analysis_json, diff_html, options_json)` | 参照関係の図を作り、メモ（目印のみ）・差分と外側タブで束ねた 1 枚 |
+| `viewlgc_page(analysis_json, diff_html, columns_json, options_json)` | 参照関係の図とカラム定義の表を作り、メモ（目印のみ）・差分と外側タブで束ねた 1 枚 |
 | `viewlgc_markdown(md)` | base ごとのメモ（Markdown）の HTML。**ビューの中から呼ぶ** |
-| `viewlgc_group_css(options_json)` | `mode='class'` でテンプレートに貼る CSS |
+| `viewlgc_group_css(options_json)` | `mode='class'` でテンプレートに貼る CSS。**SQL 関数で、生成時に焼き込んだ固定文字列を返す**（`options_json` は見ない） |
 | `viewlgc_render_dynamic_sql(sql_template, …)` | `build_table.sql` の `__…__` を展開した SQL（JavaScript ではなく SQL 関数） |
 
 ### 解析と描画は別の UDF に分ける
@@ -912,8 +912,8 @@ JavaScript が使えない以上、切り替えられるのは「作り置きし
 
 ### 参照関係の図（ERD タブ）
 
-カードは**外側のタブ 3 枚**でできている。左から `note` / `ロジック差分` /
-`参照関係` で、既定で開くのは `note`。1 レコードに全部入れてあるので、
+カードは**外側のタブ 4 枚**でできている。左から `note` / `ロジック差分` /
+`参照関係` / `カラム定義` で、既定で開くのは `note`。1 レコードに全部入れてあるので、
 `base` / `ref_label` のコントロールはどのタブにも同じように効く。別のチャートに
 分けると、コントロールを何組もそろえる必要が出て、片方だけずれた状態を作れて
 しまう。枚数と順序は `chrome.js` の `OUTER_TABS` がひとつの決め所で、
@@ -1041,6 +1041,46 @@ customers_abjp ┄┄▶ base_orders          calendar_abjp ──▶ daily
 
 base の切り出しと UDF に渡す `suffixList` は、同じ 1 つの `suffixes` から作る。
 別々に持つ場所がないので、ズレようがない。
+
+### カラム定義（カラム定義タブ）
+
+`INFORMATION_SCHEMA.COLUMNS` から View の出力列を取り、**1 行 = 1 列名、
+1 列 = 1 ロジック グループ**の表にする。セルはその型。
+
+グループごとのタブにしていないのは、列名も型も短くて横に並べても収まるから。
+全グループを一度に見せれば、どこが揃っていないかをタブを押さずに見つけられる。
+SQL は横に長いので差分側は 2 ペインだが、こちらは事情が違う。
+
+**カラム定義はグループではなく View ごとの属性。** 同じロジック グループなら
+SQL は α 等価だが、参照先テーブルの型が違えば出力列の型も違う（`amount` が jp は
+`NUMERIC`、us は `FLOAT64` など）。**これはロジック差分には出てこない。SQL は
+同一だから。** この表のいちばんの値打ちがそこなので、グループの代表 1 本を黙って
+出すのではなく、グループの中で食い違ったら必ず印を付ける。
+
+| 見た目 | 意味 |
+|---|---|
+| 枠（黄）＋ `⚠` | **同じグループの中で型が揃っていない。** ホバーで suffix ごとの内訳が出る |
+| 地色（緑） | 基準グループと型が違う |
+| `—`（灰） | そのグループにこの列が無い |
+
+行の並びは基準グループの `ordinal_position` 順。そこに無い列は後ろに足す。
+列の説明（`COLUMN_FIELD_PATHS.description`）は列名の下に小さく出す。
+
+```
+cols_raw   COLUMNS で列と型（条件文は table_schema / table_name を修飾なしで
+           見るので、JOIN する前に単独の CTE で絞る）
+col_desc   COLUMN_FIELD_PATHS で説明。field_path = column_name で最上位だけ
+cols       View ごとに [{n: 列名, t: 型, d: 説明}] へ畳む
+base_cols  base ごとに [{v: View 名, cols: […]}] へ畳んで JSON に
+```
+
+**事前生成に焼き込む。** メモと違い、カラム定義が変わるのは View をデプロイした
+ときだけで、差分やグループ構成と同じ周期。ビューの中で毎回作る理由がない。
+
+> 取れなかった base では、そのタブだけ案内文になる（カード全体は出る）。
+> `INFORMATION_SCHEMA.COLUMNS` / `COLUMN_FIELD_PATHS` のリージョン修飾が
+> 使えるかは環境によるので、疑わしいときは
+> `SELECT COUNT(*) FROM \`region-<location>.INFORMATION_SCHEMA.COLUMNS\`` で確かめる。
 
 ### base ごとのメモ（Markdown）
 

@@ -17,6 +17,7 @@ const R = require(join(here, 'render_groups.js'));
 const E = require(join(here, 'erd.js'));
 const Ch = require(join(here, 'chrome.js'));
 const Md = require(join(here, 'markdown.js'));
+const Co = require(join(here, 'columns.js'));
 
 const OPTS = { suffixParts: S.SUFFIX_PARTS };
 
@@ -119,6 +120,30 @@ const memoCases = [
   { title: 'メモ（未登録）', html: Md.markdownHtml(null) },
 ];
 
+// カラム定義の代わり。実際は INFORMATION_SCHEMA.COLUMNS から作った並びが来る。
+// 同じグループの中で型が割れる場合（jp は NUMERIC・us は FLOAT64）と、
+// グループによって列が無い場合の両方を入れて、印の出方を目で見られるようにする。
+const fakeColumns = (b) => {
+  const out = {};
+  for (const g of b.groups) {
+    g.members.forEach((m, i) => {
+      const suffix = g.suffixes[i] || m.viewName;
+      const cols = [
+        { n: 'order_date', t: 'DATE', d: '受注日（JST）' },
+        { n: 'region', t: 'STRING', d: 'リージョン コード。jp / us / uk' },
+        { n: 'order_count', t: 'INT64', d: '' },
+        { n: 'gross_amount', t: /us$/.test(suffix) ? 'FLOAT64' : 'NUMERIC',
+          d: '税抜き。参照先テーブルの型に引きずられる' },
+      ];
+      // 先頭以外のグループには列を 1 本足す／落とす
+      if (g !== b.groups[0]) cols.push({ n: 'currency', t: 'STRING', d: '通貨コード' });
+      if (g === b.groups[b.groups.length - 1]) cols.splice(1, 1);
+      out[m.viewName] = cols;
+    });
+  }
+  return out;
+};
+
 // 実際に Looker へ渡すのは、差分と参照関係を外側タブで束ねた 1 枚。
 // プレビューの先頭にその形も置いて、束ねた状態で崩れないかを見る。
 // メモは作り置きせず、ビューが REPLACE で差し込む（シートを直した内容を
@@ -133,8 +158,16 @@ const pageCases = [
   { title: '外側タブ・メモが未登録の base', b: base2, opts: {}, note: null },
 ].map((c) => ({ ...c,
   html: splice(
-    Ch.wrapPage(R.renderBase(c.b, c.opts), E.renderErdBase(c.b, c.opts), c.b),
+    Ch.wrapPage(R.renderBase(c.b, c.opts), E.renderErdBase(c.b, c.opts),
+      Co.renderColumnsBase(c.b, fakeColumns(c.b), c.opts), c.b),
     Md.markdownHtml(c.note)) }));
+
+const columnCases = [
+  { title: 'カラム定義（型が割れているグループあり）',
+    html: Co.renderColumnsBase(base3, fakeColumns(base3), {}) },
+  { title: 'カラム定義（取得できなかった場合）',
+    html: Co.renderColumnsBase(base3, {}, {}) },
+];
 
 // --- 検証 --------------------------------------------------------------
 const h3 = parts[0].html;
@@ -306,9 +339,9 @@ const checks = [
       g.missBy[i] === null &&
       g.missBy.filter((m) => m).length === base3.groupCount - 1)],
   // --- 参照関係（ERD） --------------------------------------------------
-  ['外側タブが 3 枚出る（note / ロジック差分 / 参照関係）',
+  ['外側タブが 4 枚出る（note / ロジック差分 / 参照関係 / カラム定義）',
     (pageCases[0].html.match(/class="vg-otab /g) || []).length === Ch.OUTER_TABS.length &&
-    Ch.OUTER_TABS.join(',') === 'note,ロジック差分,参照関係'],
+    Ch.OUTER_TABS.join(',') === 'note,ロジック差分,参照関係,カラム定義'],
   ['既定で開くのはいちばん左のメモ タブ', (() => {
     const h = pageCases[0].html;
     // checked が付くのは 1 枚目だけ。外側タブの CSS も 1 枚目を開く形になる。
@@ -463,6 +496,36 @@ const checks = [
   ['メモが空なら未登録の枠を返す',
     Md.markdownHtml('').includes('vg-mdempty') &&
     Md.markdownHtml('  \n  ').includes('vg-mdempty')],
+  // カラム定義。グループではなく View ごとの属性なので、同じグループの中で
+  // 型が割れることがある。それはロジック差分には出てこないので、必ず印を出す。
+  ['カラム定義は 1 枚の表で全グループを並べる', (() => {
+    const h = columnCases[0].html;
+    const heads = [...h.matchAll(/class="vg-chead[^"]*">(?:<span[^>]*>基準<\/span>)?([^<]*)</g)]
+      .map((m) => m[1]);
+    return h.includes('vg-ctable') &&
+      heads[0] === '列名' && heads.length === base3.groupCount + 1 &&
+      heads[1] === Ch.label(base3.groups[0]);
+  })()],
+  ['グループ内で型が割れていたら印を出す（ロジック差分には出ない差）', (() => {
+    const h = columnCases[0].html;
+    return h.includes('vg-cmix') && h.includes('vg-cwarn') &&
+      h.includes('NUMERIC / FLOAT64') &&
+      // 内訳が tooltip に出る
+      /data-tip="[^"]*abus = FLOAT64/.test(h) &&
+      h.includes('揃っていない箇所が');
+  })()],
+  ['基準に無い列・基準と違う型が分かる', (() => {
+    const h = columnCases[0].html;
+    return h.includes('currency') && h.includes('vg-cnone') && h.includes('vg-cdiff');
+  })()],
+  ['列の説明を列名の下に出す',
+    columnCases[0].html.includes('vg-cdesc') &&
+    columnCases[0].html.includes('受注日（JST）')],
+  ['カラム定義が取れなければ案内を出す（表は出さない）',
+    columnCases[1].html.includes('カラム定義を取得できませんでした') &&
+    !columnCases[1].html.includes('vg-ctable')],
+  ['カラム定義の CSS は columns.js 側にある',
+    Co.columnsCss().includes('.vg-ctable') && !R.chromeCss().includes('.vg-ctable')],
   ['メモの CSS は markdown.js 側にある（差分の UDF に積まない）',
     Md.memoCss().includes('.vg-mdtable') && !R.chromeCss().includes('.vg-mdtable')],
   ['伏せ字は診断で見える表記に戻す',
@@ -487,8 +550,10 @@ if (!process.argv.includes('--check')) {
     '<title>view groups preview</title>\n<style>\nbody{margin:16px;background:#fff}\n' +
     'h2{font:600 14px/1.6 Roboto,system-ui,sans-serif;color:#57606A;' +
     'margin:32px 0 12px;padding-top:16px;border-top:1px solid #D0D7DE}\n' +
-    chromeCss() + '\n' + Md.memoCss() + '\n</style>\n</head>\n<body>\n' +
-    pageCases.concat(parts, memoCases).map((p) => `<h2>${p.title}</h2>\n${p.html}`).join('\n') +
+    chromeCss() + '\n' + Md.memoCss() + '\n' + Co.columnsCss() +
+    '\n</style>\n</head>\n<body>\n' +
+    pageCases.concat(parts, memoCases, columnCases)
+      .map((p) => `<h2>${p.title}</h2>\n${p.html}`).join('\n') +
     '\n</body>\n</html>\n';
   await mkdir(join(here, 'dist'), { recursive: true });
   const out = join(here, 'dist', 'preview.html');

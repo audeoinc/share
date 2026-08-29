@@ -595,6 +595,46 @@ keyed AS (
     PARTITION BY src.view_name ORDER BY LENGTH(s.suffix) DESC
   ) = 1
 ),
+-- カラム定義。INFORMATION_SCHEMA.COLUMNS は View の出力列を持っている。
+-- 説明だけは COLUMN_FIELD_PATHS にあるので、最上位の列（field_path = 列名）に
+-- 絞って突き合わせる。
+--
+-- 条件文（__VIEW_*_COND__）は table_schema / table_name を修飾なしで見るので、
+-- JOIN してから当てると曖昧になる。それぞれ単独の CTE で絞ってから繋ぐ。
+cols_raw AS (
+  SELECT table_schema, table_name, column_name, ordinal_position, data_type
+  FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.COLUMNS`
+  WHERE (__VIEW_DATASET_COND__) AND (__VIEW_NAME_COND__)
+),
+col_desc AS (
+  SELECT table_schema, table_name, column_name, description
+  FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.COLUMN_FIELD_PATHS`
+  WHERE (__VIEW_DATASET_COND__) AND (__VIEW_NAME_COND__)
+    AND field_path = column_name
+),
+cols AS (
+  SELECT
+    r.table_name AS view_name,
+    ARRAY_AGG(
+      STRUCT(r.column_name AS n, r.data_type AS t, COALESCE(d.description, '') AS d)
+      ORDER BY r.ordinal_position
+    ) AS cols
+  FROM cols_raw AS r
+  LEFT JOIN col_desc AS d
+    ON  d.table_schema = r.table_schema
+    AND d.table_name   = r.table_name
+    AND d.column_name  = r.column_name
+  GROUP BY r.table_name
+),
+-- base ごとに束ねる。View 名で引ける形にするのは描画側（JS）の仕事。
+base_cols AS (
+  SELECT
+    k.base,
+    TO_JSON_STRING(ARRAY_AGG(STRUCT(c.view_name AS v, c.cols AS cols))) AS columns_json
+  FROM keyed AS k
+  JOIN cols AS c ON c.view_name = k.view_name
+  GROUP BY k.base
+),
 -- 解析は base ごとに 1 回だけ。結果の JSON をこの段で持っておき、
 -- メタデータは JSON から取り出し、HTML は描画の UDF に渡す。
 -- JS UDF から別の UDF は呼べないので、この 2 段で合成する。
@@ -616,9 +656,12 @@ refs AS (
   SELECT
     a.base,
     a.analysis,
+    -- 取れなかった base でも描画側が落ちないよう、空の並びを渡す
+    COALESCE(bc.columns_json, '[]') AS columns_json,
     ref_index,
     JSON_VALUE_ARRAY(a.analysis, '$.groupLabels')[SAFE_OFFSET(ref_index)] AS ref_label
-  FROM analyzed AS a,
+  FROM analyzed AS a
+  LEFT JOIN base_cols AS bc ON bc.base = a.base,
   UNNEST(GENERATE_ARRAY(
     0, CAST(JSON_VALUE(a.analysis, '$.groupCount') AS INT64) - 1
   )) AS ref_index
@@ -642,8 +685,8 @@ SELECT
   -- （先頭の '{' を落として前に足す）にそろえてある。
   --
   -- 描画は 2 段。render がロジック差分のカードを作り、page がそれを受け取って
-  -- 参照関係の図を足し、外側タブで 1 枚に束ねる。JS UDF から別の UDF は
-  -- 呼べないので、つなぐのは SQL の仕事。
+  -- 参照関係の図とカラム定義の表を足し、外側タブで 1 枚に束ねる。
+  -- JS UDF から別の UDF は呼べないので、つなぐのは SQL の仕事。
   `__UDF_PAGE__`(
     analysis,
     `__UDF_RENDER__`(
@@ -653,6 +696,7 @@ SELECT
         SUBSTR(TRIM((SELECT options_json FROM opts)), 2)
       )
     ),
+    columns_json,
     CONCAT(
       '{"referenceIndex":', CAST(ref_index AS STRING), ',',
       SUBSTR(TRIM((SELECT options_json FROM opts)), 2)
