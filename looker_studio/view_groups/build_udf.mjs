@@ -481,10 +481,10 @@ const checks = [
   // メモだけは作り置きしない。カードには目印だけを置き、ビューが
   // REPLACE で note_html に差し替える。焼き込むと、シートを直しても
   // 次の日次実行までレポートが古いままになる。
-  ['page はどのタブにも見出しを出す（base 名 / View 数 / グループ数）',
-    (info.page.match(/class="vg-title"/g) || []).length === 3 &&
-    // note のパネルにも見出しがある。目印より前に出ていること。
-    info.page.indexOf('vg-title') < info.page.indexOf('<!--VG_NOTE-->')],
+  ['page は見出しをタブと同じ帯に置く（どのタブでも見える）',
+    /<div class="vg-ohead"><div class="vg-header">.*?<div class="vg-otablist">/s
+      .test(info.page) &&
+    info.page.indexOf('vg-ohead') < info.page.indexOf('<!--VG_NOTE-->')],
   ['page はメモの目印を 1 つだけ置く（本体は焼き込まない）',
     info.page.split(require(join(here, 'chrome.js')).NOTE_MARK).length - 1 === 1 &&
     !info.page.includes('vg-md')],

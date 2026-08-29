@@ -328,16 +328,20 @@ function chromeCss() {
     //   iframe なので 100vh がチャートの高さになる。max-height なので、
     //   中身が収まるときはスクロールバーも出ない。
     `.vg-outer{max-height:100vh;overflow:auto}`,
-    // スクロールしてもタブは残す。カードは縦に長いので、下まで読んでから
-    // 別のタブへ移るのに毎回いちばん上まで戻るのは面倒。
+    // 見出しとタブは 1 枚の帯にまとめて、スクロールしても残す。カードは縦に
+    // 長いので、下まで読んでから別のタブへ移るのに毎回いちばん上まで戻るのは
+    // 面倒だし、何の base を見ているのかも見えていてほしい。
     //   z-index は 5。0 や auto にすると、あとに出てくる position:relative の
-    //   要素（{{Pn}} のチップ）が DOM 順で上に来てタブに重なる。一方
-    //   20 以上にすると、そのチップの吹き出し（z-index:20）がタブの下に隠れる。
-    //   間を取ると、地の文はタブが隠し、吹き出しはタブより前に出る。
-    //   固定できるかは埋め込み先（Looker の Templated Record）のスクロール要素
-    //   次第だが、効かない場合も従来どおり流れるだけで、崩れはしない。
-    `.vg-otablist{display:flex;gap:6px;margin:0 0 10px;padding:8px 0;` +
-      `position:sticky;top:0;z-index:5;background:#fff;box-shadow:0 1px 0 #EAEEF2}`,
+    //   要素（{{Pn}} のチップ）が DOM 順で上に来て帯に重なる。一方
+    //   20 以上にすると、そのチップの吹き出し（z-index:20）が帯の下に隠れる。
+    //   間を取ると、地の文は帯が隠し、吹き出しは帯より前に出る。
+    `.vg-ohead{position:sticky;top:0;z-index:5;background:#fff;` +
+      `margin:0 0 10px;padding:8px 0 0;box-shadow:0 1px 0 #EAEEF2}`,
+    `.vg-ohead .vg-header{margin:0 0 8px}`,
+    `.vg-otablist{display:flex;gap:6px;margin:0;padding:0 0 8px}`,
+    // パネルの中の見出しは隠す。renderBase / renderErdBase は単体でも使うので
+    // それぞれ見出しを出したままにしてあり、束ねたときだけ上の 1 枚に集約する。
+    `.vg-opanel .vg-header{display:none}`,
     `.vg-otab{display:inline-flex;align-items:center;padding:5px 16px;border:1px solid #D0D7DE;` +
       `border-radius:16px;color:#57606A;cursor:pointer;user-select:none;font-weight:600;font-size:12px}`,
     `.vg-otab:hover{background:#EAEEF2;color:#24292F}`,
@@ -360,9 +364,10 @@ function chromeCss() {
     `.vg-lgd{display:inline-block;width:18px;border-top:1.5px dashed #8C96A0}`,
   ];
   // 外側のタブ本体。枚数は chrome.js の OUTER_TABS がひとつの決め所。
+  // タブは .vg-ohead の中（見出しと同じ帯）にあるので、子ではなく子孫で辿る。
   for (let i = 1; i <= OUTER_TABS.length; i++) {
     rules.push(`.vg-or${i}:checked ~ .vg-opanels > .vg-op${i}{display:block}`);
-    rules.push(`.vg-or${i}:checked ~ .vg-otablist > .vg-ot${i}` +
+    rules.push(`.vg-or${i}:checked ~ .vg-ohead .vg-ot${i}` +
       `{background:#24292F;border-color:#24292F;color:#fff}`);
   }
   // 内側のタブ本体。ID ではなくクラスで書くので、CSS を静的に保てる。

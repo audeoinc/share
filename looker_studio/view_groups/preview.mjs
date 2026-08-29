@@ -311,22 +311,25 @@ const checks = [
       pageCases[0].html.indexOf('vg-md') < pageCases[0].html.indexOf('vg-opanel vg-op2') &&
       !pageCases[0].html.includes(Ch.NOTE_MARK);
   })()],
-  ['タブはスクロールしても残る（position:sticky）',
-    R.chromeCss().includes('.vg-otablist{') &&
-    /\.vg-otablist\{[^}]*position:sticky[^}]*top:0/.test(R.chromeCss())],
   // sticky はいちばん近いスクロールする祖先が基準。埋め込み先の overflow に
   // 左右されないよう、カード自身をスクロールする箱にしておく。
   ['カードが自前のスクロール箱になっている（sticky の基準を自分で持つ）',
     /\.vg-outer\{[^}]*max-height:100vh[^}]*overflow:auto/.test(R.chromeCss())],
-  ['どのタブにも見出しが出る（base 名 / View 数 / グループ数）', (() => {
+  ['見出しはタブと同じ帯にあり、どのタブでも見える', (() => {
     const h = pageCases[0].html;
-    // 3 枚のパネルにひとつずつ。note のぶんは目印より前。
-    const heads = [...h.matchAll(/<span class="vg-title">([^<]*)</g)].map((m) => m[1]);
-    return heads.length === Ch.OUTER_TABS.length &&
-      heads.every((t) => t === baseComplex.base) &&
-      (h.match(/vg-badge/g) || []).length === Ch.OUTER_TABS.length * 2 &&
-      h.indexOf('vg-title') < h.indexOf('vg-md');
+    const head = h.slice(h.indexOf('<div class="vg-ohead">'), h.indexOf('<div class="vg-opanels">'));
+    // 帯の中に見出しとタブが揃っていること
+    return head.includes(`<span class="vg-title">${baseComplex.base}<`) &&
+      (head.match(/vg-badge/g) || []).length === 2 &&
+      (head.match(/class="vg-otab /g) || []).length === Ch.OUTER_TABS.length &&
+      // パネル側の見出しは CSS で隠す（単体で使うときのために markup は残す）
+      R.chromeCss().includes('.vg-opanel .vg-header{display:none}');
   })()],
+  ['帯ごとスクロールに追従する（見出し＋タブ）',
+    /\.vg-ohead\{[^}]*position:sticky[^}]*top:0/.test(R.chromeCss())],
+  ['タブの切り替えは帯に入れても効く（子ではなく子孫で辿る）',
+    R.chromeCss().includes('.vg-or2:checked ~ .vg-ohead .vg-ot2') &&
+    R.chromeCss().includes('.vg-or2:checked ~ .vg-opanels > .vg-op2{display:block}')],
   ['メモが未登録でもタブは出る（中身が未登録の枠になる）',
     (pageCases[2].html.match(/class="vg-otab /g) || []).length === Ch.OUTER_TABS.length &&
     pageCases[2].html.includes('vg-mdempty')],

@@ -99,9 +99,15 @@ function referenceIndex(b, opts) {
  * 何組もそろえる必要が出て、片方だけずれた状態を作れてしまう。
  *
  * メモのパネルには本体ではなく目印（NOTE_MARK）を置く。上の説明のとおり、
- * メモだけは作り置きではなくビューの中で作るため。見出し（base 名・View 数・
- * グループ数）はここで付ける。差分側も参照関係側もそれぞれ自分で出しているので、
- * メモだけ無いとタブを移った拍子に何を見ているのか分からなくなる。
+ * メモだけは作り置きではなくビューの中で作るため。
+ *
+ * 見出し（base 名・View 数・グループ数）はタブと同じ帯（.vg-ohead）に入れて、
+ * まとめてスクロールに追従させる。差分側（renderBase）と参照関係側
+ * （renderErdBase）はそれぞれ自分でも見出しを出すが、単体で使うときのための
+ * もので、束ねたときは CSS で隠して上の 1 枚に集約する。
+ *
+ * ラジオは .vg-outer の直下に置いたまま。.vg-ohead の中に入れると
+ * :checked ~ の兄弟が .vg-opanels でなくなり、パネルの切り替えが効かない。
  *
  * 内側のタブとはクラスを分けてある。同じクラスだと内側のラジオが外側の
  * :checked ~ に引っかかり、片方を押すともう片方も切り替わる。
@@ -111,10 +117,7 @@ function referenceIndex(b, opts) {
 function wrapPage(diffHtml, erdHtml, base) {
   const b = base || {};
   const id = 'vgo' + hashId(b.base || '');
-  const note = `<div class="vg-root">` +
-    (b.base ? header(b.base, b.viewCount, (b.groups || []).length, b.unmatched) : '') +
-    NOTE_MARK + `</div>`;
-  const bodies = [note, diffHtml, erdHtml];
+  const bodies = [`<div class="vg-root">${NOTE_MARK}</div>`, diffHtml, erdHtml];
   const radios = OUTER_TABS.map((_, i) =>
     `<input class="vg-or vg-or${i + 1}" type="radio" name="${id}"` +
     ` id="${id}-${i + 1}"${i === 0 ? ' checked' : ''}>`).join('');
@@ -122,8 +125,10 @@ function wrapPage(diffHtml, erdHtml, base) {
     `<label class="vg-otab vg-ot${i + 1}" for="${id}-${i + 1}">${esc(t)}</label>`).join('');
   const panels = OUTER_TABS.map((_, i) =>
     `<div class="vg-opanel vg-op${i + 1}">${bodies[i] || ''}</div>`).join('');
+  const head = b.base
+    ? header(b.base, b.viewCount, (b.groups || []).length, b.unmatched) : '';
   return `<div class="vg-outer">${radios}` +
-    `<div class="vg-otablist">${tabs}</div>` +
+    `<div class="vg-ohead">${head}<div class="vg-otablist">${tabs}</div></div>` +
     `<div class="vg-opanels">${panels}</div></div>`;
 }
 
