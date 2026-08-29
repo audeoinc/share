@@ -492,7 +492,7 @@ SQL 中の `{{P1}}` にカーソルを合わせると、種別と suffix ごと�
 - パラメータ名はグループごとに振り直すので、左右のペインには別の対応表を渡す。
 
 ```bash
-node preview.mjs          # dist/preview.html を生成して検証（99 アサーション）
+node preview.mjs          # dist/preview.html を生成して検証（109 アサーション）
 node preview.mjs --check  # 生成せず検証だけ
 ```
 
@@ -500,7 +500,7 @@ node preview.mjs --check  # 生成せず検証だけ
 
 ```bash
 node build_udf.mjs          # 検証して view_group_html.sql を生成
-node build_udf.mjs --check  # 生成せず検証だけ（52 アサーション）
+node build_udf.mjs --check  # 生成せず検証だけ（54 アサーション）
 node check_sql.mjs          # build_table.sql と view_group_html.sql の突き合わせ
 ```
 
@@ -508,7 +508,7 @@ node check_sql.mjs          # build_table.sql と view_group_html.sql の突き�
 |---|---|
 | `viewlgc_analyze(views, options_json)` | 解析結果の JSON（`viewCount` / `groupCount` / `groupLabels` / `groupSizes` / `suffixes` / `unmatchedCount` / `bases`） |
 | `viewlgc_render(analysis_json, options_json)` | ロジック差分のカード |
-| `viewlgc_page(analysis_json, diff_html, columns_json, options_json)` | 参照関係の図とカラム定義の表を作り、メモ（目印のみ）・差分と外側タブで束ねた 1 枚 |
+| `viewlgc_page(analysis_json, diff_html, columns_json, sql_json, options_json)` | 参照関係の図・カラム定義の表・View ごとの素の SQL を作り、メモ（目印のみ）・差分と外側タブで束ねた 1 枚 |
 | `viewlgc_markdown(md)` | base ごとのメモ（Markdown）の HTML。**ビューの中から呼ぶ** |
 | `viewlgc_group_css(options_json)` | `mode='class'` でテンプレートに貼る CSS。**SQL 関数で、生成時に焼き込んだ固定文字列を返す**（`options_json` は見ない） |
 | `viewlgc_render_dynamic_sql(sql_template, …)` | `build_table.sql` の `__…__` を展開した SQL（JavaScript ではなく SQL 関数） |
@@ -522,13 +522,15 @@ node check_sql.mjs          # build_table.sql と view_group_html.sql の突き�
 
 ```
 viewlgc_analyze     素 23.7 KB → 最小化 10.7 KB（上限比 36%）
-viewlgc_render      素 38.9 KB → 最小化 25.1 KB（上限比 84%）
-viewlgc_page        素 33.8 KB → 最小化 17.0 KB（上限比 57%）
-viewlgc_markdown    素 10.9 KB → 最小化  6.4 KB（上限比 21%）
-viewlgc_group_css   素 44.5 KB → 最小化 27.8 KB（上限比 93%）
+viewlgc_render      素 46.1 KB → 最小化 28.1 KB（上限比 94%）
+viewlgc_page        素 54.1 KB → 最小化 27.8 KB（上限比 93%）
+viewlgc_markdown    素 11.1 KB → 最小化  6.5 KB（上限比 22%）
 ```
 
-`viewlgc_group_css` が上限（生成時の閾値 30 KB）に近い。CSS を足すときは
+（`viewlgc_group_css` は JavaScript ではなく SQL 関数になったので、この枠とは
+無関係。生成時に焼き込んだ固定文字列を返すだけ。）
+
+`viewlgc_render` と `viewlgc_page` がどちらも上限（生成時の閾値 30 KB）に近い。CSS を足すときは
 `node build_udf.mjs` の最後に出るサイズを見ること。**メモの CSS を
 `markdown.js` の `memoCss()` に置いてあるのはこのため**で、差分側の
 `chromeCss()` に混ぜると `viewlgc_render` にも使わない CSS が乗る。
@@ -937,14 +939,16 @@ Looker Studio はビューを読むだけ。`diff_html` を Templated Record に
 （向きによって理由が変わりうるので対称にはしていない）。グループ数はせいぜい
 数個なので、G² でも走査は実質ゼロ。
 
-タブは 3 段になる。クラスはすべて分けてある。同じクラスだとどれかのラジオが
-別の段の `:checked ~` に引っかかる。
+タブは 4 段になる（SQL タブの中は外側の 1 段下なので、深さとしては 2 段目）。
+クラスはすべて分けてある。同じクラスだとどれかのラジオが別の段の
+`:checked ~` に引っかかる。
 
 | 段 | クラス | 中身 |
 |---|---|---|
-| 外側 | `.vg-or* / .vg-ot* / .vg-op*` | note / カラム定義 / ロジック差分 / 参照関係 |
+| 外側 | `.vg-or* / .vg-ot* / .vg-op*` | note / カラム定義 / 参照関係 / ロジック差分 / SQL |
 | 基準 | `.vg-br* / .vg-bt* / .vg-bp*` | どのグループを基準にするか |
 | 比較 | `.vg-r* / .vg-t* / .vg-p*` | 基準と見比べる相手 |
+| SQL | `.vg-sr* / .vg-st* / .vg-sp*` | どの View の素の SQL を出すか |
 
 > **比較タブのラジオは基準ごとに `name` を変える。** 同じ名前だと全基準の
 > ラジオが 1 つの組になり、選ばれていない基準の比較タブがどれも開かなくなる。
@@ -952,8 +956,8 @@ Looker Studio はビューを読むだけ。`diff_html` を Templated Record に
 
 ### 参照関係の図（ERD タブ）
 
-カードは**外側のタブ 4 枚**でできている。左から `note` / `カラム定義` /
-`参照関係` / `ロジック差分` で、既定で開くのは `note`。1 レコードに全部入れてあるので、
+カードは**外側のタブ 5 枚**でできている。左から `note` / `カラム定義` /
+`参照関係` / `ロジック差分` / `SQL` で、既定で開くのは `note`。1 レコードに全部入れてあるので、
 `base` のコントロール 1 つでどのタブも決まる。別のチャートに分けると、
 コントロールを何組もそろえる必要が出て、片方だけずれた状態を作れてしまう。
 枚数と順序は `chrome.js` の `OUTER_TABS` がひとつの決め所で、CSS の規則も
@@ -1161,6 +1165,43 @@ base_cols  base ごとに [{v: View 名, cols: […]}] へ畳んで JSON に
 > `INFORMATION_SCHEMA.COLUMNS` / `COLUMN_FIELD_PATHS` のリージョン修飾が
 > 使えるかは環境によるので、疑わしいときは
 > `SELECT COUNT(*) FROM \`region-<location>.INFORMATION_SCHEMA.COLUMNS\`` で確かめる。
+
+### View の SQL そのもの（SQL タブ）
+
+`INFORMATION_SCHEMA.VIEWS.view_definition` を**そのまま**出す。差分も等価判定も
+通さない素のテキスト。
+
+**ロジック差分では代わりにならない。** あちらが出しているのは α 等価の判定に
+使ったパラメータ化済みの SQL で、実体名や値は `{{Pn}}` に置き換わっている。
+何に置き換わったかは末尾の一覧か tooltip を辿れば分かるが、「この View に
+実際に何が書いてあるか」を読むための形ではないし、そもそも**グループの代表
+1 本ぶんしか出ていない**。
+
+**インナーのタブはグループではなく View（suffix）。** グループは「同じロジックの
+束」なので、束の中のどれを見ても SQL は同じ（だから 1 つの束になっている）。
+素の SQL を見に来る人が探しているのは「abjp の SQL」であって「グループ 2 の
+SQL」ではない。並びは suffix 順で、どのグループに属しているかはパネルの見出しに
+出す。上限は `chrome.js` の `MAX_SQL_TABS`（24 枚）。ここだけグループではなく
+View 単位なので、同じ base でも枚数が桁ひとつ多くなりうる。
+
+**折り返さない。** SQL は字下げが構造を表しているので、折り返すと読みにくくなる。
+横は `.vg-sqlbox` ごとスクロールさせる（カラム定義の表とは方針が逆）。この箱の
+中に `sticky` で貼り付く要素は無いので、ここがスクロール要素になっても帯の固定は
+壊れない。
+
+**行番号は本文として書く。** CSS のカウンタは埋め込み先で効かなければ番号が
+丸ごと消えるが、テキストなら必ず出る。桁は空白でそろえるだけなので、`<pre>` と
+等幅フォントがあれば位置も合う。
+
+**解析結果には積まない。** `viewlgc_analyze` が返す JSON から `ddl` は落として
+ある（描画に要らないものを UDF 間で運ぶと、サンプル 9 本で 3 KB が 62 KB になる）。
+SQL タブぶんは `sql_json` として別に束ねて `viewlgc_page` へ渡す。カラム定義の
+`columns_json` と同じ形。
+
+```
+analyzed  base ごとに TO_JSON_STRING(ARRAY_AGG(STRUCT(view_name AS v, ddl AS s)))
+          → sql_json（解析の CTE と同じ GROUP BY なので、CTE も JOIN も増えない）
+```
 
 ### base ごとのメモ（Markdown）
 

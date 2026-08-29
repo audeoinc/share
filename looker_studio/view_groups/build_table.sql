@@ -651,7 +651,12 @@ analyzed AS (
       ARRAY_AGG(STRUCT(view_name, ddl) ORDER BY view_name),
       -- suffixes から組み立てた設定（全行で同じ値）
       (SELECT options_json FROM opts)
-    ) AS analysis
+    ) AS analysis,
+    -- SQL タブ用の素のテキスト。解析結果には積んでいない（描画に要らない
+    -- ものを UDF 間の JSON で運ぶと 20 倍の大きさになる）ので、ここで
+    -- 別に束ねて描画側へ渡す。カラム定義（columns_json）と同じ形。
+    TO_JSON_STRING(ARRAY_AGG(STRUCT(view_name AS v, ddl AS s) ORDER BY view_name))
+      AS sql_json
   FROM keyed
   GROUP BY base
 ),
@@ -666,6 +671,7 @@ refs AS (
   SELECT
     a.base,
     a.analysis,
+    a.sql_json,
     -- 取れなかった base でも描画側が落ちないよう、空の並びを渡す
     COALESCE(bc.columns_json, '[]') AS columns_json,
     0 AS ref_index,
@@ -692,12 +698,14 @@ SELECT
   -- （先頭の '{' を落として前に足す）にそろえてある。
   --
   -- 描画は 2 段。render がロジック差分のカードを作り、page がそれを受け取って
-  -- 参照関係の図とカラム定義の表を足し、外側タブで 1 枚に束ねる。
+  -- 参照関係の図・カラム定義の表・View ごとの素の SQL を足し、外側タブで
+  -- 1 枚に束ねる。
   -- JS UDF から別の UDF は呼べないので、つなぐのは SQL の仕事。
   `__UDF_PAGE__`(
     analysis,
     `__UDF_RENDER__`(analysis, (SELECT options_json FROM opts)),
     columns_json,
+    sql_json,
     (SELECT options_json FROM opts)
   ) AS diff_html
 FROM refs

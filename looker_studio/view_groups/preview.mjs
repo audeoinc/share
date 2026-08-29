@@ -18,6 +18,7 @@ const E = require(join(here, 'erd.js'));
 const Ch = require(join(here, 'chrome.js'));
 const Md = require(join(here, 'markdown.js'));
 const Co = require(join(here, 'columns.js'));
+const Sq = require(join(here, 'sqltext.js'));
 
 const OPTS = { suffixParts: S.SUFFIX_PARTS };
 
@@ -145,6 +146,15 @@ const fakeColumns = (b) => {
   return out;
 };
 
+// SQL タブに渡す素のテキスト。実際は INFORMATION_SCHEMA.VIEWS の
+// view_definition が SQL 経由で来る。ここでは解析前の ddl をそのまま使う
+// （preview の base は analyze() の生の結果なので members に残っている）。
+const fakeSql = (b) => {
+  const out = {};
+  for (const g of b.groups) for (const m of g.members) out[m.viewName] = m.ddl;
+  return out;
+};
+
 // 実際に Looker へ渡すのは、差分と参照関係を外側タブで束ねた 1 枚。
 // プレビューの先頭にその形も置いて、束ねた状態で崩れないかを見る。
 // メモは作り置きせず、ビューが REPLACE で差し込む（シートを直した内容を
@@ -152,14 +162,15 @@ const fakeColumns = (b) => {
 const splice = (html, note) => html.replace(Ch.NOTE_MARK, note);
 
 const pageCases = [
-  { title: '外側タブ（note / ロジック差分 / 参照関係）', b: baseComplex, opts: {},
-    note: NOTE_MD },
+  { title: '外側タブ（note / カラム定義 / 参照関係 / ロジック差分 / SQL）',
+    b: baseComplex, opts: {}, note: NOTE_MD },
   { title: '外側タブ・3 グループ', b: base3, opts: {}, note: NOTE_MD },
   { title: '外側タブ・メモが未登録の base', b: base2, opts: {}, note: null },
 ].map((c) => ({ ...c,
   html: splice(
     Ch.wrapPage(R.renderBase(c.b, c.opts), E.renderErdBase(c.b),
-      Co.renderColumnsBase(c.b, fakeColumns(c.b)), c.b),
+      Co.renderColumnsBase(c.b, fakeColumns(c.b)), Sq.renderSqlBase(c.b, fakeSql(c.b)),
+      c.b),
     Md.markdownHtml(c.note)) }));
 
 const columnCases = [
@@ -167,6 +178,13 @@ const columnCases = [
     html: Co.renderColumnsBase(base3, fakeColumns(base3)) },
   { title: 'カラム定義（取得できなかった場合）',
     html: Co.renderColumnsBase(base3, {}) },
+];
+
+const sqlCases = [
+  { title: 'SQL（View ごと・インナー タブは suffix）',
+    html: Sq.renderSqlBase(base3, fakeSql(base3)) },
+  { title: 'SQL（取得できなかった場合）',
+    html: Sq.renderSqlBase(base3, {}) },
 ];
 
 // --- 検証 --------------------------------------------------------------
@@ -372,9 +390,9 @@ const checks = [
       g.missBy[i] === null &&
       g.missBy.filter((m) => m).length === base3.groupCount - 1)],
   // --- 参照関係（ERD） --------------------------------------------------
-  ['外側タブが 4 枚出る（note / カラム定義 / 参照関係 / ロジック差分）',
+  ['外側タブが 5 枚出る（note / カラム定義 / 参照関係 / ロジック差分 / SQL）',
     (pageCases[0].html.match(/class="vg-otab /g) || []).length === Ch.OUTER_TABS.length &&
-    Ch.OUTER_TABS.join(',') === 'note,カラム定義,参照関係,ロジック差分'],
+    Ch.OUTER_TABS.join(',') === 'note,カラム定義,参照関係,ロジック差分,SQL'],
   ['既定で開くのはいちばん左のメモ タブ', (() => {
     const h = pageCases[0].html;
     // checked が付くのは 1 枚目だけ。外側タブの CSS も 1 枚目を開く形になる。
@@ -383,7 +401,7 @@ const checks = [
       R.chromeCss().includes('.vg-or1:checked ~ .vg-opanels > .vg-op1{display:block}');
   })()],
   ['メモは作り置きせずビューが差し込む（目印が残っている）', (() => {
-    const raw = Ch.wrapPage('<i>D</i>', '<i>E</i>', 'x');
+    const raw = Ch.wrapPage('<i>D</i>', '<i>E</i>', 'x', 'y');
     return raw.split(Ch.NOTE_MARK).length - 1 === 1 &&
       !raw.includes('vg-md') &&
       // 置換したあとは目印が消え、メモ本体が 1 枚目のパネルに入る
@@ -509,13 +527,14 @@ const checks = [
   })()],
   ['ERD にラジオを置かない（外側タブと干渉しない）',
     !/class="vg-r vg-r\d+" type="radio"[^>]*name="vge/.test(pageCases[1].html)],
-  ['パネルの中身がタブの並びと合っている（カラム定義 2 / ERD 3 / 差分 4）', (() => {
+  ['パネルの中身がタブの並びと合っている（カラム定義 2 / ERD 3 / 差分 4 / SQL 5）', (() => {
     const h = pageCases[1].html;
     const at = (n) => h.indexOf(`vg-opanel vg-op${n}`);
-    return at(1) < at(2) && at(2) < at(3) && at(3) < at(4) &&
+    return at(1) < at(2) && at(2) < at(3) && at(3) < at(4) && at(4) < at(5) &&
       h.indexOf('vg-ctable') > at(2) && h.indexOf('vg-ctable') < at(3) &&
       h.indexOf('<svg ') > at(3) && h.indexOf('<svg ') < at(4) &&
-      h.indexOf('vg-btablist') > at(4);
+      h.indexOf('vg-btablist') > at(4) && h.indexOf('vg-btablist') < at(5) &&
+      h.indexOf('vg-stablist') > at(5);
   })()],
   ['ERD の CSS が chrome 側にある',
     R.chromeCss().includes('.vg-otab') && R.chromeCss().includes('.vg-erdbox')],
@@ -620,6 +639,69 @@ const checks = [
     !columnCases[1].html.includes('vg-ctable')],
   ['カラム定義の CSS は columns.js 側にある',
     Co.columnsCss().includes('.vg-ctable') && !R.chromeCss().includes('.vg-ctable')],
+  // SQL タブ。ロジック差分が出すのはパラメータ化した SQL なので、素のテキストを
+  // 読みたいときの受け皿がここになる。インナーのタブは View（suffix）単位。
+  ['SQL のインナー タブは View 単位で suffix 順', (() => {
+    const h = sqlCases[0].html;
+    const tabs = [...h.matchAll(/class="vg-stab vg-st\d+"[^>]*>([^<]*)</g)].map((m) => m[1]);
+    const want = base3.groups.flatMap((g, i) =>
+      g.suffixes.map((s, j) => s || g.members[j].viewName)).sort();
+    return tabs.length === base3.viewCount && tabs.join(',') === want.join(',');
+  })()],
+  ['SQL は素のテキストを出す（パラメータ化しない）', (() => {
+    const h = sqlCases[0].html;
+    // 差分側は {{P1}} に置き換えた SQL を出すが、こちらは置き換えない。
+    // View 名そのもの（v_daily_sales_abjp）ではなく参照先が入っているのが素の証拠。
+    return !h.includes('{{P') && h.includes('vg-sqlpre') &&
+      h.includes('orders_abjp') && h.includes('orders_efus');
+  })()],
+  ['SQL に行番号が本文として入る（CSS のカウンタに頼らない）', (() => {
+    const h = sqlCases[0].html;
+    const body = Sq.sqlBody('SELECT 1\nFROM t\nWHERE x = 2');
+    return h.includes('<span class="vg-sqln">') &&
+      body.lines === 3 &&
+      body.html.includes('<span class="vg-sqln">1</span> SELECT 1') &&
+      body.html.includes('<span class="vg-sqln">3</span> WHERE x = 2');
+  })()],
+  ['SQL の 1 桁を超える行番号は空白で桁をそろえる', (() => {
+    const body = Sq.sqlBody(new Array(11).fill('SELECT 1').join('\n'));
+    return body.lines === 11 &&
+      body.html.includes('<span class="vg-sqln"> 1</span>') &&
+      body.html.includes('<span class="vg-sqln">10</span>');
+  })()],
+  ['SQL は折り返さず箱ごと横スクロールする（字下げが構造を表すため）', (() => {
+    const css = Sq.sqlCss();
+    return /\.vg-sqlbox\{overflow-x:auto/.test(css) &&
+      /\.vg-sqlpre\{[^}]*white-space:pre[;}]/.test(css);
+  })()],
+  ['SQL のパネルに View 名と属するグループを出す', (() => {
+    const h = sqlCases[0].html;
+    return h.includes('<span class="vg-sqlname">v_daily_sales_abjp</span>') &&
+      h.includes('グループ: abjp, abuk, abus');
+  })()],
+  ['SQL が取れなければ案内を出す（タブは出さない）',
+    sqlCases[1].html.includes('SQL を取得できませんでした') &&
+    !sqlCases[1].html.includes('vg-stablist')],
+  ['SQL タブのラジオは外側・基準・比較と別のクラス（連動しない）', (() => {
+    const h = sqlCases[0].html;
+    const css = Sq.sqlCss();
+    return /class="vg-sr vg-sr1"/.test(h) &&
+      !/class="vg-r vg-sr/.test(h) && !/class="vg-br vg-sr/.test(h) &&
+      // 形は「兄弟 > 子」から動かさない（この viz で動くと確認できている形）
+      css.includes('.vg-sr1:checked ~ .vg-spanels > .vg-sp1{display:block}') &&
+      css.includes('.vg-sr1:checked ~ .vg-stablist > .vg-st1') &&
+      // 結合子は ~ と > だけ。子孫結合子や * を使うと実機で効かなくなる
+      css.split('\n').filter((r) => r.includes(':checked')).every((r) =>
+        /^\.[\w-]+:checked(?: [~>] \.[\w-]+)+\{/.test(r));
+  })()],
+  ['SQL タブの CSS が上限枚数ぶんある', (() => {
+    const css = Sq.sqlCss();
+    return [...Array(Ch.MAX_SQL_TABS).keys()].every((i) =>
+      css.includes(`.vg-sr${i + 1}:checked ~ .vg-spanels > .vg-sp${i + 1}`)) &&
+      !css.includes(`.vg-sr${Ch.MAX_SQL_TABS + 1}:checked`);
+  })()],
+  ['SQL の CSS は sqltext.js 側にある',
+    Sq.sqlCss().includes('.vg-sqlpre') && !R.chromeCss().includes('.vg-sqlpre')],
   ['メモの CSS は markdown.js 側にある（差分の UDF に積まない）',
     Md.memoCss().includes('.vg-mdtable') && !R.chromeCss().includes('.vg-mdtable')],
   ['伏せ字は診断で見える表記に戻す',
@@ -644,9 +726,9 @@ if (!process.argv.includes('--check')) {
     '<title>view groups preview</title>\n<style>\nbody{margin:16px;background:#fff}\n' +
     'h2{font:600 14px/1.6 Roboto,system-ui,sans-serif;color:#57606A;' +
     'margin:32px 0 12px;padding-top:16px;border-top:1px solid #D0D7DE}\n' +
-    chromeCss() + '\n' + Md.memoCss() + '\n' + Co.columnsCss() +
+    chromeCss() + '\n' + Md.memoCss() + '\n' + Co.columnsCss() + '\n' + Sq.sqlCss() +
     '\n</style>\n</head>\n<body>\n' +
-    pageCases.concat(parts, memoCases, columnCases)
+    pageCases.concat(parts, memoCases, columnCases, sqlCases)
       .map((p) => `<h2>${p.title}</h2>\n${p.html}`).join('\n') +
     '\n</body>\n</html>\n';
   await mkdir(join(here, 'dist'), { recursive: true });

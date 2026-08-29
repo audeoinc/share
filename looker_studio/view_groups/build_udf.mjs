@@ -56,6 +56,7 @@ const ERD_SOURCES = [
   ['analyze.js', join(here, 'analyze.js')],
   ['erd.js', join(here, 'erd.js')],
   ['columns.js', join(here, 'columns.js')],
+  ['sqltext.js', join(here, 'sqltext.js')],
 ];
 // base ごとのメモ（Markdown）の UDF。ほかとは何も共有しない。
 // これだけビューの中から呼ぶ（＝クエリのたびに走る）ので、事前生成の
@@ -69,6 +70,7 @@ const MARKDOWN_SOURCES = [
 const CSS_SOURCES = RENDER_SOURCES.concat([
   ['markdown.js', join(here, 'markdown.js')],
   ['columns.js', join(here, 'columns.js')],
+  ['sqltext.js', join(here, 'sqltext.js')],
 ]);
 
 /**
@@ -110,7 +112,8 @@ const UNUSED_CSS = UNUSED_RENDER.concat([
   'markdownHtml', 'mdRender', 'mdBlocks', 'mdList', 'mdAligns', 'mdCells',
   'mdKind', 'mdIndent', 'mdInline', 'mdLink', 'mdUrl', 'mdEsc',
   'renderColumnsBase', 'renderColumns', 'groupColumns', 'columnOrder',
-  'cellInfo', 'mixedTip', 'uniq', 'majority']);
+  'cellInfo', 'mixedTip', 'uniq', 'majority',
+  'renderSqlBase', 'renderSql', 'sqlViews', 'sqlBody', 'sqlPanel']);
 
 /** CommonJS の体裁を落として素の関数群にする。 */
 function strip(src, file) {
@@ -306,7 +309,7 @@ return __run(analysis_json, options_json);
 // 解析結果から参照関係の図を作り、渡された差分 HTML と外側タブで束ねる。
 // 差分そのものは作らない（差分エンジンを積むと 32 KB に収まらないため）。
 const pageDriver = `
-function __run(analysis_json, diff_html, columns_json, options_json) {
+function __run(analysis_json, diff_html, columns_json, sql_json, options_json) {
   var opts = __opts(options_json);
   var a;
   try { a = JSON.parse(analysis_json); } catch (e) { a = null; }
@@ -319,21 +322,31 @@ function __run(analysis_json, diff_html, columns_json, options_json) {
     var arr = JSON.parse(columns_json) || [];
     for (var k = 0; k < arr.length; k++) byView[arr[k].v] = arr[k].cols || [];
   } catch (e) { byView = {}; }
+  // 素の SQL も同じ形（[{v: View 名, s: SQL}]）で受け取る。解析結果には
+  // 積んでいない（描画に要らないものを UDF 間で運ぶと JSON が 20 倍になる）。
+  var sqlByView = {};
+  try {
+    var sarr = JSON.parse(sql_json) || [];
+    for (var m = 0; m < sarr.length; m++) sqlByView[sarr[m].v] = sarr[m].s;
+  } catch (e) { sqlByView = {}; }
 
   var erd = '';
   var col = '';
+  var sql = '';
   var bases = a.bases || [];
   for (var i = 0; i < bases.length; i++) {
     erd += renderErdBase(bases[i]);
     col += renderColumnsBase(bases[i], byView);
+    sql += renderSqlBase(bases[i], sqlByView);
   }
   if (!erd) erd = __notice('図にできる View がありません。');
   if (!col) col = __notice('カラム定義を出せる View がありません。');
-  return wrapPage(String(diff_html || ''), erd, col,
+  if (!sql) sql = __notice('SQL を出せる View がありません。');
+  return wrapPage(String(diff_html || ''), erd, col, sql,
     a.bases && a.bases.length ? a.bases[0] : null);
 }
 
-return __run(analysis_json, diff_html, columns_json, options_json);
+return __run(analysis_json, diff_html, columns_json, sql_json, options_json);
 `.trim();
 
 // --- markdown のドライバ -----------------------------------------------
@@ -399,7 +412,7 @@ function __fixtureRules(opts) {
   return rules;
 }
 
-return chromeCss() + '\\n' + memoCss() + '\\n' + columnsCss() + '\\n' +
+return chromeCss() + '\\n' + memoCss() + '\\n' + columnsCss() + '\\n' + sqlCss() + '\\n' +
   __rulesToCss(__fixtureRules(__opts(options_json)));
 `.trim();
 
@@ -438,7 +451,7 @@ const S = require(join(here, 'sample_views.js'));
 const VIEWLGC_ANALYZE = new Function('views', 'options_json', analyzePack.code);
 const VIEWLGC_RENDER = new Function('analysis_json', 'options_json', renderPack.code);
 const VIEWLGC_PAGE = new Function(
-  'analysis_json', 'diff_html', 'columns_json', 'options_json', pagePack.code);
+  'analysis_json', 'diff_html', 'columns_json', 'sql_json', 'options_json', pagePack.code);
 const VIEWLGC_MARKDOWN = new Function('md', markdownPack.code);
 const VIEW_GROUP_CSS = new Function('options_json', cssPack.code);
 
@@ -458,6 +471,11 @@ function fakeColumns(views) {
   })));
 }
 
+// 素の SQL の代わり。実際は INFORMATION_SCHEMA.VIEWS.view_definition が来る。
+function fakeSql(views) {
+  return JSON.stringify(views.map((v) => ({ v: v.view_name, s: v.ddl })));
+}
+
 function VIEW_GROUP_INFO(views, options_json) {
   const a = VIEWLGC_ANALYZE(views, options_json);
   const j = JSON.parse(a);
@@ -472,7 +490,7 @@ function VIEW_GROUP_INFO(views, options_json) {
     // build_table.sql は render の結果をさらに page へ渡す。ここも同じ順で通し、
     // 最小化した page 本体が実際に動くことを確かめる。
     page: VIEWLGC_PAGE(a, VIEWLGC_RENDER(a, options_json),
-      fakeColumns(views), options_json),
+      fakeColumns(views), fakeSql(views), options_json),
   };
 }
 
@@ -532,23 +550,40 @@ const checks = [
         .map((m) => m[1])).size === G;
   })()],
   ['参照関係とカラム定義には基準を出さない（差分でだけ意味を持つ）', (() => {
-    // パネルは note / カラム定義 / 参照関係 / ロジック差分 の順
+    // パネルは note / カラム定義 / 参照関係 / ロジック差分 / SQL の順
     const at = (n) => info.page.indexOf(`<div class="vg-opanel vg-op${n}">`);
     const cols = info.page.slice(at(2), at(3));
     const erd = info.page.slice(at(3), at(4));
-    return at(2) > 0 && at(3) > at(2) && at(4) > at(3) &&
-      !cols.includes('基準') && !erd.includes('基準') &&
+    const sql = info.page.slice(at(5));
+    return at(2) > 0 && at(3) > at(2) && at(4) > at(3) && at(5) > at(4) &&
+      !cols.includes('基準') && !erd.includes('基準') && !sql.includes('基準') &&
       // 差分側にはある
-      info.page.slice(at(4)).includes('基準');
+      info.page.slice(at(4), at(5)).includes('基準');
   })()],
+  ['page は View ごとの素の SQL を出す（インナー タブは suffix）', (() => {
+    const at = (n) => info.page.indexOf(`<div class="vg-opanel vg-op${n}">`);
+    const sql = info.page.slice(at(5));
+    const tabs = [...sql.matchAll(/class="vg-stab vg-st\d+"[^>]*>([^<]*)</g)]
+      .map((m) => m[1]);
+    return tabs.length === info.view_count &&
+      tabs.join(',') === info.suffixes.join(',') &&
+      // パラメータ化していない素のテキスト。{{P1}} は出ない
+      sql.includes('vg-sqlpre') && !sql.includes('{{P') &&
+      // 行番号が本文として入る（CSS のカウンタに頼らない）
+      sql.includes('<span class="vg-sqln">');
+  })()],
+  ['page は SQL が渡されなくても落ちない',
+    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '[]', '{ broken', OPTS)
+      .includes('SQL を取得できませんでした')],
   ['page はカラム定義の表を出す（型とグループ内の食い違い）',
     info.page.includes('vg-ctable') &&
     info.page.includes('gross_amount') &&
     // 同じグループの中で jp が NUMERIC・us が FLOAT64。印が出ること
     info.page.includes('vg-cmix') && info.page.includes('vg-cwarn')],
   ['page はカラム定義が空でも落ちない',
-    typeof VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '{ broken', OPTS) === 'string' &&
-    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', null, OPTS)
+    typeof VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '{ broken', '[]', OPTS)
+      === 'string' &&
+    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', null, '[]', OPTS)
       .includes('カラム定義を取得できませんでした')],
   ['page はメモの目印を 1 つだけ置く（本体は焼き込まない）',
     info.page.split(require(join(here, 'chrome.js')).NOTE_MARK).length - 1 === 1 &&
@@ -993,9 +1028,13 @@ LANGUAGE js AS %s
 -- 3. viewlgc_page
 --    参照関係の図を作り、渡された差分 HTML と外側タブで束ねて 1 枚にする
 --
--- タブは左から note / ロジック差分 / 参照関係 / カラム定義 で、既定で開くのは note。
+-- タブは左から note / カラム定義 / 参照関係 / ロジック差分 / SQL で、
+-- 既定で開くのは note。
 -- カラム定義は columns_json（INFORMATION_SCHEMA.COLUMNS を base ごとにまとめた
 -- もの）から作る。取れなくても落とさず、そのタブだけ案内にする。
+-- SQL タブは sql_json（INFORMATION_SCHEMA.VIEWS.view_definition を base ごとに
+-- まとめたもの）から作る。パラメータ化していない素のテキストで、インナーの
+-- タブは グループではなく View（suffix）単位。
 -- 差分は作らない。viewlgc_render の出力をそのまま受け取って包むだけ。
 -- 図の解析にはトークナイザが要るので、差分側とは別の UDF にしてある
 -- （両方を 1 つに積むとインラインの 32 KB に収まらない）。
@@ -1009,6 +1048,7 @@ CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
   analysis_json STRING,
   diff_html STRING,
   columns_json STRING,
+  sql_json STRING,
   options_json STRING
 )
 RETURNS STRING

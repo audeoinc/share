@@ -11,6 +11,9 @@ const MAX_TABS = 12; // 静的 CSS が面倒を見るタブ数の上限
 // 基準タブ（ロジック差分の中）も静的 CSS で面倒を見る。実際に載せる枚数は
 // 下の予算で決めるので、これは CSS を用意しておく上限。
 const MAX_REF_TABS = 12;
+// SQL タブ（View ごとの素の SQL）のタブ数の上限。ここだけグループではなく
+// View 単位なので、同じ base でも枚数が桁ひとつ多くなりうる。多めに取ってある。
+const MAX_SQL_TABS = 24;
 // 1 レコードに載せる差分の上限。
 //
 // **これは「重くしない」ための値ではなく、「行が壊れない」ための値。**
@@ -35,7 +38,7 @@ const REF_BUDGET = 40 * 1024 * 1024;
  */
 // 並びを変えるとパネルの中身と番号の対応が変わるが、CSS は番号ごとに対称な
 // 規則を出すだけで見出しも中身も知らないので、貼り替えの順序は問わない。
-const OUTER_TABS = ['note', 'カラム定義', '参照関係', 'ロジック差分'];
+const OUTER_TABS = ['note', 'カラム定義', '参照関係', 'ロジック差分', 'SQL'];
 
 /**
  * メモの差し込み口。
@@ -103,7 +106,7 @@ const KIND_TEXT = {
 const kindText = (k) => KIND_TEXT[k] || k;
 
 /**
- * メモ・ロジック差分・参照関係を外側のタブで束ねる。
+ * メモ・カラム定義・参照関係・ロジック差分・SQL を外側のタブで束ねる。
  *
  * 1 レコードに全部入れるので、Looker Studio のコントロール（base / ref_label）は
  * どのタブにも同じように効く。別のチャートに分けると、コントロールを
@@ -131,11 +134,12 @@ const kindText = (k) => KIND_TEXT[k] || k;
  *
  * @param {object} base 解析結果の base 1 件分。見出しと id の種に使う
  */
-function wrapPage(diffHtml, erdHtml, colsHtml, base) {
+function wrapPage(diffHtml, erdHtml, colsHtml, sqlHtml, base) {
   const b = base || {};
   const id = 'vgo' + hashId(b.base || '');
   // OUTER_TABS と同じ並び
-  const bodies = [`<div class="vg-root">${NOTE_MARK}</div>`, colsHtml, erdHtml, diffHtml];
+  const bodies = [`<div class="vg-root">${NOTE_MARK}</div>`, colsHtml, erdHtml,
+    diffHtml, sqlHtml];
   const radios = OUTER_TABS.map((_, i) =>
     `<input class="vg-or vg-or${i + 1}" type="radio" name="${id}"` +
     ` id="${id}-${i + 1}"${i === 0 ? ' checked' : ''}>`).join('');
@@ -151,6 +155,6 @@ function wrapPage(diffHtml, erdHtml, colsHtml, base) {
 }
 
 module.exports = {
-  MAX_TABS, MAX_REF_TABS, REF_BUDGET, OUTER_TABS, NOTE_MARK,
+  MAX_TABS, MAX_REF_TABS, MAX_SQL_TABS, REF_BUDGET, OUTER_TABS, NOTE_MARK,
   esc, hashId, label, badge, header, notice, KIND_TEXT, kindText, wrapPage,
 };
