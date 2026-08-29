@@ -313,8 +313,11 @@ const checks = [
   })()],
   // sticky はいちばん近いスクロールする祖先が基準。埋め込み先の overflow に
   // 左右されないよう、カード自身をスクロールする箱にしておく。
+  // 埋め込み先まかせにすると、overflow:hidden の祖先や、中身の高さぶん伸びる
+  // iframe（＝中にスクロールする要素が無い）で効かない。固定の px を上限に
+  // 入れておけば、どの形でもこの箱がスクロールする側になる。
   ['カードが自前のスクロール箱になっている（sticky の基準を自分で持つ）',
-    /\.vg-outer\{[^}]*max-height:100vh[^}]*overflow:auto/.test(R.chromeCss())],
+    /\.vg-outer\{max-height:min\(100vh,\d+px\);overflow:auto\}/.test(R.chromeCss())],
   ['見出しはタブと同じ帯にあり、どのタブでも見える', (() => {
     const h = pageCases[0].html;
     const head = h.slice(h.indexOf('<div class="vg-ohead">'), h.indexOf('<div class="vg-opanels">'));
