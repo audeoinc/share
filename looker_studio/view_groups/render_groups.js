@@ -25,7 +25,7 @@
 const { splitLines, build2Way } = require('../ddl_diff_viz/src/lib/diff');
 const { renderFragment1, renderFragment2 } = require('../ddl_diff_viz/src/lib/render');
 const {
-  MAX_TABS, MAX_REF_TABS, REF_BUDGET, OUTER_TABS,
+  MAX_TABS, MAX_REF_TABS, REF_BUDGET, OUTER_TABS, MAX_OUTER_TABS,
   esc, hashId, label, header, notice, kindText,
 } = require('./chrome.js');
 
@@ -463,8 +463,14 @@ function chromeCss() {
   // どちらも「兄弟 > 子（> 子）」で、子孫結合子や * は使わない。この viz で
   // radio + :checked が動くと確かめたときの形が子結合子なので
   // （templated_record/samples/07_radio_tabs_test.html）、そこから外れない。
+  //
+  // 枚数は OUTER_TABS ではなく MAX_OUTER_TABS ぶん出す。ズレはもう一方向にも
+  // 起きるため。**カードは日次で作り直され、CSS は手で貼る**ので、タブを足すと
+  // 必ず「カードは新しい・CSS は古い」時間帯ができる。そのとき、いま並べる枚数
+  // ぶんしか規則が無いと、足したタブは押せるのに中身が出ない（反転もしない）。
+  // 先の番号まで出しておけば、次にタブを足すときはカードの貼り替えだけで済む。
   const TAB_PATHS = ['.vg-otablist > ', '.vg-ohead > .vg-otablist > '];
-  for (let i = 1; i <= OUTER_TABS.length; i++) {
+  for (let i = 1; i <= MAX_OUTER_TABS; i++) {
     rules.push(`.vg-or${i}:checked ~ .vg-opanels > .vg-op${i}{display:block}`);
     rules.push(TAB_PATHS.map((path) => `.vg-or${i}:checked ~ ${path}.vg-ot${i}`).join(',') +
       `{background:#24292F;border-color:#24292F;color:#fff}`);

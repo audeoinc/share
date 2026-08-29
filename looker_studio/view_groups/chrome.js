@@ -41,6 +41,20 @@ const REF_BUDGET = 40 * 1024 * 1024;
 const OUTER_TABS = ['note', 'カラム定義', '参照関係', 'ロジック差分', 'SQL'];
 
 /**
+ * 外側タブの CSS を用意しておく枚数。**いま並べる枚数より多くしてある。**
+ *
+ * テンプレートの CSS は手で貼り、カードは日次で作り直す。順序はいつも
+ * 「カードが先・CSS が後」になるので、タブを 1 枚足すと、貼り替えるまでの間
+ * **タブは出るのに中身が出ない**（そのタブを開く規則が CSS に無い）。
+ * 押せて反転もしない空欄になるので、故障と見分けが付かない。実際に 1 度出した。
+ *
+ * 使う予定のない番号の規則を出しておいても、その要素が無ければ何も起きない。
+ * 2 行 × 数枚ぶんの CSS と引き換えに、次にタブを足したときは**カードだけ
+ * 貼り替えれば動く**（CSS の貼り替えは色や体裁を変えたときだけになる）。
+ */
+const MAX_OUTER_TABS = 8;
+
+/**
  * メモの差し込み口。
  *
  * カードは日次で作り置きするが、メモはビューの中で毎回作る（シートを直した
@@ -155,6 +169,7 @@ function wrapPage(diffHtml, erdHtml, colsHtml, sqlHtml, base) {
 }
 
 module.exports = {
-  MAX_TABS, MAX_REF_TABS, MAX_SQL_TABS, REF_BUDGET, OUTER_TABS, NOTE_MARK,
+  MAX_TABS, MAX_REF_TABS, MAX_SQL_TABS, MAX_OUTER_TABS, REF_BUDGET, OUTER_TABS,
+  NOTE_MARK,
   esc, hashId, label, badge, header, notice, KIND_TEXT, kindText, wrapPage,
 };

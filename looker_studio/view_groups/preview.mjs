@@ -441,6 +441,20 @@ const checks = [
       /<div class="vg-otablist"><div class="vg-header">/.test(pageCases[0].html) &&
       !pageCases[0].html.includes('vg-ohead');
   })()],
+  // ズレは「CSS が古い」方向にも起きる。カードは日次で作り直され、CSS は手で
+  // 貼るので、タブを足すと必ず「カードは新しい・CSS は古い」時間帯ができる。
+  // いま並べる枚数ぶんしか規則が無いと、足したタブは押せるのに中身が出ない。
+  // 先の番号まで出しておけば、次はカードの貼り替えだけで動く。
+  ['外側タブの CSS を並べる枚数より多く用意してある（CSS が古くても次は動く）', (() => {
+    const css = R.chromeCss();
+    const n = Ch.OUTER_TABS.length;
+    return Ch.MAX_OUTER_TABS > n &&
+      [...Array(Ch.MAX_OUTER_TABS).keys()].every((i) =>
+        css.includes(`.vg-or${i + 1}:checked ~ .vg-opanels > .vg-op${i + 1}{display:block}`) &&
+        CARD_GENERATIONS.every(([path]) =>
+          css.includes(`.vg-or${i + 1}:checked ~ ${path}.vg-ot${i + 1}`))) &&
+      !css.includes(`.vg-or${Ch.MAX_OUTER_TABS + 1}:checked`);
+  })()],
   ['メモが未登録でもタブは出る（中身が未登録の枠になる）',
     (pageCases[2].html.match(/class="vg-otab /g) || []).length === Ch.OUTER_TABS.length &&
     pageCases[2].html.includes('vg-mdempty')],
