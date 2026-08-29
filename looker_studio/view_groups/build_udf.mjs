@@ -1184,3 +1184,98 @@ ${css}
 </style>
 `);
 console.log(`wrote ${cssPath} (${kb(Buffer.byteLength(css))} の CSS)`);
+
+// メモを書くための下書きページ。BigQuery も Looker も通さずに、Markdown の
+// 見え方をブラウザだけで確かめられるようにする。シートに貼る前の推敲用。
+//
+// 中身は viewlgc_markdown と同じ markdown.js と、viewlgc_group_css が出す
+// メモの CSS そのもの。ここで見た形がレポートでもそのまま出る。
+// 単体のファイルとして開ける（外部への読み込みが 1 つも無い）。
+const NOTE_SAMPLE = [
+  '# v_daily_sales について',
+  '',
+  '各リージョンの日次売上。**jp だけ税込** で、ほかは税抜き。',
+  '',
+  '## 参照元',
+  '',
+  '| suffix | 参照元 | 更新 |',
+  '|:--|:--|:-:|',
+  '| abjp | `orders_abjp` | 03:00 |',
+  '| abus | `orders_abus` | 04:00 |',
+  '',
+  '## 注意点',
+  '',
+  '- 一次集計は CTE `daily` で行う',
+  '  - `region` は 2 段目で付与する',
+  '- 列名 `gross_amount` は 2026-04 に変更予定',
+  '',
+  '> 使えるのは見出し / 表 / 箇条書き / コード / 強調 / リンクまで。',
+  '> 生の HTML と画像は出ません。強調は `**` と `*` だけで、',
+  '> `_` は対象外です（`table_name_abjp` のような名前が斜体にならないように）。',
+].join('\n');
+
+// 貼るのは最小化前の markdown.js。ここは人が開いて中を覗くこともある
+// ファイルなので、読める形のまま入れる（サイズの制約が無い）。
+const noteLib = markdownLib;
+const memoCssOut = require(join(here, 'markdown.js')).memoCss();
+if (noteLib.includes('</scr' + 'ipt')) {
+  console.log('  FAIL  markdown.js に </script> が含まれており下書きページを壊します');
+  process.exit(1);
+}
+if (!noteLib.includes('function markdownHtml') || !memoCssOut.includes('.vg-mdtable')) {
+  console.log('  FAIL  下書きページに変換器か CSS が入っていません');
+  process.exit(1);
+}
+
+const notePath = join(here, 'note_preview.html');
+await writeFile(notePath, `<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>メモの下書き（view_groups）</title>
+<!--
+  base ごとのメモ（note_md）の下書き用。左に Markdown を書くと右に出る。
+  出来上がったら左の内容をそのままスプレッドシートの note_md のセルに貼る。
+
+  このファイルは build_udf.mjs が生成する。直接編集しないこと。
+  変換も CSS も BigQuery の viewlgc_markdown / viewlgc_group_css と同じもの。
+-->
+<style>
+body{margin:0;font:13px/1.6 'Roboto','Segoe UI',system-ui,sans-serif;color:#24292F;background:#F6F8FA}
+header{padding:10px 16px;background:#fff;border-bottom:1px solid #D0D7DE}
+h1{margin:0;font-size:14px}
+.hint{margin:3px 0 0;color:#57606A;font-size:12px}
+.wrap{display:flex;gap:14px;padding:14px;align-items:stretch;min-height:calc(100vh - 76px)}
+.col{flex:1;min-width:0;display:flex;flex-direction:column}
+.col > h2{margin:0 0 6px;font-size:12px;color:#57606A}
+textarea{flex:1;width:100%;box-sizing:border-box;padding:12px;resize:none;
+  border:1px solid #D0D7DE;border-radius:6px;background:#fff;
+  font:12px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;color:#24292F}
+/* レポートのカードと同じ地色・余白にして、見え方をそろえる */
+.card{flex:1;overflow:auto;padding:14px 16px;border:1px solid #D0D7DE;border-radius:6px;background:#fff}
+${memoCssOut}
+</style>
+</head>
+<body>
+<header>
+  <h1>メモの下書き（base ごとの note_md）</h1>
+  <p class="hint">左に書くと右に出ます。できたら左の内容をそのままスプレッドシートの <code>note_md</code> のセルに貼ってください。</p>
+</header>
+<div class="wrap">
+  <div class="col"><h2>Markdown</h2><textarea id="src" spellcheck="false"></textarea></div>
+  <div class="col"><h2>レポートでの見え方</h2><div class="card" id="out"></div></div>
+</div>
+<script>
+${noteLib}
+
+var src = document.getElementById('src');
+var out = document.getElementById('out');
+function draw() { out.innerHTML = markdownHtml(src.value); }
+src.value = ${JSON.stringify(NOTE_SAMPLE)};
+src.addEventListener('input', draw);
+draw();
+</script>
+</body>
+</html>
+`);
+console.log(`wrote ${notePath}`);

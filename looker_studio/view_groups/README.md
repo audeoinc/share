@@ -212,6 +212,7 @@ SELECT o.amount AS total FROM `p.d.orders_abjp` AS o JOIN d.items_abjp AS i ON o
 | `build_table.sql` | 手で編集する。設定は CONFIGURATION の `DECLARE` |
 | `view_group_html.sql` | `build_udf.mjs` の生成物。JS を最小化して埋めるため。設定は先頭の `DECLARE` |
 | `template_style.html` | `build_udf.mjs` の生成物（CSS） |
+| `note_preview.html` | `build_udf.mjs` の生成物。メモの下書き用。ブラウザで開くだけで使える |
 
 **両ファイルで必ず同じ値にする `DECLARE`** は `system_name` / `udf_dataset` /
 `udf_name_prefix` / `udf_name_suffix` / `project_token_pattern` の 5 つ。
@@ -1036,6 +1037,16 @@ base ごとに添える。元が Confluence の文章なので、見出し・表
 `markdown.js` は依存を持たない素の関数だけで書いてある。BigQuery の UDF に
 埋めるのと、あとで編集画面（GAS）にプレビューとして貼るのとで、同じものを使うため。
 
+#### 書く前に見た目を確かめる（note_preview.html）
+
+**`note_preview.html`** を**ブラウザで開くだけ**で、左に書いた Markdown が右に
+レポートと同じ見た目で出る。書けたら左の内容をそのままシートの `note_md` の
+セルに貼る。BigQuery も Looker も通さずに推敲できる。
+
+`build_udf.mjs` の生成物で、中身は `viewlgc_markdown` と同じ `markdown.js` と
+`viewlgc_group_css` が出すメモの CSS そのもの。**ここで見た形がレポートでも
+そのまま出る**。外部への読み込みが 1 つも無いので、ファイル単体で開ける。
+
 ## Looker Studio への配線
 
 事前生成テーブルができていれば、あとは読むだけ。
@@ -1051,7 +1062,9 @@ base ごとに添える。元が Confluence の文章なので、見出し・表
    こちらも**単一選択**。base と 2 つそろって 1 レコードに決まる
 5. `mode='class'` で生成した場合は、テンプレートに CSS を貼る
 6. メモを出すなら、**もう 1 枚 Templated Record** を置いて `note_html` を指定する。
-   同じデータソースなので、3・4 で置いたコントロールがそのまま効く
+   同じデータソースなので、3・4 で置いたコントロールがそのまま効く。
+   メモの本文は `note_preview.html` をブラウザで開いて下書きし、
+   できた Markdown をシートの `note_md` に貼る
 
 > **コントロールや一覧に数値を出すときは `*_once` の列を使う。**
 > `group_count` / `view_count` / `unmatched_count` は base の属性なのに、
