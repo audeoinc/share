@@ -239,7 +239,10 @@ function columnsCss() {
     // 指定する）。横スクロールさせないので、包む div に overflow は置かない。
     // 置くとそこが縦のスクロール要素にもなり、下の sticky が効かなくなる。
     `.vg-ctablewrap{width:100%}`,
-    `.vg-ctable{border-collapse:collapse;font-size:12px;width:100%;table-layout:fixed}`,
+    // ★ 表の最大幅。チャートが横に広いとセルが間延びして読みづらいので頭を打つ。
+    //   広げたいときはこの 1000px を変える。
+    `.vg-ctable{border-collapse:collapse;font-size:12px;` +
+      `width:100%;max-width:1000px;table-layout:fixed}`,
     // 列名の行はスクロールしても残す。基準になるのはカードのスクロール箱
     // （.vg-outer）なので、その中で固定されている帯のぶんだけ下げる。ズレると
     // 帯と見出し行の間に本文がちらつくので、preview.mjs で実際に描いて
