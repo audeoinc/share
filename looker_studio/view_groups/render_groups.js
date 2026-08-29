@@ -319,6 +319,15 @@ function chromeCss() {
     // クラスを分けてある。同じクラスだと内側のラジオが外側の :checked ~ に
     // 引っかかり、片方を押すともう片方も切り替わる。
     `.vg-or{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}`,
+    // カードは自前のスクロール箱にする。position:sticky は「いちばん近い
+    // スクロールする祖先」を基準にするので、埋め込み先が overflow を持って
+    // いると帯はそちらに貼り付き、実際に動いている外側のスクロールには
+    // 追従しない（overflow:hidden の祖先が 1 つあるだけで効かなくなる）。
+    // 自分でスクロールする箱を作れば、基準はこちらの持ち物になる。
+    //   高さの上限は表示領域。Looker のコミュニティ ビジュアリゼーションは
+    //   iframe なので 100vh がチャートの高さになる。max-height なので、
+    //   中身が収まるときはスクロールバーも出ない。
+    `.vg-outer{max-height:100vh;overflow:auto}`,
     // スクロールしてもタブは残す。カードは縦に長いので、下まで読んでから
     // 別のタブへ移るのに毎回いちばん上まで戻るのは面倒。
     //   z-index は 5。0 や auto にすると、あとに出てくる position:relative の

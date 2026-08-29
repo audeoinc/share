@@ -314,6 +314,10 @@ const checks = [
   ['タブはスクロールしても残る（position:sticky）',
     R.chromeCss().includes('.vg-otablist{') &&
     /\.vg-otablist\{[^}]*position:sticky[^}]*top:0/.test(R.chromeCss())],
+  // sticky はいちばん近いスクロールする祖先が基準。埋め込み先の overflow に
+  // 左右されないよう、カード自身をスクロールする箱にしておく。
+  ['カードが自前のスクロール箱になっている（sticky の基準を自分で持つ）',
+    /\.vg-outer\{[^}]*max-height:100vh[^}]*overflow:auto/.test(R.chromeCss())],
   ['どのタブにも見出しが出る（base 名 / View 数 / グループ数）', (() => {
     const h = pageCases[0].html;
     // 3 枚のパネルにひとつずつ。note のぶんは目印より前。
