@@ -995,6 +995,29 @@ base ごとに添える。元が Confluence の文章なので、見出し・表
 ビューが増やす列は `has_note` / `note_md` / `note_html` / `note_updated_at` /
 `note_updated_by`。
 
+#### シートの URL とタブ名
+
+`note_sheet_url` には**アドレスバーの URL をそのまま貼ってよい**。
+`build_table.sql` が `/d/<ID>` までを切り出して使う。
+
+```
+貼る値（どちらでもよい）
+https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz1234567890/edit?gid=0#gid=0
+https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz1234567890/edit?usp=sharing
+
+実際に使われる値
+https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz1234567890
+```
+
+切り詰めているのは、`#gid=` が「タブを ID で指定する」意味を持つため。こちらは
+`note_sheet_range`（`notes!A:E`）でタブを**名前で**指定しているので、両方あると
+指定が二重になる。
+
+**タブ名は `note_sheet_range` の左側と一致させる。** 新規作成した直後のタブは
+`シート1` なので、既定の `notes!A:E` のままでは読めない。タブを `notes` に
+リネームするか、`note_sheet_range` を `'シート1!A:E'` にする。`A:E` の 5 列が
+上の表の 5 列に対応する。
+
 **HTML にするのは事前生成ではなくビューの中。** `diff_html` と同じように
 `INSERT` で焼き込むと、シートを直しても次の日次実行までレポートが古いままになる。
 1 件が数 KB の Markdown なので、クエリのたびに変換しても実行時間には響かない。

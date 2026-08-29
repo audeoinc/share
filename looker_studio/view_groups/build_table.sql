@@ -133,6 +133,12 @@ DECLARE note_sheet_range STRING DEFAULT 'notes!A:E';
 --     '-tky' のようなハイフンも安全）。データセット名と UDF 名は '-' 不可。
 --   note_sheet_url / note_sheet_range
 --     base ごとのメモを置くスプレッドシートの URL と、その中の読み取り範囲。
+--     URL はアドレスバーのものをそのまま貼ってよい。'/d/<ID>' までを下の SET で
+--     自動的に切り出す（'/edit?gid=0#gid=0' は落ちる）。
+--     切るのは、'#gid=' が「タブを ID で指定する」意味を持つため。こちらは
+--     note_sheet_range でタブを名前で指定しているので、両方あると指定が二重になる。
+--     読み取り範囲の左側（既定 'notes'）は**タブの名前**。新規作成した直後の
+--     タブは 'シート1' なので、タブをリネームするかこちらを合わせること。
 --     1 行目は見出しで、列は左から base / note_md / updated_at / updated_by /
 --     is_hidden の順（この順序が唯一の取り決め。見出しの文言は見ない）。
 --       base       メモを付ける base の名前。ビューの base と完全一致で突き合わせる
@@ -328,6 +334,11 @@ ASSERT note_sheet_url = '' OR
   'note_sheet_url はスプレッドシートの URL（https://docs.google.com/spreadsheets/d/...）にしてください。メモを使わないなら空にします。';
 ASSERT REGEXP_CONTAINS(note_sheet_range, r"^[^'`]+![A-Z]+[0-9]*:[A-Z]+[0-9]*$") AS
   'note_sheet_range は「シート名!A:E」の形にしてください。';
+-- アドレスバーの URL をそのまま貼れるように、'/d/<ID>' までに切り詰める。
+-- 上の ASSERT を通っていれば必ず取り出せるので、COALESCE が効くのは '' のときだけ。
+SET note_sheet_url = COALESCE(
+  REGEXP_EXTRACT(note_sheet_url, r'^https://docs\.google\.com/spreadsheets/d/[A-Za-z0-9_-]+'),
+  note_sheet_url);
 
 ASSERT REGEXP_CONTAINS(TRIM(analyze_options), r'^\{\s*"') AS
   'analyze_options は 1 つ以上のキーを持つ JSON オブジェクトにしてください（例: {"mode":"class"}）。';
