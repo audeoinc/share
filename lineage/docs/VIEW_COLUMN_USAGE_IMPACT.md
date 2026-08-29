@@ -1,6 +1,11 @@
-# lnge_vw_t_column_usage_impact — カラム定義書
+# lnge_t_column_usage_impact — カラム定義書
 
-Looker Studio などでこのビューをデータソースにする方向けの資料です。
+Looker Studio でこのテーブルをデータソースにしてレポートを作る方向けの資料です。
+
+> **レポートは static テーブル `lnge_t_column_usage_impact` を参照してください。**
+> 元のビュー `lnge_vw_t_column_usage_impact` と中身は同じで、static テーブルには
+> `updated_at`（テーブルを作り直した時刻）が 1 列増えます。詳細は §7。
+> 以下の説明で「ビュー」と書いてある箇所は、どちらにも当てはまります。
 **「この列を変更したら、どこの SQL の何行目が影響を受けるか」** を 1 テーブルで引けるように
 設計されたビューです。
 

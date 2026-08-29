@@ -54,10 +54,12 @@ Repositoryの健全性、解析量、失敗、変更、Impactを運用者が日�
 
 基本はRepositoryテーブルまたは運用向けViewを使用します。Looker Studioから複雑な再帰処理を行わず、必要な集計はBigQuery Viewとして準備します。
 
-カラム影響分析ビュー `lnge_vw_t_column_usage_impact` のカラム定義・粒度・集計時の注意は
+カラム影響分析 `lnge_t_column_usage_impact`（static テーブル。元ビューは
+`lnge_vw_t_column_usage_impact`）のカラム定義・粒度・集計時の注意は
 [`VIEW_COLUMN_USAGE_IMPACT.md`](VIEW_COLUMN_USAGE_IMPACT.md) を参照してください（レポート作成者向け）。
 
-オブジェクト（テーブル/ビュー）単位の依存関係ビュー `lnge_vw_t_object_dependency` は
+オブジェクト（テーブル/ビュー）単位の依存関係 `lnge_t_object_dependency`（static テーブル。
+元ビューは `lnge_vw_t_object_dependency`）は
 [`VIEW_OBJECT_DEPENDENCY.md`](VIEW_OBJECT_DEPENDENCY.md) を参照してください。カラムを意識せず
 「このテーブルを変えたらどのテーブルが影響を受けるか」を引く用途向けで、1行＝1ペア（推移的依存、
 `impact_rank` は最短ホップ）です。Looker Studio は `ARRAY` を読めないため、配列カラムには
