@@ -256,11 +256,14 @@ function refTabs(b, opts, idPrefix) {
 
   // 打ち切ったときは、なぜ選べないのかと今どれくらいの大きさなのかを出す。
   // 「基準タブが 1 枚しかない」だけだと、故障なのか設計なのか読み取れない。
+  // ここに来るのは、1 行が BigQuery の上限を超えそうなときだけ。
   const over = shown.length < groups.length
     ? notice(`基準にできるのは先頭 ${shown.length} グループまでにしています` +
       `（全 ${groups.length} 件）。基準を 1 つ増やすと比較の枚数がグループ数ぶん` +
-      `増えるため、1 レコードが ${Math.round(REF_BUDGET / 1024)} KB を超えない範囲で` +
-      `打ち切っています（ここまでで ${Math.round(size / 1024)} KB）。`)
+      `増え、このままでは 1 行が BigQuery の上限（100 MB）に達して日次の生成ごと` +
+      `失敗するため、${Math.round(REF_BUDGET / 1024 / 1024)} MB で止めています` +
+      `（ここまでで ${(size / 1024 / 1024).toFixed(1)} MB）。` +
+      `この base はグループが多すぎないか確認してください。`)
     : '';
 
   return `<div class="vg-btabs">${radios}` +

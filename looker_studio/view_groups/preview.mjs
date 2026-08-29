@@ -311,25 +311,29 @@ const checks = [
     return new Set(tips).size > 1;
   })()],
   // --- 基準の切り替え -----------------------------------------------
-  // 打ち切りが通常の運用で当たると「基準を選べない」という分かりにくい形で
-  // 表に出る。長い SQL × 3 グループ（600 KB の頃はここで 1 枚しか出なかった）で
-  // 全部そろうことを見る。
-  ['長い SQL でも基準タブが全部そろう（打ち切りに当たらない）', (() => {
+  // 打ち切りが通常の運用で当たると「基準を選べない」という、故障と見分けの
+  // 付かない形で表に出る。歯止めは 1 行が BigQuery の上限を超えるのを防ぐ
+  // ためのものなので、実データより十分大きいところまで当たらないこと。
+  // 長い SQL（500 行）× 6 グループ = 15 MB でもそろう。実測は基準 1 つぶんの
+  // 最大が 690 KB なので、ここまで来ることはない。
+  ['実データより大きい入力でも基準タブが全部そろう', (() => {
     const long = (suf, extra) =>
       'SELECT\n' + Array.from({ length: 500 },
         (_, i) => `  col_${i} + ${extra} AS c_${i},`).join('\n') +
       `\n  1 AS tail\nFROM t_${suf}`;
+    const parts = [['ab', 1], ['cd', 2], ['ef', 3], ['gh', 4], ['ij', 5], ['kl', 6]];
     const rows = [];
-    for (const [suf, extra] of [['abjp', 1], ['abus', 1], ['cdjp', 2], ['cdus', 2],
-      ['efjp', 3], ['efus', 3]]) {
-      rows.push({ view_name: 'v_long_' + suf, ddl: long(suf, extra) });
+    for (const [p, extra] of parts) {
+      for (const r of ['jp', 'us']) rows.push({ view_name: `v_l_${p}${r}`, ddl: long(p + r, extra) });
     }
-    const b = A.analyze(rows, { suffixParts: [['ab', 'cd', 'ef'], ['jp', 'us']],
+    const b = A.analyze(rows, { suffixParts: [parts.map((p) => p[0]), ['jp', 'us']],
       substitutable: ['entity'] }).bases[0];
     const h = R.renderBase(b, {});
-    return b.groups.length === 3 &&
-      (h.match(/class="vg-btab /g) || []).length === 3 &&
-      !h.includes('基準にできるのは先頭');
+    return b.groups.length === 6 &&
+      (h.match(/class="vg-btab /g) || []).length === 6 &&
+      !h.includes('基準にできるのは先頭') &&
+      // 15 MB 前後。BigQuery の 1 行 100 MB には遠い
+      Buffer.byteLength(h) > 10 * 1024 * 1024;
   })()],
   ['基準タブの見出しがグループの並びどおり', (() => {
     const names = [...h3.matchAll(/class="vg-btab vg-bt\d+"[^>]*>([^<]*)/g)].map((m) => m[1]);
