@@ -110,7 +110,7 @@ const UNUSED_CSS = UNUSED_RENDER.concat([
   'markdownHtml', 'mdRender', 'mdBlocks', 'mdList', 'mdAligns', 'mdCells',
   'mdKind', 'mdIndent', 'mdInline', 'mdLink', 'mdUrl', 'mdEsc',
   'renderColumnsBase', 'renderColumns', 'groupColumns', 'columnOrder',
-  'cellInfo', 'mixedTip', 'uniq']);
+  'cellInfo', 'mixedTip', 'uniq', 'majority']);
 
 /** CommonJS の体裁を落として素の関数群にする。 */
 function strip(src, file) {
@@ -324,8 +324,8 @@ function __run(analysis_json, diff_html, columns_json, options_json) {
   var col = '';
   var bases = a.bases || [];
   for (var i = 0; i < bases.length; i++) {
-    erd += renderErdBase(bases[i], opts);
-    col += renderColumnsBase(bases[i], byView, opts);
+    erd += renderErdBase(bases[i]);
+    col += renderColumnsBase(bases[i], byView);
   }
   if (!erd) erd = __notice('図にできる View がありません。');
   if (!col) col = __notice('カラム定義を出せる View がありません。');
@@ -520,6 +520,27 @@ const checks = [
     /<div class="vg-otablist"><div class="vg-header">.*?<label class="vg-otab vg-ot1"/s
       .test(info.page) &&
     info.page.indexOf('vg-otablist') < info.page.indexOf('<!--VG_NOTE-->')],
+  ['差分タブで基準グループをタブで選べる（G×(G-1) 枚ぶん載る）', (() => {
+    const h = VIEWLGC_RENDER(VIEWLGC_ANALYZE(views, OPTS), OPTS);
+    const G = info.group_count;
+    return (h.match(/class="vg-btab /g) || []).length === G &&
+      (h.match(/class="vg-bpanel /g) || []).length === G &&
+      (h.match(/<th colspan=/g) || []).length / 2 === G * (G - 1) &&
+      // 基準ごとにラジオの名前を分ける。分けないと選ばれていない基準の
+      // 比較タブがどれも開かなくなる。
+      new Set([...h.matchAll(/class="vg-r vg-r1" type="radio" name="([^"]+)"/g)]
+        .map((m) => m[1])).size === G;
+  })()],
+  ['参照関係とカラム定義には基準を出さない（差分でだけ意味を持つ）', (() => {
+    // パネルは note / カラム定義 / ロジック差分 / 参照関係 の順
+    const at = (n) => info.page.indexOf(`<div class="vg-opanel vg-op${n}">`);
+    const cols = info.page.slice(at(2), at(3));
+    const erd = info.page.slice(at(4));
+    return at(2) > 0 && at(3) > at(2) && at(4) > at(3) &&
+      !cols.includes('基準') && !erd.includes('基準') &&
+      // 差分側にはある
+      info.page.slice(at(3), at(4)).includes('基準');
+  })()],
   ['page はカラム定義の表を出す（型とグループ内の食い違い）',
     info.page.includes('vg-ctable') &&
     info.page.includes('gross_amount') &&

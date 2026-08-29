@@ -8,6 +8,13 @@
  */
 
 const MAX_TABS = 12; // 静的 CSS が面倒を見るタブ数の上限
+// 基準タブ（ロジック差分の中）も静的 CSS で面倒を見る。実際に載せる枚数は
+// 下の予算で決めるので、これは CSS を用意しておく上限。
+const MAX_REF_TABS = 12;
+// 1 レコードに載せる差分の目安。基準を 1 つ増やすたびに比較ペインがグループ数
+// ぶん増える（全部で G×(G−1) 枚）ので、グループが多い base では途中で打ち切る。
+// 実測でペイン 1 枚が 30 KB 前後（100 行程度の SQL）。
+const REF_BUDGET = 600 * 1024;
 
 /**
  * 外側のタブ。左から並ぶ順で、先頭が既定の表示。
@@ -83,17 +90,6 @@ const KIND_TEXT = {
 const kindText = (k) => KIND_TEXT[k] || k;
 
 /**
- * どのグループを基準にするか。範囲外や数値でない指定は既定（0）に戻す。
- * 中途半端に丸めると、指定を間違えたときに別の基準の絵が出て気づけない。
- * 差分側と ERD 側で規則が違うと、同じレコードなのに別の系統が基準に見える。
- */
-function referenceIndex(b, opts) {
-  const n = (b.groups || []).length;
-  const ri = Math.trunc(Number((opts || {}).referenceIndex));
-  return Number.isFinite(ri) && ri >= 0 && ri < n ? ri : 0;
-}
-
-/**
  * メモ・ロジック差分・参照関係を外側のタブで束ねる。
  *
  * 1 レコードに全部入れるので、Looker Studio のコントロール（base / ref_label）は
@@ -142,6 +138,6 @@ function wrapPage(diffHtml, erdHtml, colsHtml, base) {
 }
 
 module.exports = {
-  MAX_TABS, OUTER_TABS, NOTE_MARK, esc, hashId, label, badge, header, notice,
-  KIND_TEXT, kindText, referenceIndex, wrapPage,
+  MAX_TABS, MAX_REF_TABS, REF_BUDGET, OUTER_TABS, NOTE_MARK,
+  esc, hashId, label, badge, header, notice, KIND_TEXT, kindText, wrapPage,
 };

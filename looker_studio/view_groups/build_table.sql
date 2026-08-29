@@ -435,8 +435,8 @@ CREATE OR REPLACE TABLE `__T_DIFF_HIST__`
 (
   snapshot_date   DATE           OPTIONS (description = '生成日'),
   base            STRING         OPTIONS (description = 'suffix を除いた View 名。Looker のキー。suffix を認識できなかった View は View 名そのもの'),
-  ref_index       INT64          OPTIONS (description = '基準にしたグループの番号（0 = 既定 / 最大のグループ）。base と組で 1 行'),
-  ref_label       STRING         OPTIONS (description = '基準グループの見出し。レポートのプルダウンに出す値'),
+  ref_index       INT64          OPTIONS (description = '常に 0。基準はカードの中のタブで選ぶようになったため、列としてのみ残っている'),
+  ref_label       STRING         OPTIONS (description = '先頭グループの見出し。ref_index と同じく残骸で、絞り込みには使わない'),
   view_count      INT64          OPTIONS (description = 'この base に属する View 数'),
   group_count     INT64          OPTIONS (description = 'ロジックのグループ数。1 なら全部同一'),
   has_multiple    BOOL           OPTIONS (description = 'group_count > 1。ロジック逸脱の検知用'),
@@ -655,22 +655,23 @@ analyzed AS (
   FROM keyed
   GROUP BY base
 ),
--- 基準はレポート側で選ぶので、グループの数だけ行を作る。
--- 解析はここまでで 1 回だけ。増えるのは描画（下の __UDF_RENDER__）の回数で、
--- 1 行あたりの HTML の大きさは基準が 1 つのときと変わらない。
+-- 基準はカードの中のタブで選ぶので、行は base ごとに 1 本。
+-- 以前は基準ごとに行を作っていたが、基準が意味を持つのはロジック差分だけで、
+-- カラム定義にも参照関係にも基準は無い。差分の側に基準ごとのタブを持たせた
+-- ことで、レポートのコントロールも 1 レコードに絞る仕掛けも要らなくなった。
+--
+-- ref_index / ref_label は列としては残してある。消すとテーブルを作り直す
+-- ことになり、積んだ履歴まで消えるため。常に 0 と先頭グループのラベルが入る。
 refs AS (
   SELECT
     a.base,
     a.analysis,
     -- 取れなかった base でも描画側が落ちないよう、空の並びを渡す
     COALESCE(bc.columns_json, '[]') AS columns_json,
-    ref_index,
-    JSON_VALUE_ARRAY(a.analysis, '$.groupLabels')[SAFE_OFFSET(ref_index)] AS ref_label
+    0 AS ref_index,
+    JSON_VALUE_ARRAY(a.analysis, '$.groupLabels')[SAFE_OFFSET(0)] AS ref_label
   FROM analyzed AS a
-  LEFT JOIN base_cols AS bc ON bc.base = a.base,
-  UNNEST(GENERATE_ARRAY(
-    0, CAST(JSON_VALUE(a.analysis, '$.groupCount') AS INT64) - 1
-  )) AS ref_index
+  LEFT JOIN base_cols AS bc ON bc.base = a.base
 )
 SELECT
   CURRENT_DATE('__TZ__') AS snapshot_date,
@@ -695,18 +696,9 @@ SELECT
   -- JS UDF から別の UDF は呼べないので、つなぐのは SQL の仕事。
   `__UDF_PAGE__`(
     analysis,
-    `__UDF_RENDER__`(
-      analysis,
-      CONCAT(
-        '{"referenceIndex":', CAST(ref_index AS STRING), ',',
-        SUBSTR(TRIM((SELECT options_json FROM opts)), 2)
-      )
-    ),
+    `__UDF_RENDER__`(analysis, (SELECT options_json FROM opts)),
     columns_json,
-    CONCAT(
-      '{"referenceIndex":', CAST(ref_index AS STRING), ',',
-      SUBSTR(TRIM((SELECT options_json FROM opts)), 2)
-    )
+    (SELECT options_json FROM opts)
   ) AS diff_html
 FROM refs
 """;
@@ -721,14 +713,15 @@ USING suffix_list AS suffix_list, analyze_options AS analyze_options;
 -- 3. Looker Studio が読むビュー（最新スナップショットだけ・初回のみ）
 --    ビューは 2 本ある。読む側が 1 レコードに絞れる形で渡すのが目的。
 --
---    __V_DIFF__        base で 1 行。基準は既定（いちばん大きいグループ）。
---                      base のコントロール 1 つで 1 レコードに決まる。
---    __V_DIFF_BY_REF__ base × 基準で 1 行。基準も選びたいとき。
---                      base と ref_label の 2 つで 1 レコードに決まる。
+--    __V_DIFF__        base で 1 行。これを使う。
+--    __V_DIFF_BY_REF__ 同じ中身。基準ごとに行を作っていた頃の名前で、
+--                      レポートのデータソースを張り替えずに済むよう残してある。
 --
---    分けてあるのは、基準を選ばないレポートで 1 レコードに絞れなくなるのを
---    避けるため。Templated Record は 1 行を描くチャートなので、複数行が
---    来ると何が出るか読めない。
+--    基準はカードの中のタブで選ぶので、行は base ごとに 1 本しかない。
+--    base のコントロール 1 つで 1 レコードに決まる。
+--    **レポートの ref_label のコントロールは外してよい**（値が 1 つしか
+--    出てこないため）。group_count_once などの列も、行が増えなくなったので
+--    そのまま group_count を使ってよい。
 --
 --    どちらのビューも base ごとのメモを LEFT JOIN して、note_html（Markdown を
 --    HTML にしたもの）を持つ。同じデータソースに入れてあるので、レポートの
@@ -822,10 +815,8 @@ joined AS (
 )
 SELECT
   * EXCEPT (diff_html),
-  -- base の属性を「基準ごとの行」に持たせているので、そのまま集計すると
-  -- 行数ぶん膨らむ（3 グループなら 3 行 x 3 = 9）。基準の行にだけ値を置き、
-  -- 他は NULL にしておけば、既定の SUM でも 1 回しか足されない。
-  -- コントロールや一覧にはこちらを使う。
+  -- 基準ごとに行を作っていた頃の名残。行が base ごとに 1 本になったので、
+  -- いまは group_count などと同じ値になる。既存のレポートを壊さないために残す。
   IF(ref_index = 0, group_count, NULL)     AS group_count_once,
   IF(ref_index = 0, view_count, NULL)      AS view_count_once,
   IF(ref_index = 0, unmatched_count, NULL) AS unmatched_count_once,
@@ -878,10 +869,10 @@ SELECT
   group_count                       AS logic_group_count,
   group_labels                      AS logic_groups_by_suffix,
   unmatched_count                   AS suffix_unrecognized_views,
-  LENGTH(diff_html)                 AS diff_html_length_chars,
-  -- 基準ごとの行がそろっているか。group_count と同じ数になるはず。
-  (SELECT COUNT(*) FROM `__V_DIFF_BY_REF__` AS r
-   WHERE r.base = v.base)           AS rows_by_reference
+  -- 1 レコードの大きさ。基準ごとのタブを全部載せているので、グループが多い
+  -- base ほど大きくなる（比較の枚数は group_count x (group_count - 1)）。
+  -- 極端に大きい base が出てきたら、描画側の予算で打ち切られていないか見る。
+  LENGTH(diff_html)                 AS diff_html_length_chars
 FROM `__V_DIFF__` AS v
 ORDER BY base_view_name
 """;

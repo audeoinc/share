@@ -22,7 +22,7 @@
  */
 
 const { tokenizeSql, markEntities } = require('./analyze.js');
-const { esc, label, header, notice, referenceIndex } = require('./chrome.js');
+const { esc, label, header, notice } = require('./chrome.js');
 
 const BOX_W_MIN = 130;
 const BOX_W_MAX = 380;   // これを超える名前だけは詰める（<title> で全体を出す）
@@ -542,16 +542,14 @@ function groupSvg(group) {
  * 一度に 2 つ出れば足りるのに対し、参照関係は系統ごとの構造そのものなので、
  * 並べて一望できたほうが読みやすい。切り替えの操作も要らない。
  *
- * 並びは差分と同じで基準が先頭。同じ base を見ているのに差分と ERD で
- * 並びが違うと、対応を取り直す手間が要る。
+ * 並びは解析結果の順のまま。**ここに「基準」は無い。** 基準はロジック差分の中で
+ * だけ意味を持つ考え方（何と見比べるか）で、構造そのものを並べるこの図には
+ * 要らない。カラム定義の表も同じ理由で基準を持たない。
  */
-function erdStack(groups, refIndex) {
-  // 基準を先頭に、残りは元の順のまま。差分タブと並びをそろえる。
-  const order = [groups[refIndex], ...groups.filter((_, i) => i !== refIndex)];
-  return order.map((g, i) =>
+function erdStack(groups) {
+  return groups.map((g) =>
     `<div class="vg-erdblock">` +
     `<div class="vg-erdhead">` +
-    (i === 0 ? `<span class="vg-tbadge">基準</span>` : '') +
     `<span class="vg-erdname">${esc(label(g))}</span>` +
     `<span class="vg-tabn">${g.members.length}</span>` +
     `</div>` +
@@ -570,21 +568,21 @@ function erdLegend() {
     `</div>`;
 }
 
-function renderErd(b, refIndex) {
+function renderErd(b) {
   if (!b.groups.length) return notice('View が見つかりません。');
   return notice(
     'FROM / JOIN から起こした参照関係です。矢印は「読んで作る」向き、' +
     '注記は JOIN の種別と結合キー。カーディナリティと主キーは SQL からは' +
     '分からないので描いていません。' +
-    'パラメータ化した名前は、基準の View の値で表示しています。'
-  ) + erdLegend() + erdStack(b.groups, refIndex);
+    'パラメータ化した名前は、そのグループの先頭の View の値で表示しています。'
+  ) + erdLegend() + erdStack(b.groups);
 }
 
 /** base 1 件分の ERD カード。 */
-function renderErdBase(b, opts) {
+function renderErdBase(b) {
   return `<div class="vg-root">` +
     header(b.base, b.viewCount, b.groups.length, b.unmatched) +
-    renderErd(b, referenceIndex(b, opts)) +
+    renderErd(b) +
     `</div>`;
 }
 

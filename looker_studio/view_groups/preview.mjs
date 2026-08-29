@@ -69,10 +69,6 @@ const cases = [
   { title: `${baseMany.groupCount} グループ（既定 = タブ）`, b: baseMany, opts: {} },
   { title: 'suffix 未認識（単独表示）', b: baseOdd, opts: {} },
   { title: '複雑な SQL（多段 CTE / ウィンドウ / UNION）', b: baseComplex, opts: {} },
-  // 基準はレポート側で選べる（テーブルは base × 基準で 1 行）。
-  // 同じ解析結果から基準だけ変えて描いたもの。
-  { title: '基準を 2 番目のグループにした場合', b: base3, opts: { referenceIndex: 1 } },
-  { title: '基準を 3 番目のグループにした場合', b: base3, opts: { referenceIndex: 2 } },
 ];
 
 const parts = cases.map((c) => ({ ...c, html: R.renderBase(c.b, c.opts) }));
@@ -131,7 +127,8 @@ const fakeColumns = (b) => {
       const cols = [
         { n: 'order_date', t: 'DATE', o: 1, u: 'NO', d: '受注日（JST）' },
         { n: 'region', t: 'STRING', o: 2, u: 'YES', d: 'リージョン コード。jp / us / uk' },
-        { n: 'order_count', t: 'INT64', o: 3, u: 'YES', d: '' },
+        // グループ間で型が違う例。同じ列名で片方だけ NUMERIC。
+        { n: 'order_count', t: g === b.groups[1] ? 'NUMERIC' : 'INT64', o: 3, u: 'YES', d: '' },
         { n: 'gross_amount', t: /us$/.test(suffix) ? 'FLOAT64' : 'NUMERIC', o: 4,
           u: /uk$/.test(suffix) ? 'NO' : 'YES',
           d: '税抜き。参照先テーブルの型に引きずられる' },
@@ -154,20 +151,19 @@ const splice = (html, note) => html.replace(Ch.NOTE_MARK, note);
 const pageCases = [
   { title: '外側タブ（note / ロジック差分 / 参照関係）', b: baseComplex, opts: {},
     note: NOTE_MD },
-  { title: '外側タブ・基準を変えた場合', b: base3, opts: { referenceIndex: 1 },
-    note: NOTE_MD },
+  { title: '外側タブ・3 グループ', b: base3, opts: {}, note: NOTE_MD },
   { title: '外側タブ・メモが未登録の base', b: base2, opts: {}, note: null },
 ].map((c) => ({ ...c,
   html: splice(
-    Ch.wrapPage(R.renderBase(c.b, c.opts), E.renderErdBase(c.b, c.opts),
-      Co.renderColumnsBase(c.b, fakeColumns(c.b), c.opts), c.b),
+    Ch.wrapPage(R.renderBase(c.b, c.opts), E.renderErdBase(c.b),
+      Co.renderColumnsBase(c.b, fakeColumns(c.b)), c.b),
     Md.markdownHtml(c.note)) }));
 
 const columnCases = [
   { title: 'カラム定義（型が割れているグループあり）',
-    html: Co.renderColumnsBase(base3, fakeColumns(base3), {}) },
+    html: Co.renderColumnsBase(base3, fakeColumns(base3)) },
   { title: 'カラム定義（取得できなかった場合）',
-    html: Co.renderColumnsBase(base3, {}, {}) },
+    html: Co.renderColumnsBase(base3, {}) },
 ];
 
 // --- 検証 --------------------------------------------------------------
@@ -196,10 +192,14 @@ const checks = [
   ['グループ数バッジが出る', h3.includes('3 グループ')],
   ['ペイン見出しに suffix が列記される', h3.replace(/<[^>]*>/g, '').includes('abjp, abuk, abus')],
   ['3 グループは既定でタブ', h3.includes('vg-tablist')],
-  ['タブは基準を含めて 3 枚', (h3.match(/class="vg-tab /g) || []).length === 3],
-  ['タブの枚数がグループ数と一致する',
-    (h3.match(/class="vg-tab /g) || []).length === base3.groupCount &&
-    (hMany.match(/class="vg-tab /g) || []).length === baseMany.groupCount],
+  // 基準はカードの中で選ぶ（レコードは base ごとに 1 行）。基準ごとに
+  // 比較タブがグループ数ぶんできるので、比較タブは G×G 枚になる。
+  ['基準タブがグループ数ぶん出る',
+    (h3.match(/class="vg-btab /g) || []).length === base3.groupCount &&
+    (h3.match(/class="vg-bpanel /g) || []).length === base3.groupCount],
+  ['基準ごとの比較タブがグループ数と一致する',
+    (h3.match(/class="vg-tab /g) || []).length === base3.groupCount ** 2 &&
+    (hMany.match(/class="vg-tab /g) || []).length === baseMany.groupCount ** 2],
   ['タブ見出しに suffix が列記される',
     ['cdjp, cduk, cdus', 'efjp, efuk, efus']
       .every((s) => h3.replace(/<[^>]*>/g, '').includes(s))],
@@ -213,7 +213,9 @@ const checks = [
   ['1 グループはペインが 1 枚', (h1.match(/<th colspan=/g) || []).length === 1],
   ['1 グループでも基準タブが 1 枚出る',
     (h1.match(/class="vg-tab /g) || []).length === 1 && h1.includes('vg-tbase')],
-  ['3 グループはペインが 2 枚', (h3.match(/<th colspan=/g) || []).length === 2 * 2],
+  ['3 グループは基準ごとに 2 ペイン（全部で G×(G-1) 組）',
+    (h3.match(/<th colspan=/g) || []).length ===
+      2 * base3.groupCount * (base3.groupCount - 1)],
   ['1 グループでも SQL は出る', h1.replace(/<[^>]*>/g, '').includes('SELECT')],
   ['1 グループに差分マーカーが出ない', !/[+−]<\/td>/.test(h1)],
   ['パラメータ一覧が出る', h3.includes('パラメータ化した箇所')],
@@ -232,8 +234,9 @@ const checks = [
   ['誤解を招く副題 (after)/(reference) が残っていない',
     !/\((?:before|after|base|reference)\)/.test(parts.map((p) => p.html).join(''))],
   ['副題が View 数になっている', h3.includes('基準 / 3 View')],
-  ['2 グループもタブ（基準 ＋ 比較相手の 2 枚）',
-    (parts[1].html.match(/class="vg-tab /g) || []).length === 2],
+  ['2 グループもタブ（基準 2 枚 × 比較 2 枚）',
+    (parts[1].html.match(/class="vg-btab /g) || []).length === 2 &&
+    (parts[1].html.match(/class="vg-tab /g) || []).length === 4],
   ['なぜ別グループになったかを出す', h3.includes('なぜ別グループになったか')],
   ['未認識の View はタイトルが View 名', hOdd.includes('v_legacy_report')],
   ['未認識の View にバッジが付く', hOdd.includes('suffix 未認識')],
@@ -261,9 +264,9 @@ const checks = [
   ['複雑な SQL も描ける',
     parts[5].html.includes('vg-root') &&
     parts[5].html.replace(/<[^>]*>/g, '').includes('QUALIFY')],
-  ['複雑な SQL は 2 グループでタブが 2 枚',
+  ['複雑な SQL は 2 グループで比較タブが 4 枚（2 基準 × 2）',
     baseComplex.groupCount === 2 &&
-    (parts[5].html.match(/class="vg-tab /g) || []).length === 2],
+    (parts[5].html.match(/class="vg-tab /g) || []).length === 4],
   ['複雑な SQL のパラメータに実体名の種別が出る',
     parts[5].html.includes('実体名')],
   // --- パラメータの tooltip ---------------------------------------------
@@ -296,9 +299,10 @@ const checks = [
       { view_name: 'v_y_cdjp', ddl: "SELECT 'Z' AS k, b FROM t_cdjp" },
       { view_name: 'v_y_cdus', ddl: "SELECT 'Z' AS k, b FROM t_cdus" },
     ], { suffixParts: [['ab', 'cd'], ['jp', 'us']] }).bases[0];
+    // 基準ごとに同じ比較がもう一度出るので、目印の数はグループ数ぶん増える
     const h = R.renderBase(b, {});
     const marks = h.match(/\{(?:<[^>]+>)*\{(?:<[^>]+>)*P\d+(?:<[^>]+>)*\}(?:<[^>]+>)*\}/g) || [];
-    return marks.length === 3 && marks.some((m) => m.includes('<')) &&
+    return marks.length === 3 * b.groups.length && marks.some((m) => m.includes('<')) &&
       (h.match(/class="vg-ph/g) || []).length === marks.length;
   })()],
   ['左右のペインで別の対応表を使う', (() => {
@@ -307,34 +311,35 @@ const checks = [
     return new Set(tips).size > 1;
   })()],
   // --- 基準の切り替え -----------------------------------------------
-  ['基準を変えると基準タブが入れ替わる', (() => {
-    const tabsOf = (h) => [...h.matchAll(/class="vg-tab (?:vg-tbase|vg-t\d+)"[^>]*>(?:<span[^>]*>基準<\/span>)?([^<]*)/g)]
-      .map((m) => m[1].trim());
-    const t0 = tabsOf(h3), t1 = tabsOf(parts[6].html), t2 = tabsOf(parts[7].html);
-    return t0[0] === 'abjp, abuk, abus' && t1[0] === 'cdjp, cduk, cdus' &&
-      t2[0] === 'efjp, efuk, efus' &&
-      // 枚数はどの基準でも同じ＝グループ数
-      t0.length === 3 && t1.length === 3 && t2.length === 3;
+  ['基準タブの見出しがグループの並びどおり', (() => {
+    const names = [...h3.matchAll(/class="vg-btab vg-bt\d+"[^>]*>([^<]*)/g)].map((m) => m[1]);
+    return names.join(' | ') === base3.groups.map(Ch.label).join(' | ');
   })()],
-  ['基準を変えても中身の量は変わらない（1 レコードは基準 1 つぶん）', (() => {
-    const panes = (h) => (h.match(/<th colspan=/g) || []).length;
-    return panes(h3) === panes(parts[6].html) &&
-      panes(h3) === panes(parts[7].html);
+  ['基準パネルごとに左ペインが入れ替わる', (() => {
+    // 各基準パネルの先頭の「基準」タブが、その基準のグループになっている
+    const panels = h3.split('<div class="vg-bpanel ').slice(1);
+    return panels.length === base3.groupCount && panels.every((p, i) =>
+      p.indexOf(`基準</span>${Ch.label(base3.groups[i])}`) > 0);
   })()],
-  ['「なぜ別グループになったか」が選んだ基準に対する差になる',
-    /vs cdjp, cduk, cdus/.test(parts[6].html) &&
-    !/vs abjp, abuk, abus/.test(parts[6].html) &&
-    /vs efjp, efuk, efus/.test(parts[7].html)],
-  ['基準そのものは「なぜ別グループ」に出ない', (() => {
-    const names = [...parts[6].html.matchAll(/class="vg-mname">([^<]*)</g)].map((m) => m[1]);
-    return names.length === 2 && !names.includes('cdjp, cduk, cdus');
+  ['基準パネルはどれも同じ枚数の比較を持つ', (() => {
+    const panels = h3.split('<div class="vg-bpanel ').slice(1);
+    const panes = (p) => (p.match(/<th colspan=/g) || []).length;
+    return panels.every((p) => panes(p) === 2 * (base3.groupCount - 1));
   })()],
-  ['radio の id が基準ごとに変わる（同じページに並べても衝突しない）',
-    new Set([h3, parts[6].html, parts[7].html]
-      .map((h) => (h.match(/id="([^"-]+)-1"/) || [])[1])).size === 3],
-  ['範囲外の基準は 0 に丸める',
-    R.renderBase(base3, { referenceIndex: 99 }) === R.renderBase(base3, {}) &&
-    R.renderBase(base3, { referenceIndex: -3 }) === R.renderBase(base3, {})],
+  ['「なぜ別グループになったか」が基準パネルごとの向きになる', (() => {
+    const panels = h3.split('<div class="vg-bpanel ').slice(1);
+    return panels.every((p, i) => {
+      const vs = [...p.matchAll(/class="vg-mvs">vs ([^<]*)</g)].map((m) => m[1]);
+      // 全部その基準に対する差で、基準そのものは並ばない
+      return vs.length === base3.groupCount - 1 &&
+        vs.every((v) => v === Ch.label(base3.groups[i]));
+    });
+  })()],
+  ['基準パネルごとにラジオの名前を分ける（他の基準の比較タブが開かなくなる）', (() => {
+    const names = [...h3.matchAll(/class="vg-r vg-r1" type="radio" name="([^"]+)"/g)]
+      .map((m) => m[1]);
+    return names.length === base3.groupCount && new Set(names).size === names.length;
+  })()],
   ['解析は全順序対の差を持つ（基準ごとに出し分けられる）',
     base3.groups.every((g, i) => g.missBy.length === base3.groupCount &&
       g.missBy[i] === null &&
@@ -452,10 +457,11 @@ const checks = [
     const svgs = (pageCases[1].html.match(/<svg /g) || []).length;
     return blocks === base3.groupCount && svgs === base3.groupCount;
   })()],
-  ['ERD の並びは差分と同じ（基準が先頭）', (() => {
+  ['ERD の並びは解析結果の順（基準という考え方を持たない）', (() => {
     const names = [...pageCases[1].html.matchAll(/class="vg-erdname">([^<]*)</g)]
       .map((m) => m[1]);
-    return names[0] === 'cdjp, cduk, cdus' && names.length === base3.groupCount;
+    return names.join(' | ') === base3.groups.map(Ch.label).join(' | ') &&
+      !/vg-erdhead"><span class="vg-tbadge"/.test(pageCases[1].html);
   })()],
   ['ERD にラジオを置かない（外側タブと干渉しない）',
     !/class="vg-r vg-r\d+" type="radio"[^>]*name="vge/.test(pageCases[1].html)],
@@ -519,9 +525,11 @@ const checks = [
       /data-tip="[^"]*abuk = #4 NUMERIC NOT NULL/.test(h) &&
       h.includes('揃っていない箇所が');
   })()],
-  ['基準に無い列・基準と違う型が分かる', (() => {
+  ['多数派と違う型・持っていない列が分かる（基準は立てない）', (() => {
     const h = columnCases[0].html;
-    return h.includes('currency') && h.includes('vg-cnone') && h.includes('vg-cdiff');
+    return h.includes('currency') && h.includes('vg-cnone') && h.includes('vg-cdiff') &&
+      // 表に「基準」の表記もその色分けも無い
+      !h.includes('基準') && !h.includes('vg-cref');
   })()],
   ['列の説明を列名の下に出す',
     columnCases[0].html.includes('vg-cdesc') &&

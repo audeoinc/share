@@ -25,7 +25,8 @@
 const { splitLines, build2Way } = require('../ddl_diff_viz/src/lib/diff');
 const { renderFragment1, renderFragment2 } = require('../ddl_diff_viz/src/lib/render');
 const {
-  MAX_TABS, OUTER_TABS, esc, hashId, label, header, notice, kindText, referenceIndex,
+  MAX_TABS, MAX_REF_TABS, REF_BUDGET, OUTER_TABS,
+  esc, hashId, label, header, notice, kindText,
 } = require('./chrome.js');
 
 /**
@@ -203,6 +204,68 @@ function tabs(groups, refIndex, opts, idPrefix) {
 }
 
 /**
+ * 基準ごとのひとかたまり（比較タブ ＋ なぜ別グループになったか）。
+ * 基準が変わると比較の中身も「なぜ別か」の向きも変わるので、対にして扱う。
+ */
+function refPanel(b, refIndex, opts) {
+  const groups = b.groups;
+  // id はレコード内で一意であればよいが、同じページに複数レコードが並ぶ場合に
+  // 備えて、base 名・グループ構成・基準を混ぜてハッシュする。
+  // 基準ごとに別の名前にしないと、ラジオが全基準で 1 つの組になり、
+  // 選ばれていない基準の比較タブがどれも開かなくなる。
+  const idPrefix = 'vgt' + hashId(b.base + '|' + groups.map(label).join('|') + '|' + refIndex);
+  return tabs(groups, refIndex, opts, idPrefix) +
+    missTable(groups, refIndex, label(groups[refIndex]));
+}
+
+/**
+ * 基準グループを選ぶタブ。
+ *
+ * 基準は「どれを左ペインに出しっぱなしにするか」で、差分を読むときにだけ
+ * 意味を持つ（カラム定義も参照関係も基準を持たない）。だからこの選択は
+ * レポートのコントロールではなくカードの中に置く。
+ *
+ * **基準を 1 つ増やすと比較ペインがグループ数ぶん増える。** 全部載せると
+ * 枚数は G×(G−1) で効くので、大きくなりすぎたら途中で打ち切って断る。
+ * 1 枚も出さないより、載せられるところまで載せたほうが役に立つ。
+ *
+ * 内側の比較タブ・外側のタブとはクラスを分けてある。同じクラスだと
+ * 一方のラジオがもう一方の :checked ~ に引っかかる。
+ */
+function refTabs(b, opts, idPrefix) {
+  const groups = b.groups;
+  const shown = [];
+  let size = 0;
+  for (let i = 0; i < groups.length && i < MAX_REF_TABS; i++) {
+    const html = refPanel(b, i, opts);
+    // 1 枚目は予算を超えても必ず載せる。空のカードを出しても仕方がない。
+    if (shown.length && size + html.length > REF_BUDGET) break;
+    shown.push(html);
+    size += html.length;
+  }
+
+  const radios = shown.map((_, i) =>
+    `<input class="vg-br vg-br${i + 1}" type="radio" name="${idPrefix}b"` +
+    ` id="${idPrefix}b-${i + 1}"${i === 0 ? ' checked' : ''}>`).join('');
+  const tablist = shown.map((_, i) =>
+    `<label class="vg-btab vg-bt${i + 1}" for="${idPrefix}b-${i + 1}">` +
+    `${esc(label(groups[i]))}<span class="vg-tabn">${groups[i].members.length}</span></label>`)
+    .join('');
+  const panels = shown.map((html, i) =>
+    `<div class="vg-bpanel vg-bp${i + 1}">${html}</div>`).join('');
+
+  const over = shown.length < groups.length
+    ? notice(`基準にできるのは先頭 ${shown.length} グループまでにしています` +
+      `（全 ${groups.length} 件）。基準を 1 つ増やすと比較の枚数がグループ数ぶん` +
+      `増えるため、1 レコードが大きくなりすぎない範囲で打ち切っています。`)
+    : '';
+
+  return `<div class="vg-btabs">${radios}` +
+    `<div class="vg-btablist"><span class="vg-blabel">基準グループ</span>${tablist}</div>` +
+    `<div class="vg-bpanels">${panels}</div></div>` + over;
+}
+
+/**
  * base 1 件分の HTML を返す。
  * @param {{base:string, viewCount:number, groupCount:number, groups:object[]}} b
  */
@@ -210,33 +273,25 @@ function renderBase(b, opts) {
   const o = opts || {};
   const groups = b.groups;
   const n = groups.length;
-  // どのグループを基準（左ペインに出しっぱなしにする側）にするか。
-  // レポート側で選べるよう、基準ごとに 1 レコードを作り置きする。
-  // 範囲外や数値でない指定は既定（0）に戻す。中途半端に丸めると、
-  // 指定を間違えたときに「別の基準の絵」が出て気づけない。
-  const refIndex = referenceIndex(b, o);
-  // id はレコード内で一意であればよいが、同じページに複数レコードが並ぶ場合に
-  // 備えて、base 名・グループ構成・基準を混ぜてハッシュする。
-  // （同一内容を 2 回描画した場合は衝突しうる。1 チャート 1 レコードが前提。）
-  const idPrefix = 'vgt' + hashId(b.base + '|' + groups.map(label).join('|') + '|' + refIndex);
+  const idPrefix = 'vgt' + hashId(b.base + '|' + groups.map(label).join('|'));
 
-  // グループ数によらずタブで出す。タブを数えればグループ数になる形にそろえる。
   let body;
   if (n === 0) {
     body = notice('View が見つかりません。');
-  } else {
+  } else if (n === 1) {
     // 比較する相手がいないときは、同じ SQL を左右に並べても読む人が得るものが
-    // 無いので、基準タブ 1 枚と SQL 1 ペインになる。
-    const lead = n > 1 ? '' : notice(b.unmatched
+    // 無いので、基準を選ぶ余地も無い。SQL 1 ペインだけ出す。
+    body = notice(b.unmatched
       ? 'suffix を認識できなかった View です。比較相手がないので単独で表示しています。'
-      : `${b.viewCount} View すべてが同一ロジックです。比較の必要がないので SQL だけ出しています。`);
-    body = lead + tabs(groups, refIndex, o, idPrefix);
+      : `${b.viewCount} View すべてが同一ロジックです。比較の必要がないので SQL だけ出しています。`) +
+      refPanel(b, 0, o);
+  } else {
+    body = refTabs(b, o, idPrefix);
   }
 
   return `<div class="vg-root">` +
     header(b.base, b.viewCount, n, b.unmatched) +
     body +
-    missTable(groups, refIndex, n > 0 ? label(groups[refIndex]) : '') +
     paramsTable(groups) +
     `</div>`;
 }
@@ -315,7 +370,16 @@ function chromeCss() {
     `.vg-ph:hover::after{display:block}`,
     // 右端では左に出さないと枠の外へ出てしまう。最後の 2 ペインぶんだけ寄せる。
     `.vg-ph.vg-phr::after{left:auto;right:0}`,
-    // 外側タブ（ロジック差分 / 参照関係）。内側のタブと同じ仕組みだが、
+    // 基準グループのタブ（ロジック差分の中）。外側・内側とはまたクラスを分ける。
+    `.vg-br{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}`,
+    `.vg-btablist{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 10px}`,
+    `.vg-blabel{color:#57606A;font-size:12px;font-weight:600;margin-right:2px}`,
+    `.vg-btab{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;` +
+      `border:1px solid #D0D7DE;border-radius:14px;color:#57606A;` +
+      `cursor:pointer;user-select:none;font-weight:600;font-size:12px}`,
+    `.vg-btab:hover{background:#EAEEF2;color:#24292F}`,
+    `.vg-bpanel{display:none}`,
+    // 外側タブ（note / カラム定義 / ロジック差分 / 参照関係）。内側と同じ仕組みだが、
     // クラスを分けてある。同じクラスだと内側のラジオが外側の :checked ~ に
     // 引っかかり、片方を押すともう片方も切り替わる。
     `.vg-or{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}`,
@@ -395,6 +459,13 @@ function chromeCss() {
     rules.push(`.vg-or${i}:checked ~ .vg-opanels > .vg-op${i}{display:block}`);
     rules.push(TAB_PATHS.map((path) => `.vg-or${i}:checked ~ ${path}.vg-ot${i}`).join(',') +
       `{background:#24292F;border-color:#24292F;color:#fff}`);
+  }
+  // 基準グループのタブ本体。選択中は基準ペインと同じ薄い赤にする
+  // （左ペインに出っぱなしになる側の色と結び付ける）。
+  for (let i = 1; i <= MAX_REF_TABS; i++) {
+    rules.push(`.vg-br${i}:checked ~ .vg-bpanels > .vg-bp${i}{display:block}`);
+    rules.push(`.vg-br${i}:checked ~ .vg-btablist > .vg-bt${i}` +
+      `{background:#fbeded;border-color:#efb6b6;color:#24292F}`);
   }
   // 内側のタブ本体。ID ではなくクラスで書くので、CSS を静的に保てる。
   for (let i = 1; i <= MAX_TABS; i++) {

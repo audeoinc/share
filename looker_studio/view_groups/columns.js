@@ -18,9 +18,14 @@
  * だけで、並び順の違いには色を付けない。** グループが列を 1 本足すと以降の番号が
  * まとめてずれるので、色を付けると本当に見たい型の差がその中に埋もれる。
  * 番号は出すので、必要なら目で追える。
+ *
+ * **この表に「基準」は無い。** 全グループを横に並べている以上、どれか 1 つを
+ * 基準に立てなくても違いはそのまま読める。差分側は「基準と 1 つを見比べる」
+ * 作りなので基準が要るが、こちらは要らない。揃っていないセルは、その列で
+ * いちばん多い値と違うものに色を付ける。
  */
 
-const { esc, label, notice, referenceIndex } = require('./chrome.js');
+const { esc, label, notice } = require('./chrome.js');
 
 /** グループの中で揃っていないことを示す印。セルの中に置く。 */
 const WARN = '⚠';
@@ -62,21 +67,32 @@ function groupColumns(g, byView) {
 }
 
 /**
- * 表の行の並び。基準グループの順を土台にして、そこに無い列を後ろに足す。
- * 基準に合わせるのは、読む人が基準の View を見ながら突き合わせるため。
+ * 表の行の並び。先頭グループの順を土台にして、そこに無い列を後ろに足す。
+ * どのグループを土台にしても表の中身は変わらないので、単に先頭を使う。
  */
-function columnOrder(groups, maps, refIndex) {
+function columnOrder(maps) {
   const seen = new Set();
   const out = [];
-  const push = (m) => {
+  for (const m of maps) {
     const rows = [...m.values()].sort((a, b) => a.order - b.order);
     for (const e of rows) {
       if (!seen.has(e.name)) { seen.add(e.name); out.push(e.name); }
     }
-  };
-  push(maps[refIndex]);
-  for (let i = 0; i < groups.length; i++) if (i !== refIndex) push(maps[i]);
+  }
   return out;
+}
+
+/** いちばん多い値。同数なら先に出たほう。 */
+function majority(sigs) {
+  const count = new Map();
+  for (const s of sigs) count.set(s, (count.get(s) || 0) + 1);
+  let best = null;
+  let bestN = -1;
+  for (const s of sigs) {
+    const n = count.get(s);
+    if (n > bestN) { best = s; bestN = n; }
+  }
+  return best;
 }
 
 const nullText = (n) => (n === null ? 'NULL 不明' : n ? 'NULL 可' : 'NOT NULL');
@@ -133,34 +149,32 @@ function mixedTip(entry, g) {
  *                                 u: is_nullable, d: 説明 }] }
  * @param {object} opts            referenceIndex を見る
  */
-function renderColumns(b, byView, opts) {
+function renderColumns(b, byView) {
   const groups = b.groups || [];
   if (!groups.length) return notice('View が見つかりません。');
-  const refIndex = referenceIndex(b, opts || {});
   const maps = groups.map((g) => groupColumns(g, byView || {}));
-  const order = columnOrder(groups, maps, refIndex);
+  const order = columnOrder(maps);
   if (!order.length) {
     return notice('カラム定義を取得できませんでした。' +
       'INFORMATION_SCHEMA.COLUMNS から列が読めているか確認してください。');
   }
 
-  // 並びは基準グループが先頭。差分側・参照関係側と同じ順にそろえる。
-  const order2 = [refIndex].concat(groups.map((_, i) => i).filter((i) => i !== refIndex));
-
-  let diffCount = 0;
+  let diffRows = 0;
   let mixedCount = 0;
   const rows = order.map((name) => {
-    const refCell = cellInfo(maps[refIndex].get(name), groups[refIndex].members.length);
-    const entry = maps[refIndex].get(name) ||
-      order2.map((i) => maps[i].get(name)).filter((e) => e)[0];
-    const cells = order2.map((i, pos) => {
+    const infos = groups.map((g, i) => cellInfo(maps[i].get(name), g.members.length));
+    // グループ間で揃っているか。基準は立てず、いちばん多い値と違うものに色を付ける。
+    const top = majority(infos.map((c) => c.sig));
+    const uneven = infos.some((c) => c.sig !== top);
+    if (uneven) diffRows++;
+    const entry = groups.map((_, i) => maps[i].get(name)).filter((e) => e)[0];
+    const cells = infos.map((c, i) => {
       const g = groups[i];
       const e = maps[i].get(name);
-      const c = cellInfo(e, g.members.length);
       const cls = ['vg-ccell'];
       if (!c.text) cls.push('vg-cnone');
-      // 基準と違う型・NULL 制約。並び順の違いは色にしない（上の説明のとおり）。
-      else if (pos > 0 && c.sig !== refCell.sig) { cls.push('vg-cdiff'); diffCount++; }
+      // 多数派と違う型・NULL 制約。並び順の違いは色にしない（上の説明のとおり）。
+      else if (c.sig !== top) cls.push('vg-cdiff');
       if (c.mixed) { cls.push('vg-cmix'); mixedCount++; }
       const body = c.text
         ? esc(c.text) + (c.mixed
@@ -174,10 +188,9 @@ function renderColumns(b, byView, opts) {
     return `<tr><th class="vg-cname">${esc(name)}${desc}</th>${cells}</tr>`;
   }).join('');
 
-  const head = order2.map((i, pos) =>
-    `<th class="vg-chead${pos === 0 ? ' vg-cref' : ''}">` +
-    (pos === 0 ? `<span class="vg-tbadge">基準</span>` : '') +
-    `${esc(label(groups[i]))}<span class="vg-tabn">${groups[i].members.length}</span></th>`).join('');
+  const head = groups.map((g) =>
+    `<th class="vg-chead">${esc(label(g))}` +
+    `<span class="vg-tabn">${g.members.length}</span></th>`).join('');
 
   // 何を見ればよいかを先に出す。表だけ置かれても、どこが問題かは読み取りにくい。
   const lead = [];
@@ -186,9 +199,10 @@ function renderColumns(b, byView, opts) {
       `（${WARN} の印）。SQL が同一でも参照先テーブルの型が違えばこうなるので、` +
       `ロジック差分には出てきません。`));
   }
-  if (diffCount) {
-    lead.push(notice(`基準グループと型または NULL 制約が違う箇所が ${diffCount} 件` +
-      `あります（色付きのセル）。並び順（#）の違いには色を付けていません` +
+  if (diffRows) {
+    lead.push(notice(`グループ間で型または NULL 制約が揃っていない列が ${diffRows} 件` +
+      `あります（色付きのセル。その列でいちばん多い値と違うもの）。` +
+      `並び順（#）の違いには色を付けていません` +
       `（列を 1 本足すと以降がまとめてずれ、型の差が埋もれるため）。`));
   }
   if (!lead.length) {
@@ -202,8 +216,8 @@ function renderColumns(b, byView, opts) {
 }
 
 /** base 1 件分。見出しは外枠（wrapPage）が出すので、ここでは中身だけ。 */
-function renderColumnsBase(b, byView, opts) {
-  return `<div class="vg-root">${renderColumns(b, byView, opts)}</div>`;
+function renderColumnsBase(b, byView) {
+  return `<div class="vg-root">${renderColumns(b, byView)}</div>`;
 }
 
 /**
@@ -219,8 +233,6 @@ function columnsCss() {
     `.vg-chead{position:sticky;top:0;z-index:1;padding:6px 12px;` +
       `border:1px solid #D0D7DE;background:#F6F8FA;color:#24292F;` +
       `font-weight:600;text-align:left;white-space:nowrap}`,
-    // 基準グループの見出し。差分側の基準タブと同じ色にそろえる。
-    `.vg-cref{background:#fbeded;border-color:#efb6b6}`,
     `.vg-cnamehead{min-width:180px}`,
     `.vg-cname{padding:5px 12px;border:1px solid #D0D7DE;text-align:left;` +
       `vertical-align:top;font-weight:600;color:#24292F;` +
@@ -251,5 +263,5 @@ function columnsCss() {
 
 module.exports = {
   renderColumns, renderColumnsBase, columnsCss,
-  groupColumns, columnOrder, cellInfo, mixedTip, nullText,
+  groupColumns, columnOrder, cellInfo, mixedTip, nullText, majority,
 };
