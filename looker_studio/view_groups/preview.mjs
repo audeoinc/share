@@ -133,7 +133,7 @@ const pageCases = [
   { title: '外側タブ・メモが未登録の base', b: base2, opts: {}, note: null },
 ].map((c) => ({ ...c,
   html: splice(
-    Ch.wrapPage(R.renderBase(c.b, c.opts), E.renderErdBase(c.b, c.opts), c.b.base),
+    Ch.wrapPage(R.renderBase(c.b, c.opts), E.renderErdBase(c.b, c.opts), c.b),
     Md.markdownHtml(c.note)) }));
 
 // --- 検証 --------------------------------------------------------------
@@ -314,6 +314,15 @@ const checks = [
   ['タブはスクロールしても残る（position:sticky）',
     R.chromeCss().includes('.vg-otablist{') &&
     /\.vg-otablist\{[^}]*position:sticky[^}]*top:0/.test(R.chromeCss())],
+  ['どのタブにも見出しが出る（base 名 / View 数 / グループ数）', (() => {
+    const h = pageCases[0].html;
+    // 3 枚のパネルにひとつずつ。note のぶんは目印より前。
+    const heads = [...h.matchAll(/<span class="vg-title">([^<]*)</g)].map((m) => m[1]);
+    return heads.length === Ch.OUTER_TABS.length &&
+      heads.every((t) => t === baseComplex.base) &&
+      (h.match(/vg-badge/g) || []).length === Ch.OUTER_TABS.length * 2 &&
+      h.indexOf('vg-title') < h.indexOf('vg-md');
+  })()],
   ['メモが未登録でもタブは出る（中身が未登録の枠になる）',
     (pageCases[2].html.match(/class="vg-otab /g) || []).length === Ch.OUTER_TABS.length &&
     pageCases[2].html.includes('vg-mdempty')],

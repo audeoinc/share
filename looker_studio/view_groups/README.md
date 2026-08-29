@@ -492,7 +492,7 @@ SQL 中の `{{P1}}` にカーソルを合わせると、種別と suffix ごと�
 - パラメータ名はグループごとに振り直すので、左右のペインには別の対応表を渡す。
 
 ```bash
-node preview.mjs          # dist/preview.html を生成して検証（84 アサーション）
+node preview.mjs          # dist/preview.html を生成して検証（85 アサーション）
 node preview.mjs --check  # 生成せず検証だけ
 ```
 
@@ -500,7 +500,7 @@ node preview.mjs --check  # 生成せず検証だけ
 
 ```bash
 node build_udf.mjs          # 検証して view_group_html.sql を生成
-node build_udf.mjs --check  # 生成せず検証だけ（48 アサーション）
+node build_udf.mjs --check  # 生成せず検証だけ（49 アサーション）
 node check_sql.mjs          # build_table.sql と view_group_html.sql の突き合わせ
 ```
 
@@ -918,6 +918,13 @@ JavaScript が使えない以上、切り替えられるのは「作り置きし
 分けると、コントロールを何組もそろえる必要が出て、片方だけずれた状態を作れて
 しまう。枚数と順序は `chrome.js` の `OUTER_TABS` がひとつの決め所で、
 CSS の規則もそこから作る。
+
+**見出し（base 名 / View 数 / グループ数）はどのタブにも出す。** 差分側
+（`renderBase`）も参照関係側（`renderErdBase`）もそれぞれ自分で `header()` を
+呼んでいるので、`note` のパネルにも `wrapPage` が同じものを付ける。1 枚だけ
+上に出す形にしなかったのは、タブを移った拍子に何を見ているのか分からなく
+なるのを避けるため（帯の下へスクロールで隠れる位置にあるので、常に見えて
+いる保証がない）。
 
 **タブの帯はスクロールしても残す**（`position:sticky; top:0`）。カードは縦に
 長いので、下まで読んでから別のタブへ移るのにいちばん上まで戻るのは面倒。

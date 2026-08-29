@@ -99,14 +99,22 @@ function referenceIndex(b, opts) {
  * 何組もそろえる必要が出て、片方だけずれた状態を作れてしまう。
  *
  * メモのパネルには本体ではなく目印（NOTE_MARK）を置く。上の説明のとおり、
- * メモだけは作り置きではなくビューの中で作るため。
+ * メモだけは作り置きではなくビューの中で作るため。見出し（base 名・View 数・
+ * グループ数）はここで付ける。差分側も参照関係側もそれぞれ自分で出しているので、
+ * メモだけ無いとタブを移った拍子に何を見ているのか分からなくなる。
  *
  * 内側のタブとはクラスを分けてある。同じクラスだと内側のラジオが外側の
  * :checked ~ に引っかかり、片方を押すともう片方も切り替わる。
+ *
+ * @param {object} base 解析結果の base 1 件分。見出しと id の種に使う
  */
-function wrapPage(diffHtml, erdHtml, seed) {
-  const id = 'vgo' + hashId(seed);
-  const bodies = [NOTE_MARK, diffHtml, erdHtml];
+function wrapPage(diffHtml, erdHtml, base) {
+  const b = base || {};
+  const id = 'vgo' + hashId(b.base || '');
+  const note = `<div class="vg-root">` +
+    (b.base ? header(b.base, b.viewCount, (b.groups || []).length, b.unmatched) : '') +
+    NOTE_MARK + `</div>`;
+  const bodies = [note, diffHtml, erdHtml];
   const radios = OUTER_TABS.map((_, i) =>
     `<input class="vg-or vg-or${i + 1}" type="radio" name="${id}"` +
     ` id="${id}-${i + 1}"${i === 0 ? ' checked' : ''}>`).join('');
