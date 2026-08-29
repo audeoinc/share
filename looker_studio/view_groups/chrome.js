@@ -101,13 +101,19 @@ function referenceIndex(b, opts) {
  * メモのパネルには本体ではなく目印（NOTE_MARK）を置く。上の説明のとおり、
  * メモだけは作り置きではなくビューの中で作るため。
  *
- * 見出し（base 名・View 数・グループ数）はタブと同じ帯（.vg-ohead）に入れて、
- * まとめてスクロールに追従させる。差分側（renderBase）と参照関係側
- * （renderErdBase）はそれぞれ自分でも見出しを出すが、単体で使うときのための
- * もので、束ねたときは CSS で隠して上の 1 枚に集約する。
+ * 見出し（base 名・View 数・グループ数）はタブと同じ帯に入れて、まとめて
+ * スクロールに追従させる。差分側（renderBase）と参照関係側（renderErdBase）は
+ * それぞれ自分でも見出しを出すが、単体で使うときのためのもので、束ねたときは
+ * CSS で隠してこの 1 枚に集約する。
  *
- * ラジオは .vg-outer の直下に置いたまま。.vg-ohead の中に入れると
- * :checked ~ の兄弟が .vg-opanels でなくなり、パネルの切り替えが効かない。
+ * 見出しは .vg-otablist の「中」に置く。外に出して包むと、選択中のタブを塗る
+ * 規則が :checked ~ .vg-otablist > .vg-otN（子）ではなく子孫になる。
+ * この viz で動くと確認できているのは子のほうで（templated_record/samples/
+ * 07_radio_tabs_test.html）、子孫に変えたら実機で反転しなくなった。
+ * 並びは .vg-otablist を flex-wrap にして、見出しだけ 1 行占有させる。
+ *
+ * ラジオは .vg-outer の直下。ここに置いてあれば .vg-otablist も .vg-opanels も
+ * 後ろに続く兄弟になり、どちらの規則も「兄弟 > 子」で書ける。
  *
  * 内側のタブとはクラスを分けてある。同じクラスだと内側のラジオが外側の
  * :checked ~ に引っかかり、片方を押すともう片方も切り替わる。
@@ -128,7 +134,7 @@ function wrapPage(diffHtml, erdHtml, base) {
   const head = b.base
     ? header(b.base, b.viewCount, (b.groups || []).length, b.unmatched) : '';
   return `<div class="vg-outer">${radios}` +
-    `<div class="vg-ohead">${head}<div class="vg-otablist">${tabs}</div></div>` +
+    `<div class="vg-otablist">${head}${tabs}</div>` +
     `<div class="vg-opanels">${panels}</div></div>`;
 }
 

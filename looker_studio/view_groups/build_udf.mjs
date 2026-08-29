@@ -482,9 +482,9 @@ const checks = [
   // REPLACE で note_html に差し替える。焼き込むと、シートを直しても
   // 次の日次実行までレポートが古いままになる。
   ['page は見出しをタブと同じ帯に置く（どのタブでも見える）',
-    /<div class="vg-ohead"><div class="vg-header">.*?<div class="vg-otablist">/s
+    /<div class="vg-otablist"><div class="vg-header">.*?<label class="vg-otab vg-ot1"/s
       .test(info.page) &&
-    info.page.indexOf('vg-ohead') < info.page.indexOf('<!--VG_NOTE-->')],
+    info.page.indexOf('vg-otablist') < info.page.indexOf('<!--VG_NOTE-->')],
   ['page はメモの目印を 1 つだけ置く（本体は焼き込まない）',
     info.page.split(require(join(here, 'chrome.js')).NOTE_MARK).length - 1 === 1 &&
     !info.page.includes('vg-md')],

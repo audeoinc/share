@@ -143,6 +143,10 @@ const hMany = parts[3].html;
 const hOdd = parts[4].html;
 
 const idsOf = (h) => [...h.matchAll(/id="([^"]+)"/g)].map((m) => m[1]);
+// 外側タブの規則が 1 枚残らず「兄弟 > 子」で書けているか
+const OUTER_TABS_OK = (css) => Ch.OUTER_TABS.every((_, i) =>
+  css.includes(`.vg-or${i + 1}:checked ~ .vg-otablist > .vg-ot${i + 1}{`)) &&
+  !/:checked ~ [^,{]*(\*|\.vg-ohead)/.test(css);
 const checks = [
   ['タイトルが base 名', h3.includes('v_daily_sales')],
   ['グループ数バッジが出る', h3.includes('3 グループ')],
@@ -320,7 +324,7 @@ const checks = [
     /\.vg-outer\{max-height:min\(100vh,\d+px\);overflow:auto\}/.test(R.chromeCss())],
   ['見出しはタブと同じ帯にあり、どのタブでも見える', (() => {
     const h = pageCases[0].html;
-    const head = h.slice(h.indexOf('<div class="vg-ohead">'), h.indexOf('<div class="vg-opanels">'));
+    const head = h.slice(h.indexOf('<div class="vg-otablist">'), h.indexOf('<div class="vg-opanels">'));
     // 帯の中に見出しとタブが揃っていること
     return head.includes(`<span class="vg-title">${baseComplex.base}<`) &&
       (head.match(/vg-badge/g) || []).length === 2 &&
@@ -329,16 +333,18 @@ const checks = [
       R.chromeCss().includes('.vg-opanel .vg-header{display:none}');
   })()],
   ['帯ごとスクロールに追従する（見出し＋タブ）',
-    /\.vg-ohead,[^{]*\{[^}]*position:sticky[^}]*top:0/.test(R.chromeCss())],
-  // テンプレートの CSS は手貼り、カードは日次生成。世代がズレている時間帯が
-  // 必ずできるので、旧世代の外枠（.vg-ohead が無く .vg-otablist が直下）でも
-  // タブの反転と帯の固定が効くこと。効かないと「反転しない・固定されない」が
-  // 同時に起き、CSS と HTML のどちらが古いのか画面からは分からない。
-  ['旧世代の外枠でもタブの反転と固定が効く（CSS とカードの世代がズレても）', (() => {
+    /\.vg-otablist\{[^}]*position:sticky[^}]*top:0/.test(R.chromeCss())],
+  // 選択中のタブを塗る規則は「兄弟 > 子」から動かさない。この viz で
+  // radio + :checked が動くと確かめたときの形がこれで（templated_record/
+  // samples/07_radio_tabs_test.html）、子孫に変えたら実機で反転しなくなった。
+  // 見出しを別の入れ物で包むと子孫になるので、包まないことも合わせて見る。
+  ['選択中のタブを塗る規則が「兄弟 > 子」になっている', (() => {
     const css = R.chromeCss();
-    return /\.vg-or2:checked ~ \* \.vg-ot2\{/.test(css) &&
+    return OUTER_TABS_OK(css) &&
       css.includes('.vg-or2:checked ~ .vg-opanels > .vg-op2{display:block}') &&
-      /\.vg-ohead,\.vg-outer>\.vg-otablist\{[^}]*position:sticky/.test(css);
+      // 見出しは帯の中の直接の子。包む入れ物を挟むと上の形が崩れる
+      /<div class="vg-otablist"><div class="vg-header">/.test(pageCases[0].html) &&
+      !pageCases[0].html.includes('vg-ohead');
   })()],
   ['メモが未登録でもタブは出る（中身が未登録の枠になる）',
     (pageCases[2].html.match(/class="vg-otab /g) || []).length === Ch.OUTER_TABS.length &&

@@ -341,17 +341,13 @@ function chromeCss() {
     //   要素（{{Pn}} のチップ）が DOM 順で上に来て帯に重なる。一方
     //   20 以上にすると、そのチップの吹き出し（z-index:20）が帯の下に隠れる。
     //   間を取ると、地の文は帯が隠し、吹き出しは帯より前に出る。
-    // 帯そのもの。旧世代の HTML（.vg-ohead が無く .vg-otablist が直下）でも
-    // 効くように、両方を対象にする。テンプレートの CSS は手で貼るのに対して
-    // カードは日次で作り直すので、この 2 つがズレている時間帯が必ずできる。
-    // 片方でしか効かない書き方だと、その間だけ帯が流れて理由も分かりにくい。
-    `.vg-ohead,.vg-outer>.vg-otablist{position:sticky;top:0;z-index:5;` +
-      `background:#fff;margin:0 0 10px;box-shadow:0 1px 0 #EAEEF2}`,
-    `.vg-ohead{padding:8px 0 0}`,
-    `.vg-outer>.vg-otablist{padding:8px 0}`,
-    `.vg-ohead .vg-header{margin:0 0 8px}`,
-    `.vg-otablist{display:flex;gap:6px}`,
-    `.vg-ohead .vg-otablist{margin:0;padding:0 0 8px}`,
+    // 帯そのもの。見出しとタブが 1 枚に入る。見出しだけ 1 行占有させて、
+    // タブはその下に並べる。見出しを別の入れ物で包まないのは、選択中のタブを
+    // 塗る規則を「兄弟 > 子」のまま保つため（下の for を参照）。
+    `.vg-otablist{display:flex;flex-wrap:wrap;align-items:center;gap:6px;` +
+      `position:sticky;top:0;z-index:5;background:#fff;` +
+      `margin:0 0 10px;padding:8px 0;box-shadow:0 1px 0 #EAEEF2}`,
+    `.vg-otablist>.vg-header{flex:0 0 100%;margin:0}`,
     // パネルの中の見出しは隠す。renderBase / renderErdBase は単体でも使うので
     // それぞれ見出しを出したままにしてあり、束ねたときだけ上の 1 枚に集約する。
     `.vg-opanel .vg-header{display:none}`,
@@ -378,14 +374,18 @@ function chromeCss() {
   ];
   // 外側のタブ本体。枚数は chrome.js の OUTER_TABS がひとつの決め所。
   //
-  // タブの位置は「ラジオのあとに続く兄弟のどれかの中」とだけ決めて、
-  // 間の入れ物は問わない（`~ * .vg-otN`）。いまは .vg-ohead の中だが、
-  // 旧世代の HTML では .vg-otablist が直下にあり、そこにも入っている。
-  // 手貼りの CSS と日次生成のカードは世代がズレうるので、どちらでも効く形に
-  // しておく。.vg-otN はこの外枠にしか出てこないので、広く取っても誤爆しない。
+  // 形は「兄弟 > 子」で固定する。この viz で radio + :checked が動くことを
+  // 確かめたときの形がこれで（templated_record/samples/07_radio_tabs_test.html）、
+  // 見出しを別の入れ物で包んで子孫（`~ .vg-ohead .vg-otN`）にしたら実機で
+  // 反転しなくなった。手元のブラウザでは子孫でも動くので、埋め込み先で
+  // 何かが起きている。確認が取れている形から動かさない。
+  //
+  // 旧世代のカード（見出しが帯の外にあるもの）も .vg-otablist > .vg-otN の形は
+  // 同じなので、この規則はそのまま効く。テンプレートの CSS は手貼り、カードは
+  // 日次生成で世代がズレうるため、ここは揃えておく必要がある。
   for (let i = 1; i <= OUTER_TABS.length; i++) {
     rules.push(`.vg-or${i}:checked ~ .vg-opanels > .vg-op${i}{display:block}`);
-    rules.push(`.vg-or${i}:checked ~ * .vg-ot${i}` +
+    rules.push(`.vg-or${i}:checked ~ .vg-otablist > .vg-ot${i}` +
       `{background:#24292F;border-color:#24292F;color:#fff}`);
   }
   // 内側のタブ本体。ID ではなくクラスで書くので、CSS を静的に保てる。
