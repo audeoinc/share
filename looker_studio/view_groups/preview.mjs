@@ -340,9 +340,9 @@ const checks = [
       g.missBy[i] === null &&
       g.missBy.filter((m) => m).length === base3.groupCount - 1)],
   // --- 参照関係（ERD） --------------------------------------------------
-  ['外側タブが 4 枚出る（note / ロジック差分 / 参照関係 / カラム定義）',
+  ['外側タブが 4 枚出る（note / カラム定義 / ロジック差分 / 参照関係）',
     (pageCases[0].html.match(/class="vg-otab /g) || []).length === Ch.OUTER_TABS.length &&
-    Ch.OUTER_TABS.join(',') === 'note,ロジック差分,参照関係,カラム定義'],
+    Ch.OUTER_TABS.join(',') === 'note,カラム定義,ロジック差分,参照関係'],
   ['既定で開くのはいちばん左のメモ タブ', (() => {
     const h = pageCases[0].html;
     // checked が付くのは 1 枚目だけ。外側タブの CSS も 1 枚目を開く形になる。
@@ -459,10 +459,13 @@ const checks = [
   })()],
   ['ERD にラジオを置かない（外側タブと干渉しない）',
     !/class="vg-r vg-r\d+" type="radio"[^>]*name="vge/.test(pageCases[1].html)],
-  ['ERD は 3 枚目のパネル、差分は 2 枚目',
-    pageCases[1].html.indexOf('vg-opanel vg-op2') <
-      pageCases[1].html.indexOf('vg-opanel vg-op3') &&
-    pageCases[1].html.indexOf('<svg ') > pageCases[1].html.indexOf('vg-opanel vg-op3')],
+  ['パネルの中身がタブの並びと合っている（カラム定義 2 / 差分 3 / ERD 4）', (() => {
+    const h = pageCases[1].html;
+    const at = (n) => h.indexOf(`vg-opanel vg-op${n}`);
+    return at(1) < at(2) && at(2) < at(3) && at(3) < at(4) &&
+      h.indexOf('vg-ctable') > at(2) && h.indexOf('vg-ctable') < at(3) &&
+      h.indexOf('<svg ') > at(4);
+  })()],
   ['ERD の CSS が chrome 側にある',
     R.chromeCss().includes('.vg-otab') && R.chromeCss().includes('.vg-erdbox')],
   // メモ（Markdown）。ビューの中から呼ぶので、崩れても落ちないことが要件。

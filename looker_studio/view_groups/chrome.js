@@ -13,9 +13,9 @@ const MAX_TABS = 12; // 静的 CSS が面倒を見るタブ数の上限
  * 外側のタブ。左から並ぶ順で、先頭が既定の表示。
  * 数と順序は chromeCss() の規則と対で決まるので、ここだけを直せば両方動く。
  */
-// 末尾に足す。途中に差し込むと .vg-opN の番号の意味が変わり、まだ古い CSS を
-// 貼っているレポートで別のタブが開く。
-const OUTER_TABS = ['note', 'ロジック差分', '参照関係', 'カラム定義'];
+// 並びを変えるとパネルの中身と番号の対応が変わるが、CSS は番号ごとに対称な
+// 規則を出すだけで見出しも中身も知らないので、貼り替えの順序は問わない。
+const OUTER_TABS = ['note', 'カラム定義', 'ロジック差分', '参照関係'];
 
 /**
  * メモの差し込み口。
@@ -125,7 +125,8 @@ function referenceIndex(b, opts) {
 function wrapPage(diffHtml, erdHtml, colsHtml, base) {
   const b = base || {};
   const id = 'vgo' + hashId(b.base || '');
-  const bodies = [`<div class="vg-root">${NOTE_MARK}</div>`, diffHtml, erdHtml, colsHtml];
+  // OUTER_TABS と同じ並び
+  const bodies = [`<div class="vg-root">${NOTE_MARK}</div>`, colsHtml, diffHtml, erdHtml];
   const radios = OUTER_TABS.map((_, i) =>
     `<input class="vg-or vg-or${i + 1}" type="radio" name="${id}"` +
     ` id="${id}-${i + 1}"${i === 0 ? ' checked' : ''}>`).join('');
