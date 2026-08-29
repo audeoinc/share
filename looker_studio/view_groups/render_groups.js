@@ -25,7 +25,7 @@
 const { splitLines, build2Way } = require('../ddl_diff_viz/src/lib/diff');
 const { renderFragment1, renderFragment2 } = require('../ddl_diff_viz/src/lib/render');
 const {
-  MAX_TABS, esc, hashId, label, header, notice, kindText, referenceIndex,
+  MAX_TABS, OUTER_TABS, esc, hashId, label, header, notice, kindText, referenceIndex,
 } = require('./chrome.js');
 
 /**
@@ -324,11 +324,6 @@ function chromeCss() {
       `border-radius:16px;color:#57606A;cursor:pointer;user-select:none;font-weight:600;font-size:12px}`,
     `.vg-otab:hover{background:#EAEEF2;color:#24292F}`,
     `.vg-opanel{display:none}`,
-    `.vg-or1:checked ~ .vg-opanels > .vg-op1{display:block}`,
-    `.vg-or2:checked ~ .vg-opanels > .vg-op2{display:block}`,
-    `.vg-or1:checked ~ .vg-otablist > .vg-ot1,` +
-      `.vg-or2:checked ~ .vg-otablist > .vg-ot2` +
-      `{background:#24292F;border-color:#24292F;color:#fff}`,
     // 参照関係図。グループごとの図を縦に積む。差分と違って「比べる」ものでは
     // なく系統ごとの構造そのものなので、並べて一望できたほうが読みやすい。
     `.vg-erdblock{margin:0 0 28px;border:1px solid #D0D7DE;border-radius:6px;background:#fff}`,
@@ -346,7 +341,13 @@ function chromeCss() {
     `.vg-lgo{background:#8250DF;border-color:#6D3F8C}`,
     `.vg-lgd{display:inline-block;width:18px;border-top:1.5px dashed #8C96A0}`,
   ];
-  // タブ本体。ID ではなくクラスで書くので、CSS を静的に保てる。
+  // 外側のタブ本体。枚数は chrome.js の OUTER_TABS がひとつの決め所。
+  for (let i = 1; i <= OUTER_TABS.length; i++) {
+    rules.push(`.vg-or${i}:checked ~ .vg-opanels > .vg-op${i}{display:block}`);
+    rules.push(`.vg-or${i}:checked ~ .vg-otablist > .vg-ot${i}` +
+      `{background:#24292F;border-color:#24292F;color:#fff}`);
+  }
+  // 内側のタブ本体。ID ではなくクラスで書くので、CSS を静的に保てる。
   for (let i = 1; i <= MAX_TABS; i++) {
     rules.push(`.vg-r${i}:checked ~ .vg-panels > .vg-p${i}{display:block}`);
     rules.push(`.vg-r${i}:checked ~ .vg-tablist > .vg-t${i}` +

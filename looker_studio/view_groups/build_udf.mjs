@@ -478,6 +478,12 @@ const checks = [
   ['page も最小化後に動く（外側タブと図が出る）',
     info.page.includes('vg-otab') && info.page.includes('<svg ') &&
     info.page.includes(html)],
+  // メモだけは作り置きしない。カードには目印だけを置き、ビューが
+  // REPLACE で note_html に差し替える。焼き込むと、シートを直しても
+  // 次の日次実行までレポートが古いままになる。
+  ['page はメモの目印を 1 つだけ置く（本体は焼き込まない）',
+    info.page.split(require(join(here, 'chrome.js')).NOTE_MARK).length - 1 === 1 &&
+    !info.page.includes('vg-md')],
   ['タイトルが base 名', text.includes('v_daily_sales')],
   ['3 グループでタブになる', html.includes('vg-tablist')],
   ['ペイン見出しに suffix が列記される', text.includes('abjp, abuk, abus')],
@@ -914,9 +920,14 @@ LANGUAGE js AS %s
 -- 3. viewlgc_page
 --    参照関係の図を作り、渡された差分 HTML と外側タブで束ねて 1 枚にする
 --
+-- タブは左から メモ / ロジック差分 / 参照関係 で、既定で開くのはメモ。
 -- 差分は作らない。viewlgc_render の出力をそのまま受け取って包むだけ。
 -- 図の解析にはトークナイザが要るので、差分側とは別の UDF にしてある
 -- （両方を 1 つに積むとインラインの 32 KB に収まらない）。
+--
+-- メモの中身もここでは入れない。パネルには目印 '<!--VG_NOTE-->' だけを置き、
+-- ビューが REPLACE で note_html に差し替える。ここで焼き込むと、シートを
+-- 直しても次の日次実行までレポートが古いままになる。
 -- ---------------------------------------------------------------------
 EXECUTE IMMEDIATE FORMAT('''
 CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(

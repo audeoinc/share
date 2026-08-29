@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const table = await readFile(join(here, 'build_table.sql'), 'utf8');
 const udf = await readFile(join(here, 'view_group_html.sql'), 'utf8');
+const chrome = await readFile(join(here, 'chrome.js'), 'utf8');
 
 const checks = [];
 const add = (name, ok, detail) => checks.push([name, ok, detail]);
@@ -155,6 +156,18 @@ for (const base of ['analyze', 'render', 'page', 'markdown', 'group_css',
   add('system_name の既定値が両ファイルで同じ',
     t !== null && u !== null && t[1] === u[1],
     `build_table=${t ? t[1] : 'なし'} / view_group_html=${u ? u[1] : 'なし'}`);
+}
+
+// メモの差し込み口。カードは作り置き、メモはビューで毎回作るので、
+// 外枠に置いた目印をビューが REPLACE で差し替えている。文字列が食い違うと
+// 置換が起きず、メモ タブが黙って空になる（エラーにはならない）。
+{
+  const m = chrome.match(/^const NOTE_MARK = '([^']+)';$/m);
+  const mark = m ? m[1] : null;
+  // ビュー 2 本ぶん。片方だけ直したときに気づけるよう数まで見る。
+  const used = mark ? table.split(`REPLACE(diff_html, '${mark}'`).length - 1 : 0;
+  add('メモの目印が chrome.js とビューで同じ', mark !== null && used === 2,
+    `chrome.js=${mark || 'なし'} / build_table.sql での使用 ${used} 回`);
 }
 
 // 'viewlgc' を直に書いた組み立てが残っていないか（system_name の付け忘れ）

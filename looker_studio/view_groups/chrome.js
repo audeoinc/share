@@ -9,6 +9,24 @@
 
 const MAX_TABS = 12; // 静的 CSS が面倒を見るタブ数の上限
 
+/**
+ * 外側のタブ。左から並ぶ順で、先頭が既定の表示。
+ * 数と順序は chromeCss() の規則と対で決まるので、ここだけを直せば両方動く。
+ */
+const OUTER_TABS = ['メモ', 'ロジック差分', '参照関係'];
+
+/**
+ * メモの差し込み口。
+ *
+ * カードは日次で作り置きするが、メモはビューの中で毎回作る（シートを直した
+ * 内容がその場で出るようにするため）。作り置きの側に本体を埋めることが
+ * できないので、外枠だけ先に作って目印を置いておき、ビューが
+ *   REPLACE(diff_html, '<!--VG_NOTE-->', note_html)
+ * で差し替える。目印の文字列は build_table.sql と一致していなければならず、
+ * 食い違っていないかは node check_sql.mjs が見張る。
+ */
+const NOTE_MARK = '<!--VG_NOTE-->';
+
 function esc(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -74,31 +92,34 @@ function referenceIndex(b, opts) {
 }
 
 /**
- * ロジック差分と参照関係を外側のタブで束ねる。
+ * メモ・ロジック差分・参照関係を外側のタブで束ねる。
  *
- * 1 レコードに両方入れるので、Looker Studio のコントロール（base / ref_label）は
- * どちらのタブにも同じように効く。別のチャートに分けると、コントロールを
- * 2 組そろえる必要が出て、片方だけずれた状態を作れてしまう。
+ * 1 レコードに全部入れるので、Looker Studio のコントロール（base / ref_label）は
+ * どのタブにも同じように効く。別のチャートに分けると、コントロールを
+ * 何組もそろえる必要が出て、片方だけずれた状態を作れてしまう。
+ *
+ * メモのパネルには本体ではなく目印（NOTE_MARK）を置く。上の説明のとおり、
+ * メモだけは作り置きではなくビューの中で作るため。
  *
  * 内側のタブとはクラスを分けてある。同じクラスだと内側のラジオが外側の
  * :checked ~ に引っかかり、片方を押すともう片方も切り替わる。
  */
 function wrapPage(diffHtml, erdHtml, seed) {
   const id = 'vgo' + hashId(seed);
-  return `<div class="vg-outer">` +
-    `<input class="vg-or vg-or1" type="radio" name="${id}" id="${id}-1" checked>` +
-    `<input class="vg-or vg-or2" type="radio" name="${id}" id="${id}-2">` +
-    `<div class="vg-otablist">` +
-    `<label class="vg-otab vg-ot1" for="${id}-1">ロジック差分</label>` +
-    `<label class="vg-otab vg-ot2" for="${id}-2">参照関係</label>` +
-    `</div>` +
-    `<div class="vg-opanels">` +
-    `<div class="vg-opanel vg-op1">${diffHtml}</div>` +
-    `<div class="vg-opanel vg-op2">${erdHtml}</div>` +
-    `</div></div>`;
+  const bodies = [NOTE_MARK, diffHtml, erdHtml];
+  const radios = OUTER_TABS.map((_, i) =>
+    `<input class="vg-or vg-or${i + 1}" type="radio" name="${id}"` +
+    ` id="${id}-${i + 1}"${i === 0 ? ' checked' : ''}>`).join('');
+  const tabs = OUTER_TABS.map((t, i) =>
+    `<label class="vg-otab vg-ot${i + 1}" for="${id}-${i + 1}">${esc(t)}</label>`).join('');
+  const panels = OUTER_TABS.map((_, i) =>
+    `<div class="vg-opanel vg-op${i + 1}">${bodies[i] || ''}</div>`).join('');
+  return `<div class="vg-outer">${radios}` +
+    `<div class="vg-otablist">${tabs}</div>` +
+    `<div class="vg-opanels">${panels}</div></div>`;
 }
 
 module.exports = {
-  MAX_TABS, esc, hashId, label, badge, header, notice,
+  MAX_TABS, OUTER_TABS, NOTE_MARK, esc, hashId, label, badge, header, notice,
   KIND_TEXT, kindText, referenceIndex, wrapPage,
 };

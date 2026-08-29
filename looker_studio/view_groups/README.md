@@ -492,7 +492,7 @@ SQL 中の `{{P1}}` にカーソルを合わせると、種別と suffix ごと�
 - パラメータ名はグループごとに振り直すので、左右のペインには別の対応表を渡す。
 
 ```bash
-node preview.mjs          # dist/preview.html を生成して検証（79 アサーション）
+node preview.mjs          # dist/preview.html を生成して検証（83 アサーション）
 node preview.mjs --check  # 生成せず検証だけ
 ```
 
@@ -500,7 +500,7 @@ node preview.mjs --check  # 生成せず検証だけ
 
 ```bash
 node build_udf.mjs          # 検証して view_group_html.sql を生成
-node build_udf.mjs --check  # 生成せず検証だけ（47 アサーション）
+node build_udf.mjs --check  # 生成せず検証だけ（48 アサーション）
 node check_sql.mjs          # build_table.sql と view_group_html.sql の突き合わせ
 ```
 
@@ -508,7 +508,7 @@ node check_sql.mjs          # build_table.sql と view_group_html.sql の突き�
 |---|---|
 | `viewlgc_analyze(views, options_json)` | 解析結果の JSON（`viewCount` / `groupCount` / `groupLabels` / `groupSizes` / `suffixes` / `unmatchedCount` / `bases`） |
 | `viewlgc_render(analysis_json, options_json)` | ロジック差分のカード |
-| `viewlgc_page(analysis_json, diff_html, options_json)` | 参照関係の図を作り、差分と外側タブで束ねた 1 枚 |
+| `viewlgc_page(analysis_json, diff_html, options_json)` | 参照関係の図を作り、メモ（目印のみ）・差分と外側タブで束ねた 1 枚 |
 | `viewlgc_markdown(md)` | base ごとのメモ（Markdown）の HTML。**ビューの中から呼ぶ** |
 | `viewlgc_group_css(options_json)` | `mode='class'` でテンプレートに貼る CSS |
 | `viewlgc_render_dynamic_sql(sql_template, …)` | `build_table.sql` の `__…__` を展開した SQL（JavaScript ではなく SQL 関数） |
@@ -912,10 +912,12 @@ JavaScript が使えない以上、切り替えられるのは「作り置きし
 
 ### 参照関係の図（ERD タブ）
 
-カードは**外側のタブ 2 枚**でできている。`ロジック差分` と `参照関係`。
-1 レコードに両方入れてあるので、`base` / `ref_label` のコントロールは
-どちらのタブにも同じように効く。別のチャートに分けると、コントロールを
-2 組そろえる必要が出て、片方だけずれた状態を作れてしまう。
+カードは**外側のタブ 3 枚**でできている。左から `メモ` / `ロジック差分` /
+`参照関係` で、既定で開くのは `メモ`。1 レコードに全部入れてあるので、
+`base` / `ref_label` のコントロールはどのタブにも同じように効く。別のチャートに
+分けると、コントロールを何組もそろえる必要が出て、片方だけずれた状態を作れて
+しまう。枚数と順序は `chrome.js` の `OUTER_TABS` がひとつの決め所で、
+CSS の規則もそこから作る。
 
 図は `FROM` / `JOIN` から起こす。節は実体（実テーブル / CTE / サブクエリ）、
 辺は「読んで作る」向き。JOIN の種別と結合キーは、読む側へ入る辺の注記にする。
@@ -1022,6 +1024,30 @@ https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz1234567890
 `INSERT` で焼き込むと、シートを直しても次の日次実行までレポートが古いままになる。
 1 件が数 KB の Markdown なので、クエリのたびに変換しても実行時間には響かない。
 
+#### 作り置きのカードに、いま読んだメモを差し込む
+
+メモはカードの**いちばん左のタブ**（既定で開く方）に出る。ところがカード自体は
+日次で作り置きしていて、メモだけはビューの中で毎回作る。作り置きの側に本体を
+埋めることができないので、**外枠だけ先に作って目印を置き、ビューが差し替える**。
+
+```
+viewlgc_page が作る（日次）        ビューが毎回やる
+<div class="vg-opanel vg-op1">  →  REPLACE(diff_html, '<!--VG_NOTE-->', note_html)
+  <!--VG_NOTE-->
+</div>
+```
+
+目印の文字列は `chrome.js` の `NOTE_MARK` と `build_table.sql` の 2 本のビューで
+一致していなければならない。食い違っても**エラーにはならず、メモ タブが黙って
+空になる**だけなので、`node check_sql.mjs` が突き合わせる。
+
+`REGEXP_REPLACE` ではなく `REPLACE` なのは、置換文字列の `\1` が後方参照として
+解釈されるため。メモは人が書く文章なのでバックスラッシュが入りうる。
+
+> **既にあるスナップショットにはこの目印が無い。** メモ タブを出すには
+> セクション 2 を 1 回流して `diff_html` を作り直すこと（流さなければ
+> タブが 2 枚のままで、表示が壊れることはない）。
+
 **同じデータソースに載せる**のは、Looker Studio のコントロールが
 データソースを跨がないため。別データソースにすると `base` のプルダウンを
 2 組そろえることになり、片方だけずれた状態を作れてしまう。
@@ -1084,10 +1110,10 @@ https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz1234567890
 4. `viewlgc_vw_t_diff_by_ref` を使う場合は、`ref_label` のプルダウンをもう 1 つ置く。
    こちらも**単一選択**。base と 2 つそろって 1 レコードに決まる
 5. `mode='class'` で生成した場合は、テンプレートに CSS を貼る
-6. メモを出すなら、**もう 1 枚 Templated Record** を置いて `note_html` を指定する。
-   同じデータソースなので、3・4 で置いたコントロールがそのまま効く。
-   メモの本文は `note_preview.html` をブラウザで開いて下書きし、
-   できた Markdown をシートの `note_md` に貼る
+メモはカードのいちばん左のタブに出るので、追加のチャートは要らない。本文は
+`note_preview.html` をブラウザで開いて下書きし、できた Markdown をシートの
+`note_md` に貼る。メモだけを単独で置きたいときのために、`note_html`
+（タブの外枠が付かないメモ本体だけ）の列も残してある。
 
 > **コントロールや一覧に数値を出すときは `*_once` の列を使う。**
 > `group_count` / `view_count` / `unmatched_count` は base の属性なのに、

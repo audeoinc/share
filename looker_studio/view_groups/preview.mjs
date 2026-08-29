@@ -76,15 +76,7 @@ const cases = [
 
 const parts = cases.map((c) => ({ ...c, html: R.renderBase(c.b, c.opts) }));
 
-// 実際に Looker へ渡すのは、差分と参照関係を外側タブで束ねた 1 枚。
-// プレビューの先頭にその形も置いて、束ねた状態で崩れないかを見る。
-const pageCases = [
-  { title: '外側タブ（ロジック差分 / 参照関係）', b: baseComplex, opts: {} },
-  { title: '外側タブ・基準を変えた場合', b: base3, opts: { referenceIndex: 1 } },
-].map((c) => ({ ...c,
-  html: Ch.wrapPage(R.renderBase(c.b, c.opts), E.renderErdBase(c.b, c.opts), c.b.base) }));
-
-// base ごとのメモ。実物は Looker のもう 1 枚の Templated Record に出る。
+// base ごとのメモ。カードのいちばん左のタブに出る。
 // Confluence から移ってくる書き方（見出し・表・箇条書き・コード・引用）を
 // ひととおり入れて、CSS が全部そろっているかを目で見られるようにする。
 const NOTE_MD = [
@@ -126,6 +118,23 @@ const memoCases = [
   { title: 'メモ（Markdown）', html: Md.markdownHtml(NOTE_MD) },
   { title: 'メモ（未登録）', html: Md.markdownHtml(null) },
 ];
+
+// 実際に Looker へ渡すのは、差分と参照関係を外側タブで束ねた 1 枚。
+// プレビューの先頭にその形も置いて、束ねた状態で崩れないかを見る。
+// メモは作り置きせず、ビューが REPLACE で差し込む（シートを直した内容を
+// その場で出すため）。ここでも同じ置換をして、実物と同じ形を見る。
+const splice = (html, note) => html.replace(Ch.NOTE_MARK, note);
+
+const pageCases = [
+  { title: '外側タブ（メモ / ロジック差分 / 参照関係）', b: baseComplex, opts: {},
+    note: NOTE_MD },
+  { title: '外側タブ・基準を変えた場合', b: base3, opts: { referenceIndex: 1 },
+    note: NOTE_MD },
+  { title: '外側タブ・メモが未登録の base', b: base2, opts: {}, note: null },
+].map((c) => ({ ...c,
+  html: splice(
+    Ch.wrapPage(R.renderBase(c.b, c.opts), E.renderErdBase(c.b, c.opts), c.b.base),
+    Md.markdownHtml(c.note)) }));
 
 // --- 検証 --------------------------------------------------------------
 const h3 = parts[0].html;
@@ -283,8 +292,28 @@ const checks = [
       g.missBy[i] === null &&
       g.missBy.filter((m) => m).length === base3.groupCount - 1)],
   // --- 参照関係（ERD） --------------------------------------------------
-  ['外側タブが 2 枚出る',
-    (pageCases[0].html.match(/class="vg-otab /g) || []).length === 2],
+  ['外側タブが 3 枚出る（メモ / ロジック差分 / 参照関係）',
+    (pageCases[0].html.match(/class="vg-otab /g) || []).length === Ch.OUTER_TABS.length &&
+    Ch.OUTER_TABS.join(',') === 'メモ,ロジック差分,参照関係'],
+  ['既定で開くのはいちばん左のメモ タブ', (() => {
+    const h = pageCases[0].html;
+    // checked が付くのは 1 枚目だけ。外側タブの CSS も 1 枚目を開く形になる。
+    return /class="vg-or vg-or1" type="radio" name="[^"]*" id="[^"]*-1" checked>/.test(h) &&
+      !/vg-or(2|3)" type="radio"[^>]*checked/.test(h) &&
+      R.chromeCss().includes('.vg-or1:checked ~ .vg-opanels > .vg-op1{display:block}');
+  })()],
+  ['メモは作り置きせずビューが差し込む（目印が残っている）', (() => {
+    const raw = Ch.wrapPage('<i>D</i>', '<i>E</i>', 'x');
+    return raw.split(Ch.NOTE_MARK).length - 1 === 1 &&
+      !raw.includes('vg-md') &&
+      // 置換したあとは目印が消え、メモ本体が 1 枚目のパネルに入る
+      pageCases[0].html.indexOf('vg-md') > pageCases[0].html.indexOf('vg-opanel vg-op1') &&
+      pageCases[0].html.indexOf('vg-md') < pageCases[0].html.indexOf('vg-opanel vg-op2') &&
+      !pageCases[0].html.includes(Ch.NOTE_MARK);
+  })()],
+  ['メモが未登録でもタブは出る（中身が未登録の枠になる）',
+    (pageCases[2].html.match(/class="vg-otab /g) || []).length === Ch.OUTER_TABS.length &&
+    pageCases[2].html.includes('vg-mdempty')],
   ['外側と内側でラジオのクラスを分けている（片方を押しても連動しない）',
     /class="vg-or vg-or1"/.test(pageCases[0].html) &&
     !/class="vg-r vg-or/.test(pageCases[0].html)],
@@ -351,6 +380,10 @@ const checks = [
   })()],
   ['ERD にラジオを置かない（外側タブと干渉しない）',
     !/class="vg-r vg-r\d+" type="radio"[^>]*name="vge/.test(pageCases[1].html)],
+  ['ERD は 3 枚目のパネル、差分は 2 枚目',
+    pageCases[1].html.indexOf('vg-opanel vg-op2') <
+      pageCases[1].html.indexOf('vg-opanel vg-op3') &&
+    pageCases[1].html.indexOf('<svg ') > pageCases[1].html.indexOf('vg-opanel vg-op3')],
   ['ERD の CSS が chrome 側にある',
     R.chromeCss().includes('.vg-otab') && R.chromeCss().includes('.vg-erdbox')],
   // メモ（Markdown）。ビューの中から呼ぶので、崩れても落ちないことが要件。

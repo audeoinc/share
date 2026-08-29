@@ -705,22 +705,31 @@ WITH notes AS (
   QUALIFY ROW_NUMBER() OVER (
     PARTITION BY TRIM(base) ORDER BY SAFE_CAST(updated_at AS TIMESTAMP) DESC
   ) = 1
+),
+joined AS (
+  SELECT
+    d.*,
+    -- メモ。未登録なら note_html は「未登録」の枠を返す（NULL にすると
+    -- レポート側で「値なし」になり、未登録なのか取得に失敗したのか読めない）。
+    n.base IS NOT NULL            AS has_note,
+    n.note_md                     AS note_md,
+    `__UDF_MARKDOWN__`(n.note_md) AS note_html,
+    n.updated_at                  AS note_updated_at,
+    n.updated_by                  AS note_updated_by
+  FROM `__T_DIFF_HIST__` AS d
+  LEFT JOIN notes AS n ON n.base = d.base
+  WHERE d.snapshot_date = (
+    SELECT MAX(snapshot_date) FROM `__T_DIFF_HIST__`
+  )
+    AND d.ref_index = 0
 )
 SELECT
-  d.* EXCEPT (ref_index, ref_label),
-  -- メモ。未登録なら note_html は「未登録」の枠を返す（NULL にすると
-  -- レポート側で「値なし」になり、未登録なのか取得に失敗したのか読めない）。
-  n.base IS NOT NULL            AS has_note,
-  n.note_md                     AS note_md,
-  `__UDF_MARKDOWN__`(n.note_md) AS note_html,
-  n.updated_at                  AS note_updated_at,
-  n.updated_by                  AS note_updated_by
-FROM `__T_DIFF_HIST__` AS d
-LEFT JOIN notes AS n ON n.base = d.base
-WHERE d.snapshot_date = (
-  SELECT MAX(snapshot_date) FROM `__T_DIFF_HIST__`
-)
-  AND d.ref_index = 0
+  * EXCEPT (diff_html, ref_index, ref_label),
+  -- 事前生成したカードのメモ タブに、いま読んだメモを差し込む。目印は
+  -- chrome.js の NOTE_MARK と同じ文字列（node check_sql.mjs が突き合わせる）。
+  -- カードごと作り置きしないのは、シートを直した内容をその場で出すため。
+  REPLACE(diff_html, '<!--VG_NOTE-->', note_html) AS diff_html
+FROM joined
 """;
 EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
 ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
@@ -744,28 +753,37 @@ WITH notes AS (
   QUALIFY ROW_NUMBER() OVER (
     PARTITION BY TRIM(base) ORDER BY SAFE_CAST(updated_at AS TIMESTAMP) DESC
   ) = 1
+),
+joined AS (
+  SELECT
+    d.*,
+    -- メモ。未登録なら note_html は「未登録」の枠を返す（NULL にすると
+    -- レポート側で「値なし」になり、未登録なのか取得に失敗したのか読めない）。
+    n.base IS NOT NULL            AS has_note,
+    n.note_md                     AS note_md,
+    `__UDF_MARKDOWN__`(n.note_md) AS note_html,
+    n.updated_at                  AS note_updated_at,
+    n.updated_by                  AS note_updated_by
+  FROM `__T_DIFF_HIST__` AS d
+  LEFT JOIN notes AS n ON n.base = d.base
+  WHERE d.snapshot_date = (
+    SELECT MAX(snapshot_date) FROM `__T_DIFF_HIST__`
+  )
 )
 SELECT
-  d.*,
+  * EXCEPT (diff_html),
   -- base の属性を「基準ごとの行」に持たせているので、そのまま集計すると
   -- 行数ぶん膨らむ（3 グループなら 3 行 x 3 = 9）。基準の行にだけ値を置き、
   -- 他は NULL にしておけば、既定の SUM でも 1 回しか足されない。
   -- コントロールや一覧にはこちらを使う。
-  IF(d.ref_index = 0, d.group_count, NULL)     AS group_count_once,
-  IF(d.ref_index = 0, d.view_count, NULL)      AS view_count_once,
-  IF(d.ref_index = 0, d.unmatched_count, NULL) AS unmatched_count_once,
-  -- メモ。未登録なら note_html は「未登録」の枠を返す（NULL にすると
-  -- レポート側で「値なし」になり、未登録なのか取得に失敗したのか読めない）。
-  n.base IS NOT NULL            AS has_note,
-  n.note_md                     AS note_md,
-  `__UDF_MARKDOWN__`(n.note_md) AS note_html,
-  n.updated_at                  AS note_updated_at,
-  n.updated_by                  AS note_updated_by
-FROM `__T_DIFF_HIST__` AS d
-LEFT JOIN notes AS n ON n.base = d.base
-WHERE d.snapshot_date = (
-  SELECT MAX(snapshot_date) FROM `__T_DIFF_HIST__`
-)
+  IF(ref_index = 0, group_count, NULL)     AS group_count_once,
+  IF(ref_index = 0, view_count, NULL)      AS view_count_once,
+  IF(ref_index = 0, unmatched_count, NULL) AS unmatched_count_once,
+  -- 事前生成したカードのメモ タブに、いま読んだメモを差し込む。目印は
+  -- chrome.js の NOTE_MARK と同じ文字列（node check_sql.mjs が突き合わせる）。
+  -- カードごと作り置きしないのは、シートを直した内容をその場で出すため。
+  REPLACE(diff_html, '<!--VG_NOTE-->', note_html) AS diff_html
+FROM joined
 """;
 EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
 ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
