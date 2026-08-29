@@ -602,7 +602,7 @@ keyed AS (
 -- 条件文（__VIEW_*_COND__）は table_schema / table_name を修飾なしで見るので、
 -- JOIN してから当てると曖昧になる。それぞれ単独の CTE で絞ってから繋ぐ。
 cols_raw AS (
-  SELECT table_schema, table_name, column_name, ordinal_position, data_type
+  SELECT table_schema, table_name, column_name, ordinal_position, data_type, is_nullable
   FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.COLUMNS`
   WHERE (__VIEW_DATASET_COND__) AND (__VIEW_NAME_COND__)
 ),
@@ -616,7 +616,13 @@ cols AS (
   SELECT
     r.table_name AS view_name,
     ARRAY_AGG(
-      STRUCT(r.column_name AS n, r.data_type AS t, COALESCE(d.description, '') AS d)
+      STRUCT(
+        r.column_name      AS n,
+        r.data_type        AS t,
+        r.ordinal_position AS o,
+        r.is_nullable      AS u,
+        COALESCE(d.description, '') AS d
+      )
       ORDER BY r.ordinal_position
     ) AS cols
   FROM cols_raw AS r

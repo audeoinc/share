@@ -110,7 +110,7 @@ const UNUSED_CSS = UNUSED_RENDER.concat([
   'markdownHtml', 'mdRender', 'mdBlocks', 'mdList', 'mdAligns', 'mdCells',
   'mdKind', 'mdIndent', 'mdInline', 'mdLink', 'mdUrl', 'mdEsc',
   'renderColumnsBase', 'renderColumns', 'groupColumns', 'columnOrder',
-  'cellTypes', 'mixedTip']);
+  'cellInfo', 'mixedTip', 'uniq']);
 
 /** CommonJS の体裁を落として素の関数群にする。 */
 function strip(src, file) {
@@ -451,9 +451,9 @@ function fakeColumns(views) {
   return JSON.stringify(views.map((v) => ({
     v: v.view_name,
     cols: [
-      { n: 'order_date', t: 'DATE', d: '受注日' },
-      { n: 'region', t: 'STRING', d: '' },
-      { n: 'gross_amount', t: v.view_name.endsWith('us') ? 'FLOAT64' : 'NUMERIC', d: '税抜き' },
+      { n: 'order_date', t: 'DATE', o: 1, u: 'NO', d: '受注日' },
+      { n: 'region', t: 'STRING', o: 2, u: 'YES', d: '' },
+      { n: 'gross_amount', t: v.view_name.endsWith('us') ? 'FLOAT64' : 'NUMERIC', o: 3, u: 'YES', d: '税抜き' },
     ],
   })));
 }

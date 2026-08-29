@@ -129,14 +129,15 @@ const fakeColumns = (b) => {
     g.members.forEach((m, i) => {
       const suffix = g.suffixes[i] || m.viewName;
       const cols = [
-        { n: 'order_date', t: 'DATE', d: '受注日（JST）' },
-        { n: 'region', t: 'STRING', d: 'リージョン コード。jp / us / uk' },
-        { n: 'order_count', t: 'INT64', d: '' },
-        { n: 'gross_amount', t: /us$/.test(suffix) ? 'FLOAT64' : 'NUMERIC',
+        { n: 'order_date', t: 'DATE', o: 1, u: 'NO', d: '受注日（JST）' },
+        { n: 'region', t: 'STRING', o: 2, u: 'YES', d: 'リージョン コード。jp / us / uk' },
+        { n: 'order_count', t: 'INT64', o: 3, u: 'YES', d: '' },
+        { n: 'gross_amount', t: /us$/.test(suffix) ? 'FLOAT64' : 'NUMERIC', o: 4,
+          u: /uk$/.test(suffix) ? 'NO' : 'YES',
           d: '税抜き。参照先テーブルの型に引きずられる' },
       ];
       // 先頭以外のグループには列を 1 本足す／落とす
-      if (g !== b.groups[0]) cols.push({ n: 'currency', t: 'STRING', d: '通貨コード' });
+      if (g !== b.groups[0]) cols.push({ n: 'currency', t: 'STRING', o: cols.length + 1, u: 'YES', d: '通貨コード' });
       if (g === b.groups[b.groups.length - 1]) cols.splice(1, 1);
       out[m.viewName] = cols;
     });
@@ -510,8 +511,9 @@ const checks = [
     const h = columnCases[0].html;
     return h.includes('vg-cmix') && h.includes('vg-cwarn') &&
       h.includes('NUMERIC / FLOAT64') &&
-      // 内訳が tooltip に出る
-      /data-tip="[^"]*abus = FLOAT64/.test(h) &&
+      // 内訳が tooltip に出る（suffix・並び順・型・NULL 制約）
+      /data-tip="[^"]*abus = #4 FLOAT64 NULL 可/.test(h) &&
+      /data-tip="[^"]*abuk = #4 NUMERIC NOT NULL/.test(h) &&
       h.includes('揃っていない箇所が');
   })()],
   ['基準に無い列・基準と違う型が分かる', (() => {

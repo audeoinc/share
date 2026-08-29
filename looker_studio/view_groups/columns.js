@@ -2,7 +2,7 @@
 /**
  * View のカラム定義（INFORMATION_SCHEMA.COLUMNS）を 1 枚の表にする。
  *
- *   1 行 = 1 列名、1 列 = 1 ロジック グループ。セルはその型。
+ *   1 行 = 1 列名、1 列 = 1 ロジック グループ。セルは型・NULL 制約・並び順。
  *
  * グループごとのタブにしなかったのは、列名も型も短くて横に並べても収まるから。
  * 全グループを一度に見せれば、どこが揃っていないかをタブを押さずに見つけられる。
@@ -13,17 +13,22 @@
  * NUMERIC、us は FLOAT64 など）。これはロジック差分には出てこない。SQL は同一
  * だから。むしろこの表の一番の値打ちがそこなので、グループの代表 1 本を黙って
  * 出すのではなく、グループの中で食い違ったら必ず印を付ける。
+ *
+ * 出すのは型・NULL 制約・並び順・説明。**ただし「差」と見なすのは型と NULL 制約
+ * だけで、並び順の違いには色を付けない。** グループが列を 1 本足すと以降の番号が
+ * まとめてずれるので、色を付けると本当に見たい型の差がその中に埋もれる。
+ * 番号は出すので、必要なら目で追える。
  */
 
 const { esc, label, notice, referenceIndex } = require('./chrome.js');
 
-/** 型が違うことを示す印。セルの中に置く。 */
+/** グループの中で揃っていないことを示す印。セルの中に置く。 */
 const WARN = '⚠';
 
 /**
  * グループ 1 つ分の「列名 → その列について分かっていること」。
  *
- * 同じグループでも View ごとに列が違いうるので、型は View ぶん貯めておく。
+ * 同じグループでも View ごとに列が違いうるので、View ぶん貯めておく。
  * 並び順は最初に見た View の ordinal に合わせる（表の行の並びに使う）。
  */
 function groupColumns(g, byView) {
@@ -37,13 +42,20 @@ function groupColumns(g, byView) {
       const c = cols[k];
       let e = out.get(c.n);
       if (!e) {
-        e = { name: c.n, desc: '', order: k, types: [] };
+        e = { name: c.n, desc: '', order: k, vals: [] };
         out.set(c.n, e);
       }
       // 説明は列ごとに 1 つ。最初に見つかったものを採る（View ごとに違うことは
       // 基本的に無く、あっても表を横に広げてまで並べる情報ではない）。
       if (!e.desc && c.d) e.desc = c.d;
-      e.types.push({ suffix: suffix, type: c.t });
+      e.vals.push({
+        suffix: suffix,
+        type: c.t,
+        // ordinal_position は 1 始まり。取れなければ並び順から補う
+        ord: c.o == null ? k + 1 : c.o,
+        // INFORMATION_SCHEMA は 'YES' / 'NO'。無ければ不明として扱う
+        nullable: c.u == null || c.u === '' ? null : String(c.u).toUpperCase() !== 'NO',
+      });
     }
   }
   return out;
@@ -67,20 +79,46 @@ function columnOrder(groups, maps, refIndex) {
   return out;
 }
 
-/** そのグループでの型。食い違っていれば全部返す。 */
-function cellTypes(entry, memberCount) {
-  if (!entry) return { text: null, kinds: [], mixed: false };
-  const kinds = [];
-  for (const t of entry.types) if (kinds.indexOf(t.type) < 0) kinds.push(t.type);
-  // 型が割れているか、そもそも列を持たない View がグループ内にあるか
-  const mixed = kinds.length > 1 || entry.types.length !== memberCount;
-  return { text: kinds.join(' / '), kinds: kinds, mixed: mixed };
+const nullText = (n) => (n === null ? 'NULL 不明' : n ? 'NULL 可' : 'NOT NULL');
+
+/** 重複を除いて出現順に並べる。 */
+function uniq(list) {
+  const out = [];
+  for (const v of list) if (out.indexOf(v) < 0) out.push(v);
+  return out;
+}
+
+/**
+ * そのグループでのセルの中身。
+ *
+ *   text  型。グループ内で割れていれば ' / ' で並べる
+ *   meta  並び順と NULL 制約。型より弱い情報なので小さく添える
+ *   sig   グループ同士を比べるための鍵。**並び順は入れない**（1 本足すと
+ *         以降が全部ずれて、型の差が埋もれるため）
+ *   mixed グループの中で揃っていない（型・NULL 制約・並び順のいずれか、
+ *         またはこの列を持たない View がいる）
+ */
+function cellInfo(entry, memberCount) {
+  if (!entry) return { text: null, meta: '', sig: null, mixed: false };
+  const types = uniq(entry.vals.map((v) => v.type));
+  const ords = uniq(entry.vals.map((v) => v.ord));
+  const nulls = uniq(entry.vals.map((v) => nullText(v.nullable)));
+  const mixed =
+    uniq(entry.vals.map((v) => `${v.ord}|${v.type}|${v.nullable}`)).length > 1 ||
+    entry.vals.length !== memberCount;
+  return {
+    text: types.join(' / '),
+    meta: `#${ords.join(' / ')} · ${nulls.join(' / ')}`,
+    sig: types.join(' / ') + '|' + nulls.join(' / '),
+    mixed: mixed,
+  };
 }
 
 /** グループ内で食い違ったときの内訳。tooltip に出す。 */
 function mixedTip(entry, g) {
-  const lines = entry.types.map((t) => `${t.suffix} = ${t.type}`);
-  const have = entry.types.map((t) => t.suffix);
+  const lines = entry.vals.map(
+    (v) => `${v.suffix} = #${v.ord} ${v.type} ${nullText(v.nullable)}`);
+  const have = entry.vals.map((v) => v.suffix);
   for (let i = 0; i < (g.members || []).length; i++) {
     const suffix = (g.suffixes && g.suffixes[i]) || g.members[i].viewName;
     if (have.indexOf(suffix) < 0) lines.push(`${suffix} = (この列を持たない)`);
@@ -91,7 +129,8 @@ function mixedTip(entry, g) {
 /**
  * base 1 件分のカラム定義の表。
  * @param {object} b               解析結果の base 1 件分
- * @param {object} byView          { View 名: [{ n: 列名, t: 型, d: 説明 }] }
+ * @param {object} byView          { View 名: [{ n: 列名, t: 型, o: 並び順,
+ *                                 u: is_nullable, d: 説明 }] }
  * @param {object} opts            referenceIndex を見る
  */
 function renderColumns(b, byView, opts) {
@@ -111,21 +150,22 @@ function renderColumns(b, byView, opts) {
   let diffCount = 0;
   let mixedCount = 0;
   const rows = order.map((name) => {
-    const refCell = cellTypes(maps[refIndex].get(name), groups[refIndex].members.length);
+    const refCell = cellInfo(maps[refIndex].get(name), groups[refIndex].members.length);
     const entry = maps[refIndex].get(name) ||
       order2.map((i) => maps[i].get(name)).filter((e) => e)[0];
     const cells = order2.map((i, pos) => {
       const g = groups[i];
       const e = maps[i].get(name);
-      const c = cellTypes(e, g.members.length);
+      const c = cellInfo(e, g.members.length);
       const cls = ['vg-ccell'];
       if (!c.text) cls.push('vg-cnone');
-      // 基準と違う型・基準に無い列。基準の列そのものには印を付けない。
-      else if (pos > 0 && c.text !== refCell.text) { cls.push('vg-cdiff'); diffCount++; }
+      // 基準と違う型・NULL 制約。並び順の違いは色にしない（上の説明のとおり）。
+      else if (pos > 0 && c.sig !== refCell.sig) { cls.push('vg-cdiff'); diffCount++; }
       if (c.mixed) { cls.push('vg-cmix'); mixedCount++; }
       const body = c.text
         ? esc(c.text) + (c.mixed
-          ? `<span class="vg-cwarn" data-tip="${esc(mixedTip(e, g))}">${WARN}</span>` : '')
+          ? `<span class="vg-cwarn" data-tip="${esc(mixedTip(e, g))}">${WARN}</span>` : '') +
+          `<div class="vg-cmeta">${esc(c.meta)}</div>`
         : '—';
       return `<td class="${cls.join(' ')}">${body}</td>`;
     }).join('');
@@ -142,14 +182,18 @@ function renderColumns(b, byView, opts) {
   // 何を見ればよいかを先に出す。表だけ置かれても、どこが問題かは読み取りにくい。
   const lead = [];
   if (mixedCount) {
-    lead.push(notice(`同じグループの中で列の型が揃っていない箇所が ${mixedCount} 件あります` +
+    lead.push(notice(`同じグループの中で型・NULL 制約・並び順が揃っていない箇所が ${mixedCount} 件あります` +
       `（${WARN} の印）。SQL が同一でも参照先テーブルの型が違えばこうなるので、` +
       `ロジック差分には出てきません。`));
   }
   if (diffCount) {
-    lead.push(notice(`基準グループと型が違う箇所が ${diffCount} 件あります（色付きのセル）。`));
+    lead.push(notice(`基準グループと型または NULL 制約が違う箇所が ${diffCount} 件` +
+      `あります（色付きのセル）。並び順（#）の違いには色を付けていません` +
+      `（列を 1 本足すと以降がまとめてずれ、型の差が埋もれるため）。`));
   }
-  if (!lead.length) lead.push(notice('全グループで列名も型も一致しています。'));
+  if (!lead.length) {
+    lead.push(notice('全グループで列名・型・NULL 制約が一致しています。'));
+  }
 
   return lead.join('') +
     `<div class="vg-ctablewrap"><table class="vg-ctable">` +
@@ -186,6 +230,9 @@ function columnsCss() {
     `.vg-ccell{padding:5px 12px;border:1px solid #D0D7DE;vertical-align:top;` +
       `white-space:nowrap;color:#24292F;` +
       `font-family:ui-monospace,SFMono-Regular,Consolas,monospace}`,
+    // 並び順と NULL 制約。型より弱い情報なので、小さく下に添える。
+    `.vg-cmeta{margin:2px 0 0;font:11px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;` +
+      `color:#57606A}`,
     // 基準と違う型。差分の「追加」側と同じ地色で、目が同じ意味に慣れるようにする。
     `.vg-cdiff{background:#dfe7d2}`,
     `.vg-cnone{color:#8C959F;background:#FAFAFA}`,
@@ -204,5 +251,5 @@ function columnsCss() {
 
 module.exports = {
   renderColumns, renderColumnsBase, columnsCss,
-  groupColumns, columnOrder, cellTypes, mixedTip,
+  groupColumns, columnOrder, cellInfo, mixedTip, nullText,
 };
