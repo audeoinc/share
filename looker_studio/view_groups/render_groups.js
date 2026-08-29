@@ -319,7 +319,16 @@ function chromeCss() {
     // クラスを分けてある。同じクラスだと内側のラジオが外側の :checked ~ に
     // 引っかかり、片方を押すともう片方も切り替わる。
     `.vg-or{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}`,
-    `.vg-otablist{display:flex;gap:6px;margin:0 0 12px}`,
+    // スクロールしてもタブは残す。カードは縦に長いので、下まで読んでから
+    // 別のタブへ移るのに毎回いちばん上まで戻るのは面倒。
+    //   z-index は 5。0 や auto にすると、あとに出てくる position:relative の
+    //   要素（{{Pn}} のチップ）が DOM 順で上に来てタブに重なる。一方
+    //   20 以上にすると、そのチップの吹き出し（z-index:20）がタブの下に隠れる。
+    //   間を取ると、地の文はタブが隠し、吹き出しはタブより前に出る。
+    //   固定できるかは埋め込み先（Looker の Templated Record）のスクロール要素
+    //   次第だが、効かない場合も従来どおり流れるだけで、崩れはしない。
+    `.vg-otablist{display:flex;gap:6px;margin:0 0 10px;padding:8px 0;` +
+      `position:sticky;top:0;z-index:5;background:#fff;box-shadow:0 1px 0 #EAEEF2}`,
     `.vg-otab{display:inline-flex;align-items:center;padding:5px 16px;border:1px solid #D0D7DE;` +
       `border-radius:16px;color:#57606A;cursor:pointer;user-select:none;font-weight:600;font-size:12px}`,
     `.vg-otab:hover{background:#EAEEF2;color:#24292F}`,

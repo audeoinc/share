@@ -126,7 +126,7 @@ const memoCases = [
 const splice = (html, note) => html.replace(Ch.NOTE_MARK, note);
 
 const pageCases = [
-  { title: '外側タブ（メモ / ロジック差分 / 参照関係）', b: baseComplex, opts: {},
+  { title: '外側タブ（note / ロジック差分 / 参照関係）', b: baseComplex, opts: {},
     note: NOTE_MD },
   { title: '外側タブ・基準を変えた場合', b: base3, opts: { referenceIndex: 1 },
     note: NOTE_MD },
@@ -292,9 +292,9 @@ const checks = [
       g.missBy[i] === null &&
       g.missBy.filter((m) => m).length === base3.groupCount - 1)],
   // --- 参照関係（ERD） --------------------------------------------------
-  ['外側タブが 3 枚出る（メモ / ロジック差分 / 参照関係）',
+  ['外側タブが 3 枚出る（note / ロジック差分 / 参照関係）',
     (pageCases[0].html.match(/class="vg-otab /g) || []).length === Ch.OUTER_TABS.length &&
-    Ch.OUTER_TABS.join(',') === 'メモ,ロジック差分,参照関係'],
+    Ch.OUTER_TABS.join(',') === 'note,ロジック差分,参照関係'],
   ['既定で開くのはいちばん左のメモ タブ', (() => {
     const h = pageCases[0].html;
     // checked が付くのは 1 枚目だけ。外側タブの CSS も 1 枚目を開く形になる。
@@ -311,6 +311,9 @@ const checks = [
       pageCases[0].html.indexOf('vg-md') < pageCases[0].html.indexOf('vg-opanel vg-op2') &&
       !pageCases[0].html.includes(Ch.NOTE_MARK);
   })()],
+  ['タブはスクロールしても残る（position:sticky）',
+    R.chromeCss().includes('.vg-otablist{') &&
+    /\.vg-otablist\{[^}]*position:sticky[^}]*top:0/.test(R.chromeCss())],
   ['メモが未登録でもタブは出る（中身が未登録の枠になる）',
     (pageCases[2].html.match(/class="vg-otab /g) || []).length === Ch.OUTER_TABS.length &&
     pageCases[2].html.includes('vg-mdempty')],
