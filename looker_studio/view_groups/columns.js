@@ -31,6 +31,23 @@ const { esc, label, notice } = require('./chrome.js');
 const WARN = '⚠';
 
 /**
+ * 型の文字列に折り返し位置を入れる。
+ *
+ * ARRAY<STRUCT<currency STRING, gross NUMERIC, net NUMERIC>> のような型は
+ * 空白が少なく、ブラウザから見ると 1 語に近い。CSS の overflow-wrap や
+ * word-break でも折れるはずだが、**埋め込み先で効くかどうかに賭けたくない**
+ * （table-layout:fixed も含め、こちらが指定した CSS がそのまま効かない場面を
+ * この画面では何度か踏んでいる）。<wbr> は「ここで折ってよい」を markup 側で
+ * 示す要素で、CSS の解釈に依存しない。
+ *
+ * 入れるのは < と , のうしろ。型の構造の切れ目なので、折れても読める。
+ * 引数はエスケープ済みの文字列（< は &lt; になっている）。
+ */
+function breakType(escaped) {
+  return String(escaped).replace(/(&lt;|,)/g, '$1<wbr>');
+}
+
+/**
  * グループ 1 つ分の「列名 → その列について分かっていること」。
  *
  * 同じグループでも View ごとに列が違いうるので、View ぶん貯めておく。
@@ -177,7 +194,7 @@ function renderColumns(b, byView) {
       else if (c.sig !== top) cls.push('vg-cdiff');
       if (c.mixed) { cls.push('vg-cmix'); mixedCount++; }
       const body = c.text
-        ? esc(c.text) + (c.mixed
+        ? breakType(esc(c.text)) + (c.mixed
           ? `<span class="vg-cwarn" data-tip="${esc(mixedTip(e, g))}">${WARN}</span>` : '') +
           `<div class="vg-cmeta">${esc(c.meta)}</div>`
         : '—';
@@ -251,13 +268,16 @@ function columnsCss() {
       `border:1px solid #D0D7DE;background:#F6F8FA;color:#24292F;` +
       `font-weight:600;text-align:left;overflow-wrap:anywhere}`,
     `.vg-cname{padding:5px 12px;border:1px solid #D0D7DE;text-align:left;` +
-      `vertical-align:top;font-weight:600;color:#24292F;overflow-wrap:anywhere;` +
+      `vertical-align:top;font-weight:600;color:#24292F;` +
+      `overflow-wrap:anywhere;word-break:break-all;` +
       `font-family:ui-monospace,SFMono-Regular,Consolas,monospace}`,
     `.vg-cdesc{margin:2px 0 0;font:11px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;` +
       `font-weight:400;color:#57606A}`,
     // 型は長くなりうる。折り返して縦に伸ばす（横スクロールを避けるため）。
+    // markup 側にも <wbr> で折り返し位置を入れてあるので、ここが効かなくても
+    // 型の構造の切れ目では折れる。
     `.vg-ccell{padding:5px 12px;border:1px solid #D0D7DE;vertical-align:top;` +
-      `color:#24292F;overflow-wrap:anywhere;` +
+      `color:#24292F;overflow-wrap:anywhere;word-break:break-all;` +
       `font-family:ui-monospace,SFMono-Regular,Consolas,monospace}`,
     // 並び順と NULL 制約。型より弱い情報なので、小さく下に添える。
     `.vg-cmeta{margin:2px 0 0;font:11px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;` +
@@ -279,6 +299,6 @@ function columnsCss() {
 }
 
 module.exports = {
-  renderColumns, renderColumnsBase, columnsCss,
+  renderColumns, renderColumnsBase, columnsCss, breakType,
   groupColumns, columnOrder, cellInfo, mixedTip, nullText, majority,
 };

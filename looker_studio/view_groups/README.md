@@ -492,7 +492,7 @@ SQL 中の `{{P1}}` にカーソルを合わせると、種別と suffix ごと�
 - パラメータ名はグループごとに振り直すので、左右のペインには別の対応表を渡す。
 
 ```bash
-node preview.mjs          # dist/preview.html を生成して検証（97 アサーション）
+node preview.mjs          # dist/preview.html を生成して検証（99 アサーション）
 node preview.mjs --check  # 生成せず検証だけ
 ```
 
@@ -1104,7 +1104,16 @@ base の切り出しと UDF に渡す `suffixList` は、同じ 1 つの `suffix
 **横スクロールはさせない。** 幅は `min(100%, 1000px)` に取り、`table-layout:fixed` と
 `<colgroup>` で列名 24%・残りをグループ数で均等割りする。上限を置いているのは、
 チャートが横に広いとセルが間延びして読みづらくなるため（`.vg-ctable` の
-`max-width` に ★ を付けてある）。`ARRAY<STRUCT<…>>` の
+`max-width` に ★ を付けてある）。
+
+**折り返しは CSS だけに頼らない。** `ARRAY<STRUCT<currency STRING, gross NUMERIC>>`
+のような型は空白が少なく、ブラウザから見ると 1 語に近い。`overflow-wrap` や
+`word-break` でも折れるはずだが、**この画面では指定した CSS がそのまま効かない
+場面を何度か踏んでいる**ので、markup 側にも `<wbr>`（ここで折ってよい、を表す
+要素）を `<` と `,` のうしろに入れてある。型の構造の切れ目なので折れても読める。
+
+> 手元で `table-layout:fixed` と CSS の折り返し指定を両方無効にしても、
+> `<wbr>` だけで表が枠に収まることを確かめてある。`ARRAY<STRUCT<…>>` の
 ような長い型はセルの中で折り返す。横に流すと、右の方のグループを見るのに毎回
 スクロールが要って、揃っていない箇所を見つけるという目的に合わない。
 

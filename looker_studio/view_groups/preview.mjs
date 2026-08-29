@@ -127,9 +127,12 @@ const fakeColumns = (b) => {
       const cols = [
         { n: 'order_date', t: 'DATE', o: 1, u: 'NO', d: '受注日（JST）' },
         { n: 'region', t: 'STRING', o: 2, u: 'YES', d: 'リージョン コード。jp / us / uk' },
+        // 長い型。空白が少なく 1 語に近いので、折り返せないと横に伸びる
+        { n: 'amount_breakdown', o: 3, u: 'YES', d: '通貨ごとの内訳',
+          t: 'ARRAY<STRUCT<currency STRING, gross NUMERIC, net NUMERIC, tax NUMERIC>>' },
         // グループ間で型が違う例。同じ列名で片方だけ NUMERIC。
-        { n: 'order_count', t: g === b.groups[1] ? 'NUMERIC' : 'INT64', o: 3, u: 'YES', d: '' },
-        { n: 'gross_amount', t: /us$/.test(suffix) ? 'FLOAT64' : 'NUMERIC', o: 4,
+        { n: 'order_count', t: g === b.groups[1] ? 'NUMERIC' : 'INT64', o: 4, u: 'YES', d: '' },
+        { n: 'gross_amount', t: /us$/.test(suffix) ? 'FLOAT64' : 'NUMERIC', o: 5,
           u: /uk$/.test(suffix) ? 'NO' : 'YES',
           d: '税抜き。参照先テーブルの型に引きずられる' },
       ];
@@ -563,8 +566,8 @@ const checks = [
     return h.includes('vg-cmix') && h.includes('vg-cwarn') &&
       h.includes('NUMERIC / FLOAT64') &&
       // 内訳が tooltip に出る（suffix・並び順・型・NULL 制約）
-      /data-tip="[^"]*abus = #4 FLOAT64 NULL 可/.test(h) &&
-      /data-tip="[^"]*abuk = #4 NUMERIC NOT NULL/.test(h) &&
+      /data-tip="[^"]*abus = #5 FLOAT64 NULL 可/.test(h) &&
+      /data-tip="[^"]*abuk = #5 NUMERIC NOT NULL/.test(h) &&
       h.includes('揃っていない箇所が');
   })()],
   ['多数派と違う型・持っていない列が分かる（基準は立てない）', (() => {
@@ -584,6 +587,18 @@ const checks = [
     return bar === 75 &&
       /\.vg-chead\{position:sticky;top:var\(--vg-bar\)/.test(css);
   })()],
+  // 型は空白が少なく、ブラウザから見ると 1 語に近い。CSS の折り返しが埋め込み
+  // 先で効かなくても折れるよう、markup 側にも <wbr> を入れる。
+  ['長い型に折り返し位置を入れる（CSS が効かなくても折れる）', (() => {
+    const t = Co.breakType(Ch.esc('ARRAY<STRUCT<currency STRING, gross NUMERIC>>'));
+    return t.includes('ARRAY&lt;<wbr>STRUCT&lt;<wbr>') &&
+      t.includes('STRING,<wbr>') &&
+      // エスケープした山括弧を壊していない
+      !t.includes('<STRUCT') &&
+      columnCases[0].html.includes('<wbr>');
+  })()],
+  ['セルの折り返しは CSS でも指定する（二重の備え）',
+    /\.vg-ccell\{[^}]*overflow-wrap:anywhere;word-break:break-all/.test(Co.columnsCss())],
   ['カラム定義の表に最大幅がある（広いチャートで間延びさせない）',
     /\.vg-ctable\{[^}]*max-width:1000px/.test(Co.columnsCss())],
   ['カラム定義は横スクロールさせない（幅はグループ数で均等割り）', (() => {
