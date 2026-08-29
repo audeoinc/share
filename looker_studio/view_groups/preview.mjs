@@ -329,10 +329,17 @@ const checks = [
       R.chromeCss().includes('.vg-opanel .vg-header{display:none}');
   })()],
   ['帯ごとスクロールに追従する（見出し＋タブ）',
-    /\.vg-ohead\{[^}]*position:sticky[^}]*top:0/.test(R.chromeCss())],
-  ['タブの切り替えは帯に入れても効く（子ではなく子孫で辿る）',
-    R.chromeCss().includes('.vg-or2:checked ~ .vg-ohead .vg-ot2') &&
-    R.chromeCss().includes('.vg-or2:checked ~ .vg-opanels > .vg-op2{display:block}')],
+    /\.vg-ohead,[^{]*\{[^}]*position:sticky[^}]*top:0/.test(R.chromeCss())],
+  // テンプレートの CSS は手貼り、カードは日次生成。世代がズレている時間帯が
+  // 必ずできるので、旧世代の外枠（.vg-ohead が無く .vg-otablist が直下）でも
+  // タブの反転と帯の固定が効くこと。効かないと「反転しない・固定されない」が
+  // 同時に起き、CSS と HTML のどちらが古いのか画面からは分からない。
+  ['旧世代の外枠でもタブの反転と固定が効く（CSS とカードの世代がズレても）', (() => {
+    const css = R.chromeCss();
+    return /\.vg-or2:checked ~ \* \.vg-ot2\{/.test(css) &&
+      css.includes('.vg-or2:checked ~ .vg-opanels > .vg-op2{display:block}') &&
+      /\.vg-ohead,\.vg-outer>\.vg-otablist\{[^}]*position:sticky/.test(css);
+  })()],
   ['メモが未登録でもタブは出る（中身が未登録の枠になる）',
     (pageCases[2].html.match(/class="vg-otab /g) || []).length === Ch.OUTER_TABS.length &&
     pageCases[2].html.includes('vg-mdempty')],

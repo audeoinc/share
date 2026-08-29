@@ -341,10 +341,17 @@ function chromeCss() {
     //   要素（{{Pn}} のチップ）が DOM 順で上に来て帯に重なる。一方
     //   20 以上にすると、そのチップの吹き出し（z-index:20）が帯の下に隠れる。
     //   間を取ると、地の文は帯が隠し、吹き出しは帯より前に出る。
-    `.vg-ohead{position:sticky;top:0;z-index:5;background:#fff;` +
-      `margin:0 0 10px;padding:8px 0 0;box-shadow:0 1px 0 #EAEEF2}`,
+    // 帯そのもの。旧世代の HTML（.vg-ohead が無く .vg-otablist が直下）でも
+    // 効くように、両方を対象にする。テンプレートの CSS は手で貼るのに対して
+    // カードは日次で作り直すので、この 2 つがズレている時間帯が必ずできる。
+    // 片方でしか効かない書き方だと、その間だけ帯が流れて理由も分かりにくい。
+    `.vg-ohead,.vg-outer>.vg-otablist{position:sticky;top:0;z-index:5;` +
+      `background:#fff;margin:0 0 10px;box-shadow:0 1px 0 #EAEEF2}`,
+    `.vg-ohead{padding:8px 0 0}`,
+    `.vg-outer>.vg-otablist{padding:8px 0}`,
     `.vg-ohead .vg-header{margin:0 0 8px}`,
-    `.vg-otablist{display:flex;gap:6px;margin:0;padding:0 0 8px}`,
+    `.vg-otablist{display:flex;gap:6px}`,
+    `.vg-ohead .vg-otablist{margin:0;padding:0 0 8px}`,
     // パネルの中の見出しは隠す。renderBase / renderErdBase は単体でも使うので
     // それぞれ見出しを出したままにしてあり、束ねたときだけ上の 1 枚に集約する。
     `.vg-opanel .vg-header{display:none}`,
@@ -370,10 +377,15 @@ function chromeCss() {
     `.vg-lgd{display:inline-block;width:18px;border-top:1.5px dashed #8C96A0}`,
   ];
   // 外側のタブ本体。枚数は chrome.js の OUTER_TABS がひとつの決め所。
-  // タブは .vg-ohead の中（見出しと同じ帯）にあるので、子ではなく子孫で辿る。
+  //
+  // タブの位置は「ラジオのあとに続く兄弟のどれかの中」とだけ決めて、
+  // 間の入れ物は問わない（`~ * .vg-otN`）。いまは .vg-ohead の中だが、
+  // 旧世代の HTML では .vg-otablist が直下にあり、そこにも入っている。
+  // 手貼りの CSS と日次生成のカードは世代がズレうるので、どちらでも効く形に
+  // しておく。.vg-otN はこの外枠にしか出てこないので、広く取っても誤爆しない。
   for (let i = 1; i <= OUTER_TABS.length; i++) {
     rules.push(`.vg-or${i}:checked ~ .vg-opanels > .vg-op${i}{display:block}`);
-    rules.push(`.vg-or${i}:checked ~ .vg-ohead .vg-ot${i}` +
+    rules.push(`.vg-or${i}:checked ~ * .vg-ot${i}` +
       `{background:#24292F;border-color:#24292F;color:#fff}`);
   }
   // 内側のタブ本体。ID ではなくクラスで書くので、CSS を静的に保てる。
