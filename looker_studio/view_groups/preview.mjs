@@ -143,10 +143,20 @@ const hMany = parts[3].html;
 const hOdd = parts[4].html;
 
 const idsOf = (h) => [...h.matchAll(/id="([^"]+)"/g)].map((m) => m[1]);
-// 外側タブの規則が 1 枚残らず「兄弟 > 子」で書けているか
+// これまでに配った外枠の世代。テンプレートの CSS は手貼り、カードは日次生成
+// なので、どの世代のカードが入っていても同じ CSS で効かないといけない。
+// 片方を決め打ちにしたせいで実機の「タブが反転しない」を二度出している。
+const CARD_GENERATIONS = [
+  ['.vg-otablist > ', '見出しがパネルの中／帯の中'],
+  ['.vg-ohead > .vg-otablist > ', '見出しを .vg-ohead で包んだ世代'],
+];
+// 外側タブの規則が、全世代ぶん「兄弟 > 子」で書けているか。
+// 子孫結合子と * は使わない（この viz で動くと確認できているのは子結合子）。
 const OUTER_TABS_OK = (css) => Ch.OUTER_TABS.every((_, i) =>
-  css.includes(`.vg-or${i + 1}:checked ~ .vg-otablist > .vg-ot${i + 1}{`)) &&
-  !/:checked ~ [^,{]*(\*|\.vg-ohead)/.test(css);
+  CARD_GENERATIONS.every(([path]) =>
+    css.includes(`.vg-or${i + 1}:checked ~ ${path}.vg-ot${i + 1}`))) &&
+  !/:checked ~ [^,{]*\*/.test(css) &&
+  !/:checked ~ \.vg-ohead \./.test(css);
 const checks = [
   ['タイトルが base 名', h3.includes('v_daily_sales')],
   ['グループ数バッジが出る', h3.includes('3 グループ')],
@@ -332,13 +342,13 @@ const checks = [
       // パネル側の見出しは CSS で隠す（単体で使うときのために markup は残す）
       R.chromeCss().includes('.vg-opanel .vg-header{display:none}');
   })()],
-  ['帯ごとスクロールに追従する（見出し＋タブ）',
-    /\.vg-otablist\{[^}]*position:sticky[^}]*top:0/.test(R.chromeCss())],
+  ['帯ごとスクロールに追従する（見出し＋タブ・全世代）',
+    /\.vg-otablist,\.vg-ohead\{[^}]*position:sticky[^}]*top:0/.test(R.chromeCss())],
   // 選択中のタブを塗る規則は「兄弟 > 子」から動かさない。この viz で
   // radio + :checked が動くと確かめたときの形がこれで（templated_record/
   // samples/07_radio_tabs_test.html）、子孫に変えたら実機で反転しなくなった。
   // 見出しを別の入れ物で包むと子孫になるので、包まないことも合わせて見る。
-  ['選択中のタブを塗る規則が「兄弟 > 子」になっている', (() => {
+  ['選択中のタブを塗る規則が、配った全世代のカードで効く形になっている', (() => {
     const css = R.chromeCss();
     return OUTER_TABS_OK(css) &&
       css.includes('.vg-or2:checked ~ .vg-opanels > .vg-op2{display:block}') &&

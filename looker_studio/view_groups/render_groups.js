@@ -344,10 +344,15 @@ function chromeCss() {
     // 帯そのもの。見出しとタブが 1 枚に入る。見出しだけ 1 行占有させて、
     // タブはその下に並べる。見出しを別の入れ物で包まないのは、選択中のタブを
     // 塗る規則を「兄弟 > 子」のまま保つため（下の for を参照）。
-    `.vg-otablist{display:flex;flex-wrap:wrap;align-items:center;gap:6px;` +
+    //
+    // .vg-ohead は見出しを別の入れ物で包んでいた世代のカード向け。CSS は手貼り、
+    // カードは日次生成なので、どちらの世代が入っていても効くようにしておく。
+    `.vg-otablist,.vg-ohead{display:flex;flex-wrap:wrap;align-items:center;gap:6px;` +
       `position:sticky;top:0;z-index:5;background:#fff;` +
       `margin:0 0 10px;padding:8px 0;box-shadow:0 1px 0 #EAEEF2}`,
-    `.vg-otablist>.vg-header{flex:0 0 100%;margin:0}`,
+    `.vg-otablist>.vg-header,.vg-ohead>.vg-header{flex:0 0 100%;margin:0}`,
+    // 包まれている世代では、内側の .vg-otablist は素の並びに戻す
+    `.vg-ohead>.vg-otablist{position:static;padding:0;margin:0;box-shadow:none;flex:0 0 100%}`,
     // パネルの中の見出しは隠す。renderBase / renderErdBase は単体でも使うので
     // それぞれ見出しを出したままにしてあり、束ねたときだけ上の 1 枚に集約する。
     `.vg-opanel .vg-header{display:none}`,
@@ -374,18 +379,21 @@ function chromeCss() {
   ];
   // 外側のタブ本体。枚数は chrome.js の OUTER_TABS がひとつの決め所。
   //
-  // 形は「兄弟 > 子」で固定する。この viz で radio + :checked が動くことを
-  // 確かめたときの形がこれで（templated_record/samples/07_radio_tabs_test.html）、
-  // 見出しを別の入れ物で包んで子孫（`~ .vg-ohead .vg-otN`）にしたら実機で
-  // 反転しなくなった。手元のブラウザでは子孫でも動くので、埋め込み先で
-  // 何かが起きている。確認が取れている形から動かさない。
+  // **テンプレートの CSS は手で貼り、カードは日次で作り直す。** この 2 つは
+  // 別々に配るので、世代がズレた状態が必ず生まれる。外枠を変えるたびに
+  // 片方の世代を決め打ちにしていたせいで、実機で「タブが反転しない」を
+  // 二度出した。これまでに配った外枠は次の 2 通りなので、両方を並べて書く。
   //
-  // 旧世代のカード（見出しが帯の外にあるもの）も .vg-otablist > .vg-otN の形は
-  // 同じなので、この規則はそのまま効く。テンプレートの CSS は手貼り、カードは
-  // 日次生成で世代がズレうるため、ここは揃えておく必要がある。
+  //   .vg-outer > .vg-otablist > .vg-otN            見出しが帯の中／帯の外
+  //   .vg-outer > .vg-ohead > .vg-otablist > .vg-otN  見出しを包んでいた世代
+  //
+  // どちらも「兄弟 > 子（> 子）」で、子孫結合子や * は使わない。この viz で
+  // radio + :checked が動くと確かめたときの形が子結合子なので
+  // （templated_record/samples/07_radio_tabs_test.html）、そこから外れない。
+  const TAB_PATHS = ['.vg-otablist > ', '.vg-ohead > .vg-otablist > '];
   for (let i = 1; i <= OUTER_TABS.length; i++) {
     rules.push(`.vg-or${i}:checked ~ .vg-opanels > .vg-op${i}{display:block}`);
-    rules.push(`.vg-or${i}:checked ~ .vg-otablist > .vg-ot${i}` +
+    rules.push(TAB_PATHS.map((path) => `.vg-or${i}:checked ~ ${path}.vg-ot${i}`).join(',') +
       `{background:#24292F;border-color:#24292F;color:#fff}`);
   }
   // 内側のタブ本体。ID ではなくクラスで書くので、CSS を静的に保てる。
