@@ -22,7 +22,7 @@ const REF_BUDGET = 600 * 1024;
  */
 // 並びを変えるとパネルの中身と番号の対応が変わるが、CSS は番号ごとに対称な
 // 規則を出すだけで見出しも中身も知らないので、貼り替えの順序は問わない。
-const OUTER_TABS = ['note', 'カラム定義', 'ロジック差分', '参照関係'];
+const OUTER_TABS = ['note', 'カラム定義', '参照関係', 'ロジック差分'];
 
 /**
  * メモの差し込み口。
@@ -122,7 +122,7 @@ function wrapPage(diffHtml, erdHtml, colsHtml, base) {
   const b = base || {};
   const id = 'vgo' + hashId(b.base || '');
   // OUTER_TABS と同じ並び
-  const bodies = [`<div class="vg-root">${NOTE_MARK}</div>`, colsHtml, diffHtml, erdHtml];
+  const bodies = [`<div class="vg-root">${NOTE_MARK}</div>`, colsHtml, erdHtml, diffHtml];
   const radios = OUTER_TABS.map((_, i) =>
     `<input class="vg-or vg-or${i + 1}" type="radio" name="${id}"` +
     ` id="${id}-${i + 1}"${i === 0 ? ' checked' : ''}>`).join('');

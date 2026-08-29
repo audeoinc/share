@@ -209,8 +209,16 @@ function renderColumns(b, byView) {
     lead.push(notice('全グループで列名・型・NULL 制約が一致しています。'));
   }
 
+  // 幅はグループ数で均等割り。型は ARRAY<STRUCT<…>> のように長くなることが
+  // あるので、横スクロールさせずにセルの中で折り返す。列名の欄は説明も入るぶん
+  // 少し広く取る。table-layout:fixed にしないと、長い型がある列だけが伸びる。
+  const nameW = 24;
+  const colW = ((100 - nameW) / groups.length).toFixed(3);
+  const colgroup = `<colgroup><col style="width:${nameW}%">` +
+    groups.map(() => `<col style="width:${colW}%">`).join('') + `</colgroup>`;
+
   return lead.join('') +
-    `<div class="vg-ctablewrap"><table class="vg-ctable">` +
+    `<div class="vg-ctablewrap"><table class="vg-ctable">${colgroup}` +
     `<thead><tr><th class="vg-chead vg-cnamehead">列名</th>${head}</tr></thead>` +
     `<tbody>${rows}</tbody></table></div>`;
 }
@@ -227,20 +235,26 @@ function renderColumnsBase(b, byView) {
  */
 function columnsCss() {
   return [
-    // 表は列（グループ）が増えると横に伸びる。カードごとではなく表だけ流す。
-    `.vg-ctablewrap{overflow-x:auto}`,
-    `.vg-ctable{border-collapse:collapse;font-size:12px}`,
-    `.vg-chead{position:sticky;top:0;z-index:1;padding:6px 12px;` +
+    // 幅はカードいっぱいに取り、グループ数で均等割りする（列幅は colgroup で
+    // 指定する）。横スクロールさせないので、包む div に overflow は置かない。
+    // 置くとそこが縦のスクロール要素にもなり、下の sticky が効かなくなる。
+    `.vg-ctablewrap{width:100%}`,
+    `.vg-ctable{border-collapse:collapse;font-size:12px;width:100%;table-layout:fixed}`,
+    // 列名の行はスクロールしても残す。基準になるのはカードのスクロール箱
+    // （.vg-outer）なので、その中で固定されている帯のぶんだけ下げる。ズレると
+    // 帯と見出し行の間に本文がちらつくので、preview.mjs で実際に描いて
+    // 位置が合っているかを見ている。
+    `.vg-chead{position:sticky;top:var(--vg-bar);z-index:1;padding:6px 12px;` +
       `border:1px solid #D0D7DE;background:#F6F8FA;color:#24292F;` +
-      `font-weight:600;text-align:left;white-space:nowrap}`,
-    `.vg-cnamehead{min-width:180px}`,
+      `font-weight:600;text-align:left;overflow-wrap:anywhere}`,
     `.vg-cname{padding:5px 12px;border:1px solid #D0D7DE;text-align:left;` +
-      `vertical-align:top;font-weight:600;color:#24292F;` +
+      `vertical-align:top;font-weight:600;color:#24292F;overflow-wrap:anywhere;` +
       `font-family:ui-monospace,SFMono-Regular,Consolas,monospace}`,
     `.vg-cdesc{margin:2px 0 0;font:11px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;` +
-      `font-weight:400;color:#57606A;white-space:normal;max-width:320px}`,
+      `font-weight:400;color:#57606A}`,
+    // 型は長くなりうる。折り返して縦に伸ばす（横スクロールを避けるため）。
     `.vg-ccell{padding:5px 12px;border:1px solid #D0D7DE;vertical-align:top;` +
-      `white-space:nowrap;color:#24292F;` +
+      `color:#24292F;overflow-wrap:anywhere;` +
       `font-family:ui-monospace,SFMono-Regular,Consolas,monospace}`,
     // 並び順と NULL 制約。型より弱い情報なので、小さく下に添える。
     `.vg-cmeta{margin:2px 0 0;font:11px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;` +

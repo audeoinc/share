@@ -345,9 +345,9 @@ const checks = [
       g.missBy[i] === null &&
       g.missBy.filter((m) => m).length === base3.groupCount - 1)],
   // --- 参照関係（ERD） --------------------------------------------------
-  ['外側タブが 4 枚出る（note / カラム定義 / ロジック差分 / 参照関係）',
+  ['外側タブが 4 枚出る（note / カラム定義 / 参照関係 / ロジック差分）',
     (pageCases[0].html.match(/class="vg-otab /g) || []).length === Ch.OUTER_TABS.length &&
-    Ch.OUTER_TABS.join(',') === 'note,カラム定義,ロジック差分,参照関係'],
+    Ch.OUTER_TABS.join(',') === 'note,カラム定義,参照関係,ロジック差分'],
   ['既定で開くのはいちばん左のメモ タブ', (() => {
     const h = pageCases[0].html;
     // checked が付くのは 1 枚目だけ。外側タブの CSS も 1 枚目を開く形になる。
@@ -370,7 +370,8 @@ const checks = [
   // iframe（＝中にスクロールする要素が無い）で効かない。固定の px を上限に
   // 入れておけば、どの形でもこの箱がスクロールする側になる。
   ['カードが自前のスクロール箱になっている（sticky の基準を自分で持つ）',
-    /\.vg-outer\{max-height:min\(100vh,\d+px\);overflow:auto\}/.test(R.chromeCss())],
+    /\.vg-outer\{max-height:min\(100vh,\d+px\);overflow:auto;--vg-bar:\d+px\}/
+      .test(R.chromeCss())],
   ['見出しはタブと同じ帯にあり、どのタブでも見える', (() => {
     const h = pageCases[0].html;
     const head = h.slice(h.indexOf('<div class="vg-otablist">'), h.indexOf('<div class="vg-opanels">'));
@@ -463,14 +464,31 @@ const checks = [
     return names.join(' | ') === base3.groups.map(Ch.label).join(' | ') &&
       !/vg-erdhead"><span class="vg-tbadge"/.test(pageCases[1].html);
   })()],
+  // 注記は辺の中点に置き、行数ぶん上下に広がる。結合キーが多いと箱の並びの
+  // 外へはみ出すので、図の高さはそれも含めて決める。
+  ['結合キーが多い注記が図からはみ出さない', (() => {
+    const sql = 'SELECT 1 FROM a LEFT JOIN b ON a.k1=b.k1 AND a.k2=b.k2 AND a.k3=b.k3' +
+      ' AND a.k4=b.k4 AND a.k5=b.k5 AND a.k6=b.k6';
+    const lay = E.layout(E.buildGraph(sql, []));
+    const svg = E.toSvg(lay);
+    const ys = [...svg.matchAll(/<tspan x="[^"]*" y="([-0-9.]+)"/g)].map((m) => Number(m[1]));
+    const top = lay.y0 || 0;
+    // 注記の 1 行目の上端（y から 11px 上）と最終行の下端が viewBox に入る
+    return ys.length === 7 &&
+      Math.min(...ys) - 11 >= top &&
+      Math.max(...ys) + 3 <= top + lay.height &&
+      // 箱だけで決めていた頃の高さでは入りきらない形であること
+      lay.height > 10 * 2 + E.BOX_H + 6;
+  })()],
   ['ERD にラジオを置かない（外側タブと干渉しない）',
     !/class="vg-r vg-r\d+" type="radio"[^>]*name="vge/.test(pageCases[1].html)],
-  ['パネルの中身がタブの並びと合っている（カラム定義 2 / 差分 3 / ERD 4）', (() => {
+  ['パネルの中身がタブの並びと合っている（カラム定義 2 / ERD 3 / 差分 4）', (() => {
     const h = pageCases[1].html;
     const at = (n) => h.indexOf(`vg-opanel vg-op${n}`);
     return at(1) < at(2) && at(2) < at(3) && at(3) < at(4) &&
       h.indexOf('vg-ctable') > at(2) && h.indexOf('vg-ctable') < at(3) &&
-      h.indexOf('<svg ') > at(4);
+      h.indexOf('<svg ') > at(3) && h.indexOf('<svg ') < at(4) &&
+      h.indexOf('vg-btablist') > at(4);
   })()],
   ['ERD の CSS が chrome 側にある',
     R.chromeCss().includes('.vg-otab') && R.chromeCss().includes('.vg-erdbox')],
@@ -530,6 +548,28 @@ const checks = [
     return h.includes('currency') && h.includes('vg-cnone') && h.includes('vg-cdiff') &&
       // 表に「基準」の表記もその色分けも無い
       !h.includes('基準') && !h.includes('vg-cref');
+  })()],
+  // 列名の行はスクロールしても残す。貼り付く位置は帯の高さ（--vg-bar）で
+  // 決めているので、帯の中身を変えたらここもズレる。実際にブラウザで測るのは
+  // preview では無理なので、CSS の数値と帯を構成する寸法の対応を書き留めて
+  // 突き合わせる（実測は開発時に dist/preview.html を開いて確認する）。
+  ['列名の行を帯の下に貼り付ける', (() => {
+    const css = R.chromeCss() + '\n' + Co.columnsCss();
+    const bar = Number((css.match(/--vg-bar:(\d+)px/) || [])[1]);
+    // 帯 = 上下の padding 8+8 ＋ 見出し行 ＋ 行間 6 ＋ タブ。実測 75px。
+    return bar === 75 &&
+      /\.vg-chead\{position:sticky;top:var\(--vg-bar\)/.test(css);
+  })()],
+  ['カラム定義は横スクロールさせない（幅はグループ数で均等割り）', (() => {
+    const h = columnCases[0].html;
+    const cols = [...h.matchAll(/<col style="width:([\d.]+)%">/g)].map((m) => Number(m[1]));
+    const css = Co.columnsCss();
+    return cols.length === base3.groupCount + 1 &&
+      Math.abs(cols.reduce((a, b) => a + b, 0) - 100) < 0.01 &&
+      new Set(cols.slice(1)).size === 1 &&
+      css.includes('table-layout:fixed') &&
+      !css.includes('overflow-x:auto') &&
+      !/\.vg-ccell\{[^}]*white-space:nowrap/.test(css);
   })()],
   ['列の説明を列名の下に出す',
     columnCases[0].html.includes('vg-cdesc') &&

@@ -532,14 +532,14 @@ const checks = [
         .map((m) => m[1])).size === G;
   })()],
   ['参照関係とカラム定義には基準を出さない（差分でだけ意味を持つ）', (() => {
-    // パネルは note / カラム定義 / ロジック差分 / 参照関係 の順
+    // パネルは note / カラム定義 / 参照関係 / ロジック差分 の順
     const at = (n) => info.page.indexOf(`<div class="vg-opanel vg-op${n}">`);
     const cols = info.page.slice(at(2), at(3));
-    const erd = info.page.slice(at(4));
+    const erd = info.page.slice(at(3), at(4));
     return at(2) > 0 && at(3) > at(2) && at(4) > at(3) &&
       !cols.includes('基準') && !erd.includes('基準') &&
       // 差分側にはある
-      info.page.slice(at(3), at(4)).includes('基準');
+      info.page.slice(at(4)).includes('基準');
   })()],
   ['page はカラム定義の表を出す（型とグループ内の食い違い）',
     info.page.includes('vg-ctable') &&

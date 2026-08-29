@@ -397,13 +397,35 @@ function layout(graph) {
   });
   const pos = new Map(placed.map((n) => [n.id, n]));
   const rows = Math.max(1, ...cols.map((c) => (c || []).length));
+
+  // 高さは箱の並びだけでは決まらない。注記は辺の中点に置き、行数ぶん上下へ
+  // 広がるので、結合キーが多い辺があると箱の外まではみ出す。同じ段どうしを
+  // つなぐ辺だと中点が箱の中心と同じ高さになり、上へもはみ出す。
+  // 箱と注記の両方を含む範囲を測って、それを図の大きさにする。
+  let top = 0;
+  let bottom = PAD * 2 + rows * BOX_H + Math.max(0, rows - 1) * GAP_Y + 6;
+  for (const e of edges) {
+    const a = pos.get(e.from);
+    const b2 = pos.get(e.to);
+    if (!a || !b2) continue;
+    const lines = edgeLines(e);
+    if (!lines.length) continue;
+    const cy = (a.y + a.h / 2 + b2.y + b2.h / 2) / 2;
+    const h = lines.length * LINE_H;
+    top = Math.min(top, cy - h / 2 - PAD);
+    bottom = Math.max(bottom, cy + h / 2 + PAD);
+  }
+
   return {
     nodes: placed,
     edges: edges.map((e) => ({ ...e, a: pos.get(e.from), b: pos.get(e.to) })).filter((e) => e.a && e.b),
     gaps,
     colOf,
+    // はみ出したぶんは viewBox の原点を負にして取り込む。座標を全部ずらすより
+    // 素直で、箱の位置の計算に手を入れずに済む。
+    y0: top,
     width: (colX[cols.length - 1] || PAD) + boxW + PAD,
-    height: PAD * 2 + rows * BOX_H + Math.max(0, rows - 1) * GAP_Y + 6,
+    height: bottom - top,
   };
 }
 
@@ -474,7 +496,8 @@ function edgeLabel(e) {
  */
 function toSvg(lay) {
   const out = [];
-  out.push(`<svg viewBox="0 0 ${lay.width} ${lay.height}" width="${lay.width}" height="${lay.height}" ` +
+  out.push(`<svg viewBox="0 ${(lay.y0 || 0).toFixed(1)} ${lay.width} ${lay.height}" ` +
+    `width="${lay.width}" height="${lay.height}" ` +
     `role="img" aria-label="参照関係図" xmlns="http://www.w3.org/2000/svg">`);
   out.push('<defs><marker id="vgarrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" ' +
     'markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#8C96A0"/></marker></defs>');
