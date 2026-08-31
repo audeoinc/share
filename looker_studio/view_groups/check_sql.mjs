@@ -200,6 +200,37 @@ add('ビューはテーブルを直に読ませず、メモを差し込む',
   (table.match(/CREATE OR REPLACE VIEW/g) || []).length === 1 &&
   !/snapshot_date = \(\n\s*SELECT MAX\(snapshot_date\)/.test(table));
 
+// --- 5e. STRING_AGG の区切りがリテラルか ------------------------------
+// BigQuery は STRING_AGG の第 2 引数（区切り文字）にリテラルかクエリ
+// パラメータしか許さない。CHR(10) のような式を書くと
+//   Argument 2 to STRING_AGG must be a literal or query parameter
+// で落ちる。テンプレートにはバックスラッシュを書けない（= 改行のリテラルを
+// 作れない）ので、改行を挟みたいときは ARRAY_TO_STRING を使う。あちらに
+// この制限は無い。実行して初めて分かる種類の間違いなので静的に見る。
+{
+  const bad = [];
+  for (const [i, t] of templates.entries()) {
+    for (const m of t.matchAll(/STRING_AGG\(/g)) {
+      // 第 1 引数を読み飛ばして、深さ 0 のカンマの次を見る
+      let depth = 0;
+      let j = m.index + m[0].length;
+      for (; j < t.length; j++) {
+        const ch = t[j];
+        if (ch === '(') depth++;
+        else if (ch === ')') { if (depth === 0) break; depth--; }
+        else if (ch === ',' && depth === 0) { j++; break; }
+      }
+      const arg2 = t.slice(j).replace(/^\s+/, '');
+      // 区切りを省いた STRING_AGG(x) は既定の ',' なので問題ない
+      if (arg2 === '' || arg2[0] === ')') continue;
+      if (arg2[0] === "'" || arg2[0] === '"' || arg2[0] === '@') continue;
+      bad.push(`テンプレート ${i + 1}: ${arg2.slice(0, 40)}`);
+    }
+  }
+  add('STRING_AGG の区切りがリテラルかパラメータ', bad.length === 0,
+    bad.join(' / '));
+}
+
 // --- 6. 両ファイルで一致させる必要がある値 -----------------------------
 for (const base of ['analyze', 'render', 'page', 'markdown', 'group_css',
   'render_dynamic_sql']) {

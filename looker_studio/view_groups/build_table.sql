@@ -728,10 +728,16 @@ base_desc AS (
     -- base の中で説明が 1 種類なら、そのまま出す（見出しは邪魔）。
     -- 割れていたら、どの View のものかを添えて全部出す。黙って 1 つだけ
     -- 出すと、説明が食い違っていることに気づけない。
+    -- 区切りは STRING_AGG ではなく ARRAY_TO_STRING で入れる。STRING_AGG の
+    -- 区切り文字はリテラルかクエリ パラメータでなければならず、CHR(10) の
+    -- ような式は受け付けない（テンプレートにバックスラッシュを書けないので、
+    -- 改行のリテラルも作れない）。ARRAY_TO_STRING にその制限は無い。
     IF(COUNT(*) = 1,
        ANY_VALUE(desc_md),
-       STRING_AGG('**' || view_names || '**' || CHR(10) || CHR(10) || desc_md,
-                  CHR(10) || CHR(10) ORDER BY view_names)) AS desc_md
+       ARRAY_TO_STRING(
+         ARRAY_AGG('**' || view_names || '**' || CHR(10) || CHR(10) || desc_md
+                   ORDER BY view_names),
+         CHR(10) || CHR(10))) AS desc_md
   FROM desc_by_base
   GROUP BY base
 ),
