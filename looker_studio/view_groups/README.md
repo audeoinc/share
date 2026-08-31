@@ -1154,13 +1154,16 @@ base の切り出しと UDF に渡す `suffixList` は、同じ 1 つの `suffix
 
 ```sql
 DECLARE suffix_tail_lengths ARRAY<INT64> DEFAULT [2];
-DECLARE suffix_exclude_list ARRAY<STRING> DEFAULT ['meta'];
+DECLARE suffix_exclude_list ARRAY<STRING> DEFAULT ['meta', 'ta'];
 ```
 
+データセットが `mart_abjp` / `mart_cdjp` / `mart_efjp` / `mart_ghkr` / `ops_meta`
+のときの結果。
+
 ```
-いま             abjp abuk abus cdjp cdus meta
-末尾 2 文字       abjp abuk abus cdjp cdus jp meta ta uk us
-   + meta を除外  abjp abuk abus cdjp cdus jp uk us
+除外なし                  abjp cdjp efjp ghkr jp kr meta ta
+ghkr を除外（kr は残る）    abjp cdjp efjp      jp kr meta ta
+meta と ta を除外         abjp cdjp efjp ghkr jp kr
 ```
 
 **除外が要る。** 既定の条件では作業用データセット `ops_meta` から `meta` が
@@ -1169,8 +1172,12 @@ suffix として入っており、末尾 2 文字を足すと `ta` まで増え�
 base が切られる。**base が変わるとメモが黙って外れる**（メモは `base` の完全一致で
 突き合わせている）。エラーは出ない。
 
-`suffix_exclude_list` は**導出の前後どちらにも効く**。元の値を落とせば、そこから
-導出される末尾も出ない（`meta` を除けば `ta` も無い）。
+**除外が効くのは出来上がった一覧に対してだけ**（導出のあと 1 回）。落とした値
+からの導出は止まらないので、`ghkr` を落としても `kr` は残る — 「4 文字のほうは
+要らないが末尾は要る」が書ける。裏返しに、`meta` と `ta` は両方並べる必要がある
+（`meta` だけでは `ta` が残る）。段階を分けて効かせるほうが短く書けるが、書いた値と
+消える値が 1 対 1 で対応しないほうが分かりにくい。**5-4 が最終的な一覧を全部
+出す**ので、消したいものはそれを見て並べればよい。
 
 > **正規表現ではなく値そのもの**（完全一致）。ここだけ `*_patterns` と流儀が違う
 > のは、suffix が短くて部分一致だと巻き添えが大きいため（`ta` を弾くつもりが
