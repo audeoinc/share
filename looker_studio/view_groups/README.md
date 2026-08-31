@@ -713,6 +713,7 @@ DECLARE target_project_id STRING DEFAULT NULL;
 | `suffix_list` | suffix 一覧。空なら `suffix_pattern` で自動抽出。データセット名から導けないときだけ並べる |
 | `suffix_tail_lengths` | 取り出した suffix の末尾 n 文字も suffix として扱う。既定の `[2]` で `abjp` → `jp` |
 | `suffix_exclude_list` | suffix 一覧から落とす値（正規表現ではなく完全一致） |
+| `include_nested_fields` | カラム定義に STRUCT の中身を行として出すか（既定 `TRUE`） |
 | `snapshot_time_zone` | `snapshot_date`（いつ時点の内容か）の基準タイムゾーン。リージョンごとに変える（[A]） |
 | `analyze_options` | UDF に渡す解析オプション（JSON）。`substitutable` などをここで足せば再生成が要らない |
 | `note_sheet_url` | base ごとのメモを置くスプレッドシートの URL（[A]）。空ならメモを使わない |
@@ -1337,12 +1338,42 @@ JSON として読めたときだけ中身を取り出す。
 `columns.js` の `DESC_JA_KEYS` / `DESC_EN_KEYS` に足せば主に上がる。
 
 ```
-cols_raw   COLUMNS で列と型（条件文は table_schema / table_name を修飾なしで
-           見るので、JOIN する前に単独の CTE で絞る）
-col_desc   COLUMN_FIELD_PATHS で説明。field_path = column_name で最上位だけ
-cols       View ごとに [{n: 列名, t: 型, o: 並び順, u: is_nullable, d: 説明}] へ畳む
-base_cols  base ごとに [{v: View 名, cols: […]}] へ畳んで JSON に
+cols_raw     COLUMNS で最上位の列と型（条件文は table_schema / table_name を
+             修飾なしで見るので、JOIN する前に単独の CTE で絞る）
+col_paths    COLUMN_FIELD_PATHS。STRUCT の中まで 1 行ずつ持っている
+col_entries  最上位（cols_raw が軸）とネスト（col_paths）を UNION ALL で 1 本に
+cols         View ごとに [{n: field_path, t: 型, o: 並び順, u: is_nullable,
+             d: 説明}] へ畳む
+base_cols    base ごとに [{v: View 名, cols: […]}] へ畳んで JSON に
 ```
+
+##### STRUCT の中身は行として展開する
+
+型が `ARRAY<STRUCT<currency STRING, gross NUMERIC>>` のままだと、中の定義が読めない。
+`COLUMN_FIELD_PATHS` は**中まで 1 行ずつ持っている**ので、それを行として出す。
+
+```
+amount_breakdown            ARRAY<STRUCT<currency STRING, gross NUMERIC>>  #3 · NULL 可
+  └ currency                STRING                                        通貨
+  └ gross                   NUMERIC                                       税込み金額
+```
+
+セルに入れ子で出したり tooltip に隠したりしないのは、**この表の値打ちが
+「グループ間で揃っていないところが列で並ぶ」ことだから**。行に割れば、
+`ARRAY<STRUCT<…>>` の長い型を目で比べる代わりに、どのフィールドが違うかまで
+色で分かる。`include_nested_fields = FALSE` で最上位だけに戻せる。
+
+**並びは親の型の中での宣言順。** `COLUMN_FIELD_PATHS` に `ordinal_position` は
+無い（最上位にしかない）ので、辞書順にするか親の型文字列の出現位置を見るかに
+なる。表示している型と並びが一致するほうが読みやすいので後者を採る
+（`structFields()` が型を読む。読めなければその項目は後ろへ回す。落とさない）。
+
+**ネストの行には並び順（`#3`）と NULL 制約を出さない。** `ordinal_position` も
+`is_nullable` も `COLUMNS` にしか無く、親のものを持ってくると嘘になる。
+
+> 最上位は `cols_raw`（`COLUMNS`）を軸にした `LEFT JOIN`。`COLUMN_FIELD_PATHS`
+> が権限などで引けない環境でも、型と NULL 制約だけは出る。軸を逆にすると
+> あちらが空のときカラム定義が丸ごと消える。
 
 **事前生成に焼き込む。** メモと違い、カラム定義が変わるのは View をデプロイした
 ときだけで、差分やグループ構成と同じ周期。ビューの中で毎回作る理由がない。

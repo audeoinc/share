@@ -228,6 +228,11 @@ DECLARE suffix_tail_lengths ARRAY<INT64> DEFAULT [2];
 -- のは、suffix が短くて部分一致だと巻き添えが大きいため（'ta' を弾くつもりが
 -- REGEXP_CONTAINS では 'meta' まで消える）。
 DECLARE suffix_exclude_list ARRAY<STRING> DEFAULT [];
+-- カラム定義に STRUCT の中身（ネストした項目）を出すか。
+-- TRUE なら amount_breakdown の下に amount_breakdown.currency のような行が
+-- 並ぶ。型が ARRAY<STRUCT<...>> のままだと中の定義が読めないので既定は TRUE。
+-- STRUCT が多い View だと表が縦に伸びるので、最上位だけ見たいときは FALSE。
+DECLARE include_nested_fields BOOL DEFAULT TRUE;
 -- UDF に渡す解析オプション（JSON）。1 つ以上のキーを持つオブジェクトにすること。
 -- 指定できるキーは view_group_html.sql の冒頭に一覧がある。
 --   substitutable / equivalentLiterals / suffixAware / includeUnmatched /
@@ -662,31 +667,70 @@ cols_raw AS (
   FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.COLUMNS`
   WHERE (__VIEW_DATASET_COND__) AND (__VIEW_NAME_COND__)
 ),
-col_desc AS (
-  SELECT table_schema, table_name, column_name, description
+-- COLUMN_FIELD_PATHS は STRUCT の中まで 1 行ずつ持っている。
+--   amount_breakdown           ARRAY<STRUCT<currency STRING, gross NUMERIC>>
+--   amount_breakdown.currency  STRING
+--   amount_breakdown.gross     NUMERIC
+-- ネストした項目もそれぞれ description を持てるので、論理名もここから取れる。
+col_paths AS (
+  SELECT table_schema, table_name, column_name, field_path, data_type, description
   FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.COLUMN_FIELD_PATHS`
   WHERE (__VIEW_DATASET_COND__) AND (__VIEW_NAME_COND__)
-    AND field_path = column_name
+),
+-- 最上位とネストを 1 本に束ねる。
+--
+-- **最上位は COLUMNS を軸にする（LEFT JOIN）。** COLUMN_FIELD_PATHS が
+-- 権限などで引けない環境でも、型と NULL 制約だけは出るようにするため。
+-- 軸を逆にすると、あちらが空のときカラム定義が丸ごと消える。
+--
+-- ネストの行は型と説明だけ。ordinal_position も is_nullable も COLUMNS に
+-- しか無いので、親のものを持ってくると嘘になる（描画側も出さない）。
+col_entries AS (
+  SELECT
+    r.table_name       AS view_name,
+    r.column_name      AS field_path,
+    r.data_type        AS data_type,
+    r.ordinal_position AS ordinal_position,
+    r.is_nullable      AS is_nullable,
+    COALESCE(p.description, '') AS description
+  FROM cols_raw AS r
+  LEFT JOIN col_paths AS p
+    ON  p.table_schema = r.table_schema
+    AND p.table_name   = r.table_name
+    AND p.field_path   = r.column_name
+  UNION ALL
+  SELECT
+    p.table_name,
+    p.field_path,
+    p.data_type,
+    r.ordinal_position,
+    CAST(NULL AS STRING),
+    COALESCE(p.description, '')
+  FROM col_paths AS p
+  JOIN cols_raw AS r
+    ON  r.table_schema = p.table_schema
+    AND r.table_name   = p.table_name
+    AND r.column_name  = p.column_name
+  WHERE p.field_path != p.column_name
+    AND @include_nested_fields
 ),
 cols AS (
   SELECT
-    r.table_name AS view_name,
+    view_name,
     ARRAY_AGG(
       STRUCT(
-        r.column_name      AS n,
-        r.data_type        AS t,
-        r.ordinal_position AS o,
-        r.is_nullable      AS u,
-        COALESCE(d.description, '') AS d
+        field_path       AS n,
+        data_type        AS t,
+        ordinal_position AS o,
+        is_nullable      AS u,
+        description      AS d
       )
-      ORDER BY r.ordinal_position
+      -- 並びは描画側が決める（ネストは親の型の中での宣言順に並べ替える）。
+      -- ここでは同じ入力から同じ並びが出ることだけを保証する。
+      ORDER BY ordinal_position, field_path
     ) AS cols
-  FROM cols_raw AS r
-  LEFT JOIN col_desc AS d
-    ON  d.table_schema = r.table_schema
-    AND d.table_name   = r.table_name
-    AND d.column_name  = r.column_name
-  GROUP BY r.table_name
+  FROM col_entries
+  GROUP BY view_name
 ),
 -- base ごとに束ねる。View 名で引ける形にするのは描画側（JS）の仕事。
 base_cols AS (
@@ -822,6 +866,7 @@ EXECUTE IMMEDIATE rendered_sql
 USING suffix_list AS suffix_list,
       suffix_tail_lengths AS suffix_tail_lengths,
       suffix_exclude_list AS suffix_exclude_list,
+      include_nested_fields AS include_nested_fields,
       analyze_options AS analyze_options;
 
 

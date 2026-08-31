@@ -156,6 +156,14 @@ const fakeColumns = (b) => {
         // 長い型。空白が少なく 1 語に近いので、折り返せないと横に伸びる
         { n: 'amount_breakdown', o: 3, u: 'YES', d: '通貨ごとの内訳',
           t: 'ARRAY<STRUCT<currency STRING, gross NUMERIC, net NUMERIC, tax NUMERIC>>' },
+        // STRUCT の中身。COLUMN_FIELD_PATHS から来る（並び順も NULL 制約も無い）。
+        // わざと宣言順と違う順で渡して、描画側が並べ替えることを見る。
+        { n: 'amount_breakdown.tax', t: 'NUMERIC', o: 3, u: null, d: '消費税' },
+        { n: 'amount_breakdown.currency', t: 'STRING', o: 3, u: null,
+          d: '{"ja":"通貨","en":"currency"}' },
+        { n: 'amount_breakdown.gross', t: 'NUMERIC', o: 3, u: null, d: '税込み金額' },
+        { n: 'amount_breakdown.net', t: /us$/.test(suffix) ? 'FLOAT64' : 'NUMERIC',
+          o: 3, u: null, d: '税抜き金額' },
         // グループ間で型が違う例。同じ列名で片方だけ NUMERIC。
         { n: 'order_count', t: g === b.groups[1] ? 'NUMERIC' : 'INT64', o: 4, u: 'YES', d: '' },
         // グループによって説明が違う例。セルに置いていれば横に並んで見える
@@ -214,6 +222,14 @@ const sqlCases = [
   { title: 'SQL（取得できなかった場合）',
     html: Sq.renderSqlBase(base3, {}) },
 ];
+
+// カラム定義の表から、見出しが name の行を引く。見出しはタグを挟む
+// （<span class="vg-cnestmark">└</span>currency）ので、素の substring では拾えない。
+const columnRow = (name, html) => (html || columnCases[0].html).split('<tr>')
+  .find((r) => {
+    const th = r.match(/<th class="vg-cname[^"]*">([\s\S]*?)<\/th>/);
+    return th && th[1].replace(/<[^>]*>/g, '') === name;
+  });
 
 // --- 検証 --------------------------------------------------------------
 const h3 = parts[0].html;
@@ -695,6 +711,39 @@ const checks = [
   })()],
   // 説明は View に付いた属性なので、グループによって違うことがある。
   // 列名の欄にまとめると差が消えるので、グループごとのセルに置く。
+  // STRUCT の中身は COLUMN_FIELD_PATHS にある。型が ARRAY<STRUCT<...>> の
+  // ままだと中の定義が読めないので、行として展開する（グループ間の比較が効く）。
+  ['STRUCT の中身を行として出す（親のすぐ下に字下げして）', (() => {
+    const h = columnCases[0].html;
+    const names = [...h.matchAll(/<th class="vg-cname[^"]*">([\s\S]*?)<\/th>/g)]
+      .map((m) => m[1].replace(/<[^>]*>/g, ''));
+    const at = names.indexOf('amount_breakdown');
+    return at >= 0 &&
+      // 親のすぐ下に、宣言順（currency, gross, net, tax）で並ぶ。
+      // fixture はわざと違う順で渡している
+      names.slice(at + 1, at + 5).join(',') === '\u2514currency,\u2514gross,\u2514net,\u2514tax' &&
+      h.includes('class="vg-cname vg-cd1"');
+  })()],
+  ['ネストの並びは親の型の宣言順（COLUMN_FIELD_PATHS に ordinal が無いため）', (() => {
+    return Co.structFields('ARRAY<STRUCT<currency STRING, gross NUMERIC, tax NUMERIC>>')
+        .join(',') === 'currency,gross,tax' &&
+      Co.structFields('STRUCT<a ARRAY<STRUCT<b INT64, c STRING>>, d INT64>')
+        .join(',') === 'a,d' &&
+      // 型から読めなければ空。呼び出し側が後ろへ回す
+      Co.structFields('STRING').length === 0;
+  })()],
+  ['ネストの行には並び順と NULL 制約を出さない（親のものを出さない）', (() => {
+    // 行の見出しはタグを挟む（<span>└</span>currency）ので、素の substring では
+    // 拾えない。タグを落としてから引く。
+    const parent = columnRow('amount_breakdown');
+    const child = columnRow('\u2514currency');
+    return parent && parent.includes('vg-cmeta') &&
+      child && !child.includes('vg-cmeta') && child.includes('通貨');
+  })()],
+  ['ネストでもグループ間の型の違いが色で出る', (() => {
+    const net = columnRow('\u2514net');
+    return net && net.includes('FLOAT64') && net.includes('vg-cmix');
+  })()],
   ['列の説明はグループごとのセルに出す（列名の欄ではない）', (() => {
     const h = columnCases[0].html;
     // 列名の欄には名前だけ

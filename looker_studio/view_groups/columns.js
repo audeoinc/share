@@ -128,6 +128,70 @@ function descHtml(text) {
 }
 
 /**
+ * 型の文字列から STRUCT のフィールド名を宣言順に取り出す。
+ *
+ * ネストした項目の並び順を決めるのに使う。COLUMN_FIELD_PATHS には
+ * ordinal_position が無い（最上位にしかない）ので、辞書順にするか、
+ * 親の型の中での出現位置を見るかのどちらかになる。**表示している型の文字列と
+ * 並びが一致しているほうが読みやすい**ので後者を採る。
+ *
+ *   ARRAY<STRUCT<currency STRING, gross NUMERIC>>  ->  ['currency', 'gross']
+ *
+ * 読めなければ空を返す。呼び出し側はその項目を後ろに回す（落とさない）。
+ */
+function structFields(type) {
+  const s = String(type == null ? '' : type);
+  const at = s.indexOf('STRUCT<');
+  if (at < 0) return [];
+  const parts = [];
+  let cur = '';
+  let depth = 0;
+  for (let i = at + 7; i < s.length; i++) {
+    const ch = s.charAt(i);
+    if (ch === '>' && depth === 0) { parts.push(cur); break; }
+    if (ch === '<') depth++;
+    else if (ch === '>') depth--;
+    else if (ch === ',' && depth === 0) { parts.push(cur); cur = ''; continue; }
+    cur += ch;
+  }
+  const out = [];
+  for (let i = 0; i < parts.length; i++) {
+    // 'currency STRING' / 'items ARRAY<STRUCT<...>>' の先頭語がフィールド名
+    const name = parts[i].trim().split(/[\s<]/)[0];
+    if (name) out.push(name);
+  }
+  return out;
+}
+
+/**
+ * 行の並び順の鍵。最上位は ordinal、ネストは親の型の中での出現位置。
+ *
+ * 文字列にしておくと、親が子より必ず前に来る（前方一致で短いほうが小さい）。
+ * 型から読めなかった項目は 9999 にして後ろへ回す。
+ */
+function assignOrder(out) {
+  const pad = (n) => ('000' + n).slice(-4);
+  for (const e of out.values()) {
+    const segs = e.name.split('.');
+    const top = out.get(segs[0]);
+    const ord = top && top.vals[0] && top.vals[0].ord != null ? top.vals[0].ord : 9999;
+    let key = pad(ord);
+    let path = segs[0];
+    for (let i = 1; i < segs.length; i++) {
+      const parent = out.get(path);
+      const fields = parent && parent.vals[0] ? structFields(parent.vals[0].type) : [];
+      const at = fields.indexOf(segs[i]);
+      key += '.' + pad(at < 0 ? 9999 : at);
+      path += '.' + segs[i];
+    }
+    e.sortKey = key;
+  }
+}
+
+/** ネストした項目（field_path に '.' がある）。列名に '.' は使えないので確実。 */
+const isNested = (name) => String(name).indexOf('.') >= 0;
+
+/**
  * セルに出す説明。
  *
  * **列名の欄ではなくグループごとのセルに置く。** 説明は View に付いた属性なので、
@@ -186,6 +250,7 @@ function groupColumns(g, byView) {
       });
     }
   }
+  assignOrder(out);
   return out;
 }
 
@@ -197,7 +262,8 @@ function columnOrder(maps) {
   const seen = new Set();
   const out = [];
   for (const m of maps) {
-    const rows = [...m.values()].sort((a, b) => a.order - b.order);
+    const rows = [...m.values()].sort((a, b) =>
+      (a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0));
     for (const e of rows) {
       if (!seen.has(e.name)) { seen.add(e.name); out.push(e.name); }
     }
@@ -255,8 +321,11 @@ function cellInfo(entry, memberCount) {
 
 /** グループ内で食い違ったときの内訳。tooltip に出す。 */
 function mixedTip(entry, g) {
-  const lines = entry.vals.map(
-    (v) => `${v.suffix} = #${v.ord} ${v.type} ${nullText(v.nullable)}`);
+  // ネストした項目は並び順も NULL 制約も持たない。親のものを出すと嘘になる。
+  const nested = isNested(entry.name);
+  const lines = entry.vals.map((v) => nested
+    ? `${v.suffix} = ${v.type}`
+    : `${v.suffix} = #${v.ord} ${v.type} ${nullText(v.nullable)}`);
   const have = entry.vals.map((v) => v.suffix);
   for (let i = 0; i < (g.members || []).length; i++) {
     const suffix = (g.suffixes && g.suffixes[i]) || g.members[i].viewName;
@@ -285,6 +354,9 @@ function renderColumns(b, byView) {
   let diffRows = 0;
   let mixedCount = 0;
   const rows = order.map((name) => {
+    const segs = name.split('.');
+    const depth = segs.length - 1;
+    const nested = depth > 0;
     const infos = groups.map((g, i) => cellInfo(maps[i].get(name), g.members.length));
     // グループ間で揃っているか。基準は立てず、いちばん多い値と違うものに色を付ける。
     const top = majority(infos.map((c) => c.sig));
@@ -301,11 +373,19 @@ function renderColumns(b, byView) {
       const body = c.text
         ? breakType(esc(c.text)) + (c.mixed
           ? `<span class="vg-cwarn" data-tip="${esc(mixedTip(e, g))}">${WARN}</span>` : '') +
-          `<div class="vg-cmeta">${esc(c.meta)}</div>` + descCell(e)
+          // ネストした項目には並び順も NULL 制約も無い（COLUMN_FIELD_PATHS が
+          // 持っていない）。親のものを出すと嘘になるので、型と説明だけにする。
+          (nested ? '' : `<div class="vg-cmeta">${esc(c.meta)}</div>`) + descCell(e)
         : '—';
       return `<td class="${cls.join(' ')}">${body}</td>`;
     }).join('');
-    return `<tr><th class="vg-cname">${esc(name)}</th>${cells}</tr>`;
+    // ネストは葉の名前だけを字下げして出す。親の行がすぐ上にあるので、
+    // 全体のパスを繰り返さなくても対応は追える。
+    const cls = 'vg-cname' + (depth ? ` vg-cd${Math.min(depth, 3)}` : '');
+    const shown = depth
+      ? `<span class="vg-cnestmark">\u2514</span>${esc(segs[segs.length - 1])}`
+      : esc(name);
+    return `<tr><th class="${cls}">${shown}</th>${cells}</tr>`;
   }).join('');
 
   const head = groups.map((g) =>
@@ -383,6 +463,12 @@ function columnsCss() {
     // グループの中で説明が割れているときに、どの View のものかを示す見出し。
     `.vg-cdescwho{margin:4px 0 0;font:11px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;` +
       `font-weight:600;color:#8C959F}`,
+    // STRUCT の中の項目。深さぶん字下げして、親との関係を字面で見せる。
+    // 3 段より深いものは 3 段目に揃える（それ以上は横幅が持たない）。
+    `.vg-cd1{padding-left:26px}`,
+    `.vg-cd2{padding-left:40px}`,
+    `.vg-cd3{padding-left:54px}`,
+    `.vg-cnestmark{margin-right:4px;color:#8C959F;font-weight:400}`,
     // 型は長くなりうる。折り返して縦に伸ばす（横スクロールを避けるため）。
     // markup 側にも <wbr> で折り返し位置を入れてあるので、ここが効かなくても
     // 型の構造の切れ目では折れる。
@@ -410,6 +496,7 @@ function columnsCss() {
 
 module.exports = {
   renderColumns, renderColumnsBase, columnsCss, breakType, descCell,
+  structFields, assignOrder, isNested,
   groupColumns, columnOrder, cellInfo, mixedTip, nullText, majority,
   parseDesc, descHtml, DESC_JA_KEYS, DESC_EN_KEYS,
 };
