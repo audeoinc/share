@@ -126,8 +126,11 @@ const fakeColumns = (b) => {
     g.members.forEach((m, i) => {
       const suffix = g.suffixes[i] || m.viewName;
       const cols = [
-        { n: 'order_date', t: 'DATE', o: 1, u: 'NO', d: '受注日（JST）' },
-        { n: 'region', t: 'STRING', o: 2, u: 'YES', d: 'リージョン コード。jp / us / uk' },
+        // description は素のテキストのことも、論理名を持たせた JSON のこともある
+        { n: 'order_date', t: 'DATE', o: 1, u: 'NO',
+          d: '{"ja":"受注日","en":"order date"}' },
+        { n: 'region', t: 'STRING', o: 2, u: 'YES',
+          d: '{"name_ja":"リージョン","name_en":"region","unit":"ISO 3166"}' },
         // 長い型。空白が少なく 1 語に近いので、折り返せないと横に伸びる
         { n: 'amount_breakdown', o: 3, u: 'YES', d: '通貨ごとの内訳',
           t: 'ARRAY<STRUCT<currency STRING, gross NUMERIC, net NUMERIC, tax NUMERIC>>' },
@@ -647,7 +650,34 @@ const checks = [
   })()],
   ['列の説明を列名の下に出す',
     columnCases[0].html.includes('vg-cdesc') &&
-    columnCases[0].html.includes('受注日（JST）')],
+    columnCases[0].html.includes('税抜き')],
+  // description は自由文字列なので、論理名を持たせたければ JSON を入れるしかない。
+  // キー名は環境で違うので広めに受け、拾えなかったキーも捨てずに出す。
+  ['description の JSON から日本語 / 英語の論理名を出す', (() => {
+    const h = columnCases[0].html;
+    return h.includes('<div class="vg-cdesc">受注日</div>') &&
+      h.includes('<div class="vg-cdesc vg-cdescsub">order date</div>') &&
+      // 素のテキストはそのまま 1 行で出す（従来どおり）
+      h.includes('<div class="vg-cdesc">税抜き。参照先テーブルの型に引きずられる</div>');
+  })()],
+  ['description のキー名は綴りを決め打ちにしない', (() => {
+    const ja = ['ja', 'name_ja', '日本語論理名', '論理名'];
+    const en = ['en', 'name_en', '英語論理名'];
+    return ja.every((k) => Co.parseDesc(JSON.stringify({ [k]: '受注日' })).ja === '受注日') &&
+      en.every((k) => Co.parseDesc(JSON.stringify({ [k]: 'order date' })).en === 'order date');
+  })()],
+  ['拾えなかったキーも捨てずに出す（黙って消えない）', (() => {
+    const d = Co.parseDesc('{"name_ja":"リージョン","name_en":"region","unit":"ISO 3166"}');
+    return d.rest.length === 1 && d.rest[0].key === 'unit' &&
+      columnCases[0].html.includes('unit: ISO 3166');
+  })()],
+  ['JSON として読めなければ素のテキストとして出す', (() => {
+    return Co.parseDesc('{ 壊れた JSON').raw === '{ 壊れた JSON' &&
+      Co.parseDesc('受注日（JST）').raw === '受注日（JST）' &&
+      Co.parseDesc('[1,2]').raw === '[1,2]' &&
+      Co.parseDesc('') === null && Co.parseDesc(null) === null &&
+      Co.descHtml(null) === '';
+  })()],
   ['カラム定義が取れなければ案内を出す（表は出さない）',
     columnCases[1].html.includes('カラム定義を取得できませんでした') &&
     !columnCases[1].html.includes('vg-ctable')],

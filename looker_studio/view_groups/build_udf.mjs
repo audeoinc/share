@@ -104,7 +104,7 @@ const UNUSED_ANALYZE = ['alphaMap'];
 // ERD 側はグループ化もパラメータ化もしない。トークナイザと実体名の判定だけ使う。
 const UNUSED_ERD = ['alphaMap', 'alphaMapDetail', 'parameterize', 'groupByLogic',
   'analyze', 'maskTokens', 'buildLiteralMap', 'suffixWords', 'parseEquivalents',
-  'extractSuffix', 'expandSuffixParts', 'normalizeSpace'];
+  'extractSuffix', 'expandSuffixParts', 'normalizeSpace', 'stripOptionsClause'];
 const UNUSED_RENDER = ['renderFragment3', 'build3Way', 'mapToBase', 'baseCell', 'segsText'];
 // CSS の UDF は markdown.js から memoCss() しか呼ばない。Markdown を HTML に
 // する側は viewlgc_markdown が持っているので、こちらには積まない。
@@ -112,7 +112,7 @@ const UNUSED_CSS = UNUSED_RENDER.concat([
   'markdownHtml', 'mdRender', 'mdBlocks', 'mdList', 'mdAligns', 'mdCells',
   'mdKind', 'mdIndent', 'mdInline', 'mdLink', 'mdUrl', 'mdEsc',
   'renderColumnsBase', 'renderColumns', 'groupColumns', 'columnOrder',
-  'cellInfo', 'mixedTip', 'uniq', 'majority',
+  'cellInfo', 'mixedTip', 'uniq', 'majority', 'descHtml', 'parseDesc', 'pickKey',
   'renderSqlBase', 'renderSql', 'sqlViews', 'sqlBody', 'sqlPanel']);
 
 /** CommonJS の体裁を落として素の関数群にする。 */

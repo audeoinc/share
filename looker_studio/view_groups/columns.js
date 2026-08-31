@@ -48,6 +48,86 @@ function breakType(escaped) {
 }
 
 /**
+ * 列の説明（INFORMATION_SCHEMA の description）の読み取り。
+ *
+ * 素のテキストのこともあれば、論理名を持たせるために JSON を入れてあることも
+ * ある（BigQuery の description は自由文字列なので、構造を持たせたければ
+ * こうするしかない）。
+ *
+ *   {"ja": "受注日", "en": "order date"}
+ *
+ * **キー名は環境によって違うので、よくある綴りをまとめて受ける。** 決め打ちに
+ * すると、綴りが 1 つ違うだけで論理名が丸ごと出なくなる（しかもエラーは出ず、
+ * 説明が空に見えるだけ）。拾えなかったキーは捨てずに `key: value` で出すので、
+ * **どう書いても画面から消えることはない**。
+ *
+ * JSON として読めなければ、そのまま素のテキストとして扱う（従来どおり）。
+ */
+const DESC_JA_KEYS = ['ja', 'jp', 'ja_name', 'name_ja', 'japanese',
+  'logical_name_ja', 'logicalNameJa', 'ja_logical_name',
+  '和名', '日本語', '日本語論理名', '論理名'];
+const DESC_EN_KEYS = ['en', 'en_name', 'name_en', 'english',
+  'logical_name_en', 'logicalNameEn', 'en_logical_name',
+  '英語', '英語論理名'];
+
+/** 候補のキーのうち、最初に見つかった空でない値。 */
+function pickKey(obj, keys) {
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    if (!Object.prototype.hasOwnProperty.call(obj, k)) continue;
+    const v = obj[k];
+    if (v == null || String(v) === '') continue;
+    return { key: k, value: String(v) };
+  }
+  return null;
+}
+
+/**
+ * @returns {null | {raw: string} | {ja: string, en: string, rest: object[]}}
+ */
+function parseDesc(text) {
+  const s = String(text == null ? '' : text).trim();
+  if (!s) return null;
+  // '{' で始まらないものに JSON.parse を試す意味はない。素のテキストは
+  // そのまま出す（この形のほうが圧倒的に多い）。
+  if (s.charAt(0) !== '{') return { raw: s };
+  let o = null;
+  try { o = JSON.parse(s); } catch (e) { o = null; }
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return { raw: s };
+
+  const ja = pickKey(o, DESC_JA_KEYS);
+  const en = pickKey(o, DESC_EN_KEYS);
+  const used = {};
+  if (ja) used[ja.key] = true;
+  if (en) used[en.key] = true;
+  const rest = [];
+  const keys = Object.keys(o);
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    if (used[k]) continue;
+    const v = o[k];
+    if (v == null || v === '') continue;
+    rest.push({ key: k, value: typeof v === 'object' ? JSON.stringify(v) : String(v) });
+  }
+  return { ja: ja ? ja.value : '', en: en ? en.value : '', rest: rest };
+}
+
+/** 列名の下に出す説明。日本語論理名を主、それ以外を従で並べる。 */
+function descHtml(text) {
+  const d = parseDesc(text);
+  if (!d) return '';
+  if (d.raw) return `<div class="vg-cdesc">${esc(d.raw)}</div>`;
+  let out = '';
+  if (d.ja) out += `<div class="vg-cdesc">${esc(d.ja)}</div>`;
+  if (d.en) out += `<div class="vg-cdesc vg-cdescsub">${esc(d.en)}</div>`;
+  for (let i = 0; i < d.rest.length; i++) {
+    out += `<div class="vg-cdesc vg-cdescsub">` +
+      `${esc(d.rest[i].key)}: ${esc(d.rest[i].value)}</div>`;
+  }
+  return out;
+}
+
+/**
  * グループ 1 つ分の「列名 → その列について分かっていること」。
  *
  * 同じグループでも View ごとに列が違いうるので、View ぶん貯めておく。
@@ -200,8 +280,7 @@ function renderColumns(b, byView) {
         : '—';
       return `<td class="${cls.join(' ')}">${body}</td>`;
     }).join('');
-    const desc = entry && entry.desc
-      ? `<div class="vg-cdesc">${esc(entry.desc)}</div>` : '';
+    const desc = entry ? descHtml(entry.desc) : '';
     return `<tr><th class="vg-cname">${esc(name)}${desc}</th>${cells}</tr>`;
   }).join('');
 
@@ -271,8 +350,11 @@ function columnsCss() {
       `vertical-align:top;font-weight:600;color:#24292F;` +
       `overflow-wrap:anywhere;word-break:break-all;` +
       `font-family:ui-monospace,SFMono-Regular,Consolas,monospace}`,
+    // 列の説明。description が JSON なら日本語論理名を主、英語論理名と
+    // 残りのキーを従（薄い色）で下に並べる。素のテキストなら 1 行だけ。
     `.vg-cdesc{margin:2px 0 0;font:11px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;` +
       `font-weight:400;color:#57606A}`,
+    `.vg-cdescsub{color:#8C959F}`,
     // 型は長くなりうる。折り返して縦に伸ばす（横スクロールを避けるため）。
     // markup 側にも <wbr> で折り返し位置を入れてあるので、ここが効かなくても
     // 型の構造の切れ目では折れる。
@@ -301,4 +383,5 @@ function columnsCss() {
 module.exports = {
   renderColumns, renderColumnsBase, columnsCss, breakType,
   groupColumns, columnOrder, cellInfo, mixedTip, nullText, majority,
+  parseDesc, descHtml, DESC_JA_KEYS, DESC_EN_KEYS,
 };
