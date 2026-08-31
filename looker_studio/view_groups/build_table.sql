@@ -856,6 +856,7 @@ EXECUTE IMMEDIATE rendered_sql;
 --      5-1 生成結果の中身
 --      5-2 ロジックが割れている base（＝要確認）
 --      5-3 suffix を認識できなかった View
+--      5-3b 名前が重複する View（複数のデータセットに同じ名前がある）
 --      5-4 実際に使う suffix の一覧
 --      5-5 データセット別の対象 View 数
 --      5-5b View 名の条件で落ちた View
@@ -914,6 +915,32 @@ ORDER BY unrecognized_view_name
 EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
 ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
   '5-3 の SQL に未展開のプレースホルダが残っています。';
+EXECUTE IMMEDIATE rendered_sql;
+
+-- 5-3b 名前が重複する View（複数のデータセットに同じ名前がある）
+--      **この作りは View 名がリージョン内で一意である前提。** base の切り出しは
+--      PARTITION BY view_name で 1 本だけ残すので、重複していると残りが黙って
+--      消える（カラム定義も table_name で畳むので混ざる）。
+--
+--      4 文字 suffix（_abjp / _cdjp）なら名前にデータセットの区別が入るので
+--      衝突しないが、suffix_tail_lengths で 2 文字（_jp）を足すと
+--      mart_abjp.v_sales_jp と mart_cdjp.v_sales_jp が同じ名前になり得る。
+--      **0 件でなければ、その View は正しく扱えていない。**
+SET sql_template = """
+SELECT
+  '5-3b 名前が重複する View'           AS check_name,
+  table_name                        AS view_name,
+  COUNT(*)                          AS dataset_count,
+  STRING_AGG(table_schema, ', ' ORDER BY table_schema) AS dataset_names
+FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.VIEWS`
+WHERE (__VIEW_DATASET_COND__) AND (__VIEW_NAME_COND__)
+GROUP BY check_name, view_name
+HAVING COUNT(*) > 1
+ORDER BY dataset_count DESC, view_name
+""";
+EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+  '5-3b の SQL に未展開のプレースホルダが残っています。';
 EXECUTE IMMEDIATE rendered_sql;
 
 -- 5-4 実際に使う suffix の一覧

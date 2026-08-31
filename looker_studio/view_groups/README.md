@@ -1189,6 +1189,27 @@ View は「suffix 未認識」として単独で並び、確認クエリ 5-3 に
 > 同時に当たることは原理的に無いので、`abjp` と `jp` を並べて安全。
 > （SQL 側は最長一致、UDF 側は一覧順で選ぶが、候補が 1 つしか無いので一致する。）
 
+##### 短い suffix を足す前に、View 名の重複を確かめる
+
+**この作りは View 名がリージョン内で一意である前提。** base の切り出しは
+View 名だけで畳んでいる。
+
+```sql
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY src.view_name ORDER BY LENGTH(s.suffix) DESC
+) = 1
+```
+
+4 文字 suffix（`_abjp` / `_cdjp`）なら View 名にデータセットの区別が入るので
+衝突しない。**2 文字を足すとこの前提が崩れうる。** `jp` は `abjp` / `cdjp` /
+`efjp` のどれからも導出されるので、`mart_abjp.v_sales_jp` と
+`mart_cdjp.v_sales_jp` が同じ名前で並びうる。そうなると 1 本だけ残って
+**残りは黙って消える**（カラム定義も `GROUP BY table_name` なので混ざる）。
+
+確認クエリ **5-3b** が重複を出す。**0 件でなければ、その View は正しく扱えて
+いない。** その場合は `analysis_include_object_patterns` で対象を絞るか、
+データセットまで含めた識別に作りを変える必要がある（未対応）。
+
 ### カラム定義（カラム定義タブ）
 
 `INFORMATION_SCHEMA.COLUMNS` から View の出力列を取り、**1 行 = 1 列名、
