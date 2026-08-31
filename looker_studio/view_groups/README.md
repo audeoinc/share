@@ -699,6 +699,7 @@ DECLARE target_project_id STRING DEFAULT NULL;
 | `analysis_exclude_object_patterns` | 落とす View 名。include のあとに効く |
 | `suffix_pattern` | データセット名から suffix を切り出す正規表現（1 つ目のキャプチャ） |
 | `suffix_list` | suffix 一覧。空なら `suffix_pattern` で自動抽出。データセット名から導けないときだけ並べる |
+| `suffix_list_extra` | 自動抽出に**足す** suffix。データセット名に現れない suffix を補う |
 | `snapshot_time_zone` | `snapshot_date`（いつ時点の内容か）の基準タイムゾーン。リージョンごとに変える（[A]） |
 | `analyze_options` | UDF に渡す解析オプション（JSON）。`substitutable` などをここで足せば再生成が要らない |
 | `note_sheet_url` | base ごとのメモを置くスプレッドシートの URL（[A]）。空ならメモを使わない |
@@ -1140,6 +1141,41 @@ customers_abjp ┄┄▶ base_orders          calendar_abjp ──▶ daily
 
 base の切り出しと UDF に渡す `suffixList` は、同じ 1 つの `suffixes` から作る。
 別々に持つ場所がないので、ズレようがない。
+
+#### データセット名に現れない suffix（`suffix_list_extra`）
+
+自動抽出は**データセット名**を見る。だから「データセットは `mart_abjp`（suffix =
+`abjp`）なのに、その中に `v_x_jp` のように地域だけを持つ View がある」という形は
+拾えない。`jp` はどのデータセット名の末尾にも出てこない。
+
+```sql
+DECLARE suffix_list_extra ARRAY<STRING> DEFAULT ['jp', 'us', 'uk'];
+```
+
+自動抽出はそのままで、この一覧を**足す**だけ。`suffix_list` を明示したときも足す。
+
+**`suffix_pattern` を `r'_([A-Za-z]{2,4})$'` に広げる手は勧めない。** あれは
+データセット名に当たるので、2〜3 文字で終わるデータセットの語尾が片端から
+suffix になる（`ops_meta` → `meta` のように、既定でも既に起きている）。混ざった
+ゴミは**全 View 名**に `ENDS_WITH` で当たるため、`v_batch_ops` のような無関係な
+View の base が `v_batch` に切られる。**base が変わるとメモが黙って外れる**
+（メモは `base` の完全一致で突き合わせている）。エラーは出ない。
+
+| | `{2,4}` に広げる | `suffix_list_extra` |
+|---|---|---|
+| 2 文字が拾える | ✓ | ✓ |
+| 3 文字も勝手に入る | 入る | 入らない |
+| 無関係な View の base が変わる | ありうる | 無い |
+| データセット名に無い suffix | 拾えない | ✓ |
+| 新しい地域が増えたとき | 自動 | 1 行足す |
+
+足し忘れは**静かには壊れない**。その suffix を持つ View は「suffix 未認識」として
+単独で並び、確認クエリ 5-3 に出る。実際に使われている一覧は 5-4 で確かめられる。
+
+> **長さの違う suffix を混ぜても取り違えは起きない。** suffix に `_` は入らない
+> ので、`v_x_abjp` が `_jp` で終わることはない。1 つの View 名に 2 つの suffix が
+> 同時に当たることは原理的に無いので、`abjp` と `jp` を並べて安全。
+> （SQL 側は最長一致、UDF 側は一覧順で選ぶが、候補が 1 つしか無いので一致する。）
 
 ### カラム定義（カラム定義タブ）
 
