@@ -699,7 +699,8 @@ DECLARE target_project_id STRING DEFAULT NULL;
 | `analysis_exclude_object_patterns` | 落とす View 名。include のあとに効く |
 | `suffix_pattern` | データセット名から suffix を切り出す正規表現（1 つ目のキャプチャ） |
 | `suffix_list` | suffix 一覧。空なら `suffix_pattern` で自動抽出。データセット名から導けないときだけ並べる |
-| `suffix_list_extra` | 自動抽出に**足す** suffix。データセット名に現れない suffix を補う |
+| `suffix_tail_lengths` | 取り出した suffix の末尾 n 文字も suffix として扱う。`[2]` で `abjp` → `jp` |
+| `suffix_exclude_list` | suffix 一覧から落とす値（正規表現ではなく完全一致） |
 | `snapshot_time_zone` | `snapshot_date`（いつ時点の内容か）の基準タイムゾーン。リージョンごとに変える（[A]） |
 | `analyze_options` | UDF に渡す解析オプション（JSON）。`substitutable` などをここで足せば再生成が要らない |
 | `note_sheet_url` | base ごとのメモを置くスプレッドシートの URL（[A]）。空ならメモを使わない |
@@ -1142,35 +1143,46 @@ customers_abjp ┄┄▶ base_orders          calendar_abjp ──▶ daily
 base の切り出しと UDF に渡す `suffixList` は、同じ 1 つの `suffixes` から作る。
 別々に持つ場所がないので、ズレようがない。
 
-#### データセット名に現れない suffix（`suffix_list_extra`）
+#### データセット名に現れない suffix（`suffix_tail_lengths`）
 
 自動抽出は**データセット名**を見る。だから「データセットは `mart_abjp`（suffix =
 `abjp`）なのに、その中に `v_x_jp` のように地域だけを持つ View がある」という形は
 拾えない。`jp` はどのデータセット名の末尾にも出てこない。
 
+4 文字の suffix が `<系統 2 文字><地域 2 文字>` の組になっているなら、**その後ろ
+2 文字がそのまま地域だけの suffix になる**。取り出した suffix から導出する。
+
 ```sql
-DECLARE suffix_list_extra ARRAY<STRING> DEFAULT ['jp', 'us', 'uk'];
+DECLARE suffix_tail_lengths ARRAY<INT64> DEFAULT [2];
+DECLARE suffix_exclude_list ARRAY<STRING> DEFAULT ['meta'];
 ```
 
-自動抽出はそのままで、この一覧を**足す**だけ。`suffix_list` を明示したときも足す。
+```
+いま             abjp abuk abus cdjp cdus meta
+末尾 2 文字       abjp abuk abus cdjp cdus jp meta ta uk us
+   + meta を除外  abjp abuk abus cdjp cdus jp uk us
+```
 
-**`suffix_pattern` を `r'_([A-Za-z]{2,4})$'` に広げる手は勧めない。** あれは
-データセット名に当たるので、2〜3 文字で終わるデータセットの語尾が片端から
-suffix になる（`ops_meta` → `meta` のように、既定でも既に起きている）。混ざった
-ゴミは**全 View 名**に `ENDS_WITH` で当たるため、`v_batch_ops` のような無関係な
-View の base が `v_batch` に切られる。**base が変わるとメモが黙って外れる**
-（メモは `base` の完全一致で突き合わせている）。エラーは出ない。
+**除外が要る。** 既定の条件では作業用データセット `ops_meta` から `meta` が
+suffix として入っており、末尾 2 文字を足すと `ta` まで増える。混ざったゴミは
+**全 View 名**に `ENDS_WITH` で当たるので、`v_summary_ta` のような無関係な View の
+base が切られる。**base が変わるとメモが黙って外れる**（メモは `base` の完全一致で
+突き合わせている）。エラーは出ない。
 
-| | `{2,4}` に広げる | `suffix_list_extra` |
-|---|---|---|
-| 2 文字が拾える | ✓ | ✓ |
-| 3 文字も勝手に入る | 入る | 入らない |
-| 無関係な View の base が変わる | ありうる | 無い |
-| データセット名に無い suffix | 拾えない | ✓ |
-| 新しい地域が増えたとき | 自動 | 1 行足す |
+`suffix_exclude_list` は**導出の前後どちらにも効く**。元の値を落とせば、そこから
+導出される末尾も出ない（`meta` を除けば `ta` も無い）。
 
-足し忘れは**静かには壊れない**。その suffix を持つ View は「suffix 未認識」として
-単独で並び、確認クエリ 5-3 に出る。実際に使われている一覧は 5-4 で確かめられる。
+> **正規表現ではなく値そのもの**（完全一致）。ここだけ `*_patterns` と流儀が違う
+> のは、suffix が短くて部分一致だと巻き添えが大きいため（`ta` を弾くつもりが
+> `REGEXP_CONTAINS` では `meta` まで消える）。
+
+**`suffix_pattern` を `r'_([A-Za-z]{2,4})$'` に広げても解決しない。** あれは
+データセット名に当たるので、`mart_abjp` からはやはり `abjp` しか出てこない。
+そのうえ 2〜3 文字で終わるデータセットの語尾が片端から suffix になる。
+
+導出し忘れ（新しい地域が増えたなど）は**静かには壊れない**。その suffix を持つ
+View は「suffix 未認識」として単独で並び、確認クエリ 5-3 に出る。実際に使われて
+いる一覧と、それがどこから来たかは 5-4 で確かめられる。
 
 > **長さの違う suffix を混ぜても取り違えは起きない。** suffix に `_` は入らない
 > ので、`v_x_abjp` が `_jp` で終わることはない。1 つの View 名に 2 つの suffix が

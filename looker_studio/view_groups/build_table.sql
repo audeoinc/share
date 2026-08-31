@@ -187,26 +187,33 @@ DECLARE suffix_pattern STRING DEFAULT r'_([A-Za-z]{4})$';
 -- View が suffix を持たないデータセットに置いてある場合など、
 -- データセット名から導けないときだけ並べる。
 DECLARE suffix_list ARRAY<STRING> DEFAULT [];
--- 上の一覧に**足す** suffix。自動抽出は残したまま補える。
+-- 取り出した suffix の**末尾 n 文字も suffix として扱う**長さの一覧。
+-- 空なら何も足さない。[2] なら abjp / abus から jp / us が増える。
 --
--- 用途は「データセット名には現れない suffix」。例えばデータセットが mart_abjp
+-- 用途は「データセット名には現れない suffix」。データセットが mart_abjp
 -- （suffix = abjp）で、その中に v_x_jp のように地域だけを持つ View がある場合、
 -- jp はどのデータセット名の末尾にも出てこないので自動抽出では拾えない。
--- ここに ['jp','us','uk'] と書けば拾えるようになる。
+-- 4 文字の suffix が <系統 2 文字><地域 2 文字> の組になっているなら、
+-- その後ろ 2 文字がそのまま地域だけの suffix になる。
 --
--- **suffix_pattern を r'_([A-Za-z]{2,4})$' のように広げる手もあるが、勧めない。**
--- あれはデータセット名に当たるので、2〜3 文字で終わるデータセットの語尾が
--- 片端から suffix になる（ops_meta → meta のように、いま既に起きている）。
--- 混ざったゴミは全 View 名に ENDS_WITH で当たるため、無関係な View の base が
--- 切られる。base が変わるとメモ（base で突き合わせている）が黙って外れるので、
--- 気づきにくい壊れ方をする。ここに書くぶんには、書いたものしか増えない。
+-- **suffix_pattern を r'_([A-Za-z]{2,4})$' に広げても解決しない。** あれは
+-- データセット名に当たるので、mart_abjp からはやはり abjp しか出てこない。
+-- そのうえ 2〜3 文字で終わるデータセットの語尾が片端から suffix になる。
+DECLARE suffix_tail_lengths ARRAY<INT64> DEFAULT [];
+-- suffix 一覧から落とす値。自動抽出したものにも、末尾から導出したものにも効く。
 --
--- 足し忘れても静かには壊れない。その suffix を持つ View は「suffix 未認識」
--- として単独で並び、確認クエリ 5-3 に出る。
+-- **正規表現ではなく値そのもの**（完全一致）。ここだけ *_patterns と流儀が違う
+-- のは、suffix が短くて部分一致だと巻き添えが大きいため（'ta' を弾くつもりが
+-- REGEXP_CONTAINS では 'meta' まで消える）。
 --
--- suffix に '_' は入らないので、abjp と jp を同時に並べても取り違えは起きない
--- （v_x_abjp が '_jp' で終わることはない）。長さの違う組を混ぜて安全。
-DECLARE suffix_list_extra ARRAY<STRING> DEFAULT [];
+-- 要るのは、suffix のつもりでないデータセット名の語尾が混ざるため。既定の
+-- 条件では作業用データセット ops_meta から meta が suffix として入っており、
+-- 末尾 2 文字を足すと ta まで増える。混ざったゴミは**全 View 名**に
+-- ENDS_WITH で当たるので、v_summary_ta のような無関係な View の base が
+-- 切られる。base が変わるとメモ（base で突き合わせている）が黙って外れる。
+--
+-- 元の値を落とせば、そこから導出される末尾も出ない（meta を除けば ta も無い）。
+DECLARE suffix_exclude_list ARRAY<STRING> DEFAULT [];
 -- UDF に渡す解析オプション（JSON）。1 つ以上のキーを持つオブジェクトにすること。
 -- 指定できるキーは view_group_html.sql の冒頭に一覧がある。
 --   substitutable / equivalentLiterals / suffixAware / includeUnmatched /
@@ -431,9 +438,7 @@ EXECUTE IMMEDIATE rendered_sql INTO target_dataset_count, target_view_count;
 
 ASSERT target_view_count > 0 AS
   '対象の View が 0 件です。@@location / analysis_include_dataset_patterns / analysis_include_object_patterns を確認してください。';
-ASSERT target_dataset_count > 0
-    OR ARRAY_LENGTH(suffix_list) > 0
-    OR ARRAY_LENGTH(suffix_list_extra) > 0 AS
+ASSERT target_dataset_count > 0 OR ARRAY_LENGTH(suffix_list) > 0 AS
   'suffix を持つデータセットが 0 件です。suffix_pattern / analysis_include_dataset_patterns を確認するか、suffix_list に直接並べてください。';
 
 
@@ -553,12 +558,12 @@ OPTIONS (
 )
 AS
 WITH
--- suffix 一覧。suffix_list が空なら、対象データセットの名前から切り出す。
--- suffix_list_extra はどちらの場合も末尾に足す（データセット名に現れない
--- suffix を補うため。例: mart_abjp の中の v_x_jp に対する 'jp'）。
-suffixes AS (
+-- suffix 一覧の素。suffix_list が空なら、対象データセットの名前から切り出す。
+-- 除外はここでも効かせる。落とした値からは末尾も導出されない
+-- （meta を除けば ta も出ない）。
+suffix_base AS (
   SELECT DISTINCT suffix
-  FROM UNNEST(ARRAY_CONCAT(
+  FROM UNNEST(
     IF(ARRAY_LENGTH(@suffix_list) > 0,
        @suffix_list,
        ARRAY(
@@ -566,10 +571,25 @@ suffixes AS (
          FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.SCHEMATA`
          WHERE REGEXP_CONTAINS(schema_name, r'__SUFFIX_PATTERN__')
            AND (__SCHEMA_COND__)
-       )),
-    @suffix_list_extra
-  )) AS suffix
+       ))
+  ) AS suffix
   WHERE suffix IS NOT NULL AND suffix != ''
+    AND suffix NOT IN UNNEST(@suffix_exclude_list)
+),
+-- 実際に使う suffix 一覧。素のものに、その末尾 n 文字を足す。
+-- データセット名に現れない suffix を拾うため（mart_abjp の中の v_x_jp → 'jp'）。
+-- suffix に '_' は入らないので、abjp と jp が同じ一覧に並んでも 1 つの View 名に
+-- 両方が当たることは無い（v_x_abjp は '_jp' では終わらない）。
+suffixes AS (
+  SELECT DISTINCT suffix
+  FROM (
+    SELECT suffix FROM suffix_base
+    UNION ALL
+    SELECT SUBSTR(b.suffix, -n) AS suffix
+    FROM suffix_base AS b, UNNEST(@suffix_tail_lengths) AS n
+    WHERE n > 0 AND LENGTH(b.suffix) > n
+  )
+  WHERE suffix NOT IN UNNEST(@suffix_exclude_list)
 ),
 -- UDF に渡す設定。suffixList だけ実行時に決まるので、analyze_options に足す。
 opts AS (
@@ -735,7 +755,9 @@ EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_te
 ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
   '生成の SQL に未展開のプレースホルダが残っています。';
 EXECUTE IMMEDIATE rendered_sql
-USING suffix_list AS suffix_list, suffix_list_extra AS suffix_list_extra,
+USING suffix_list AS suffix_list,
+      suffix_tail_lengths AS suffix_tail_lengths,
+      suffix_exclude_list AS suffix_exclude_list,
       analyze_options AS analyze_options;
 
 
@@ -895,27 +917,51 @@ ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
 EXECUTE IMMEDIATE rendered_sql;
 
 -- 5-4 実際に使う suffix の一覧
---     データセット名から自動抽出したものと、suffix_list_extra で足したものを
---     並べて出す。「jp が suffix になっているか」はここで確かめる。
+--     データセット名から取り出したものと、suffix_tail_lengths で末尾から
+--     導出したものを並べて出す。「jp が suffix になっているか」はここで確かめる。
+--     除外した値も excluded = TRUE で出す（消えた理由が分かるように）。
+--     suffix_list を明示している場合は、ここには出ない（一覧がそのまま使われる）。
 SET sql_template = """
+WITH
+src AS (
+  SELECT
+    REGEXP_EXTRACT(schema_name, r'__SUFFIX_PATTERN__') AS suffix,
+    schema_name
+  FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.SCHEMATA`
+  WHERE REGEXP_CONTAINS(schema_name, r'__SUFFIX_PATTERN__') AND (__SCHEMA_COND__)
+),
+listed AS (
+  SELECT
+    suffix                                             AS suffix,
+    'データセット名から'                                 AS suffix_origin,
+    STRING_AGG(schema_name, ', ' ORDER BY schema_name) AS detail
+  FROM src
+  GROUP BY suffix
+  UNION ALL
+  SELECT
+    SUBSTR(s.suffix, -n)                             AS suffix,
+    FORMAT('末尾 %d 文字', n)                          AS suffix_origin,
+    STRING_AGG(DISTINCT s.suffix, ', ' ORDER BY s.suffix) AS detail
+  FROM src AS s, UNNEST(@suffix_tail_lengths) AS n
+  WHERE n > 0 AND LENGTH(s.suffix) > n
+    AND s.suffix NOT IN UNNEST(@suffix_exclude_list)
+  GROUP BY suffix, suffix_origin
+)
 SELECT
-  '5-4 実際に使う suffix'              AS check_name,
-  REGEXP_EXTRACT(schema_name, r'__SUFFIX_PATTERN__')  AS effective_suffix,
-  COUNT(*)                                            AS dataset_count,
-  STRING_AGG(schema_name, ', ' ORDER BY schema_name)  AS dataset_names
-FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.SCHEMATA`
-WHERE REGEXP_CONTAINS(schema_name, r'__SUFFIX_PATTERN__') AND (__SCHEMA_COND__)
-GROUP BY check_name, effective_suffix
-UNION ALL
--- データセット名に現れない suffix（例: mart_abjp の中の v_x_jp に対する 'jp'）
-SELECT '5-4 実際に使う suffix', x, 0, '(suffix_list_extra で追加)'
-FROM UNNEST(@suffix_list_extra) AS x
-ORDER BY effective_suffix
+  '5-4 実際に使う suffix'                  AS check_name,
+  suffix                                  AS effective_suffix,
+  suffix_origin                           AS suffix_origin,
+  detail                                  AS derived_from,
+  suffix IN UNNEST(@suffix_exclude_list)  AS excluded
+FROM listed
+ORDER BY excluded, effective_suffix
 """;
 EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
 ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
   '5-4 の SQL に未展開のプレースホルダが残っています。';
-EXECUTE IMMEDIATE rendered_sql USING suffix_list_extra AS suffix_list_extra;
+EXECUTE IMMEDIATE rendered_sql
+USING suffix_tail_lengths AS suffix_tail_lengths,
+      suffix_exclude_list AS suffix_exclude_list;
 
 -- 5-5 データセット別の対象 View 数
 SET sql_template = """
