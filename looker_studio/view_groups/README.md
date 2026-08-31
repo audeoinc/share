@@ -1172,6 +1172,31 @@ suffix として入っており、末尾 2 文字を足すと `ta` まで増え�
 base が切られる。**base が変わるとメモが黙って外れる**（メモは `base` の完全一致で
 突き合わせている）。エラーは出ない。
 
+**ただし、まず `analysis_exclude_dataset_patterns` を検討すること。** 除外の道具は
+2 つあり、役割が違う。
+
+| | 効く範囲 |
+|---|---|
+| `analysis_exclude_dataset_patterns` | そのデータセットを**丸ごと**対象外にする。名前から suffix を取り出さず（末尾の導出も起きず）、中の View も集めない |
+| `suffix_exclude_list` | 出来上がった suffix 一覧から値を落とすだけ。View の集め方は変わらない |
+
+```
+除外なし                        suffix: abjp cdjp ghkr jp kr meta ta
+                               View  : mart_abjp.v_sales_abjp  mart_abjp.v_sales_jp
+                                       mart_ghkr.v_sales_ghkr  ops_meta.viewlgc_vw_t_diff
+
+exclude_dataset = [^mart_ghkr$] suffix: abjp cdjp jp meta ta
+                               View  : mart_abjp.v_sales_abjp  mart_abjp.v_sales_jp
+                                       ops_meta.viewlgc_vw_t_diff
+
+  + [^ops_meta$]               suffix: abjp cdjp jp
+                               View  : mart_abjp.v_sales_abjp  mart_abjp.v_sales_jp
+```
+
+作業用データセットはデータセット側で落とすのが筋（`meta` も `ta` も出なくなり、
+`viewlgc` 自身の View も対象から消える）。`suffix_exclude_list` が要るのは、
+**解析対象にはしたいが名前の語尾が suffix ではない**データセットがある場合だけ。
+
 **除外が効くのは出来上がった一覧に対してだけ**（導出のあと 1 回）。落とした値
 からの導出は止まらないので、`ghkr` を落としても `kr` は残る — 「4 文字のほうは
 要らないが末尾は要る」が書ける。裏返しに、`meta` と `ta` は両方並べる必要がある

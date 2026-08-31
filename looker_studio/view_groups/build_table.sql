@@ -202,6 +202,20 @@ DECLARE suffix_list ARRAY<STRING> DEFAULT [];
 DECLARE suffix_tail_lengths ARRAY<INT64> DEFAULT [];
 -- suffix 一覧から落とす値。
 --
+-- **まず analysis_exclude_dataset_patterns を検討すること。** データセットごと
+-- 対象外にすれば、その名前から suffix は取り出されず（末尾の導出も起きず）、
+-- 中の View も集められない。「データセットを除外したらその中のオブジェクトも
+-- 全部除外」が素直に成り立つ。作業用データセット（既定の条件だと ops_meta が
+-- 入ってしまい meta / ta が増える）はこちらで落とすのが筋。
+--
+--   analysis_exclude_dataset_patterns = [r'^ops_meta$']
+--     → suffix から meta と ta が消え、viewlgc 自身の View も対象外になる
+--
+-- こちらが要るのは、**解析対象にはしたいが名前の語尾が suffix ではない**
+-- データセットがある場合だけ。混ざったゴミは全 View 名に ENDS_WITH で当たるので、
+-- v_summary_ta のような無関係な View の base が切られる。base が変わると
+-- メモ（base で突き合わせている）が黙って外れる。
+--
 -- **効くのは出来上がった一覧に対してだけ**（導出のあと）。落とした値からの
 -- 導出は止まらないので、「4 文字のほうは要らないが末尾は要る」が書ける。
 --   ghkr を落とす → 一覧から ghkr だけが消え、kr は残る
@@ -213,12 +227,6 @@ DECLARE suffix_tail_lengths ARRAY<INT64> DEFAULT [];
 -- **正規表現ではなく値そのもの**（完全一致）。ここだけ *_patterns と流儀が違う
 -- のは、suffix が短くて部分一致だと巻き添えが大きいため（'ta' を弾くつもりが
 -- REGEXP_CONTAINS では 'meta' まで消える）。
---
--- 要るのは、suffix のつもりでないデータセット名の語尾が混ざるため。既定の
--- 条件では作業用データセット ops_meta から meta が suffix として入っており、
--- 末尾 2 文字を足すと ta まで増える。混ざったゴミは**全 View 名**に
--- ENDS_WITH で当たるので、v_summary_ta のような無関係な View の base が
--- 切られる。base が変わるとメモ（base で突き合わせている）が黙って外れる。
 DECLARE suffix_exclude_list ARRAY<STRING> DEFAULT [];
 -- UDF に渡す解析オプション（JSON）。1 つ以上のキーを持つオブジェクトにすること。
 -- 指定できるキーは view_group_html.sql の冒頭に一覧がある。
@@ -925,13 +933,16 @@ EXECUTE IMMEDIATE rendered_sql;
 
 -- 5-3b 名前が重複する View（複数のデータセットに同じ名前がある）
 --      **この作りは View 名がリージョン内で一意である前提。** base の切り出しは
---      PARTITION BY view_name で 1 本だけ残すので、重複していると残りが黙って
---      消える（カラム定義も table_name で畳むので混ざる）。
+--      PARTITION BY view_name で 1 本だけ残すので、重複していたらどれか 1 本
+--      だけを採る（カラム定義も table_name で畳むので混ざる）。
 --
 --      4 文字 suffix（_abjp / _cdjp）なら名前にデータセットの区別が入るので
 --      衝突しないが、suffix_tail_lengths で 2 文字（_jp）を足すと
 --      mart_abjp.v_sales_jp と mart_cdjp.v_sales_jp が同じ名前になり得る。
---      **0 件でなければ、その View は正しく扱えていない。**
+--
+--      **同名 View は作らない運用なら 0 件のはずで、これは見張り。**
+--      1 本だけ採る挙動はその前提のうえで許容している（0 件でない状態が
+--      続くなら、データセットまで含めた識別に作りを変える必要がある）。
 SET sql_template = """
 SELECT
   '5-3b 名前が重複する View'           AS check_name,
