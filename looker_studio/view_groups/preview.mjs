@@ -852,6 +852,27 @@ const checks = [
   ['カラム定義が取れなければ案内を出す（表は出さない）',
     columnCases[1].html.includes('カラム定義を取得できませんでした') &&
     !columnCases[1].html.includes('vg-ctable')],
+  // 要素の重要度どおりの大小になっているか。同じ大きさで並べると、どれを先に
+  // 読めばよいかが字面から分からなくなる。数字を直すときはここも合わせる。
+  ['文字の大きさが重要度の順になっている（型 > 列名 > モード）', (() => {
+    const css = Co.columnsCss();
+    const size = (cls) => {
+      const rule = css.split('\n').find((r) => r.indexOf('.' + cls + '{') === 0);
+      if (!rule) return null;
+      const m = rule.match(/font(?:-size)?:\s*(\d+)px/);
+      return m ? Number(m[1]) : null;
+    };
+    const type = size('vg-ctable');      // セルの本体（型）は表の地の大きさ
+    const name = size('vg-cname');
+    const head = size('vg-chead');
+    const desc = size('vg-cdesc');
+    const meta = size('vg-cmeta');
+    const sub = size('vg-cdescsub');
+    const who = size('vg-cdescwho');
+    return type === 12 && name === 11 && head === 11 && desc === 11 &&
+      meta === 10 && sub === 10 && who === 10 &&
+      type > name && name > meta;
+  })()],
   ['カラム定義の CSS は columns.js 側にある',
     Co.columnsCss().includes('.vg-ctable') && !R.chromeCss().includes('.vg-ctable')],
   // SQL タブ。ロジック差分が出すのはパラメータ化した SQL なので、素のテキストを

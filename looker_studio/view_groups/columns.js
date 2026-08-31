@@ -15,8 +15,8 @@
  * 出すのではなく、グループの中で食い違ったら必ず印を付ける。
  *
  * 出すのは型・モード（NULLABLE / REQUIRED / REPEATED。BigQuery のコンソールと
- * 同じ表記）・説明。**並び順（ordinal）は
- * 出さない。** 行がその順に並んでいるので番号を添えても読めるものが増えず、
+ * 同じ表記）・説明。**並び順（ordinal）は出さない。**
+ * 行がその順に並んでいるので番号を添えても読めるものが増えず、
  * 列を 1 本足すと以降がまとめてずれて目障りになるだけ。グループ内で並び順が
  * 食い違ったときだけ ⚠ の内訳に出す（そこは本物の差なので黙らせない）。
  *
@@ -498,6 +498,13 @@ function columnsCss() {
     `.vg-ctablewrap{width:100%}`,
     // ★ 表の最大幅。チャートが横に広いとセルが間延びして読みづらいので頭を打つ。
     //   広げたいときはこの 1000px を変える。
+    //
+    // 文字の大きさは 3 段。**いちばん見たいのは型**なので、そこだけ地の大きさで
+    // 出し、ほかは 1 段ずつ落とす。同じ大きさで並べると、どれを先に読めばよいかが
+    // 字面から分からなくなる。
+    //   12px  型（セルの本体）
+    //   11px  列名 / グループ見出し / 説明（日本語論理名）
+    //   10px  モード / 説明の従（英語論理名・その他のキー）/ 内訳の見出し
     `.vg-ctable{border-collapse:collapse;font-size:12px;` +
       `width:100%;max-width:1000px;table-layout:fixed}`,
     // 列名の行はスクロールしても残す。基準になるのはカードのスクロール箱
@@ -506,18 +513,19 @@ function columnsCss() {
     // 位置が合っているかを見ている。
     `.vg-chead{position:sticky;top:var(--vg-bar);z-index:1;padding:6px 12px;` +
       `border:1px solid #D0D7DE;background:#F6F8FA;color:#24292F;` +
-      `font-weight:600;text-align:left;overflow-wrap:anywhere}`,
+      `font-weight:600;font-size:11px;text-align:left;overflow-wrap:anywhere}`,
+    // 列名は型より 1 段小さいが、太字と等幅で十分に立つ。
     `.vg-cname{padding:5px 12px;border:1px solid #D0D7DE;text-align:left;` +
-      `vertical-align:top;font-weight:600;color:#24292F;` +
+      `vertical-align:top;font-weight:600;font-size:11px;color:#24292F;` +
       `overflow-wrap:anywhere;word-break:break-all;` +
       `font-family:ui-monospace,SFMono-Regular,Consolas,monospace}`,
     // 列の説明。description が JSON なら日本語論理名を主、英語論理名と
     // 残りのキーを従（薄い色）で下に並べる。素のテキストなら 1 行だけ。
     `.vg-cdesc{margin:2px 0 0;font:11px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;` +
       `font-weight:400;color:#57606A}`,
-    `.vg-cdescsub{color:#8C959F}`,
+    `.vg-cdescsub{font-size:10px;color:#8C959F}`,
     // グループの中で説明が割れているときに、どの View のものかを示す見出し。
-    `.vg-cdescwho{margin:4px 0 0;font:11px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;` +
+    `.vg-cdescwho{margin:4px 0 0;font:10px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;` +
       `font-weight:600;color:#8C959F}`,
     // STRUCT の中の項目。深さぶん字下げして、親との関係を字面で見せる。
     // 3 段より深いものは 3 段目に揃える（それ以上は横幅が持たない）。
@@ -531,9 +539,9 @@ function columnsCss() {
     `.vg-ccell{padding:5px 12px;border:1px solid #D0D7DE;vertical-align:top;` +
       `color:#24292F;overflow-wrap:anywhere;word-break:break-all;` +
       `font-family:ui-monospace,SFMono-Regular,Consolas,monospace}`,
-    // 並び順と NULL 制約。型より弱い情報なので、小さく下に添える。
-    `.vg-cmeta{margin:2px 0 0;font:11px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;` +
-      `color:#57606A}`,
+    // モード。型より弱い情報なので、いちばん小さくして下に添える。
+    `.vg-cmeta{margin:2px 0 0;font:10px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;` +
+      `letter-spacing:.02em;color:#8C959F}`,
     // 基準と違う型。差分の「追加」側と同じ地色で、目が同じ意味に慣れるようにする。
     `.vg-cdiff{background:#dfe7d2}`,
     `.vg-cnone{color:#8C959F;background:#FAFAFA}`,
