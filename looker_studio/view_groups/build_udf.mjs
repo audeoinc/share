@@ -828,7 +828,7 @@ DECLARE udf_name_suffix STRING DEFAULT '';
 --     一致しなければ '' になり、残った '{project_token}' は下の ASSERT で落ちる。
 --   system_name
 --     このシステムを表す名前。関数もテーブルもビューも、この名前と '_' が
---     先頭に入る（既定なら viewlgc_analyze / viewlgc_t_diff_hist）。
+--     先頭に入る（既定なら viewlgc_analyze / viewlgc_t_diff）。
 --     同じプロジェクトに別のシステムを同居させたときに、どのオブジェクトが
 --     どのシステムのものかを名前だけで見分けるためのもの。
 --     **build_table.sql の同名の変数と必ず同じ値にすること。**
@@ -1124,10 +1124,9 @@ AS (%s)
 -- 置き換える目印:
 --   __TARGET_PROJECT__     読み取り対象のプロジェクト
 --   __JOB_REGION__         region- を除いたロケーション
---   __T_DIFF_HIST__        生成結果のテーブル（project.dataset.table）
+--   __T_DIFF__             生成結果のテーブル（project.dataset.table）
 --   __T_BASE_NOTE__        base ごとのメモの外部テーブル（同上）
 --   __V_DIFF__             メモを差し込むビュー。レポートはこれを読む
---   __V_DIFF_BY_REF__      同じ中身の別名（データソースの張り替えを避けるため）
 --   __UDF_ANALYZE__        analyze 関数（project.dataset.function）
 --   __UDF_RENDER__         render 関数（同上）
 --   __UDF_PAGE__           page 関数（同上）
@@ -1154,9 +1153,8 @@ CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
   target_project_id STRING,
   job_region STRING,
   objects STRUCT<
-    diff_hist         STRING,
-    diff_latest       STRING,
-    diff_by_ref       STRING,
+    diff_table        STRING,
+    diff_view         STRING,
     base_note         STRING,
     analyze_function  STRING,
     render_function   STRING,
@@ -1195,18 +1193,15 @@ AS (
   REPLACE(
   REPLACE(
   REPLACE(
-  REPLACE(
     sql_template,
     '__TARGET_PROJECT__', target_project_id),
     '__JOB_REGION__', job_region),
-    '__T_DIFF_HIST__',
-      work_project_id || '.' || work_dataset || '.' || objects.diff_hist),
+    '__T_DIFF__',
+      work_project_id || '.' || work_dataset || '.' || objects.diff_table),
     '__T_BASE_NOTE__',
       work_project_id || '.' || work_dataset || '.' || objects.base_note),
-    '__V_DIFF_BY_REF__',
-      work_project_id || '.' || work_dataset || '.' || objects.diff_by_ref),
     '__V_DIFF__',
-      work_project_id || '.' || work_dataset || '.' || objects.diff_latest),
+      work_project_id || '.' || work_dataset || '.' || objects.diff_view),
     '__UDF_ANALYZE__',
       udf_project_id || '.' || udf_dataset || '.' || objects.analyze_function),
     '__UDF_RENDER__',

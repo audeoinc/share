@@ -148,7 +148,7 @@ add('IF … RAISE ではなく ASSERT を使っている',
 // 落ちる。実行するまで分からないので、ここで並びまで突き合わせる。
 {
   const m = table.match(
-    /CREATE OR REPLACE TABLE `__T_DIFF_HIST__`\n\(\n([\s\S]*?)\n\)\nCLUSTER BY/);
+    /CREATE OR REPLACE TABLE `__T_DIFF__`\n\(\n([\s\S]*?)\n\)\nCLUSTER BY/);
   const declared = m
     ? m[1].split('\n').map((l) => (l.trim().match(/^([a-z_][a-z0-9_]*)\s/) || [])[1])
       .filter(Boolean)
@@ -188,16 +188,16 @@ add('IF … RAISE ではなく ASSERT を使っている',
 // 戻すと、その隙間にレポートを開いた人には何も出ない。以前はビューが
 // MAX(snapshot_date) を採っていたので隙間があっても前日分が出ていた。
 add('生成はテーブルごと差し替える（読み手に空を見せない）',
-  /CREATE OR REPLACE TABLE `__T_DIFF_HIST__`[\s\S]*?\nAS\nWITH/.test(table) &&
-  !/DELETE FROM `__T_DIFF_HIST__`/.test(table) &&
-  !/TRUNCATE TABLE `__T_DIFF_HIST__`/.test(table) &&
-  !/INSERT INTO `__T_DIFF_HIST__`/.test(table));
+  /CREATE OR REPLACE TABLE `__T_DIFF__`[\s\S]*?\nAS\nWITH/.test(table) &&
+  !/DELETE FROM `__T_DIFF__`/.test(table) &&
+  !/TRUNCATE TABLE `__T_DIFF__`/.test(table) &&
+  !/INSERT INTO `__T_DIFF__`/.test(table));
 
 // --- 5d. ビューがメモを差し込んでいるか --------------------------------
 // 「最新だけを採る」仕事が無くなってもビューは要る。テーブルを直接読ませると
 // メモのタブが空のまま（目印が置き換わらない）になる。
 add('ビューはテーブルを直に読ませず、メモを差し込む',
-  (table.match(/CREATE OR REPLACE VIEW/g) || []).length === 2 &&
+  (table.match(/CREATE OR REPLACE VIEW/g) || []).length === 1 &&
   !/snapshot_date = \(\n\s*SELECT MAX\(snapshot_date\)/.test(table));
 
 // --- 6. 両ファイルで一致させる必要がある値 -----------------------------
@@ -223,9 +223,9 @@ for (const base of ['analyze', 'render', 'page', 'markdown', 'group_css',
 {
   const m = chrome.match(/^const NOTE_MARK = '([^']+)';$/m);
   const mark = m ? m[1] : null;
-  // ビュー 2 本ぶん。片方だけ直したときに気づけるよう数まで見る。
+  // ビューは 1 本。目印が食い違うと置換が起きず、メモ タブが黙って空になる。
   const used = mark ? table.split(`REPLACE(diff_html, '${mark}'`).length - 1 : 0;
-  add('メモの目印が chrome.js とビューで同じ', mark !== null && used === 2,
+  add('メモの目印が chrome.js とビューで同じ', mark !== null && used === 1,
     `chrome.js=${mark || 'なし'} / build_table.sql での使用 ${used} 回`);
 }
 

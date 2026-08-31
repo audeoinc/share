@@ -659,10 +659,9 @@ DECLARE target_project_id STRING DEFAULT NULL;
 
 | SET する変数 | 作られるもの | 既定でできる名前 |
 |---|---|---|
-| `table_diff_hist` | 日次スナップショットを積むテーブル | `viewlgc_t_diff_hist` |
+| `table_diff` | 生成結果のテーブル（最新の 1 世代だけ） | `viewlgc_t_diff` |
 | `table_base_note` | base ごとのメモ（スプレッドシートの外部テーブル） | `viewlgc_m_base_note` |
-| `view_diff` | 最新スナップショット。基準 = 先頭グループの 1 行だけ | `viewlgc_vw_t_diff` |
-| `view_diff_by_ref` | 同上。基準ごとに 1 行 | `viewlgc_vw_t_diff_by_ref` |
+| `view_diff` | レポートが読むビュー。メモを差し込む | `viewlgc_vw_t_diff` |
 | `udf_analyze_function_name` | View 群を解析して JSON を返す UDF | `viewlgc_analyze` |
 | `udf_render_function_name` | その JSON を比較 HTML にする UDF | `viewlgc_render` |
 | `udf_page_function_name` | 参照関係を作り差分と束ねる UDF | `viewlgc_page` |
@@ -683,9 +682,11 @@ DECLARE target_project_id STRING DEFAULT NULL;
 > 食い違うと、作った関数を `build_table.sql` が見つけられない。
 > `node check_sql.mjs` が組み立ての式が同じかどうかまで見る。
 
-**テーブルの `_hist` は名残。** 日次スナップショットを積んでいた頃の名前で、
-いまは最新の 1 世代しか持たない。名前と中身が合っていないが、変えると既存の
-テーブルが手元に残る（手で消す手間が要る）ので据え置いてある。
+テーブルとビューは基本名が同じ `diff` で、`vw_` の有無だけで見分ける。
+
+> 以前はテーブルだけ `_hist` が付いていた（日次スナップショットを積んでいた頃の
+> 名残）。履歴をやめたときに落とした。名前を変えても古いオブジェクトは残るので、
+> `build_table.sql` のセクション 1 に `DROP` の手順を書き添えてある。
 
 `build_table.sql` の設定は次のとおり。ここが唯一の置き場所で、書き換えたら
 そのまま実行する。生成の手順はない。
@@ -748,7 +749,7 @@ DECLARE analysis_exclude_object_patterns ARRAY<STRING> DEFAULT [r'_tmp$', r'_bk$
 
 ```sql
 SET sql_template = """
-CREATE OR REPLACE TABLE `__T_DIFF_HIST__` … AS SELECT …
+CREATE OR REPLACE TABLE `__T_DIFF__` … AS SELECT …
 """;
 EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
 ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS '… に未展開のプレースホルダがあります。';
@@ -866,13 +867,12 @@ Looker の操作のたびに UDF を回すのは重いので、スケジュー�
 `INFORMATION_SCHEMA` の中身は View をデプロイしたときしか変わらない。
 
 ```
-viewlgc_t_diff_hist  CLUSTER BY base（最新の 1 世代だけ）
+viewlgc_t_diff  CLUSTER BY base（最新の 1 世代だけ）
   snapshot_date / base / ref_index / ref_label
   view_count / group_count / has_multiple
   group_labels / group_sizes / suffixes / unmatched_count / diff_html
 
-viewlgc_vw_t_diff(_by_ref)  上に加えて
-  group_count_once / view_count_once / unmatched_count_once
+viewlgc_vw_t_diff  上に加えて
   has_note / note_md / note_html / note_updated_at / note_updated_by
 ```
 
@@ -886,7 +886,7 @@ Looker Studio はビューを読むだけ。`diff_html` を Templated Record に
 **テーブルごと差し替える形に変えた**。
 
 ```sql
-CREATE OR REPLACE TABLE `__T_DIFF_HIST__` ( … ) CLUSTER BY base OPTIONS ( … )
+CREATE OR REPLACE TABLE `__T_DIFF__` ( … ) CLUSTER BY base OPTIONS ( … )
 AS WITH … SELECT …
 ```
 
@@ -915,9 +915,9 @@ REPLACE(diff_html, '<!--VG_NOTE-->', note_html) AS diff_html
 （目印がそのまま残る）。メモを事前生成に混ぜないのは、シートを直した内容が次の
 日次実行を待たずに出るようにするため。
 
-ビューが 2 本あるのは、レポートのデータソースがどちらを指しているか分からない
-ため。`_by_ref` は基準ごとに行を作っていた頃の名前で、中身は同じ。片方だけ
-消すと、そちらを指していた場合にレポートが壊れる。
+ビューは 1 本だけ。以前は基準ごとに行を作っていた頃の名前
+（`viewlgc_vw_t_diff_by_ref`）も同じ中身で作っていたが、レポートのデータソースが
+`viewlgc_vw_t_diff` を読んでいることが分かったので消した。
 
 ### 基準はカードの中で選ぶ
 
@@ -1256,7 +1256,7 @@ base ごとに添える。元が Confluence の文章なので、見出し・表
 スプレッドシート（1 base = 1 行）
   └ Drive
       └ viewlgc_m_base_note（外部テーブル・列は全部 STRING）
-          └ viewlgc_vw_t_diff / _by_ref が base で LEFT JOIN
+          └ viewlgc_vw_t_diff が base で LEFT JOIN
               └ note_html = viewlgc_markdown(note_md)
 ```
 
@@ -1388,8 +1388,6 @@ viewlgc_page が作る（日次）        ビューが毎回やる
 
 > **`ref_label` のコントロールは外してよい。** 基準がカードの中に入ったので、
 > 行は base ごとに 1 本しかなく、このプルダウンには値が 1 つしか出てこない。
-> `viewlgc_vw_t_diff_by_ref` は `viewlgc_vw_t_diff` と同じ中身になっているので、
-> データソースを張り替えずにコントロールだけ外せばよい。
 メモはカードのいちばん左のタブ（`note`）に出るので、追加のチャートは要らない。本文は
 `note_preview.html` をブラウザで開いて下書きし、できた Markdown をシートの
 `note_md` に貼る。メモだけを単独で置きたいときのために、`note_html`

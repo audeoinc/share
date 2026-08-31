@@ -29,10 +29,9 @@
 -- プレースホルダ（展開は viewlgc_render_dynamic_sql が行う）:
 --   __TARGET_PROJECT__     読み取り対象のプロジェクト
 --   __JOB_REGION__         region- を除いたロケーション
---   __T_DIFF_HIST__        生成結果のテーブル（project.dataset.table）
+--   __T_DIFF__             生成結果のテーブル（project.dataset.table）
 --   __T_BASE_NOTE__        base ごとのメモの外部テーブル（同上）
 --   __V_DIFF__             メモを差し込むビュー。レポートはこれを読む
---   __V_DIFF_BY_REF__      同じ中身の別名（データソースの張り替えを避けるため）
 --   __UDF_ANALYZE__        analyze 関数（project.dataset.function）
 --   __UDF_RENDER__         render 関数（同上）
 --   __UDF_PAGE__           参照関係を作り差分と束ねる関数（同上）
@@ -114,7 +113,7 @@ DECLARE note_sheet_range STRING DEFAULT 'notes!A:E';
 --     下の ASSERT で落ちる。view_group_html.sql と合わせること。
 --   system_name
 --     このシステムを表す名前。テーブルもビューも関数も、この名前と '_' が
---     先頭に入る（既定なら viewlgc_t_diff_hist / viewlgc_analyze）。
+--     先頭に入る（既定なら viewlgc_t_diff / viewlgc_analyze）。
 --     同じプロジェクトに別のシステムを同居させたときに、どのオブジェクトが
 --     どのシステムのものかを名前だけで見分けるためのもの。
 --     環境ではなくシステムを表すので、prefix / suffix とは別に持つ。
@@ -129,7 +128,7 @@ DECLARE note_sheet_range STRING DEFAULT 'notes!A:E';
 --     と組み立てる。区分は 'm_'（master）/ 't_'（transaction）でリテラル。
 --     環境ごとに変わるのは prefix と suffix だけなので、変数はこの 2 つ。
 --     区切りの '_' は値に含めて書く。
---     例: prefix='ope_' / suffix='_tky' で ope_viewlgc_t_diff_hist_tky。
+--     例: prefix='ope_' / suffix='_tky' で ope_viewlgc_t_diff_tky。
 --     使える文字は英数字と '_' と '-'（参照はすべてバッククォート引用なので
 --     '-tky' のようなハイフンも安全）。データセット名と UDF 名は '-' 不可。
 --   note_sheet_url / note_sheet_range
@@ -219,10 +218,9 @@ DECLARE project_token      STRING;
 -- 作るオブジェクトの物理名（下の SET で組み立てる）。データセット名は含まない。
 -- オブジェクトが増えたらここに 1 行足し、SET と本文の __…__ を対で増やし、
 -- viewlgc_render_dynamic_sql にも置換を 1 段足す。
-DECLARE table_diff_hist  STRING;  -- 生成結果のテーブル（最新の 1 世代だけ）
-DECLARE table_base_note  STRING;  -- base ごとのメモ（スプレッドシートの外部テーブル）
-DECLARE view_diff        STRING;  -- 最新スナップショット。基準 = 先頭グループの 1 行だけ
-DECLARE view_diff_by_ref STRING;  -- 同上。基準ごとに 1 行（レポートで基準を選ぶ用）
+DECLARE table_diff      STRING;  -- 生成結果のテーブル（最新の 1 世代だけ）
+DECLARE table_base_note STRING;  -- base ごとのメモ（スプレッドシートの外部テーブル）
+DECLARE view_diff       STRING;  -- レポートが読むビュー。メモを差し込む
 
 -- view_group_html.sql が作った関数名。同じ規則で組み立てて突き合わせる。
 -- 解析と描画が別の UDF なのは、インラインのコード ブロブが 1 個あたり 32 KB
@@ -280,28 +278,22 @@ ASSERT REGEXP_CONTAINS(udf_dataset, r'^[A-Za-z0-9_]+$') AS
 -- テーブル: prefix + system_name + '_' + 区分 + 基本名 + suffix
 -- ビュー  : prefix + system_name + '_' + 'vw_' + 区分 + 基本名 + suffix
 -- 区分 't_' は transaction（'m_' は master）。
--- テーブルの基本名の _hist は、日次スナップショットを積んでいた頃の名残。
--- いまは最新の 1 世代しか持たないので名前と中身が合っていないが、
--- 変えると既存のテーブルが残る（手で消す手間が要る）ので据え置いてある。
+-- テーブルとビューは基本名が同じ 'diff' で、'vw_' の有無だけで見分ける。
 ASSERT REGEXP_CONTAINS(system_name, r'^[A-Za-z0-9_]+$') AS
   'system_name は英数字と _ だけにしてください（ルーチン名に - は使えません）。';
-SET table_diff_hist =
-  table_name_prefix || system_name || '_' || 't_' || 'diff_hist' || table_name_suffix;
+SET table_diff =
+  table_name_prefix || system_name || '_' || 't_' || 'diff' || table_name_suffix;
 -- メモは View のデプロイでは変わらない台帳なので 'm_'（master）。
 SET table_base_note =
   table_name_prefix || system_name || '_' || 'm_' || 'base_note' || table_name_suffix;
 SET view_diff =
   table_name_prefix || system_name || '_' || 'vw_' || 't_' || 'diff' || table_name_suffix;
-SET view_diff_by_ref =
-  table_name_prefix || system_name || '_' || 'vw_' || 't_' || 'diff_by_ref' || table_name_suffix;
-ASSERT REGEXP_CONTAINS(table_diff_hist, r'^[A-Za-z0-9_-]+$') AS
-  'table_diff_hist の名前が不正です。';
+ASSERT REGEXP_CONTAINS(table_diff, r'^[A-Za-z0-9_-]+$') AS
+  'table_diff の名前が不正です。';
 ASSERT REGEXP_CONTAINS(table_base_note, r'^[A-Za-z0-9_-]+$') AS
   'table_base_note の名前が不正です。';
 ASSERT REGEXP_CONTAINS(view_diff, r'^[A-Za-z0-9_-]+$') AS
   'view_diff の名前が不正です。';
-ASSERT REGEXP_CONTAINS(view_diff_by_ref, r'^[A-Za-z0-9_-]+$') AS
-  'view_diff_by_ref の名前が不正です。';
 
 -- UDF: udf_prefix + system_name + '_' + 基本名 + udf_suffix
 --      （view_group_html.sql と同じ。system_name も同じ値でなければ見つからない）
@@ -376,11 +368,11 @@ SET view_name_condition = CONCAT(
 -- 固定の設定はここで焼き込み、テンプレートだけを @sql_template で渡す。
 -- 値は %T で埋める。条件文には引用符が入るので、%s だと壊れる。
 SET render_call_sql = FORMAT(
-  """SELECT `%s.%s.%s`(@sql_template, %T, %T, %T, %T, %T, %T, STRUCT(%T AS diff_hist, %T AS diff_latest, %T AS diff_by_ref, %T AS base_note, %T AS analyze_function, %T AS render_function, %T AS page_function, %T AS markdown_function, %T AS css_function), STRUCT(%T AS time_zone, %T AS suffix_pattern, %T AS note_sheet_url, %T AS note_sheet_range), STRUCT(%T AS schema_condition, %T AS view_dataset_condition, %T AS view_name_condition))""",
+  """SELECT `%s.%s.%s`(@sql_template, %T, %T, %T, %T, %T, %T, STRUCT(%T AS diff_table, %T AS diff_view, %T AS base_note, %T AS analyze_function, %T AS render_function, %T AS page_function, %T AS markdown_function, %T AS css_function), STRUCT(%T AS time_zone, %T AS suffix_pattern, %T AS note_sheet_url, %T AS note_sheet_range), STRUCT(%T AS schema_condition, %T AS view_dataset_condition, %T AS view_name_condition))""",
   udf_project_id, udf_dataset, udf_sql_function_name,
   work_project_id, work_dataset, udf_project_id, udf_dataset,
   target_project_id, job_region,
-  table_diff_hist, view_diff, view_diff_by_ref, table_base_note,
+  table_diff, view_diff, table_base_note,
   udf_analyze_function_name, udf_render_function_name,
   udf_page_function_name, udf_markdown_function_name, udf_css_function_name,
   snapshot_time_zone, suffix_pattern,
@@ -429,6 +421,16 @@ ASSERT target_dataset_count > 0 OR ARRAY_LENGTH(suffix_list) > 0 AS
 --    差分のテーブルはここでは作らない。セクション 2 が毎回
 --    CREATE OR REPLACE TABLE ... AS SELECT で作り直すので、置き場所を先に
 --    用意しておく必要がない。初回もセクション 2 だけで揃う。
+--
+--    【1 回きりの後片付け】名前を変える前・ビューを 2 本作っていた頃の
+--    オブジェクトは、名前が違うので新しい実行では触られず、そのまま残る。
+--    中身は作り直せるものしか入っていないので、確認のうえ手で消すこと。
+--    自動では消さない（消してよいかはこのスクリプトからは判断できない）。
+--
+--      DROP TABLE IF EXISTS `<project>.<dataset>.viewlgc_t_diff_hist`;
+--      DROP VIEW  IF EXISTS `<project>.<dataset>.viewlgc_vw_t_diff_by_ref`;
+--
+--    prefix / suffix を付けているなら、その名前に読み替える。
 -- ---------------------------------------------------------------------
 -- base ごとのメモ。実体はスプレッドシートで、ここでは外部テーブルとして
 -- 見えるようにするだけ。列はすべて STRING で受けて、型はビューで付ける。
@@ -508,7 +510,7 @@ END IF;
 --    初回もこの 1 文でテーブルができる。セクション 1 は要らない。
 -- ---------------------------------------------------------------------
 SET sql_template = """
-CREATE OR REPLACE TABLE `__T_DIFF_HIST__`
+CREATE OR REPLACE TABLE `__T_DIFF__`
 (
   snapshot_date   DATE           OPTIONS (description = '生成日。履歴は持たないので、常に最後に実行した日'),
   base            STRING         OPTIONS (description = 'suffix を除いた View 名。Looker のキー。suffix を認識できなかった View は View 名そのもの'),
@@ -720,20 +722,16 @@ USING suffix_list AS suffix_list, analyze_options AS analyze_options;
 --    メモだけを事前生成に混ぜないのは、シートを直した内容が次の日次実行を
 --    待たずにレポートへ出るようにするため。ここはビューのままにする。
 --
---    ビューは 2 本ある。読む側が 1 レコードに絞れる形で渡すのが目的。
---
---    __V_DIFF__        base で 1 行。これを使う。
---    __V_DIFF_BY_REF__ 同じ中身。基準ごとに行を作っていた頃の名前で、
---                      レポートのデータソースを張り替えずに済むよう残してある。
---                      どちらを読んでいるか分からないので両方作る。
+--    ビューは 1 本だけ。以前は基準ごとに行を作っていた頃の名前
+--    （__V_DIFF_BY_REF__）も同じ中身で作っていたが、レポートのデータソースが
+--    __V_DIFF__ を読んでいることが分かったので消した。
 --
 --    基準はカードの中のタブで選ぶので、行は base ごとに 1 本しかない。
 --    base のコントロール 1 つで 1 レコードに決まる。
 --    **レポートの ref_label のコントロールは外してよい**（値が 1 つしか
---    出てこないため）。group_count_once などの列も、行が増えなくなったので
---    そのまま group_count を使ってよい。
+--    出てこないため）。
 --
---    どちらのビューも base ごとのメモを LEFT JOIN して、note_html（Markdown を
+--    ビューは base ごとのメモを LEFT JOIN して、note_html（Markdown を
 --    HTML にしたもの）を持つ。同じデータソースに入れてあるので、レポートの
 --    base のコントロールがメモのチャートにもそのまま効く。別データソースに
 --    すると Looker Studio のコントロールが跨がらず、2 組そろえる必要が出る。
@@ -769,7 +767,7 @@ joined AS (
     `__UDF_MARKDOWN__`(n.note_md) AS note_html,
     n.updated_at                  AS note_updated_at,
     n.updated_by                  AS note_updated_by
-  FROM `__T_DIFF_HIST__` AS d
+  FROM `__T_DIFF__` AS d
   LEFT JOIN notes AS n ON n.base = d.base
   -- 絞り込みは要らない。テーブルは最新の 1 世代しか持たず、
   -- 行も base ごとに 1 本（ref_index は常に 0）。
@@ -785,56 +783,6 @@ FROM joined
 EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
 ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
   'CREATE VIEW の SQL に未展開のプレースホルダが残っています。';
-EXECUTE IMMEDIATE rendered_sql;
-
-SET sql_template = """
-CREATE OR REPLACE VIEW `__V_DIFF_BY_REF__` AS
-WITH notes AS (
-  -- base ごとに 1 行に絞る。シートは人が手で足すので、同じ base の行が
-  -- 増えることがある。落とすのではなく、いちばん新しいものを採る。
-  SELECT
-    TRIM(base) AS base,
-    note_md,
-    SAFE_CAST(updated_at AS TIMESTAMP) AS updated_at,
-    updated_by
-  FROM `__T_BASE_NOTE__`
-  WHERE TRIM(COALESCE(base, '')) != ''
-    -- 消さずに下書きへ戻せるようにする。書き方は揺れるので広めに読む。
-    AND NOT COALESCE(LOWER(TRIM(is_hidden)) IN ('true', '1', 'yes'), FALSE)
-  QUALIFY ROW_NUMBER() OVER (
-    PARTITION BY TRIM(base) ORDER BY SAFE_CAST(updated_at AS TIMESTAMP) DESC
-  ) = 1
-),
-joined AS (
-  SELECT
-    d.*,
-    -- メモ。未登録なら note_html は「未登録」の枠を返す（NULL にすると
-    -- レポート側で「値なし」になり、未登録なのか取得に失敗したのか読めない）。
-    n.base IS NOT NULL            AS has_note,
-    n.note_md                     AS note_md,
-    `__UDF_MARKDOWN__`(n.note_md) AS note_html,
-    n.updated_at                  AS note_updated_at,
-    n.updated_by                  AS note_updated_by
-  FROM `__T_DIFF_HIST__` AS d
-  LEFT JOIN notes AS n ON n.base = d.base
-  -- 絞り込みは要らない。テーブルは最新の 1 世代しか持たない。
-)
-SELECT
-  * EXCEPT (diff_html),
-  -- 基準ごとに行を作っていた頃の名残。行が base ごとに 1 本になったので、
-  -- いまは group_count などと同じ値になる。既存のレポートを壊さないために残す。
-  IF(ref_index = 0, group_count, NULL)     AS group_count_once,
-  IF(ref_index = 0, view_count, NULL)      AS view_count_once,
-  IF(ref_index = 0, unmatched_count, NULL) AS unmatched_count_once,
-  -- 事前生成したカードのメモ タブに、いま読んだメモを差し込む。目印は
-  -- chrome.js の NOTE_MARK と同じ文字列（node check_sql.mjs が突き合わせる）。
-  -- カードごと作り置きしないのは、シートを直した内容をその場で出すため。
-  REPLACE(diff_html, '<!--VG_NOTE-->', note_html) AS diff_html
-FROM joined
-""";
-EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
-  'CREATE VIEW（基準ごと）の SQL に未展開のプレースホルダが残っています。';
 EXECUTE IMMEDIATE rendered_sql;
 
 
