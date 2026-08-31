@@ -658,17 +658,16 @@ AS (%s)
 -- 置き換える目印:
 --   __TARGET_PROJECT__     読み取り対象のプロジェクト
 --   __JOB_REGION__         region- を除いたロケーション
---   __T_DIFF_HIST__        履歴テーブル（project.dataset.table）
+--   __T_DIFF_HIST__        生成結果のテーブル（project.dataset.table）
 --   __T_BASE_NOTE__        base ごとのメモの外部テーブル（同上）
---   __V_DIFF__             最新スナップショットのビュー（基準 = 先頭グループ）
---   __V_DIFF_BY_REF__      同上。基準ごとに 1 行あるほう
+--   __V_DIFF__             メモを差し込むビュー。レポートはこれを読む
+--   __V_DIFF_BY_REF__      同じ中身の別名（データソースの張り替えを避けるため）
 --   __UDF_ANALYZE__        analyze 関数（project.dataset.function）
 --   __UDF_RENDER__         render 関数（同上）
 --   __UDF_PAGE__           page 関数（同上）
 --   __UDF_MARKDOWN__       markdown 関数（同上）
 --   __UDF_CSS__            group_css 関数（同上）
---   __TZ__                 snapshot_date の基準タイムゾーン
---   __RETENTION_DAYS__     パーティションの保持日数
+--   __TZ__                 snapshot_date（生成日）の基準タイムゾーン
 --   __SUFFIX_PATTERN__     suffix を切り出す正規表現
 --   __NOTE_SHEET_URL__     メモのスプレッドシートの URL
 --   __NOTE_SHEET_RANGE__   その中の読み取り範囲
@@ -701,7 +700,6 @@ CREATE OR REPLACE FUNCTION `%s.%s.%s`(
   >,
   options STRUCT<
     time_zone        STRING,
-    retention_days   STRING,
     suffix_pattern   STRING,
     note_sheet_url   STRING,
     note_sheet_range STRING
@@ -714,7 +712,6 @@ CREATE OR REPLACE FUNCTION `%s.%s.%s`(
 )
 RETURNS STRING
 AS (
-  REPLACE(
   REPLACE(
   REPLACE(
   REPLACE(
@@ -755,7 +752,6 @@ AS (
     '__UDF_CSS__',
       udf_project_id || '.' || udf_dataset || '.' || objects.css_function),
     '__TZ__', options.time_zone),
-    '__RETENTION_DAYS__', options.retention_days),
     '__SUFFIX_PATTERN__', options.suffix_pattern),
     '__NOTE_SHEET_URL__', options.note_sheet_url),
     '__NOTE_SHEET_RANGE__', options.note_sheet_range),

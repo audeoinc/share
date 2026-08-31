@@ -8,8 +8,10 @@
 -- α 等価判定 → パラメータ化 → 差分 → HTML 生成）。INFORMATION_SCHEMA の中身は
 -- View をデプロイしたときしか変わらないので、スケジュールドクエリで作り置きする。
 --
--- パーティションに日付を積むので、履歴が残る。
--- 「いつグループ構成が変わったか」を後から追える＝ロジック逸脱の検知に使える。
+-- 持つのは最新の 1 世代だけ。日次の生成は CREATE OR REPLACE TABLE ... AS SELECT で
+-- テーブルごと差し替える。**差し替えは 1 文で終わるので、読み手から見て
+-- 「空のテーブル」が見える瞬間が無い。** DELETE + INSERT や TRUNCATE + INSERT だと
+-- その隙間にレポートを開いた人には何も出ない。
 --
 -- 前提: view_group_html.sql で 6 つの UDF を作成済み。
 --       system_name / udf_dataset / udf_name_prefix / udf_name_suffix は
@@ -27,17 +29,16 @@
 -- プレースホルダ（展開は viewlgc_render_dynamic_sql が行う）:
 --   __TARGET_PROJECT__     読み取り対象のプロジェクト
 --   __JOB_REGION__         region- を除いたロケーション
---   __T_DIFF_HIST__        履歴テーブル（project.dataset.table）
+--   __T_DIFF_HIST__        生成結果のテーブル（project.dataset.table）
 --   __T_BASE_NOTE__        base ごとのメモの外部テーブル（同上）
---   __V_DIFF__             最新スナップショットのビュー（基準 = 先頭グループ）
---   __V_DIFF_BY_REF__      同上。基準ごとに 1 行あるほう
+--   __V_DIFF__             メモを差し込むビュー。レポートはこれを読む
+--   __V_DIFF_BY_REF__      同じ中身の別名（データソースの張り替えを避けるため）
 --   __UDF_ANALYZE__        analyze 関数（project.dataset.function）
 --   __UDF_RENDER__         render 関数（同上）
 --   __UDF_PAGE__           参照関係を作り差分と束ねる関数（同上）
 --   __UDF_MARKDOWN__       メモの Markdown を HTML にする関数（同上）
 --   __UDF_CSS__            group_css 関数（同上）
---   __TZ__                 snapshot_date の基準タイムゾーン
---   __RETENTION_DAYS__     パーティションの保持日数
+--   __TZ__                 snapshot_date（生成日）の基準タイムゾーン
 --   __SUFFIX_PATTERN__     suffix を切り出す正規表現
 --   __NOTE_SHEET_URL__     メモのスプレッドシートの URL
 --   __NOTE_SHEET_RANGE__   その中の読み取り範囲（シート名!A:E）
@@ -171,16 +172,14 @@ DECLARE note_sheet_range STRING DEFAULT 'notes!A:E';
 --       include 例: [r'^mart_']  [r'^mart_abjp$', r'^mart_abus$']
 --       exclude 例: [r'_tmp$', r'_bk$', r'^wk_']
 --   snapshot_time_zone
---     snapshot_date（履歴テーブルのパーティション キー）をどの日付で刻むか。
+--     snapshot_date（いつ時点の内容かを表す列）をどの日付で刻むか。
 --     このツールはリージョンをまたいで使うので、置き場所によって変える。
 --     ジョブのリージョンとは別物で、@@location からは決まらない。
---     日付の境目がずれると、同じ実行が別の日に積まれたり 1 日に 2 回積まれたり
---     するので、運用しているタイムゾーンに合わせること。
+--     履歴を積まなくなったので、ずれても壊れるものは無い。ただし「いつの
+--     内容か」を読む人が見るので、運用しているタイムゾーンに合わせること。
 --     IANA のタイムゾーン名（'Asia/Tokyo' / 'UTC' / 'America/New_York' など）。
 
 -- [B] 既定のままで動くもの --------------------------------------------
--- 履歴の保持日数（パーティションの有効期限）。
-DECLARE partition_expiration_days INT64 DEFAULT 400;
 -- suffix の切り出し。1 つ目のキャプチャが suffix になる。
 -- analysis_include_dataset_patterns が「どのデータセットを見るか」なのに対し、
 -- こちらは「同じ意味を持つ文字列をどう取り出すか」。役割が違う。
@@ -220,7 +219,7 @@ DECLARE project_token      STRING;
 -- 作るオブジェクトの物理名（下の SET で組み立てる）。データセット名は含まない。
 -- オブジェクトが増えたらここに 1 行足し、SET と本文の __…__ を対で増やし、
 -- viewlgc_render_dynamic_sql にも置換を 1 段足す。
-DECLARE table_diff_hist  STRING;  -- 日次スナップショットを積むテーブル
+DECLARE table_diff_hist  STRING;  -- 生成結果のテーブル（最新の 1 世代だけ）
 DECLARE table_base_note  STRING;  -- base ごとのメモ（スプレッドシートの外部テーブル）
 DECLARE view_diff        STRING;  -- 最新スナップショット。基準 = 先頭グループの 1 行だけ
 DECLARE view_diff_by_ref STRING;  -- 同上。基準ごとに 1 行（レポートで基準を選ぶ用）
@@ -280,8 +279,10 @@ ASSERT REGEXP_CONTAINS(udf_dataset, r'^[A-Za-z0-9_]+$') AS
 
 -- テーブル: prefix + system_name + '_' + 区分 + 基本名 + suffix
 -- ビュー  : prefix + system_name + '_' + 'vw_' + 区分 + 基本名 + suffix
--- 区分 't_' は transaction（'m_' は master）。テーブルは日次スナップショットの
--- 積み上げなので基本名に _hist を付け、ビューは最新 1 日ぶんなので付けない。
+-- 区分 't_' は transaction（'m_' は master）。
+-- テーブルの基本名の _hist は、日次スナップショットを積んでいた頃の名残。
+-- いまは最新の 1 世代しか持たないので名前と中身が合っていないが、
+-- 変えると既存のテーブルが残る（手で消す手間が要る）ので据え置いてある。
 ASSERT REGEXP_CONTAINS(system_name, r'^[A-Za-z0-9_]+$') AS
   'system_name は英数字と _ だけにしてください（ルーチン名に - は使えません）。';
 SET table_diff_hist =
@@ -375,14 +376,14 @@ SET view_name_condition = CONCAT(
 -- 固定の設定はここで焼き込み、テンプレートだけを @sql_template で渡す。
 -- 値は %T で埋める。条件文には引用符が入るので、%s だと壊れる。
 SET render_call_sql = FORMAT(
-  """SELECT `%s.%s.%s`(@sql_template, %T, %T, %T, %T, %T, %T, STRUCT(%T AS diff_hist, %T AS diff_latest, %T AS diff_by_ref, %T AS base_note, %T AS analyze_function, %T AS render_function, %T AS page_function, %T AS markdown_function, %T AS css_function), STRUCT(%T AS time_zone, %T AS retention_days, %T AS suffix_pattern, %T AS note_sheet_url, %T AS note_sheet_range), STRUCT(%T AS schema_condition, %T AS view_dataset_condition, %T AS view_name_condition))""",
+  """SELECT `%s.%s.%s`(@sql_template, %T, %T, %T, %T, %T, %T, STRUCT(%T AS diff_hist, %T AS diff_latest, %T AS diff_by_ref, %T AS base_note, %T AS analyze_function, %T AS render_function, %T AS page_function, %T AS markdown_function, %T AS css_function), STRUCT(%T AS time_zone, %T AS suffix_pattern, %T AS note_sheet_url, %T AS note_sheet_range), STRUCT(%T AS schema_condition, %T AS view_dataset_condition, %T AS view_name_condition))""",
   udf_project_id, udf_dataset, udf_sql_function_name,
   work_project_id, work_dataset, udf_project_id, udf_dataset,
   target_project_id, job_region,
   table_diff_hist, view_diff, view_diff_by_ref, table_base_note,
   udf_analyze_function_name, udf_render_function_name,
   udf_page_function_name, udf_markdown_function_name, udf_css_function_name,
-  snapshot_time_zone, CAST(partition_expiration_days AS STRING), suffix_pattern,
+  snapshot_time_zone, suffix_pattern,
   note_sheet_url, note_sheet_range,
   schema_condition, view_dataset_condition, view_name_condition);
 
@@ -423,41 +424,12 @@ ASSERT target_dataset_count > 0 OR ARRAY_LENGTH(suffix_list) > 0 AS
 
 
 -- ---------------------------------------------------------------------
--- 1. 格納先（初回とスキーマを変えたときだけ）
+-- 1. base ごとのメモの置き場所（初回とシートを変えたときだけ）
 --
---    CREATE OR REPLACE なので、実行すると既存の行はすべて消える。
---    パーティションに積んだ履歴（いつグループ構成が変わったか）も一緒に消える。
---    スケジュールドクエリに登録するのは CONFIGURATION と セクション 2 だけなので、
---    日次の生成でここが動くことはない。
+--    差分のテーブルはここでは作らない。セクション 2 が毎回
+--    CREATE OR REPLACE TABLE ... AS SELECT で作り直すので、置き場所を先に
+--    用意しておく必要がない。初回もセクション 2 だけで揃う。
 -- ---------------------------------------------------------------------
-SET sql_template = """
-CREATE OR REPLACE TABLE `__T_DIFF_HIST__`
-(
-  snapshot_date   DATE           OPTIONS (description = '生成日'),
-  base            STRING         OPTIONS (description = 'suffix を除いた View 名。Looker のキー。suffix を認識できなかった View は View 名そのもの'),
-  ref_index       INT64          OPTIONS (description = '常に 0。基準はカードの中のタブで選ぶようになったため、列としてのみ残っている'),
-  ref_label       STRING         OPTIONS (description = '先頭グループの見出し。ref_index と同じく残骸で、絞り込みには使わない'),
-  view_count      INT64          OPTIONS (description = 'この base に属する View 数'),
-  group_count     INT64          OPTIONS (description = 'ロジックのグループ数。1 なら全部同一'),
-  has_multiple    BOOL           OPTIONS (description = 'group_count > 1。ロジック逸脱の検知用'),
-  group_labels    ARRAY<STRING>  OPTIONS (description = 'タブ見出し（同一ロジックの suffix 列記）'),
-  group_sizes     ARRAY<INT64>   OPTIONS (description = '各グループの View 数'),
-  suffixes        ARRAY<STRING>  OPTIONS (description = '認識した suffix 一覧'),
-  unmatched_count INT64          OPTIONS (description = 'suffix を認識できなかった View 数。1 ならこの行が単独表示の View'),
-  diff_html       STRING         OPTIONS (description = '比較 HTML。Templated Record に渡す')
-)
-PARTITION BY snapshot_date
-CLUSTER BY base, ref_index
-OPTIONS (
-  description = 'suffix 違い View のロジック グループ比較（事前生成）',
-  partition_expiration_days = __RETENTION_DAYS__
-)
-""";
-EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
-  'CREATE TABLE の SQL に未展開のプレースホルダが残っています。';
-EXECUTE IMMEDIATE rendered_sql;
-
 -- base ごとのメモ。実体はスプレッドシートで、ここでは外部テーブルとして
 -- 見えるようにするだけ。列はすべて STRING で受けて、型はビューで付ける。
 -- シートは書き手が自由に触るので、日付や真偽値の書き方を強制できない。
@@ -522,20 +494,40 @@ END IF;
 -- ---------------------------------------------------------------------
 -- 2. 生成（スケジュールドクエリに登録する本体）
 --
---    同じ日に何度実行しても結果が同じになるよう、当日分を消してから入れる。
---    MERGE より DELETE + INSERT のほうが単純で、パーティション単位なので安い。
+--    持つのは最新の 1 世代だけ。テーブルごと作り直す。
+--
+--    **1 文で差し替わるので、読み手から見て「空のテーブル」が見える瞬間が無い。**
+--    DELETE + INSERT や TRUNCATE + INSERT だと、その隙間にレポートを開いた人には
+--    何も出ない。以前は履歴を積んでいて、ビューが MAX(snapshot_date) を採って
+--    いたので隙間があっても前日分が出ていた。最新しか持たなくなった以上、
+--    途中経過を見せない書き方に替える必要がある。
+--
+--    列の説明（OPTIONS）は列リストに書く。CTAS でもスキーマを明示できるので、
+--    作り直すたびに説明が消えることはない。
+--
+--    初回もこの 1 文でテーブルができる。セクション 1 は要らない。
 -- ---------------------------------------------------------------------
 SET sql_template = """
-DELETE FROM `__T_DIFF_HIST__`
-WHERE snapshot_date = CURRENT_DATE('__TZ__')
-""";
-EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
-  'DELETE の SQL に未展開のプレースホルダが残っています。';
-EXECUTE IMMEDIATE rendered_sql;
-
-SET sql_template = """
-INSERT INTO `__T_DIFF_HIST__`
+CREATE OR REPLACE TABLE `__T_DIFF_HIST__`
+(
+  snapshot_date   DATE           OPTIONS (description = '生成日。履歴は持たないので、常に最後に実行した日'),
+  base            STRING         OPTIONS (description = 'suffix を除いた View 名。Looker のキー。suffix を認識できなかった View は View 名そのもの'),
+  ref_index       INT64          OPTIONS (description = '常に 0。基準はカードの中のタブで選ぶようになったため、列としてのみ残っている'),
+  ref_label       STRING         OPTIONS (description = '先頭グループの見出し。ref_index と同じく残骸で、絞り込みには使わない'),
+  view_count      INT64          OPTIONS (description = 'この base に属する View 数'),
+  group_count     INT64          OPTIONS (description = 'ロジックのグループ数。1 なら全部同一'),
+  has_multiple    BOOL           OPTIONS (description = 'group_count > 1。ロジック逸脱の検知用'),
+  group_labels    ARRAY<STRING>  OPTIONS (description = 'タブ見出し（同一ロジックの suffix 列記）'),
+  group_sizes     ARRAY<INT64>   OPTIONS (description = '各グループの View 数'),
+  suffixes        ARRAY<STRING>  OPTIONS (description = '認識した suffix 一覧'),
+  unmatched_count INT64          OPTIONS (description = 'suffix を認識できなかった View 数。1 ならこの行が単独表示の View'),
+  diff_html       STRING         OPTIONS (description = '比較 HTML。Templated Record に渡す')
+)
+CLUSTER BY base
+OPTIONS (
+  description = 'suffix 違い View のロジック グループ比較（事前生成・最新の 1 世代だけ）'
+)
+AS
 WITH
 -- suffix 一覧。suffix_list が空なら、対象データセットの名前から切り出す。
 suffixes AS (
@@ -712,18 +704,28 @@ FROM refs
 """;
 EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
 ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
-  'INSERT の SQL に未展開のプレースホルダが残っています。';
+  '生成の SQL に未展開のプレースホルダが残っています。';
 EXECUTE IMMEDIATE rendered_sql
 USING suffix_list AS suffix_list, analyze_options AS analyze_options;
 
 
 -- ---------------------------------------------------------------------
--- 3. Looker Studio が読むビュー（最新スナップショットだけ・初回のみ）
+-- 3. Looker Studio が読むビュー（初回のみ）
+--
+--    **ビューはメモのために要る。** 最新の 1 世代しか持たなくなったので
+--    「最新だけを採る」仕事は無くなったが、ビューの本体はもう一つのほう、
+--    base ごとのメモを突き合わせて差し込む処理。テーブルを直接読ませると
+--    メモのタブが空のまま（目印 <!--VG_NOTE--> が置き換わらない）になる。
+--
+--    メモだけを事前生成に混ぜないのは、シートを直した内容が次の日次実行を
+--    待たずにレポートへ出るようにするため。ここはビューのままにする。
+--
 --    ビューは 2 本ある。読む側が 1 レコードに絞れる形で渡すのが目的。
 --
 --    __V_DIFF__        base で 1 行。これを使う。
 --    __V_DIFF_BY_REF__ 同じ中身。基準ごとに行を作っていた頃の名前で、
 --                      レポートのデータソースを張り替えずに済むよう残してある。
+--                      どちらを読んでいるか分からないので両方作る。
 --
 --    基準はカードの中のタブで選ぶので、行は base ごとに 1 本しかない。
 --    base のコントロール 1 つで 1 レコードに決まる。
@@ -769,10 +771,8 @@ joined AS (
     n.updated_by                  AS note_updated_by
   FROM `__T_DIFF_HIST__` AS d
   LEFT JOIN notes AS n ON n.base = d.base
-  WHERE d.snapshot_date = (
-    SELECT MAX(snapshot_date) FROM `__T_DIFF_HIST__`
-  )
-    AND d.ref_index = 0
+  -- 絞り込みは要らない。テーブルは最新の 1 世代しか持たず、
+  -- 行も base ごとに 1 本（ref_index は常に 0）。
 )
 SELECT
   * EXCEPT (diff_html, ref_index, ref_label),
@@ -817,9 +817,7 @@ joined AS (
     n.updated_by                  AS note_updated_by
   FROM `__T_DIFF_HIST__` AS d
   LEFT JOIN notes AS n ON n.base = d.base
-  WHERE d.snapshot_date = (
-    SELECT MAX(snapshot_date) FROM `__T_DIFF_HIST__`
-  )
+  -- 絞り込みは要らない。テーブルは最新の 1 世代しか持たない。
 )
 SELECT
   * EXCEPT (diff_html),
@@ -864,8 +862,7 @@ EXECUTE IMMEDIATE rendered_sql;
 --      5-5 データセット別の対象 View 数
 --      5-5b View 名の条件で落ちた View
 --      5-6 条件から外れたデータセット
---      5-7 グループ構成が変わった日
---      5-8 メモの登録状況
+--      5-7 メモの登録状況
 -- ---------------------------------------------------------------------
 
 -- 5-1 生成結果の中身
@@ -985,41 +982,13 @@ ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
   '5-6 の SQL に未展開のプレースホルダが残っています。';
 EXECUTE IMMEDIATE rendered_sql;
 
--- 5-7 グループ構成が変わった日（ロジック逸脱がいつ入ったか）
---     履歴が 1 日分しかなければ 0 件。
-SET sql_template = """
-SELECT
-  '5-7 グループ構成が変わった日'       AS check_name,
-  base                              AS base_view_name,
-  snapshot_date                     AS changed_on,
-  group_count                       AS logic_group_count_after,
-  prev_labels                       AS logic_groups_before_json,
-  curr_labels                       AS logic_groups_after_json
-FROM (
-  SELECT *,
-    LAG(TO_JSON_STRING(group_labels)) OVER w AS prev_labels,
-    TO_JSON_STRING(group_labels)      AS curr_labels
-  FROM `__T_DIFF_HIST__`
-  -- 基準ごとに行があるが、グループ構成はどの行でも同じ。
-  -- 絞らないと同じ日の別の基準の行と比べてしまう。
-  WHERE ref_index = 0
-  WINDOW w AS (PARTITION BY base ORDER BY snapshot_date)
-)
-WHERE prev_labels IS NOT NULL AND prev_labels != curr_labels
-ORDER BY changed_on DESC, base_view_name
-""";
-EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
-  '5-7 の SQL に未展開のプレースホルダが残っています。';
-EXECUTE IMMEDIATE rendered_sql;
-
--- 5-8 メモの登録状況
+-- 5-7 メモの登録状況
 --     note_sheet_url が未設定なら全部 FALSE になる（＝テーブルが空）。
 --     シートの base を書き間違えるとどの行にも当たらないので、
 --     「シートにあるのにビューに出ない base」を最後に別立てで出す。
 SET sql_template = """
 SELECT
-  '5-8 メモの登録状況'                 AS check_name,
+  '5-7 メモの登録状況'                 AS check_name,
   base                              AS base_view_name,
   has_note                          AS note_registered,
   note_updated_at                   AS note_updated_at,
@@ -1028,7 +997,7 @@ SELECT
 FROM `__V_DIFF__`
 UNION ALL
 SELECT
-  '5-8 メモの登録状況（当たらない base）', TRIM(n.base), FALSE,
+  '5-7 メモの登録状況（当たらない base）', TRIM(n.base), FALSE,
   CAST(NULL AS TIMESTAMP), CAST(NULL AS STRING), CAST(NULL AS INT64)
 FROM `__T_BASE_NOTE__` AS n
 WHERE TRIM(COALESCE(n.base, '')) != ''
@@ -1037,6 +1006,6 @@ ORDER BY note_registered DESC, base_view_name
 """;
 EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
 ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
-  '5-8 の SQL に未展開のプレースホルダが残っています。';
+  '5-7 の SQL に未展開のプレースホルダが残っています。';
 EXECUTE IMMEDIATE rendered_sql;
 END;

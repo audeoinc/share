@@ -141,6 +141,65 @@ add('IF … RAISE ではなく ASSERT を使っている',
   }
 }
 
+// --- 5b. CTAS の列リストと SELECT の列が一致するか ---------------------
+// 生成は CREATE OR REPLACE TABLE (列リスト) ... AS SELECT で、テーブルごと
+// 差し替える。列リストは説明（OPTIONS）を持たせるために書いてあるので、
+// SELECT 側に列を足したときに片方だけ直すと BigQuery が「列数が合わない」で
+// 落ちる。実行するまで分からないので、ここで並びまで突き合わせる。
+{
+  const m = table.match(
+    /CREATE OR REPLACE TABLE `__T_DIFF_HIST__`\n\(\n([\s\S]*?)\n\)\nCLUSTER BY/);
+  const declared = m
+    ? m[1].split('\n').map((l) => (l.trim().match(/^([a-z_][a-z0-9_]*)\s/) || [])[1])
+      .filter(Boolean)
+    : [];
+  // 最後の SELECT（… AS diff_html まで）を深さ 0 のカンマで割る
+  // 'FROM refs' の直前の SELECT。前方から非貪欲に取るとファイル先頭の別の
+  // SELECT に当たるので、切り出してから最後の SELECT を採る。
+  const upto = table.slice(0, table.indexOf('\nFROM refs\n'));
+  const body = upto.slice(upto.lastIndexOf('\nSELECT\n') + '\nSELECT\n'.length);
+  const cols = [];
+  {
+    // 括弧だけを数える。ここは型を書かないので < > は比較演算子
+    // （has_multiple の '> 1'）で、型引数の括弧として数えると深さが狂う。
+    let depth = 0, cur = '';
+    for (const ch of body) {
+      if (ch === '(') depth++;
+      else if (ch === ')') depth--;
+      if (ch === ',' && depth === 0) { cols.push(cur); cur = ''; } else cur += ch;
+    }
+    cols.push(cur);
+  }
+  // 別名があればそれ、無ければ末尾の識別子が列名になる
+  const selected = cols
+    .map((c) => c.split('\n').filter((l) => !l.trim().startsWith('--')).join(' ').trim())
+    .filter((c) => c !== '')
+    .map((c) => {
+      const as = c.match(/\sAS\s+([A-Za-z_][A-Za-z0-9_]*)\s*$/);
+      return as ? as[1] : (c.match(/([A-Za-z_][A-Za-z0-9_]*)\s*$/) || [])[1];
+    });
+  add('CTAS の列リストと SELECT の列が同じ並び',
+    declared.length > 0 && declared.join(',') === selected.join(','),
+    `列リスト [${declared.join(',')}] / SELECT [${selected.join(',')}]`);
+}
+
+// --- 5c. 生成が 1 文で差し替わるか ------------------------------------
+// 最新の 1 世代しか持たないので、DELETE + INSERT や TRUNCATE + INSERT に
+// 戻すと、その隙間にレポートを開いた人には何も出ない。以前はビューが
+// MAX(snapshot_date) を採っていたので隙間があっても前日分が出ていた。
+add('生成はテーブルごと差し替える（読み手に空を見せない）',
+  /CREATE OR REPLACE TABLE `__T_DIFF_HIST__`[\s\S]*?\nAS\nWITH/.test(table) &&
+  !/DELETE FROM `__T_DIFF_HIST__`/.test(table) &&
+  !/TRUNCATE TABLE `__T_DIFF_HIST__`/.test(table) &&
+  !/INSERT INTO `__T_DIFF_HIST__`/.test(table));
+
+// --- 5d. ビューがメモを差し込んでいるか --------------------------------
+// 「最新だけを採る」仕事が無くなってもビューは要る。テーブルを直接読ませると
+// メモのタブが空のまま（目印が置き換わらない）になる。
+add('ビューはテーブルを直に読ませず、メモを差し込む',
+  (table.match(/CREATE OR REPLACE VIEW/g) || []).length === 2 &&
+  !/snapshot_date = \(\n\s*SELECT MAX\(snapshot_date\)/.test(table));
+
 // --- 6. 両ファイルで一致させる必要がある値 -----------------------------
 for (const base of ['analyze', 'render', 'page', 'markdown', 'group_css',
   'render_dynamic_sql']) {

@@ -613,7 +613,6 @@ DECLARE analysis_exclude_object_patterns  ARRAY<STRING> DEFAULT [];
 DECLARE snapshot_time_zone STRING DEFAULT 'Asia/Tokyo';   -- snapshot_date の基準
 
 -- [B] 既定のままで動くもの
-DECLARE partition_expiration_days INT64 DEFAULT 400;
 DECLARE suffix_pattern  STRING        DEFAULT r'_([A-Za-z]{4})$';
 DECLARE suffix_list     ARRAY<STRING> DEFAULT [];
 DECLARE analyze_options STRING        DEFAULT '{"mode":"class"}';
@@ -684,13 +683,9 @@ DECLARE target_project_id STRING DEFAULT NULL;
 > 食い違うと、作った関数を `build_table.sql` が見つけられない。
 > `node check_sql.mjs` が組み立ての式が同じかどうかまで見る。
 
-**テーブルだけ `_hist` が付く。** 実体が日次スナップショットの積み上げ
-（`PARTITION BY snapshot_date`・過去日を消さない・`partition_expiration_days` で
-落ちる）なのに対し、ビューは最新 1 日ぶんだけを返すため。base 名を
-オブジェクトごとに分けてあるので、こういう付け分けができる。
-
-> ビューの名前から `_latest` が消えているが、中身は変わらず最新スナップショットだけを
-> 返す。履歴側に `_hist` を付けて区別する形にしたため。
+**テーブルの `_hist` は名残。** 日次スナップショットを積んでいた頃の名前で、
+いまは最新の 1 世代しか持たない。名前と中身が合っていないが、変えると既存の
+テーブルが手元に残る（手で消す手間が要る）ので据え置いてある。
 
 `build_table.sql` の設定は次のとおり。ここが唯一の置き場所で、書き換えたら
 そのまま実行する。生成の手順はない。
@@ -703,9 +698,8 @@ DECLARE target_project_id STRING DEFAULT NULL;
 | `analysis_exclude_object_patterns` | 落とす View 名。include のあとに効く |
 | `suffix_pattern` | データセット名から suffix を切り出す正規表現（1 つ目のキャプチャ） |
 | `suffix_list` | suffix 一覧。空なら `suffix_pattern` で自動抽出。データセット名から導けないときだけ並べる |
-| `snapshot_time_zone` | `snapshot_date` の基準タイムゾーン。リージョンごとに変える（[A]） |
+| `snapshot_time_zone` | `snapshot_date`（いつ時点の内容か）の基準タイムゾーン。リージョンごとに変える（[A]） |
 | `analyze_options` | UDF に渡す解析オプション（JSON）。`substitutable` などをここで足せば再生成が要らない |
-| `partition_expiration_days` | 履歴の保持日数 |
 | `note_sheet_url` | base ごとのメモを置くスプレッドシートの URL（[A]）。空ならメモを使わない |
 | `note_sheet_range` | その中の読み取り範囲。既定 `notes!A:E`（[A]） |
 
@@ -754,7 +748,7 @@ DECLARE analysis_exclude_object_patterns ARRAY<STRING> DEFAULT [r'_tmp$', r'_bk$
 
 ```sql
 SET sql_template = """
-INSERT INTO `__T_DIFF_HIST__` …
+CREATE OR REPLACE TABLE `__T_DIFF_HIST__` … AS SELECT …
 """;
 EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
 ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS '… に未展開のプレースホルダがあります。';
@@ -807,10 +801,9 @@ SET render_call_sql = FORMAT(
 - **セクション 5 の確認クエリは実行される。** ファイルを丸ごと流すと 8 本の
   結果が順に出る（生成結果 / 割れている base / 未認識の View / 対象データセットと
   suffix / データセット別の View 数 / View 名の条件で落ちた View /
-  条件から外れたデータセット / 構成が変わった日）
-- **セクション 1 は `CREATE OR REPLACE TABLE`。** 実行すると既存の行が消える
-  （パーティションに積んだ履歴も含めて）。スキーマを変えたときに確実に作り直せる
-  かわり、うっかり流すと履歴が飛ぶ。日次の生成には含まれない
+  条件から外れたデータセット / メモの登録状況）
+- **セクション 1 が作るのはメモの置き場所だけ。** 差分のテーブルはセクション 2 が
+  毎回作り直すので、先に用意しておく必要がない。初回もセクション 2 だけで揃う
 - 生成器は書き出す前に、`FORMAT` の書式に `%s` 以外の `%` が無いか、`r"""` の
   対応が取れているか、旧いプレースホルダが残っていないかを検査する
 - **`node check_sql.mjs` が 2 つの SQL の食い違いを見つける。** 使っている目印が
@@ -828,7 +821,7 @@ SET render_call_sql = FORMAT(
 suffix を出すデータセットと、比較対象の View があるデータセットは**同じ集合**なので、
 別々に持つ意味がない。**リージョン単位の `INFORMATION_SCHEMA` が使える**ので、
 データセットごとの `UNION ALL` を組み立てる必要もない。
-1 つの `INSERT` の中で、同じ条件から両方を引く。
+1 つの文の中で、同じ条件から両方を引く。
 
 ```sql
 src AS (
@@ -873,8 +866,8 @@ Looker の操作のたびに UDF を回すのは重いので、スケジュー�
 `INFORMATION_SCHEMA` の中身は View をデプロイしたときしか変わらない。
 
 ```
-viewlgc_t_diff_hist  PARTITION BY snapshot_date CLUSTER BY base, ref_index
-  base / ref_index / ref_label
+viewlgc_t_diff_hist  CLUSTER BY base（最新の 1 世代だけ）
+  snapshot_date / base / ref_index / ref_label
   view_count / group_count / has_multiple
   group_labels / group_sizes / suffixes / unmatched_count / diff_html
 
@@ -885,6 +878,46 @@ viewlgc_vw_t_diff(_by_ref)  上に加えて
 
 Looker Studio はビューを読むだけ。`diff_html` を Templated Record に渡す。
 パラメータもカスタムクエリも UDF も不要。
+
+### 持つのは最新の 1 世代だけ
+
+以前は `PARTITION BY snapshot_date` で日次スナップショットを積み、「いつグループ
+構成が変わったか」を追えるようにしていた。実際には使い道が無かったので、
+**テーブルごと差し替える形に変えた**。
+
+```sql
+CREATE OR REPLACE TABLE `__T_DIFF_HIST__` ( … ) CLUSTER BY base OPTIONS ( … )
+AS WITH … SELECT …
+```
+
+**`DELETE` + `INSERT` に戻してはいけない。** 履歴があった頃はビューが
+`MAX(snapshot_date)` を採っていたので、消してから入れるまでの隙間に
+レポートを開いても前日分が出ていた。最新しか持たない以上、その隙間は
+**何も出ない時間**になる。`CREATE OR REPLACE TABLE ... AS SELECT` は 1 文で
+差し替わるので、読み手からは古い内容か新しい内容のどちらかしか見えない。
+`TRUNCATE` + `INSERT` も同じ理由で不可。`node check_sql.mjs` が見張る。
+
+列の説明（`OPTIONS(description = …)`）は CTAS の列リストに書く。スキーマを
+明示できるので、作り直すたびに説明が消えることはない。**列リストと `SELECT` の
+並びが食い違うと BigQuery が落とす**ので、`check_sql.mjs` が両者の列名を
+順番まで突き合わせる。
+
+#### それでもビューは要る（メモのため）
+
+「最新だけを採る」仕事は無くなったが、ビューを外すことはできない。もう一つの
+仕事、**base ごとのメモを突き合わせて差し込む処理**がここにあるため。
+
+```sql
+REPLACE(diff_html, '<!--VG_NOTE-->', note_html) AS diff_html
+```
+
+テーブルを直接レポートに読ませると、この置換が起きずメモのタブが空のままになる
+（目印がそのまま残る）。メモを事前生成に混ぜないのは、シートを直した内容が次の
+日次実行を待たずに出るようにするため。
+
+ビューが 2 本あるのは、レポートのデータソースがどちらを指しているか分からない
+ため。`_by_ref` は基準ごとに行を作っていた頃の名前で、中身は同じ。片方だけ
+消すと、そちらを指していた場合にレポートが壊れる。
 
 ### 基準はカードの中で選ぶ
 
@@ -905,7 +938,7 @@ Looker Studio はビューを読むだけ。`diff_html` を Templated Record に
 
 **`REF_BUDGET`（40 MB）は「重くしない」ための値ではなく、「行が壊れない」ための値。**
 グループが極端に多い base が 1 つ紛れ込むと、1 行が BigQuery の上限
-（クエリ結果の 1 行 100 MB）を超え、**日次の `INSERT` ごと落ちる**。カードが
+（クエリ結果の 1 行 100 MB）を超え、**日次の生成ごと落ちる**。カードが
 欠けるよりパイプラインが止まるほうが困るので、そこだけは止める。
 
 実測（あるプロジェクトの全 base）で、基準 1 つぶんの最大が 690 KB・大半は
@@ -930,7 +963,7 @@ Looker Studio はビューを読むだけ。`diff_html` を Templated Record に
 > BigQuery に置く総量はどちらも同じ G(G−1) 枚で変わらない。
 
 `ref_index` / `ref_label` の列はテーブルに残してある（常に 0 と先頭グループの
-ラベル）。消すとテーブルを作り直すことになり、積んだ履歴まで消えるため。
+ラベル）。消すとレポート側でその列を使っているチャートが壊れるため。
 `*_once` の列も同じ理由で残っているが、行が増えなくなったので
 `group_count` などをそのまま使ってよい。
 
@@ -1105,9 +1138,6 @@ customers_abjp ┄┄▶ base_orders          calendar_abjp ──▶ daily
   一緒に積むとインラインの 32 KB に収まらない。共通の外枠は `chrome.js` に出して
   両方から使う
 
-パーティションに日付を積むので**履歴が残る**。「いつグループ構成が変わったか」を
-後から追えるので、ロジック逸脱の検知に使える（`build_table.sql` の末尾に例あり）。
-
 base の切り出しと UDF に渡す `suffixList` は、同じ 1 つの `suffixes` から作る。
 別々に持つ場所がないので、ズレようがない。
 
@@ -1269,7 +1299,7 @@ https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz1234567890
 上の表の 5 列に対応する。
 
 **HTML にするのは事前生成ではなくビューの中。** `diff_html` と同じように
-`INSERT` で焼き込むと、シートを直しても次の日次実行までレポートが古いままになる。
+事前生成に焼き込むと、シートを直しても次の日次実行までレポートが古いままになる。
 1 件が数 KB の Markdown なので、クエリのたびに変換しても実行時間には響かない。
 
 #### 作り置きのカードに、いま読んだメモを差し込む
