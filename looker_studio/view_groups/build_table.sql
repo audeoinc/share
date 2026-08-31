@@ -200,7 +200,15 @@ DECLARE suffix_list ARRAY<STRING> DEFAULT [];
 -- データセット名に当たるので、mart_abjp からはやはり abjp しか出てこない。
 -- そのうえ 2〜3 文字で終わるデータセットの語尾が片端から suffix になる。
 DECLARE suffix_tail_lengths ARRAY<INT64> DEFAULT [];
--- suffix 一覧から落とす値。自動抽出したものにも、末尾から導出したものにも効く。
+-- suffix 一覧から落とす値。
+--
+-- **効くのは出来上がった一覧に対してだけ**（導出のあと）。落とした値からの
+-- 導出は止まらないので、「4 文字のほうは要らないが末尾は要る」が書ける。
+--   ghkr を落とす → 一覧から ghkr だけが消え、kr は残る
+--   meta と ta を消したい → 両方並べる（meta だけでは ta が残る）
+-- 段階を分けて効かせるほうが短く書けるが、書いた値と消える値が 1 対 1 で
+-- 対応しないほうが分かりにくい。5-4 が最終的な一覧を全部出すので、
+-- 消したいものはそれを見て並べればよい。
 --
 -- **正規表現ではなく値そのもの**（完全一致）。ここだけ *_patterns と流儀が違う
 -- のは、suffix が短くて部分一致だと巻き添えが大きいため（'ta' を弾くつもりが
@@ -211,8 +219,6 @@ DECLARE suffix_tail_lengths ARRAY<INT64> DEFAULT [];
 -- 末尾 2 文字を足すと ta まで増える。混ざったゴミは**全 View 名**に
 -- ENDS_WITH で当たるので、v_summary_ta のような無関係な View の base が
 -- 切られる。base が変わるとメモ（base で突き合わせている）が黙って外れる。
---
--- 元の値を落とせば、そこから導出される末尾も出ない（meta を除けば ta も無い）。
 DECLARE suffix_exclude_list ARRAY<STRING> DEFAULT [];
 -- UDF に渡す解析オプション（JSON）。1 つ以上のキーを持つオブジェクトにすること。
 -- 指定できるキーは view_group_html.sql の冒頭に一覧がある。
@@ -559,8 +565,8 @@ OPTIONS (
 AS
 WITH
 -- suffix 一覧の素。suffix_list が空なら、対象データセットの名前から切り出す。
--- 除外はここでも効かせる。落とした値からは末尾も導出されない
--- （meta を除けば ta も出ない）。
+-- 除外はここでは効かせない。導出のあとに 1 回だけ効かせることで、
+-- 「4 文字のほうは落として末尾だけ残す」（ghkr を消して kr は残す）が書ける。
 suffix_base AS (
   SELECT DISTINCT suffix
   FROM UNNEST(
@@ -574,7 +580,6 @@ suffix_base AS (
        ))
   ) AS suffix
   WHERE suffix IS NOT NULL AND suffix != ''
-    AND suffix NOT IN UNNEST(@suffix_exclude_list)
 ),
 -- 実際に使う suffix 一覧。素のものに、その末尾 n 文字を足す。
 -- データセット名に現れない suffix を拾うため（mart_abjp の中の v_x_jp → 'jp'）。
@@ -589,6 +594,7 @@ suffixes AS (
     FROM suffix_base AS b, UNNEST(@suffix_tail_lengths) AS n
     WHERE n > 0 AND LENGTH(b.suffix) > n
   )
+  -- 除外はここ 1 か所だけ。書いた値と消える値が 1 対 1 で対応する。
   WHERE suffix NOT IN UNNEST(@suffix_exclude_list)
 ),
 -- UDF に渡す設定。suffixList だけ実行時に決まるので、analyze_options に足す。
@@ -971,7 +977,6 @@ listed AS (
     STRING_AGG(DISTINCT s.suffix, ', ' ORDER BY s.suffix) AS detail
   FROM src AS s, UNNEST(@suffix_tail_lengths) AS n
   WHERE n > 0 AND LENGTH(s.suffix) > n
-    AND s.suffix NOT IN UNNEST(@suffix_exclude_list)
   GROUP BY suffix, suffix_origin
 )
 SELECT
