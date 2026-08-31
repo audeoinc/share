@@ -128,6 +128,24 @@ function descHtml(text) {
 }
 
 /**
+ * セルに出す説明。
+ *
+ * **列名の欄ではなくグループごとのセルに置く。** 説明は View に付いた属性なので、
+ * グループによって違うことがある（片方だけ書いてある・文面が更新されている）。
+ * 1 か所にまとめて出すとその差が消えるが、セルに置けば横に並んで見える。
+ *
+ * グループの中で割れていたら、どの View のものかを添えて全部出す。
+ * note タブの View の description と同じ扱い（黙って 1 つだけ出さない）。
+ */
+function descCell(entry) {
+  if (!entry || !entry.descs.length) return '';
+  if (entry.descs.length === 1) return descHtml(entry.descs[0].text);
+  return entry.descs.map((d) =>
+    `<div class="vg-cdescwho">${esc(d.suffixes.join(', '))}</div>` +
+    descHtml(d.text)).join('');
+}
+
+/**
  * グループ 1 つ分の「列名 → その列について分かっていること」。
  *
  * 同じグループでも View ごとに列が違いうるので、View ぶん貯めておく。
@@ -144,12 +162,20 @@ function groupColumns(g, byView) {
       const c = cols[k];
       let e = out.get(c.n);
       if (!e) {
-        e = { name: c.n, desc: '', order: k, vals: [] };
+        e = { name: c.n, descs: [], order: k, vals: [] };
         out.set(c.n, e);
       }
-      // 説明は列ごとに 1 つ。最初に見つかったものを採る（View ごとに違うことは
-      // 基本的に無く、あっても表を横に広げてまで並べる情報ではない）。
-      if (!e.desc && c.d) e.desc = c.d;
+      // 説明は View ごとの属性。同じグループの中で割れることもあるので、
+      // 1 つに畳まずに「同じ文面を持つ suffix」の組で貯める。
+      if (c.d) {
+        const t = String(c.d);
+        let hit = null;
+        for (let x = 0; x < e.descs.length; x++) {
+          if (e.descs[x].text === t) hit = e.descs[x];
+        }
+        if (hit) hit.suffixes.push(suffix);
+        else e.descs.push({ text: t, suffixes: [suffix] });
+      }
       e.vals.push({
         suffix: suffix,
         type: c.t,
@@ -264,7 +290,6 @@ function renderColumns(b, byView) {
     const top = majority(infos.map((c) => c.sig));
     const uneven = infos.some((c) => c.sig !== top);
     if (uneven) diffRows++;
-    const entry = groups.map((_, i) => maps[i].get(name)).filter((e) => e)[0];
     const cells = infos.map((c, i) => {
       const g = groups[i];
       const e = maps[i].get(name);
@@ -276,12 +301,11 @@ function renderColumns(b, byView) {
       const body = c.text
         ? breakType(esc(c.text)) + (c.mixed
           ? `<span class="vg-cwarn" data-tip="${esc(mixedTip(e, g))}">${WARN}</span>` : '') +
-          `<div class="vg-cmeta">${esc(c.meta)}</div>`
+          `<div class="vg-cmeta">${esc(c.meta)}</div>` + descCell(e)
         : '—';
       return `<td class="${cls.join(' ')}">${body}</td>`;
     }).join('');
-    const desc = entry ? descHtml(entry.desc) : '';
-    return `<tr><th class="vg-cname">${esc(name)}${desc}</th>${cells}</tr>`;
+    return `<tr><th class="vg-cname">${esc(name)}</th>${cells}</tr>`;
   }).join('');
 
   const head = groups.map((g) =>
@@ -308,7 +332,8 @@ function renderColumns(b, byView) {
   // 幅はグループ数で均等割り。型は ARRAY<STRUCT<…>> のように長くなることが
   // あるので、横スクロールさせずにセルの中で折り返す。列名の欄は説明も入るぶん
   // 少し広く取る。table-layout:fixed にしないと、長い型がある列だけが伸びる。
-  const nameW = 24;
+  // 列名の欄は名前だけ（説明はセルに移した）ので、その分を各グループに回す。
+  const nameW = 18;
   const colW = ((100 - nameW) / groups.length).toFixed(3);
   const colgroup = `<colgroup><col style="width:${nameW}%">` +
     groups.map(() => `<col style="width:${colW}%">`).join('') + `</colgroup>`;
@@ -355,6 +380,9 @@ function columnsCss() {
     `.vg-cdesc{margin:2px 0 0;font:11px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;` +
       `font-weight:400;color:#57606A}`,
     `.vg-cdescsub{color:#8C959F}`,
+    // グループの中で説明が割れているときに、どの View のものかを示す見出し。
+    `.vg-cdescwho{margin:4px 0 0;font:11px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;` +
+      `font-weight:600;color:#8C959F}`,
     // 型は長くなりうる。折り返して縦に伸ばす（横スクロールを避けるため）。
     // markup 側にも <wbr> で折り返し位置を入れてあるので、ここが効かなくても
     // 型の構造の切れ目では折れる。
@@ -381,7 +409,7 @@ function columnsCss() {
 }
 
 module.exports = {
-  renderColumns, renderColumnsBase, columnsCss, breakType,
+  renderColumns, renderColumnsBase, columnsCss, breakType, descCell,
   groupColumns, columnOrder, cellInfo, mixedTip, nullText, majority,
   parseDesc, descHtml, DESC_JA_KEYS, DESC_EN_KEYS,
 };

@@ -158,9 +158,12 @@ const fakeColumns = (b) => {
           t: 'ARRAY<STRUCT<currency STRING, gross NUMERIC, net NUMERIC, tax NUMERIC>>' },
         // グループ間で型が違う例。同じ列名で片方だけ NUMERIC。
         { n: 'order_count', t: g === b.groups[1] ? 'NUMERIC' : 'INT64', o: 4, u: 'YES', d: '' },
+        // グループによって説明が違う例。セルに置いていれば横に並んで見える
         { n: 'gross_amount', t: /us$/.test(suffix) ? 'FLOAT64' : 'NUMERIC', o: 5,
           u: /uk$/.test(suffix) ? 'NO' : 'YES',
-          d: '税抜き。参照先テーブルの型に引きずられる' },
+          d: g === b.groups[0]
+            ? '税抜き。参照先テーブルの型に引きずられる'
+            : '税込み（2026-04 に税抜きへ変更予定）' },
       ];
       // 先頭以外のグループには列を 1 本足す／落とす
       if (g !== b.groups[0]) cols.push({ n: 'currency', t: 'STRING', o: cols.length + 1, u: 'YES', d: '通貨コード' });
@@ -690,9 +693,36 @@ const checks = [
       !css.includes('overflow-x:auto') &&
       !/\.vg-ccell\{[^}]*white-space:nowrap/.test(css);
   })()],
-  ['列の説明を列名の下に出す',
-    columnCases[0].html.includes('vg-cdesc') &&
-    columnCases[0].html.includes('税抜き')],
+  // 説明は View に付いた属性なので、グループによって違うことがある。
+  // 列名の欄にまとめると差が消えるので、グループごとのセルに置く。
+  ['列の説明はグループごとのセルに出す（列名の欄ではない）', (() => {
+    const h = columnCases[0].html;
+    // 列名の欄には名前だけ
+    const names = [...h.matchAll(/<th class="vg-cname">([\s\S]*?)<\/th>/g)].map((m) => m[1]);
+    if (!names.length || names.some((n) => n.includes('vg-cdesc'))) return false;
+    // セルの中に入っていること
+    const cells = [...h.matchAll(/<td class="vg-ccell[^"]*">([\s\S]*?)<\/td>/g)]
+      .map((m) => m[1]);
+    return cells.some((c) => c.includes('vg-cdesc') && c.includes('税抜き')) &&
+      // グループごとに違う説明が、それぞれのセルに出る
+      cells.some((c) => c.includes('税込み（2026-04 に税抜きへ変更予定）'));
+  })()],
+  ['グループの中で説明が割れたら View 名を添えて全部出す', (() => {
+    const g = { suffixes: ['abjp', 'abus'],
+      members: [{ viewName: 'v_x_abjp' }, { viewName: 'v_x_abus' }] };
+    const byView = {
+      v_x_abjp: [{ n: 'a', t: 'INT64', o: 1, u: 'YES', d: '受注日' }],
+      v_x_abus: [{ n: 'a', t: 'INT64', o: 1, u: 'YES', d: '受注日（旧）' }],
+    };
+    const one = { v_x_abjp: byView.v_x_abjp, v_x_abus: byView.v_x_abjp };
+    const split = Co.descCell(Co.groupColumns(g, byView).get('a'));
+    const same = Co.descCell(Co.groupColumns(g, one).get('a'));
+    return split.includes('<div class="vg-cdescwho">abjp</div>') &&
+      split.includes('<div class="vg-cdescwho">abus</div>') &&
+      split.includes('受注日（旧）') &&
+      // 1 種類なら見出しは付けない
+      !same.includes('vg-cdescwho') && same.includes('受注日');
+  })()],
   // description は自由文字列なので、論理名を持たせたければ JSON を入れるしかない。
   // キー名は環境で違うので広めに受け、拾えなかったキーも捨てずに出す。
   ['description の JSON から日本語 / 英語の論理名を出す', (() => {

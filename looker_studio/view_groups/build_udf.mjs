@@ -86,8 +86,10 @@ const CSS_SOURCES = RENDER_SOURCES.concat([
 function dropFunctions(src, names) {
   let out = src;
   for (const name of names) {
-    // `function name(` から、列 0 の `}` までを 1 つの宣言とみなす
-    const re = new RegExp(`^function ${name}\\([\\s\\S]*?^\\}\\n`, 'm');
+    // `function name(` から、列 0 の `}` までを 1 つの宣言とみなす。
+    // 改行は「あれば」。バンドルの最後の関数には後ろに改行が無い
+    // （strip が trim するため）ので、\n を必須にすると落とせない。
+    const re = new RegExp(`^function ${name}\\([\\s\\S]*?^\\}(?:\\n|$)`, 'm');
     if (!re.test(out)) throw new Error(`dropFunctions: ${name} が見つかりません`);
     out = out.replace(re, '');
     if (new RegExp(`^function ${name}\\(`, 'm').test(out)) {
@@ -104,8 +106,14 @@ const UNUSED_ANALYZE = ['alphaMap'];
 // ERD 側はグループ化もパラメータ化もしない。トークナイザと実体名の判定だけ使う。
 const UNUSED_ERD = ['alphaMap', 'alphaMapDetail', 'parameterize', 'groupByLogic',
   'analyze', 'maskTokens', 'buildLiteralMap', 'suffixWords', 'parseEquivalents',
-  'extractSuffix', 'expandSuffixParts', 'normalizeSpace', 'stripOptionsClause'];
-const UNUSED_RENDER = ['renderFragment3', 'build3Way', 'mapToBase', 'baseCell', 'segsText'];
+  'extractSuffix', 'expandSuffixParts', 'normalizeSpace', 'stripOptionsClause',
+  // CSS は viewlgc_group_css が配る。page は markup しか作らないので、
+  // CSS の文字列を積むだけ無駄（1 個 32 KB のインライン上限に効いてくる）。
+  'columnsCss', 'sqlCss'];
+// 外枠で束ねるのは page の仕事。render はロジック差分のカードを作るだけなので
+// wrapPage は要らない（chrome.js を共有しているぶん付いてくる）。
+const UNUSED_RENDER = ['renderFragment3', 'build3Way', 'mapToBase', 'baseCell',
+  'segsText', 'wrapPage'];
 // CSS の UDF は markdown.js から memoCss() しか呼ばない。Markdown を HTML に
 // する側は viewlgc_markdown が持っているので、こちらには積まない。
 const UNUSED_CSS = UNUSED_RENDER.concat([

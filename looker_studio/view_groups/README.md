@@ -522,15 +522,25 @@ node check_sql.mjs          # build_table.sql と view_group_html.sql の突き�
 
 ```
 viewlgc_analyze     素 23.7 KB → 最小化 10.7 KB（上限比 36%）
-viewlgc_render      素 46.1 KB → 最小化 28.1 KB（上限比 94%）
-viewlgc_page        素 54.1 KB → 最小化 27.8 KB（上限比 93%）
+viewlgc_render      素 45.8 KB → 最小化 27.5 KB（上限比 92%）
+viewlgc_page        素 52.2 KB → 最小化 26.1 KB（上限比 87%）
 viewlgc_markdown    素 11.1 KB → 最小化  6.5 KB（上限比 22%）
 ```
 
 （`viewlgc_group_css` は JavaScript ではなく SQL 関数になったので、この枠とは
 無関係。生成時に焼き込んだ固定文字列を返すだけ。）
 
-`viewlgc_render` と `viewlgc_page` がどちらも上限（生成時の閾値 30 KB）に近い。CSS を足すときは
+**枠を空けるのは `UNUSED_*` の見直しが最初の手。** ファイルを共有している都合で、
+その UDF が呼ばないものまで付いてくる。実際、`viewlgc_page` は CSS を返す関数
+（`columnsCss` / `sqlCss`）を積んでいて 98% まで来ていたが、CSS を配るのは
+`viewlgc_group_css` の仕事なので落として 87% に戻った。`viewlgc_render` も
+外枠で束ねる `wrapPage`（page の仕事）を落としている。
+
+> `dropFunctions` はバンドル末尾の関数も落とせる。閉じ括弧のあとの改行を
+> 必須にしていた頃は、最後のファイルの最後の関数だけ「見つかりません」で
+> 落ちていた（`strip` が末尾を trim するため）。
+
+`viewlgc_render` と `viewlgc_page` はどちらも上限（生成時の閾値 30 KB）に近い。CSS を足すときは
 `node build_udf.mjs` の最後に出るサイズを見ること。**メモの CSS を
 `markdown.js` の `memoCss()` に置いてあるのはこのため**で、差分側の
 `chromeCss()` に混ぜると `viewlgc_render` にも使わない CSS が乗る。
@@ -1293,7 +1303,14 @@ SQL は α 等価だが、参照先テーブルの型が違えば出力列の型
 `⚠` の対象（同じ SQL なのに順序が違うのは本物の差なので）。
 
 行の並びは基準グループの `ordinal_position` 順。そこに無い列は後ろに足す。
-列の説明（`COLUMN_FIELD_PATHS.description`）は列名の下に小さく出す。
+
+**列の説明（`COLUMN_FIELD_PATHS.description`）は、列名の欄ではなくグループごとの
+セルに出す。** 説明も View に付いた属性なので、グループによって違うことがある
+（片方だけ書いてある・文面が更新されている）。1 か所にまとめて出すとその差が
+消えるが、セルに置けば型や NULL 制約と同じように横に並んで見える。
+
+グループの**中**で説明が割れていたら、どの View のものかを添えて全部出す
+（note タブの View の description と同じ扱い）。1 種類なら見出しは付けない。
 
 ##### 説明が JSON なら論理名として読む
 
