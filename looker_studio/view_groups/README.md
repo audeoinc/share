@@ -1399,7 +1399,29 @@ base ごとに添える。元が Confluence の文章なので、見出し・表
 | `updated_by` | 更新者。表示にだけ使う |
 | `is_hidden` | `TRUE` / `1` / `yes` なら出さない。消さずに下書きへ戻すためのもの |
 
-ビューが増やす列は `has_note` / `note_md` / `note_html` / `note_updated_at` /
+##### note タブは View の description ＋ シートのメモ
+
+`note` タブに出るのは 2 つを繋いだもの。**View 自身の `description`（Markdown）が
+先で、シートのメモが続く。**
+
+| | 出どころ | 変わるとき |
+|---|---|---|
+| `view_desc_md` | `INFORMATION_SCHEMA.TABLE_OPTIONS` の `description` | View をデプロイしたとき |
+| `note_md` | スプレッドシート | 書き換えたその場で |
+
+区切りは Markdown の水平線。出どころが違うことが読み手に分かるようにする。
+**片方しか無ければそれだけを出す**（空のものを落としてから繋ぐので、区切り線
+だけが残ることはない）。どちらも無ければ従来どおり「未登録」の枠になる。
+
+`description` は `TABLE_OPTIONS` にしか無い（`VIEWS` にも `TABLES` にも列が無い）。
+`option_value` は JSON 文字列の体裁（`"説明文"`）なので剥がして中身を取り出し、
+剥がせない形なら生のまま使う。
+
+**base の中で説明が割れていたら、全部出す。** 同じロジックの View なのに説明が
+違えばそれ自体が情報なので、黙って 1 つだけ出さない（どの View のものかを
+太字で添えて並べる）。1 種類なら見出しは付けない。
+
+ビューが増やす列は `has_note` / `has_view_desc` / `note_md` / `note_html` / `note_updated_at` /
 `note_updated_by`。
 
 #### シートの URL とタブ名

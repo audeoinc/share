@@ -564,6 +564,7 @@ CREATE OR REPLACE TABLE `__T_DIFF__`
   group_sizes     ARRAY<INT64>   OPTIONS (description = '各グループの View 数'),
   suffixes        ARRAY<STRING>  OPTIONS (description = '認識した suffix 一覧'),
   unmatched_count INT64          OPTIONS (description = 'suffix を認識できなかった View 数。1 ならこの行が単独表示の View'),
+  view_desc_md    STRING         OPTIONS (description = 'View 自身の description（Markdown）。note タブの先頭に出す。未設定なら NULL'),
   diff_html       STRING         OPTIONS (description = '比較 HTML。Templated Record に渡す')
 )
 CLUSTER BY base
@@ -696,6 +697,44 @@ base_cols AS (
   JOIN cols AS c ON c.view_name = k.view_name
   GROUP BY k.base
 ),
+-- View 自身の description（Markdown）。note タブの先頭に出す。
+--
+-- description は TABLE_OPTIONS にしか無い（VIEWS にも TABLES にも列が無い）。
+-- option_value は JSON 文字列の体裁（"説明文"）で入っているので、剥がして
+-- 中身を取り出す。剥がせない形で入っていたら生のまま使う（落とすよりよい）。
+view_opts AS (
+  SELECT
+    table_name AS view_name,
+    COALESCE(SAFE.STRING(SAFE.PARSE_JSON(option_value)), option_value) AS desc_md
+  FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.TABLE_OPTIONS`
+  WHERE option_name = 'description'
+    AND (__VIEW_DATASET_COND__) AND (__VIEW_NAME_COND__)
+),
+-- 同じ説明を持つ View をまとめる。base の中で説明が割れているかどうかが
+-- ここで分かる（同じロジックの View なのに説明が違えば、それ自体が情報）。
+desc_by_base AS (
+  SELECT
+    k.base,
+    d.desc_md,
+    STRING_AGG(k.view_name, ', ' ORDER BY k.view_name) AS view_names
+  FROM keyed AS k
+  JOIN view_opts AS d ON d.view_name = k.view_name
+  WHERE TRIM(COALESCE(d.desc_md, '')) != ''
+  GROUP BY k.base, d.desc_md
+),
+base_desc AS (
+  SELECT
+    base,
+    -- base の中で説明が 1 種類なら、そのまま出す（見出しは邪魔）。
+    -- 割れていたら、どの View のものかを添えて全部出す。黙って 1 つだけ
+    -- 出すと、説明が食い違っていることに気づけない。
+    IF(COUNT(*) = 1,
+       ANY_VALUE(desc_md),
+       STRING_AGG('**' || view_names || '**' || CHR(10) || CHR(10) || desc_md,
+                  CHR(10) || CHR(10) ORDER BY view_names)) AS desc_md
+  FROM desc_by_base
+  GROUP BY base
+),
 -- 解析は base ごとに 1 回だけ。結果の JSON をこの段で持っておき、
 -- メタデータは JSON から取り出し、HTML は描画の UDF に渡す。
 -- JS UDF から別の UDF は呼べないので、この 2 段で合成する。
@@ -729,10 +768,14 @@ refs AS (
     a.sql_json,
     -- 取れなかった base でも描画側が落ちないよう、空の並びを渡す
     COALESCE(bc.columns_json, '[]') AS columns_json,
+    -- View に description が無い base もある。その場合は NULL のままにして、
+    -- ビュー側でシートのメモだけを出す。
+    bd.desc_md AS view_desc_md,
     0 AS ref_index,
     JSON_VALUE_ARRAY(a.analysis, '$.groupLabels')[SAFE_OFFSET(0)] AS ref_label
   FROM analyzed AS a
   LEFT JOIN base_cols AS bc ON bc.base = a.base
+  LEFT JOIN base_desc AS bd ON bd.base = a.base
 )
 SELECT
   CURRENT_DATE('__TZ__') AS snapshot_date,
@@ -749,6 +792,7 @@ SELECT
   ) AS group_sizes,
   JSON_VALUE_ARRAY(analysis, '$.suffixes') AS suffixes,
   CAST(JSON_VALUE(analysis, '$.unmatchedCount') AS INT64) AS unmatched_count,
+  view_desc_md,
   -- どのグループを基準にするかを設定に足して渡す。opts と同じ組み立て方
   -- （先頭の '{' を落として前に足す）にそろえてある。
   --
@@ -795,6 +839,12 @@ USING suffix_list AS suffix_list,
 --    **レポートの ref_label のコントロールは外してよい**（値が 1 つしか
 --    出てこないため）。
 --
+--    note タブに出すのは 2 つを繋いだもの。View 自身の description（Markdown）
+--    が先で、シートのメモが続く。片方しか無ければそれだけを出す。
+--      description  View に付いた正式な説明。デプロイでしか変わらない
+--      シート       運用中の補足。書き換えたらその場で出る
+--    区切りは水平線。出どころが違うことが読み手に分かるようにする。
+--
 --    ビューは base ごとのメモを LEFT JOIN して、note_html（Markdown を
 --    HTML にしたもの）を持つ。同じデータソースに入れてあるので、レポートの
 --    base のコントロールがメモのチャートにもそのまま効く。別データソースに
@@ -828,21 +878,46 @@ joined AS (
     -- レポート側で「値なし」になり、未登録なのか取得に失敗したのか読めない）。
     n.base IS NOT NULL            AS has_note,
     n.note_md                     AS note_md,
-    `__UDF_MARKDOWN__`(n.note_md) AS note_html,
+    d.view_desc_md IS NOT NULL    AS has_view_desc,
+    -- note タブに出す Markdown。View 自身の description が先で、シートの
+    -- メモが続く。どちらも無いこと・片方だけあることがあるので、空のものを
+    -- 落としてから繋ぐ（そうしないと区切り線だけが残る）。
+    --
+    -- 区切りは Markdown の水平線。description は View に付いた正式な説明、
+    -- シートは運用中の補足で、出どころが違うことが読み手に分かるようにする。
+    --
+    -- 改行はエスケープ表記で書けない（テンプレートにバックスラッシュを
+    -- 禁じているため。node check_sql.mjs が見張る）ので CHR(10) で組み立てる。
+    ARRAY_TO_STRING(
+      ARRAY(
+        SELECT part
+        FROM UNNEST([d.view_desc_md, n.note_md]) AS part
+        WHERE TRIM(COALESCE(part, '')) != ''
+      ),
+      CHR(10) || CHR(10) || '---' || CHR(10) || CHR(10)
+    )                             AS note_source_md,
     n.updated_at                  AS note_updated_at,
     n.updated_by                  AS note_updated_by
   FROM `__T_DIFF__` AS d
   LEFT JOIN notes AS n ON n.base = d.base
   -- 絞り込みは要らない。テーブルは最新の 1 世代しか持たず、
   -- 行も base ごとに 1 本（ref_index は常に 0）。
+),
+-- Markdown を HTML にするのは 1 回だけ。カードに差し込む側と、単独で置きたい
+-- とき用の note_html で同じものを使う。
+rendered AS (
+  SELECT
+    j.*,
+    `__UDF_MARKDOWN__`(j.note_source_md) AS note_html
+  FROM joined AS j
 )
 SELECT
-  * EXCEPT (diff_html, ref_index, ref_label),
+  * EXCEPT (diff_html, ref_index, ref_label, note_source_md),
   -- 事前生成したカードのメモ タブに、いま読んだメモを差し込む。目印は
   -- chrome.js の NOTE_MARK と同じ文字列（node check_sql.mjs が突き合わせる）。
   -- カードごと作り置きしないのは、シートを直した内容をその場で出すため。
   REPLACE(diff_html, '<!--VG_NOTE-->', note_html) AS diff_html
-FROM joined
+FROM rendered
 """;
 EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
 ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS

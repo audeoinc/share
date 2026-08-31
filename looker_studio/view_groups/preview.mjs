@@ -112,9 +112,31 @@ const NOTE_MD = [
   'snake_case_name は斜体にしない。',
 ].join('\n');
 
+// note タブに出すのは「View 自身の description」と「シートのメモ」を繋いだもの。
+// 繋ぐのは SQL 側（ビュー）だが、見え方はここで確かめられる。
+const VIEW_DESC_MD = [
+  '## v_daily_sales_abjp',
+  '',
+  'リージョン別の日次売上。**受注日は JST** で切っている。',
+  '',
+  '| 項目 | 値 |',
+  '|:--|:--|',
+  '| 更新 | 03:00 |',
+  '| 所有 | データ基盤チーム |',
+].join('\n');
+// 空のものを落としてから繋ぐ（区切り線だけが残らないように）。ビュー側の
+// ARRAY_TO_STRING と同じ扱い。
+const joinNote = (...parts) =>
+  parts.filter((p) => p && String(p).trim() !== '').join('\n\n---\n\n');
+
 const memoCases = [
-  { title: 'メモ（Markdown）', html: Md.markdownHtml(NOTE_MD) },
-  { title: 'メモ（未登録）', html: Md.markdownHtml(null) },
+  { title: 'メモ（View の description ＋ シート）',
+    html: Md.markdownHtml(joinNote(VIEW_DESC_MD, NOTE_MD)) },
+  { title: 'メモ（description だけ・シート未登録）',
+    html: Md.markdownHtml(joinNote(VIEW_DESC_MD, null)) },
+  { title: 'メモ（シートだけ・description 無し）',
+    html: Md.markdownHtml(joinNote(null, NOTE_MD)) },
+  { title: 'メモ（どちらも無い）', html: Md.markdownHtml(joinNote(null, null)) },
 ];
 
 // カラム定義の代わり。実際は INFORMATION_SCHEMA.COLUMNS から作った並びが来る。
@@ -587,6 +609,26 @@ const checks = [
   ['メモが空なら未登録の枠を返す',
     Md.markdownHtml('').includes('vg-mdempty') &&
     Md.markdownHtml('  \n  ').includes('vg-mdempty')],
+  // note タブは View 自身の description が先、シートのメモが続く。
+  // 片方しか無いときに区切り線だけが残らないこと。
+  ['note は description のあとにシートのメモを出す', (() => {
+    const h = memoCases[0].html;
+    const hr = h.indexOf('<hr class="vg-mdhr">');
+    return hr > 0 &&
+      h.indexOf('データ基盤チーム') < hr &&
+      h.indexOf('v_daily_sales について') > hr;
+  })()],
+  ['片方しか無ければ区切り線を出さない', (() => {
+    const only = [memoCases[1].html, memoCases[2].html];
+    return only.every((h) => !h.includes('<hr class="vg-mdhr">') ||
+      // シート側の本文には元から --- が入っているので、そのぶんは数に入れる
+      (h.match(/<hr class="vg-mdhr">/g) || []).length ===
+        (NOTE_MD.match(/^---$/gm) || []).length) &&
+      memoCases[1].html.includes('データ基盤チーム') &&
+      memoCases[2].html.includes('v_daily_sales について');
+  })()],
+  ['どちらも無ければ未登録の枠になる',
+    memoCases[3].html.includes('vg-mdempty')],
   // カラム定義。グループではなく View ごとの属性なので、同じグループの中で
   // 型が割れることがある。それはロジック差分には出てこないので、必ず印を出す。
   ['カラム定義は 1 枚の表で全グループを並べる', (() => {
