@@ -613,9 +613,11 @@ DECLARE analysis_exclude_object_patterns  ARRAY<STRING> DEFAULT [];
 DECLARE snapshot_time_zone STRING DEFAULT 'Asia/Tokyo';   -- snapshot_date の基準
 
 -- [B] 既定のままで動くもの
-DECLARE suffix_pattern  STRING        DEFAULT r'_([A-Za-z]{4})$';
-DECLARE suffix_list     ARRAY<STRING> DEFAULT [];
-DECLARE analyze_options STRING        DEFAULT '{"mode":"class"}';
+DECLARE suffix_pattern      STRING        DEFAULT r'_([A-Za-z]{4})$';
+DECLARE suffix_list         ARRAY<STRING> DEFAULT [];
+DECLARE suffix_tail_lengths ARRAY<INT64>  DEFAULT [2];
+DECLARE suffix_exclude_list ARRAY<STRING> DEFAULT [];
+DECLARE analyze_options     STRING        DEFAULT '{"mode":"class"}';
 
 -- [C] 導出・内部用。編集しない
 DECLARE job_region STRING DEFAULT @@location;
@@ -699,7 +701,7 @@ DECLARE target_project_id STRING DEFAULT NULL;
 | `analysis_exclude_object_patterns` | 落とす View 名。include のあとに効く |
 | `suffix_pattern` | データセット名から suffix を切り出す正規表現（1 つ目のキャプチャ） |
 | `suffix_list` | suffix 一覧。空なら `suffix_pattern` で自動抽出。データセット名から導けないときだけ並べる |
-| `suffix_tail_lengths` | 取り出した suffix の末尾 n 文字も suffix として扱う。`[2]` で `abjp` → `jp` |
+| `suffix_tail_lengths` | 取り出した suffix の末尾 n 文字も suffix として扱う。既定の `[2]` で `abjp` → `jp` |
 | `suffix_exclude_list` | suffix 一覧から落とす値（正規表現ではなく完全一致） |
 | `snapshot_time_zone` | `snapshot_date`（いつ時点の内容か）の基準タイムゾーン。リージョンごとに変える（[A]） |
 | `analyze_options` | UDF に渡す解析オプション（JSON）。`substitutable` などをここで足せば再生成が要らない |

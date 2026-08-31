@@ -188,7 +188,7 @@ DECLARE suffix_pattern STRING DEFAULT r'_([A-Za-z]{4})$';
 -- データセット名から導けないときだけ並べる。
 DECLARE suffix_list ARRAY<STRING> DEFAULT [];
 -- 取り出した suffix の**末尾 n 文字も suffix として扱う**長さの一覧。
--- 空なら何も足さない。[2] なら abjp / abus から jp / us が増える。
+-- 既定の [2] で abjp / abus から jp / us が増える。空にすると何も足さない。
 --
 -- 用途は「データセット名には現れない suffix」。データセットが mart_abjp
 -- （suffix = abjp）で、その中に v_x_jp のように地域だけを持つ View がある場合、
@@ -199,7 +199,7 @@ DECLARE suffix_list ARRAY<STRING> DEFAULT [];
 -- **suffix_pattern を r'_([A-Za-z]{2,4})$' に広げても解決しない。** あれは
 -- データセット名に当たるので、mart_abjp からはやはり abjp しか出てこない。
 -- そのうえ 2〜3 文字で終わるデータセットの語尾が片端から suffix になる。
-DECLARE suffix_tail_lengths ARRAY<INT64> DEFAULT [];
+DECLARE suffix_tail_lengths ARRAY<INT64> DEFAULT [2];
 -- suffix 一覧から落とす値。
 --
 -- **まず analysis_exclude_dataset_patterns を検討すること。** データセットごと
