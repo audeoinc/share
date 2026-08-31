@@ -14,10 +14,10 @@
  * だから。むしろこの表の一番の値打ちがそこなので、グループの代表 1 本を黙って
  * 出すのではなく、グループの中で食い違ったら必ず印を付ける。
  *
- * 出すのは型・NULL 制約・並び順・説明。**ただし「差」と見なすのは型と NULL 制約
- * だけで、並び順の違いには色を付けない。** グループが列を 1 本足すと以降の番号が
- * まとめてずれるので、色を付けると本当に見たい型の差がその中に埋もれる。
- * 番号は出すので、必要なら目で追える。
+ * 出すのは型・モード（NULL 制約 / REPEATED）・説明。**並び順（ordinal）は
+ * 出さない。** 行がその順に並んでいるので番号を添えても読めるものが増えず、
+ * 列を 1 本足すと以降がまとめてずれて目障りになるだけ。グループ内で並び順が
+ * 食い違ったときだけ ⚠ の内訳に出す（そこは本物の差なので黙らせない）。
  *
  * **この表に「基準」は無い。** 全グループを横に並べている以上、どれか 1 つを
  * 基準に立てなくても違いはそのまま読める。差分側は「基準と 1 つを見比べる」
@@ -318,7 +318,7 @@ function uniq(list) {
  * そのグループでのセルの中身。
  *
  *   text  型。グループ内で割れていれば ' / ' で並べる
- *   meta  並び順と NULL 制約。型より弱い情報なので小さく添える
+ *   nulls NULL 制約。型より弱い情報なので小さく添える
  *   sig   グループ同士を比べるための鍵。**並び順は入れない**（1 本足すと
  *         以降が全部ずれて、型の差が埋もれるため）
  *   mixed グループの中で揃っていない（型・NULL 制約・並び順のいずれか、
@@ -342,9 +342,7 @@ function cellInfo(entry, memberCount) {
     // 全部が ARRAY のときだけ REPEATED。割れていたら NULL 制約の側で出る。
     repeated: shapes.length > 0 && shapes.every((s) => s.repeated),
     record: shapes.some((s) => s.record),
-    ords: ords.join(' / '),
     nulls: nulls.join(' / '),
-    meta: `#${ords.join(' / ')} · ${nulls.join(' / ')}`,
     // 比べるのは畳む前の型。RECORD 同士でも中身が違えば差として出す
     // （どこが違うかは子の行に出る）。
     sig: types.join(' / ') + '|' + nulls.join(' / '),
@@ -419,9 +417,12 @@ function renderColumns(b, byView) {
       // ネストした項目には並び順も NULL 制約も無い（COLUMN_FIELD_PATHS が
       // 持っていない）。親のものを出すと嘘になるので出さない。REPEATED は
       // その項目自身の型から分かるので出す。
+      // モードだけ。並び順（ordinal）は出さない — 行がその順に並んでいるので
+      // 番号を添えても読めるものが増えず、列を 1 本足すと以降がまとめてずれる。
+      // グループ内で食い違ったときだけ ⚠ の内訳に出す。
       const meta = nested
         ? (c.repeated ? 'REPEATED' : '')
-        : `#${c.ords} · ${c.repeated ? 'REPEATED' : c.nulls}`;
+        : (c.repeated ? 'REPEATED' : c.nulls);
       const body = c.text
         ? breakType(esc(shown)) + (c.mixed
           ? `<span class="vg-cwarn" data-tip="${esc(mixedTip(e, g))}">${WARN}</span>` : '') +
@@ -446,13 +447,14 @@ function renderColumns(b, byView) {
   const lead = [];
   if (mixedCount) {
     lead.push(notice(`同じグループの中で型・NULL 制約・並び順が揃っていない箇所が ${mixedCount} 件あります` +
-      `（${WARN} の印）。SQL が同一でも参照先テーブルの型が違えばこうなるので、` +
+      `（${WARN} の印。ホバーすると suffix ごとの内訳が出ます）。` +
+      `SQL が同一でも参照先テーブルの型が違えばこうなるので、` +
       `ロジック差分には出てきません。`));
   }
   if (diffRows) {
     lead.push(notice(`グループ間で型または NULL 制約が揃っていない列が ${diffRows} 件` +
       `あります（色付きのセル。その列でいちばん多い値と違うもの）。` +
-      `並び順（#）の違いには色を付けていません` +
+      `並び順の違いは差として扱っていません` +
       `（列を 1 本足すと以降がまとめてずれ、型の差が埋もれるため）。`));
   }
   if (!lead.length) {

@@ -739,6 +739,18 @@ const checks = [
   })()],
   // 中身が子の行に出ているなら、親の型は Console と同じ RECORD / REPEATED に
   // 畳む。同じ内容を 2 か所に出しても場所を取るだけ。
+  // 並び順（ordinal）は表に出さない。行がその順に並んでいるので番号を
+  // 添えても読めるものが増えず、列を 1 本足すと以降がまとめてずれる。
+  ['表に並び順（#N）を出さない', (() => {
+    const h = columnCases[0].html;
+    const cells = [...h.matchAll(/<div class="vg-cmeta">([^<]*)<\/div>/g)].map((m) => m[1]);
+    return cells.length > 0 && cells.every((c) => c.indexOf('#') < 0) &&
+      // モードは出る
+      cells.some((c) => c === 'REPEATED') &&
+      cells.some((c) => c === 'NULL 可' || c === 'NOT NULL') &&
+      // グループ内で食い違ったときの内訳にだけ並び順が残る
+      /data-tip="[^"]*#5 /.test(h);
+  })()],
   ['STRUCT の親は RECORD / REPEATED に畳む', (() => {
     const parent = columnRow('amount_breakdown');
     return parent && parent.includes('RECORD') && parent.includes('REPEATED') &&
@@ -774,8 +786,8 @@ const checks = [
     const parent = columnRow('amount_breakdown');
     const child = columnRow('\u2514currency');
     return parent && parent.includes('vg-cmeta') &&
-      // 親は #3 · REPEATED。子には並び順も NULL 制約も出ない
-      parent.includes('#3 · REPEATED') &&
+      // 親はモードだけ（並び順は出さない）。子には NULL 制約も出ない
+      parent.includes('>REPEATED<') && !parent.includes('#') &&
       child && !child.includes('vg-cmeta') && child.includes('通貨');
   })()],
   ['ネストでもグループ間の型の違いが色で出る', (() => {
