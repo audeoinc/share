@@ -2,7 +2,7 @@
 /**
  * View のカラム定義（INFORMATION_SCHEMA.COLUMNS）を 1 枚の表にする。
  *
- *   1 行 = 1 列名、1 列 = 1 ロジック グループ。セルは型・NULL 制約・並び順。
+ *   1 行 = 1 列名、1 列 = 1 ロジック グループ。セルは型とモード。
  *
  * グループごとのタブにしなかったのは、列名も型も短くて横に並べても収まるから。
  * 全グループを一度に見せれば、どこが揃っていないかをタブを押さずに見つけられる。
@@ -14,7 +14,8 @@
  * だから。むしろこの表の一番の値打ちがそこなので、グループの代表 1 本を黙って
  * 出すのではなく、グループの中で食い違ったら必ず印を付ける。
  *
- * 出すのは型・モード（NULL 制約 / REPEATED）・説明。**並び順（ordinal）は
+ * 出すのは型・モード（NULLABLE / REQUIRED / REPEATED。BigQuery のコンソールと
+ * 同じ表記）・説明。**並び順（ordinal）は
  * 出さない。** 行がその順に並んでいるので番号を添えても読めるものが増えず、
  * 列を 1 本足すと以降がまとめてずれて目障りになるだけ。グループ内で並び順が
  * 食い違ったときだけ ⚠ の内訳に出す（そこは本物の差なので黙らせない）。
@@ -305,7 +306,10 @@ function majority(sigs) {
   return best;
 }
 
-const nullText = (n) => (n === null ? 'NULL 不明' : n ? 'NULL 可' : 'NOT NULL');
+// モードの表記は BigQuery のコンソールに合わせる（NULLABLE / REQUIRED /
+// REPEATED）。REPEATED は型が ARRAY かどうかで決まるので typeShape 側。
+// is_nullable が取れないときだけ UNKNOWN（コンソールには無い状態）。
+const nullText = (n) => (n === null ? 'UNKNOWN' : n ? 'NULLABLE' : 'REQUIRED');
 
 /** 重複を除いて出現順に並べる。 */
 function uniq(list) {

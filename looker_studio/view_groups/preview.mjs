@@ -663,8 +663,8 @@ const checks = [
     return h.includes('vg-cmix') && h.includes('vg-cwarn') &&
       h.includes('NUMERIC / FLOAT64') &&
       // 内訳が tooltip に出る（suffix・並び順・型・NULL 制約）
-      /data-tip="[^"]*abus = #5 FLOAT64 NULL 可/.test(h) &&
-      /data-tip="[^"]*abuk = #5 NUMERIC NOT NULL/.test(h) &&
+      /data-tip="[^"]*abus = #5 FLOAT64 NULLABLE/.test(h) &&
+      /data-tip="[^"]*abuk = #5 NUMERIC REQUIRED/.test(h) &&
       h.includes('揃っていない箇所が');
   })()],
   ['多数派と違う型・持っていない列が分かる（基準は立てない）', (() => {
@@ -747,7 +747,7 @@ const checks = [
     return cells.length > 0 && cells.every((c) => c.indexOf('#') < 0) &&
       // モードは出る
       cells.some((c) => c === 'REPEATED') &&
-      cells.some((c) => c === 'NULL 可' || c === 'NOT NULL') &&
+      cells.some((c) => c === 'NULLABLE' || c === 'REQUIRED') &&
       // グループ内で食い違ったときの内訳にだけ並び順が残る
       /data-tip="[^"]*#5 /.test(h);
   })()],

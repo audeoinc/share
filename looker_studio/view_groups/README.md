@@ -1258,8 +1258,9 @@ QUALIFY ROW_NUMBER() OVER (
 ### カラム定義（カラム定義タブ）
 
 `INFORMATION_SCHEMA.COLUMNS` から View の出力列を取り、**1 行 = 1 列名、
-1 列 = 1 ロジック グループ**の表にする。セルは**型とモード**（`NULL 可` /
-`NOT NULL` / `REPEATED`）。型を大きく、モードはその下に小さく添える。
+1 列 = 1 ロジック グループ**の表にする。セルは**型とモード**（`NULLABLE` /
+`REQUIRED` / `REPEATED`）。型を大きく、モードはその下に小さく添える。
+表記は BigQuery のコンソールに合わせてある。
 
 **並び順（ordinal）は出さない。** 行がその順に並んでいるので番号を添えても
 読めるものが増えず、列を 1 本足すと以降がまとめてずれて目障りになるだけ。
@@ -1299,7 +1300,7 @@ SQL は α 等価だが、参照先テーブルの型が違えば出力列の型
 
 | 見た目 | 意味 |
 |---|---|
-| 枠（黄）＋ `⚠` | **同じグループの中で揃っていない**（型 / NULL 制約 / 並び順、またはこの列を持たない View がいる）。ホバーで `abus = #4 FLOAT64 NULL 可` のように suffix ごとの内訳が出る（並び順が見えるのはここだけ） |
+| 枠（黄）＋ `⚠` | **同じグループの中で揃っていない**（型 / NULL 制約 / 並び順、またはこの列を持たない View がいる）。ホバーで `abus = #4 FLOAT64 NULLABLE` のように suffix ごとの内訳が出る（並び順が見えるのはここだけ） |
 | 地色（緑） | 基準グループと**型か NULL 制約**が違う |
 | `—`（灰） | そのグループにこの列が無い |
 
@@ -1358,7 +1359,7 @@ base_cols    base ごとに [{v: View 名, cols: […]}] へ畳んで JSON に
 `COLUMN_FIELD_PATHS` は**中まで 1 行ずつ持っている**ので、それを行として出す。
 
 ```
-order_date                  DATE       NOT NULL         受注日
+order_date                  DATE       REQUIRED         受注日
 tags                        STRING     REPEATED         タグ
 amount_breakdown            RECORD     REPEATED         通貨ごとの内訳
   └ currency                STRING                      通貨
@@ -1371,9 +1372,9 @@ amount_breakdown            RECORD     REPEATED         通貨ごとの内訳
 | 型 | 表示 | モード |
 |---|---|---|
 | `ARRAY<STRUCT<…>>` | `RECORD` | `REPEATED` |
-| `STRUCT<…>` | `RECORD` | `NULL 可` / `NOT NULL` |
+| `STRUCT<…>` | `RECORD` | `NULLABLE` / `REQUIRED` |
 | `ARRAY<STRING>` | `STRING` | `REPEATED` |
-| `STRING` | `STRING` | `NULL 可` / `NOT NULL` |
+| `STRING` | `STRING` | `NULLABLE` / `REQUIRED` |
 
 **畳むのは、畳んでも定義が読めなくならないときだけ。** `ARRAY<STRING>` は
 中身が無いので常に畳めるが、`ARRAY<STRUCT<…>>` は**子の行が出ているときだけ**。
