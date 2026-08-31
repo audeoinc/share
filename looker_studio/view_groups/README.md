@@ -1353,10 +1353,33 @@ base_cols    base ごとに [{v: View 名, cols: […]}] へ畳んで JSON に
 `COLUMN_FIELD_PATHS` は**中まで 1 行ずつ持っている**ので、それを行として出す。
 
 ```
-amount_breakdown            ARRAY<STRUCT<currency STRING, gross NUMERIC>>  #3 · NULL 可
-  └ currency                STRING                                        通貨
-  └ gross                   NUMERIC                                       税込み金額
+amount_breakdown            RECORD     #3 · REPEATED    通貨ごとの内訳
+  └ currency                STRING                      通貨
+  └ gross                   NUMERIC                     税込み金額
+tags                        STRING     #4 · REPEATED    タグ
 ```
+
+**親の型はコンソールと同じ `RECORD` / `REPEATED` に畳む。** 中身は子の行に出て
+いるので、親にも同じ文字列を並べると場所を取るだけで読めるものは増えない。
+
+| 型 | 表示 | モード |
+|---|---|---|
+| `ARRAY<STRUCT<…>>` | `RECORD` | `REPEATED` |
+| `STRUCT<…>` | `RECORD` | `NULL 可` / `NOT NULL` |
+| `ARRAY<STRING>` | `STRING` | `REPEATED` |
+| `STRING` | `STRING` | `NULL 可` / `NOT NULL` |
+
+**畳むのは、畳んでも定義が読めなくならないときだけ。** `ARRAY<STRING>` は
+中身が無いので常に畳めるが、`ARRAY<STRUCT<…>>` は**子の行が出ているときだけ**。
+`include_nested_fields = FALSE` のときに `RECORD` へ畳むと、STRUCT の定義が
+画面のどこからも読めなくなる。
+
+> スカラーの型名は標準 SQL のまま（`INTEGER` ではなく `INT64`）。コンソールの
+> レガシー表記に寄せると SQL タブに出る型と食い違うため、**構造の部分だけ**を
+> コンソールに合わせている。
+>
+> グループ間の比較は**畳む前の型**で行う。`RECORD` 同士でも中身が違えば親の
+> セルに色が付き、どこが違うかは子の行で分かる。
 
 セルに入れ子で出したり tooltip に隠したりしないのは、**この表の値打ちが
 「グループ間で揃っていないところが列で並ぶ」ことだから**。行に割れば、

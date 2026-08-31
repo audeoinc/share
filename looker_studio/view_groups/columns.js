@@ -188,6 +188,27 @@ function assignOrder(out) {
   }
 }
 
+/**
+ * 型を BigQuery のコンソールと同じ見え方に畳む。
+ *
+ *   ARRAY<STRUCT<currency STRING, …>>  ->  RECORD / REPEATED
+ *   STRUCT<currency STRING, …>         ->  RECORD
+ *   ARRAY<INT64>                       ->  INT64 / REPEATED
+ *   INT64                              ->  INT64
+ *
+ * STRUCT の中身は子の行に出ているので、親の型に同じものを並べても場所を取る
+ * だけで読めるものは増えない。スカラーの型名は標準 SQL のまま（INTEGER では
+ * なく INT64）にしてある。SQL タブに出る型と揃えるため。
+ */
+function typeShape(type) {
+  const s = String(type == null ? '' : type).trim();
+  const repeated = s.slice(0, 6).toUpperCase() === 'ARRAY<';
+  let inner = s;
+  if (repeated) inner = s.slice(s.indexOf('<') + 1, s.lastIndexOf('>')).trim();
+  const record = inner.slice(0, 7).toUpperCase() === 'STRUCT<';
+  return { repeated: repeated, record: record, name: record ? 'RECORD' : inner };
+}
+
 /** ネストした項目（field_path に '.' がある）。列名に '.' は使えないので確実。 */
 const isNested = (name) => String(name).indexOf('.') >= 0;
 
@@ -311,9 +332,21 @@ function cellInfo(entry, memberCount) {
   const mixed =
     uniq(entry.vals.map((v) => `${v.ord}|${v.type}|${v.nullable}`)).length > 1 ||
     entry.vals.length !== memberCount;
+  const shapes = entry.vals.map((v) => typeShape(v.type));
   return {
+    // text は型そのまま。shape は Console と同じ畳み方。どちらを出すかは
+    // 子の行があるかどうかで描画側が決める（中身が他に出ていないのに
+    // RECORD に畳むと、定義が画面のどこからも読めなくなる）。
     text: types.join(' / '),
+    shape: uniq(shapes.map((s) => s.name)).join(' / '),
+    // 全部が ARRAY のときだけ REPEATED。割れていたら NULL 制約の側で出る。
+    repeated: shapes.length > 0 && shapes.every((s) => s.repeated),
+    record: shapes.some((s) => s.record),
+    ords: ords.join(' / '),
+    nulls: nulls.join(' / '),
     meta: `#${ords.join(' / ')} · ${nulls.join(' / ')}`,
+    // 比べるのは畳む前の型。RECORD 同士でも中身が違えば差として出す
+    // （どこが違うかは子の行に出る）。
     sig: types.join(' / ') + '|' + nulls.join(' / '),
     mixed: mixed,
   };
@@ -351,6 +384,13 @@ function renderColumns(b, byView) {
       'INFORMATION_SCHEMA.COLUMNS から列が読めているか確認してください。');
   }
 
+  // 子の行を持つ項目。親の型を RECORD に畳んでよいかの判断に使う。
+  const hasChild = new Set();
+  for (const path of order) {
+    const at = path.lastIndexOf('.');
+    if (at > 0) hasChild.add(path.slice(0, at));
+  }
+
   let diffRows = 0;
   let mixedCount = 0;
   const rows = order.map((name) => {
@@ -370,12 +410,22 @@ function renderColumns(b, byView) {
       // 多数派と違う型・NULL 制約。並び順の違いは色にしない（上の説明のとおり）。
       else if (c.sig !== top) cls.push('vg-cdiff');
       if (c.mixed) { cls.push('vg-cmix'); mixedCount++; }
+      // 畳んでよいのは、畳んでも定義が読めなくならないとき。
+      //   ARRAY<STRING> -> STRING / REPEATED   … 中身が無いので常に畳める
+      //   ARRAY<STRUCT<…>> -> RECORD / REPEATED … 子の行に中身が出ているときだけ
+      // include_nested_fields = FALSE のときに RECORD へ畳むと、STRUCT の定義が
+      // 画面のどこからも読めなくなる。
+      const shown = (!c.record || hasChild.has(name)) ? c.shape : c.text;
+      // ネストした項目には並び順も NULL 制約も無い（COLUMN_FIELD_PATHS が
+      // 持っていない）。親のものを出すと嘘になるので出さない。REPEATED は
+      // その項目自身の型から分かるので出す。
+      const meta = nested
+        ? (c.repeated ? 'REPEATED' : '')
+        : `#${c.ords} · ${c.repeated ? 'REPEATED' : c.nulls}`;
       const body = c.text
-        ? breakType(esc(c.text)) + (c.mixed
+        ? breakType(esc(shown)) + (c.mixed
           ? `<span class="vg-cwarn" data-tip="${esc(mixedTip(e, g))}">${WARN}</span>` : '') +
-          // ネストした項目には並び順も NULL 制約も無い（COLUMN_FIELD_PATHS が
-          // 持っていない）。親のものを出すと嘘になるので、型と説明だけにする。
-          (nested ? '' : `<div class="vg-cmeta">${esc(c.meta)}</div>`) + descCell(e)
+          (meta ? `<div class="vg-cmeta">${esc(meta)}</div>` : '') + descCell(e)
         : '—';
       return `<td class="${cls.join(' ')}">${body}</td>`;
     }).join('');
@@ -496,7 +546,7 @@ function columnsCss() {
 
 module.exports = {
   renderColumns, renderColumnsBase, columnsCss, breakType, descCell,
-  structFields, assignOrder, isNested,
+  structFields, assignOrder, isNested, typeShape,
   groupColumns, columnOrder, cellInfo, mixedTip, nullText, majority,
   parseDesc, descHtml, DESC_JA_KEYS, DESC_EN_KEYS,
 };

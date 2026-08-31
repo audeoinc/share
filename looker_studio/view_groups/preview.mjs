@@ -688,11 +688,16 @@ const checks = [
   // 先で効かなくても折れるよう、markup 側にも <wbr> を入れる。
   ['長い型に折り返し位置を入れる（CSS が効かなくても折れる）', (() => {
     const t = Co.breakType(Ch.esc('ARRAY<STRUCT<currency STRING, gross NUMERIC>>'));
+    // 子の行があれば親は RECORD に畳むので、表に長い型が出るのは
+    // 畳まないとき（include_nested_fields = FALSE など）。そちらで見る。
+    const g = { suffixes: ['abjp'], members: [{ viewName: 'v_x_abjp' }] };
+    const h = Co.renderColumns({ groups: [g] }, { v_x_abjp: [
+      { n: 'a', t: 'ARRAY<STRUCT<currency STRING, gross NUMERIC>>', o: 1, u: 'YES', d: '' }] });
     return t.includes('ARRAY&lt;<wbr>STRUCT&lt;<wbr>') &&
       t.includes('STRING,<wbr>') &&
       // エスケープした山括弧を壊していない
       !t.includes('<STRUCT') &&
-      columnCases[0].html.includes('<wbr>');
+      h.includes('<wbr>');
   })()],
   ['セルの折り返しは CSS でも指定する（二重の備え）',
     /\.vg-ccell\{[^}]*overflow-wrap:anywhere;word-break:break-all/.test(Co.columnsCss())],
@@ -732,12 +737,45 @@ const checks = [
       // 型から読めなければ空。呼び出し側が後ろへ回す
       Co.structFields('STRING').length === 0;
   })()],
+  // 中身が子の行に出ているなら、親の型は Console と同じ RECORD / REPEATED に
+  // 畳む。同じ内容を 2 か所に出しても場所を取るだけ。
+  ['STRUCT の親は RECORD / REPEATED に畳む', (() => {
+    const parent = columnRow('amount_breakdown');
+    return parent && parent.includes('RECORD') && parent.includes('REPEATED') &&
+      // 畳んだので中身は親の行に出ない（子の行にある）
+      !parent.includes('currency STRING') && !parent.includes('STRUCT');
+  })()],
+  ['繰り返しスカラーも畳む（中身が無いので情報は落ちない）', (() => {
+    const g = { suffixes: ['abjp'], members: [{ viewName: 'v_x_abjp' }] };
+    const h = Co.renderColumns({ groups: [g] }, { v_x_abjp: [
+      { n: 'tags', t: 'ARRAY<STRING>', o: 1, u: 'YES', d: '' }] });
+    return h.includes('STRING') && h.includes('REPEATED') && !h.includes('ARRAY');
+  })()],
+  ['型の畳み方', (() => {
+    const t = (x) => Co.typeShape(x);
+    return t('ARRAY<STRUCT<a STRING>>').name === 'RECORD' &&
+      t('ARRAY<STRUCT<a STRING>>').repeated === true &&
+      t('STRUCT<a STRING>').name === 'RECORD' &&
+      t('STRUCT<a STRING>').repeated === false &&
+      t('ARRAY<INT64>').name === 'INT64' && t('ARRAY<INT64>').repeated === true &&
+      t('INT64').name === 'INT64' && t('INT64').repeated === false;
+  })()],
+  ['子の行が無ければ畳まない（定義がどこからも読めなくなるため）', (() => {
+    const g = { suffixes: ['abjp'], members: [{ viewName: 'v_x_abjp' }] };
+    const b = { groups: [g] };
+    // include_nested_fields = FALSE の状態を作る（最上位だけ渡す）
+    const h = Co.renderColumns(b, { v_x_abjp: [
+      { n: 'a', t: 'ARRAY<STRUCT<x INT64, y STRING>>', o: 1, u: 'YES', d: '' }] });
+    return h.includes('STRUCT') && h.includes('x INT64') && !h.includes('RECORD');
+  })()],
   ['ネストの行には並び順と NULL 制約を出さない（親のものを出さない）', (() => {
     // 行の見出しはタグを挟む（<span>└</span>currency）ので、素の substring では
     // 拾えない。タグを落としてから引く。
     const parent = columnRow('amount_breakdown');
     const child = columnRow('\u2514currency');
     return parent && parent.includes('vg-cmeta') &&
+      // 親は #3 · REPEATED。子には並び順も NULL 制約も出ない
+      parent.includes('#3 · REPEATED') &&
       child && !child.includes('vg-cmeta') && child.includes('通貨');
   })()],
   ['ネストでもグループ間の型の違いが色で出る', (() => {
