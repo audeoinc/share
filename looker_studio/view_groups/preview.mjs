@@ -160,7 +160,7 @@ const noteCases = [
     html: `<div class="vg-root">` + V.renderNote(base3,
       fakeDescs(base3, (v) => (/jp$/.test(v) ? VIEW_DESC_MD : VIEW_DESC_US_MD)),
       Md.markdownHtml(NOTE_MD)) + `</div>` },
-  { title: 'note（description が全 View 同じ = タブなし）',
+  { title: 'note（description が全 View 同じ = 押せない見出し 1 枚）',
     html: `<div class="vg-root">` + V.renderNote(base3,
       fakeDescs(base3, () => VIEW_DESC_MD), Md.markdownHtml(NOTE_MD)) + `</div>` },
   { title: 'note（description が一部の View にしか無い）',
@@ -756,10 +756,32 @@ const checks = [
       tabs[1] === 'abjp, cdjp, efjp' &&
       (h.match(/class="vg-dpanel /g) || []).length === 2;
   })()],
-  ['description が同一ならタブは出さない（押せて何も起きない飾りにしない）', (() => {
+  // 1 種類でも見出しは出す。あれは飾りではなく caption で、「どの View の
+  // description か」は description そのものと同じくらい大事な情報。隠すと
+  // 全 View に付いているのか 1 本だけなのかが読めない。ただしラジオは
+  // 持たせない（押せそうに見えて何も起きない状態を作らない）。
+  ['description が 1 種類でも suffix を羅列した見出しを出す', (() => {
     const h = noteCases[1].html;
-    return !h.includes('vg-dtab') && !h.includes('vg-dr1') &&
-      h.includes('vg-nhead">View の description') && h.includes('受注日は JST');
+    const m = h.match(/<span class="vg-dtab vg-dstatic">([^<]*)<span class="vg-tabn">(\d+)</);
+    return m !== null && h.includes('受注日は JST') &&
+      // base の全 View ぶんが並ぶ
+      m[1] === base3.groups.flatMap((g) => g.suffixes).sort().join(', ') &&
+      Number(m[2]) === base3.viewCount &&
+      // ラジオも <label> も出さない（切り替える先が無いので）
+      !h.includes('vg-dr') && !h.includes('<label class="vg-dtab');
+  })()],
+  ['選択中と押せない見出しは同じ塗り（どちらも「いま見ているもの」）', (() => {
+    const css = V.descCss();
+    const on = 'background:#EAEEF2;border-color:#8C959F;color:#24292F';
+    return css.includes(`.vg-dtab.vg-dstatic{${on};cursor:default}`) &&
+      css.includes(`.vg-dr1:checked ~ .vg-dtablist > .vg-dt1{${on}}`) &&
+      // 緑は使わない。このカードでは緑に別の意味がある（差分の追加・
+      // 「1 グループ = 全部同じ」バッジ）ので、選択状態と読み分けられなくなる
+      !/\.vg-d[a-z]*[0-9]*[^}]*#DAFBE1/.test(css) &&
+      // hover は選択中より 1 段薄い。同じ色だと選択とマウス位置が区別できない
+      css.includes('.vg-dtab:hover{background:#F6F8FA;color:#24292F}') &&
+      // 押せない見出しは hover のあとに置いて勝たせる（乗っても光らない）
+      css.indexOf('.vg-dtab.vg-dstatic{') > css.indexOf('.vg-dtab:hover{');
   })()],
   ['description が一部にしか無ければ、その組も出す（黙って消さない）', (() => {
     const h = noteCases[2].html;

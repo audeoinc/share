@@ -695,17 +695,29 @@ const checks = [
       // 上段の中身は焼き込み済み（Markdown を HTML にするのは SQL 側）
       note.includes('日本向け') && note.includes('共通');
   })()],
-  ['description が割れていたらタブになる（同一ならタブは出ない）', (() => {
+  ['description が割れていたらタブになる（見出しは suffix）', (() => {
     const at = (n) => info.page.indexOf(`<div class="vg-opanel vg-op${n}">`);
     const note = info.page.slice(at(1), at(2));
     const tabs = [...note.matchAll(/class="vg-dtab vg-dt\d+"[^>]*>([^<]*)</g)]
       .map((m) => m[1]);
     // fixture は jp とそれ以外の 2 文面。見出しは View 名ではなく suffix
-    const one = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
-      JSON.stringify([{ v: views.map((v) => v.view_name), h: '<p>ひとつ</p>' }]), OPTS);
     return tabs.length === 2 &&
-      tabs.every((t) => /^[a-z]{4}(, [a-z]{4})*$/.test(t)) &&
-      !one.includes('vg-dtab') && one.includes('ひとつ');
+      tabs.every((t) => /^[a-z]{4}(, [a-z]{4})*$/.test(t));
+  })()],
+  // 1 種類でも見出しは出す。あれは飾りではなく caption で、「どの View の
+  // description か」は description そのものと同じくらい大事な情報。
+  // ただしラジオは持たせない（押せそうに見えて何も起きない状態を作らない）。
+  ['description が 1 種類でも suffix の見出しを出す（押せない <span>）', (() => {
+    const names = views.map((v) => v.view_name);
+    const one = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
+      JSON.stringify([{ v: names, h: '<p>ひとつ</p>' }]), OPTS);
+    const m = one.match(/<span class="vg-dtab vg-dstatic">([^<]*)<span class="vg-tabn">(\d+)</);
+    return m !== null && one.includes('ひとつ') &&
+      // 全 View ぶんの suffix が並ぶ
+      m[1].split(', ').length === info.view_count &&
+      Number(m[2]) === info.view_count &&
+      // ラジオも <label> も出さない
+      !one.includes('vg-dr') && !one.includes('<label class="vg-dtab');
   })()],
   ['description が無ければ段ごと出さない（メモだけになる）', (() => {
     const MARK = require(join(here, 'chrome.js')).NOTE_MARK;

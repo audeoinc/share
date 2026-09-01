@@ -85,12 +85,12 @@ const NOTE_MARK = '<!--VG_NOTE-->';
  * note タブ）。原因が「CSS を貼っていない」であることは画面から読み取れない。
  *
  * そこでカード側に世代の印を埋め、**その世代の CSS だけが消せる**ようにする。
- *   カード  <div class="vg-cssgen2" style="…">CSS が古い</div>
- *   CSS     .vg-cssgen2{display:none}
+ *   カード  <div class="vg-cssgen3" style="…">CSS が古い</div>
+ *   CSS     .vg-cssgen3{display:none}
  * 古い CSS にはこの規則が無いので、案内がそのまま出る。style 属性で直に
  * 飾ってあるので、CSS が 1 行も効いていなくても読める形で出る。
  */
-const CSS_GEN = 2;
+const CSS_GEN = 3;
 
 /**
  * CSS が古いときだけ出る案内。上の CSS_GEN を参照。

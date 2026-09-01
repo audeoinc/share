@@ -16,8 +16,13 @@
  * **タブが付くのは description の側だけ。** description は View に付いた属性
  * なので、同じ base の中で割れることがある（片方だけ書いてある・文面が古い）。
  * 1 本に畳むとその差が消えるので、割れている数だけタブにして横並びで選べる
- * ようにする。**全 View で同じならタブは出さない**（1 枚しかないタブは、
- * 押せるのに何も起きない飾りにしかならない）。
+ * ようにする。
+ *
+ * **1 種類のときも見出しは出す。** あれは飾りではなく caption で、
+ * 「この description がどの View のものか」は description そのものと同じくらい
+ * 大事な情報。隠すと、9 本全部に付いているのか 1 本だけなのかが読めない。
+ * ただしそのときはラジオを持たせず <span> にする（押せそうに見えて何も
+ * 起きない状態を作らない）。ロジック差分の「基準」タブと同じ扱い。
  *
  * メモは base に 1 つしか無いのでタブの外。加えて、メモだけは作り置きではなく
  * ビューの中で差し込む（NOTE_MARK）ので、タブの中に入れるとタブ 1 枚ぶんの
@@ -29,6 +34,20 @@
  */
 
 const { esc, hashId, notice, MAX_DESC_TABS } = require('./chrome.js');
+
+/**
+ * 選択中のタブの塗り。**無彩色にしてある。**
+ *
+ * 以前は緑（#DAFBE1）だったが、このカードでは緑に既に意味がある ―
+ * 差分の「追加」も、見出しの「1 グループ = 全部同じ」バッジも緑。そこへ
+ * タブの選択状態が同じ緑で入ると、意味を持った色なのか単に選ばれているだけ
+ * なのかが読み分けられない。description のタブは「操作」というより
+ * 「いま何を見ているかの表示」なので、彩度を持たせないほうが役割に合う。
+ *
+ * 塗り＋濃い枠（未選択は白地に #D0D7DE）で、一目で選択中と分かる。
+ * 選択中と押せない見出し（.vg-dstatic）で同じ値を使うので、定数にしてある。
+ */
+const DESC_TAB_ON = 'background:#EAEEF2;border-color:#8C959F;color:#24292F';
 
 /** View 名 → suffix。見出しは View 名ではなく suffix で出す（ほかのタブと同じ）。 */
 function suffixByView(b) {
@@ -87,6 +106,9 @@ function descPanel(g) {
     : g.html;
 }
 
+/** タブ 1 枚の見出し。中身は選べても選べなくても同じ形にそろえる。 */
+const tabText = (g) => `${esc(g.label)}<span class="vg-tabn">${g.count}</span>`;
+
 /**
  * description の段。**中身がひとつも無ければ空文字を返す**（段ごと出さない）。
  * description を付けていない base のほうが多いので、そこに空の箱が
@@ -97,9 +119,18 @@ function renderDesc(b, descs) {
   if (!gs.some((g) => !g.empty)) return '';
 
   const head = `<div class="vg-nhead">View の description</div>`;
-  // 1 種類しか無いならタブは出さない。押せるのに何も起きないタブになる。
+  // 1 種類のときも見出しは出す。**あれは飾りではなく caption。**
+  // 「この description がどの View のものか」は description そのものと同じくらい
+  // 大事な情報で、隠すと 9 本全部に付いているのか 1 本だけなのかが読めない。
+  //
+  // ただしラジオは持たせず <span> にする。<label> のままだと押せそうに見えて
+  // 何も起きない。ロジック差分の「基準」タブ（render_groups.js の baseTab）も
+  // 同じ理由で <label> ではなく <span> にしてあるので、その扱いにそろえる。
+  // 見た目は選択中のタブと同じ ― 実際「いま見ているもの」なので同じで正しい。
   if (gs.length === 1) {
     return `<div class="vg-nsec">${head}` +
+      `<div class="vg-dtablist">` +
+      `<span class="vg-dtab vg-dstatic">${tabText(gs[0])}</span></div>` +
       `<div class="vg-dbox">${descPanel(gs[0])}</div></div>`;
   }
 
@@ -117,8 +148,8 @@ function renderDesc(b, descs) {
     `<input class="vg-dr vg-dr${i + 1}" type="radio" name="${id}"` +
     ` id="${id}-${i + 1}"${i === 0 ? ' checked' : ''}>`).join('');
   const tablist = shown.map((g, i) =>
-    `<label class="vg-dtab vg-dt${i + 1}" for="${id}-${i + 1}">${esc(g.label)}` +
-    `<span class="vg-tabn">${g.count}</span></label>`).join('');
+    `<label class="vg-dtab vg-dt${i + 1}" for="${id}-${i + 1}">` +
+    `${tabText(g)}</label>`).join('');
   const panels = shown.map((g, i) =>
     `<div class="vg-dpanel vg-dp${i + 1}">${descPanel(g)}</div>`).join('');
   // 打ち切ったときは、なぜ選べないのかを出す。タブが足りないだけだと、
@@ -173,18 +204,22 @@ function descCss() {
       `border:1px solid #D0D7DE;border-radius:14px;color:#57606A;` +
       `cursor:pointer;user-select:none;font-weight:600;font-size:12px;` +
       `font-family:ui-monospace,SFMono-Regular,Consolas,monospace}`,
-    `.vg-dtab:hover{background:#EAEEF2;color:#24292F}`,
+    // hover は選択中より 1 段薄くする。**選択中と同じ色にしない。**
+    // 以前は hover も #EAEEF2 で、下の選択色を無彩色にしたときに
+    // 「選ばれている」と「マウスが乗っている」が見分けられなくなった。
+    `.vg-dtab:hover{background:#F6F8FA;color:#24292F}`,
     `.vg-dpanel{display:none}`,
+    // 1 種類しか無いときの見出し。ラジオを持たないので押しても何も起きない
+    // （<span>）。見た目は選択中と同じ ― 実際「いま見ているもの」なので同じ。
+    // .vg-dtab:hover と詳細度が並ぶので、あとに置いて勝たせる（乗っても光らない）。
+    `.vg-dtab.vg-dstatic{${DESC_TAB_ON};cursor:default}`,
   ];
   // タブ本体。ID ではなくクラスで書くので、レコードが変わってもこの CSS のまま。
   // 形は「兄弟 > 子」から動かさない。この viz で radio + :checked が動くと
   // 確かめたときの形がこれ（templated_record/samples/07_radio_tabs_test.html）。
-  // 選択中は緑系にして、外側（黒）・基準（薄い赤）・SQL（青）と見分けられる
-  // ようにする。
   for (let i = 1; i <= MAX_DESC_TABS; i++) {
     rules.push(`.vg-dr${i}:checked ~ .vg-dpanels > .vg-dp${i}{display:block}`);
-    rules.push(`.vg-dr${i}:checked ~ .vg-dtablist > .vg-dt${i}` +
-      `{background:#DAFBE1;border-color:#4AC26B;color:#1A7F37}`);
+    rules.push(`.vg-dr${i}:checked ~ .vg-dtablist > .vg-dt${i}{${DESC_TAB_ON}}`);
   }
   return rules.join('\n');
 }
