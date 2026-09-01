@@ -666,8 +666,13 @@ suffix_base AS (
 ),
 -- 実際に使う suffix 一覧。素のものに、その末尾 n 文字を足す。
 -- データセット名に現れない suffix を拾うため（mart_abjp の中の v_x_jp → 'jp'）。
--- suffix に '_' は入らないので、abjp と jp が同じ一覧に並んでも 1 つの View 名に
--- 両方が当たることは無い（v_x_abjp は '_jp' では終わらない）。
+--
+-- **1 つの View 名に 2 つ以上の suffix が当たりうる。** 下の keyed は最長一致で
+-- 選ぶ（ORDER BY LENGTH(s.suffix) DESC）。UDF 側の extractSuffix も最長一致に
+-- してあり、片方だけ変えると行の base 列とカードの中身が食い違う。
+--   v_x_abjp に abjp と jp → abjp（jp では終わらないので実際には当たらない）
+--   v_x_zz_abjp に zz_abjp と abjp → zz_abjp
+-- suffix_extra_list に '_' を含む値（abjp_xyz123456 など）を足すとこの形になる。
 --
 -- suffix_extra_list はここで足す。**末尾の導出のあと**なので、書いた文字列が
 -- そのまま 1 つ増えるだけになる（'global' から 'al' は増えない）。

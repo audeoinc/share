@@ -271,13 +271,28 @@ function extractSuffix(viewName, opts) {
   }
 
   if (Array.isArray(o.suffixList) && o.suffixList.length > 0) {
-    // 既知の suffix 一覧がある場合は突き合わせが最も確実
+    // 既知の suffix 一覧がある場合は突き合わせが最も確実。
+    //
+    // **当たったものの中でいちばん長いものを採る。** 一覧に並んだ順ではない。
+    // 1 つの View 名に 2 つ以上の suffix が当たることがあり（abjp と jp、
+    // zz_abjp と abjp）、どちらを採るかで base が変わる。base を決めるのは
+    // build_table.sql の keyed で、あちらは
+    //   QUALIFY ROW_NUMBER() OVER (... ORDER BY LENGTH(s.suffix) DESC) = 1
+    // つまり最長一致。**ここが先頭一致だと SQL と食い違う。**
+    // 一覧は ORDER BY suffix（辞書順）で来るので、短いほうが先に並ぶことが
+    // あり、たとえば suffix が {abjp, zz_abjp} で View が vw_x_zz_abjp のとき、
+    // SQL は base = vw_x、こちらは base = vw_x_zz になっていた。
+    // 行の base 列とカードの中身が食い違うが、どちらもエラーにはならない。
+    let hit = null;
     for (const suf of o.suffixList) {
-      if (viewName.length > suf.length + 1 && viewName.endsWith('_' + suf)) {
-        return { base: viewName.slice(0, -(suf.length + 1)), suffix: suf };
+      if (viewName.length > suf.length + 1 && viewName.endsWith('_' + suf) &&
+          (hit === null || suf.length > hit.length)) {
+        hit = suf;
       }
     }
-    return null;
+    return hit === null
+      ? null
+      : { base: viewName.slice(0, -(hit.length + 1)), suffix: hit };
   }
   const re = o.suffixPattern ? new RegExp(o.suffixPattern) : DEFAULT_SUFFIX_RE;
   const m = String(viewName).match(re);
@@ -318,6 +333,11 @@ function suffixWords(suffix, parts) {
   const words = [s];
   if (Array.isArray(parts) && parts.length > 0) {
     for (const p of parts) if (String(p).length >= 2) words.push(String(p));
+  } else if (s.indexOf('_') > 0) {
+    // '_' を含む suffix は、そこが区分の切れ目。真ん中で割ると
+    // abjp_xyz123456 が abjp_xy / z123456 になり、意味の無い語で
+    // リテラルを伏せることになる（実際に足せる形なので防いでおく）。
+    for (const p of s.split('_')) if (p.length >= 2) words.push(p);
   } else if (s.length % 2 === 0) {
     words.push(s.slice(0, s.length / 2), s.slice(s.length / 2));
   }

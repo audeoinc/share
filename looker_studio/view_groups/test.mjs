@@ -181,6 +181,30 @@ checks.push(['suffixList でも base を切り出せる',
   A.extractSuffix('v_daily_sales_abjp', listOpts).base === 'v_daily_sales']);
 checks.push(['suffixList は長い一致を優先する',
   A.extractSuffix('v_x_cduk', listOpts).suffix === 'cduk']);
+// 一覧は build_table.sql から ORDER BY suffix（辞書順）で来るので、短いほうが
+// 先に並ぶことがある。**並んだ順ではなく長さで選ぶ。** base を決めるのは
+// SQL 側の keyed（ORDER BY LENGTH(s.suffix) DESC = 最長一致）で、ここが
+// 先頭一致だと行の base 列とカードの中身が食い違う（どちらもエラーは出ない）。
+// suffix_extra_list に '_' を含む値を足すとこの形になる。
+checks.push(['suffixList は並んだ順ではなく長さで選ぶ（SQL の keyed と同じ）', (() => {
+  const list = ['abjp', 'zz_abjp'].sort();   // 短いほうが先に並ぶ
+  const r = A.extractSuffix('vw_x_zz_abjp', { suffixList: list });
+  return list[0] === 'abjp' && r.suffix === 'zz_abjp' && r.base === 'vw_x';
+})()]);
+checks.push(['\'_\' を含む suffix でも base が揃う（vw_sample の 2 本）', (() => {
+  const list = ['abjp', 'abjp_xyz123456', 'jp'];
+  const a = A.extractSuffix('vw_sample_abjp', { suffixList: list });
+  const b = A.extractSuffix('vw_sample_abjp_xyz123456', { suffixList: list });
+  return a.base === 'vw_sample' && a.suffix === 'abjp' &&
+    b.base === 'vw_sample' && b.suffix === 'abjp_xyz123456';
+})()]);
+// 伏せ字に使う語。'_' があればそこが区分の切れ目で、真ん中では割らない
+// （abjp_xy / z123456 のような意味の無い語でリテラルを伏せないため）。
+checks.push(['suffix の語は \'_\' で割る（真ん中では割らない）',
+  JSON.stringify(A.suffixWords('abjp_xyz123456')) ===
+    JSON.stringify(['abjp_xyz123456', 'abjp', 'xyz123456']) &&
+  // '_' が無い偶数長はこれまでどおり前後半
+  JSON.stringify(A.suffixWords('abjp')) === JSON.stringify(['abjp', 'ab', 'jp'])]);
 checks.push(['suffixList にない末尾は対象外',
   A.extractSuffix('v_daily_sales_efus', listOpts) === null]);
 checks.push(['suffixList でも suffixParts と同じグループ分けになる',
