@@ -70,6 +70,42 @@ const MAX_OUTER_TABS = 8;
  */
 const NOTE_MARK = '<!--VG_NOTE-->';
 
+/**
+ * 配布 CSS の世代。**カードが新しい CSS の規則を必要とするようになったら上げる。**
+ *
+ * この画面は CSS を手で貼り、カードは日次で作り直す。順序はいつも
+ * 「カードが先・CSS が後」なので、その間カードは**新しい markup ＋ 古い CSS**で
+ * 表示される。タブ 1 枚ぶんの追加なら MAX_OUTER_TABS の余分な規則で吸収できるが、
+ * **クラスの頭ごと増える機能（note タブの description のタブなど）は吸収できない。**
+ * そのときの見え方は
+ *   ・パネルが全部同時に出る（.vg-dpanel{display:none} が無い）
+ *   ・ラジオの丸がそのまま見える（隠す規則が無い）
+ *   ・押しても何も起きない（:checked の規則が無い）
+ * で、**故障と見分けが付かない**。実際に 2 度この形で表に出た（SQL タブと
+ * note タブ）。原因が「CSS を貼っていない」であることは画面から読み取れない。
+ *
+ * そこでカード側に世代の印を埋め、**その世代の CSS だけが消せる**ようにする。
+ *   カード  <div class="vg-cssgen2" style="…">CSS が古い</div>
+ *   CSS     .vg-cssgen2{display:none}
+ * 古い CSS にはこの規則が無いので、案内がそのまま出る。style 属性で直に
+ * 飾ってあるので、CSS が 1 行も効いていなくても読める形で出る。
+ */
+const CSS_GEN = 2;
+
+/**
+ * CSS が古いときだけ出る案内。上の CSS_GEN を参照。
+ * 飾りは style 属性に直に書く（この案内が出る場面では CSS が当てにならない）。
+ */
+function cssGuard() {
+  return `<div class="vg-cssgen${CSS_GEN}" style="margin:0 0 10px;` +
+    `padding:8px 12px;border:1px solid #D4A72C;border-radius:6px;` +
+    `background:#FFF8C5;color:#7D4E00;` +
+    `font:12px/1.6 'Roboto','Segoe UI',system-ui,sans-serif">` +
+    `このカードには新しい CSS（世代 ${CSS_GEN}）が要ります。` +
+    `template_style.html を貼り直してください。` +
+    `貼り替えるまで、タブが切り替わらず中身が全部同時に出ます。</div>`;
+}
+
 function esc(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -173,7 +209,9 @@ function wrapPage(diffHtml, erdHtml, colsHtml, sqlHtml, noteHtml, base) {
     `<div class="vg-opanel vg-op${i + 1}">${bodies[i] || ''}</div>`).join('');
   const head = b.base
     ? header(b.base, b.viewCount, (b.groups || []).length, b.unmatched) : '';
-  return `<div class="vg-outer">${radios}` +
+  // 世代の案内はいちばん上。CSS が古ければ出て、合っていれば消える。
+  // ラジオより前に置いてよい（:checked ~ が見るのはラジオの「後ろ」だけ）。
+  return `<div class="vg-outer">${cssGuard()}${radios}` +
     `<div class="vg-otablist">${head}${tabs}</div>` +
     `<div class="vg-opanels">${panels}</div></div>`;
 }
@@ -181,6 +219,6 @@ function wrapPage(diffHtml, erdHtml, colsHtml, sqlHtml, noteHtml, base) {
 module.exports = {
   MAX_TABS, MAX_REF_TABS, MAX_SQL_TABS, MAX_DESC_TABS, MAX_OUTER_TABS,
   REF_BUDGET, OUTER_TABS,
-  NOTE_MARK,
+  NOTE_MARK, CSS_GEN, cssGuard,
   esc, hashId, label, badge, header, notice, KIND_TEXT, kindText, wrapPage,
 };

@@ -120,14 +120,15 @@ const UNUSED_ANALYZE = ['alphaMap'];
 const UNUSED_ERD = ['alphaMap', 'alphaMapDetail', 'parameterize', 'groupByLogic',
   'analyze', 'maskTokens', 'buildLiteralMap', 'suffixWords', 'parseEquivalents',
   'extractSuffix', 'expandSuffixParts', 'normalizeSpace', 'stripOptionsClause',
-  'wrapPage'];
+  'wrapPage', 'cssGuard'];
 // CSS は viewlgc_group_css が配る。page も erd も markup しか作らないので、
 // CSS の文字列を積むだけ無駄（1 個 32 KB のインライン上限に効いてくる）。
 const UNUSED_PAGE = ['columnsCss', 'sqlCss', 'descCss'];
 // 外枠で束ねるのは page の仕事。render はロジック差分のカードを作るだけなので
 // wrapPage は要らない（chrome.js を共有しているぶん付いてくる）。
+// cssGuard は wrapPage（＝ page）専用。CSS_GEN のほうは chromeCss() が使うので残す。
 const UNUSED_RENDER = ['renderFragment3', 'build3Way', 'mapToBase', 'baseCell',
-  'segsText', 'wrapPage'];
+  'segsText', 'wrapPage', 'cssGuard'];
 // CSS の UDF は markdown.js から memoCss() しか呼ばない。Markdown を HTML に
 // する側は viewlgc_markdown が持っているので、こちらには積まない。
 const UNUSED_CSS = UNUSED_RENDER.concat([
@@ -842,6 +843,28 @@ const checks = [
     // （'.vg-md' は '.vg-mdh1{' にも含まれてしまう）。
     const defined = new Set([...css.matchAll(/\.(vg-md[a-z0-9]*)/g)].map((m) => m[1]));
     return used.length >= 18 && used.every((c) => defined.has(c));
+  })()],
+  // CSS は手で貼り、カードは日次で作り直す。順序はいつも「カードが先・CSS が
+  // 後」なので、その間カードは新しい markup ＋ 古い CSS で表示される。
+  // クラスの頭ごと増える機能はどうやっても吸収できないので、
+  // **せめて原因が画面から読めるようにする。** カードに世代の印を埋め、
+  // その世代の CSS だけがそれを消す。
+  ['カードに CSS の世代の印がある（古い CSS では案内が出る）', (() => {
+    const { CSS_GEN } = require(join(here, 'chrome.js'));
+    const mark = `class="vg-cssgen${CSS_GEN}"`;
+    return info.page.split(mark).length - 1 === 1 &&
+      // CSS が 1 行も効いていない場面で出るものなので、飾りは style 属性に直書き
+      /class="vg-cssgen\d+" style="[^"]*background:#FFF8C5/.test(info.page) &&
+      info.page.includes('template_style.html を貼り直してください') &&
+      // 印はいちばん上（どのタブを開いていても見える）
+      info.page.indexOf(mark) < info.page.indexOf('vg-otablist');
+  })()],
+  ['配る CSS がいまの世代の印を消す（古い世代の規則では消えない）', (() => {
+    const { CSS_GEN } = require(join(here, 'chrome.js'));
+    return css.includes(`.vg-cssgen${CSS_GEN}{display:none}`) &&
+      // 世代をまたいで残さない。1 つ前の規則が残っていると、古い CSS でも
+      // 案内が消えてしまい仕掛けが働かない
+      !css.includes(`.vg-cssgen${CSS_GEN - 1}{`);
   })()],
   // 最小化するとエスケープの書き方が変わりうるので、リテラルの読み分けが
   // 生き残っているかを本体そのもので見る。割れていれば値の差で別グループになる。

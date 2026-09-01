@@ -25,7 +25,7 @@
 const { splitLines, build2Way } = require('../ddl_diff_viz/src/lib/diff');
 const { renderFragment1, renderFragment2 } = require('../ddl_diff_viz/src/lib/render');
 const {
-  MAX_TABS, MAX_REF_TABS, REF_BUDGET, OUTER_TABS, MAX_OUTER_TABS,
+  MAX_TABS, MAX_REF_TABS, REF_BUDGET, OUTER_TABS, MAX_OUTER_TABS, CSS_GEN,
   esc, hashId, label, header, notice, kindText,
 } = require('./chrome.js');
 
@@ -311,6 +311,11 @@ function renderBase(b, opts) {
 // ---------------------------------------------------------------------
 function chromeCss() {
   const rules = [
+    // 世代の印。カードが埋めた .vg-cssgenN を、その世代の CSS だけが消せる。
+    // 古い CSS にはこの規則が無いので案内がそのまま出る（chrome.js の CSS_GEN）。
+    // **カードが新しい規則を要るようになったら CSS_GEN を上げる。** ここは
+    // 番号を書かずに参照するので、上げ忘れるのは chrome.js 側だけで済む。
+    `.vg-cssgen${CSS_GEN}{display:none}`,
     `.vg-root{font:13px/1.6 'Roboto','Segoe UI',system-ui,-apple-system,sans-serif;color:#24292F}`,
     `.vg-header{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 10px}`,
     `.vg-title{font-weight:600;font-size:15px;line-height:1.6;color:#1A1A1A}`,

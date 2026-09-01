@@ -685,6 +685,22 @@ const checks = [
       h.indexOf('vg-btablist') > at(4) && h.indexOf('vg-btablist') < at(5) &&
       h.indexOf('vg-stablist') > at(5);
   })()],
+  // CSS は手で貼り、カードは日次で作り直す。順序はいつも「カードが先・CSS が
+  // 後」なので、その間カードは新しい markup ＋ 古い CSS で表示される。
+  // クラスの頭ごと増える機能は吸収できないので、せめて原因が画面から読める
+  // ようにする。カードに世代の印を埋め、その世代の CSS だけがそれを消す。
+  ['カードに CSS の世代の印がある（古い CSS では案内が出る）', (() => {
+    const h = pageCases[0].html;
+    const mark = `class="vg-cssgen${Ch.CSS_GEN}"`;
+    return h.split(mark).length - 1 === 1 &&
+      // CSS が 1 行も効いていない場面で出るので、飾りは style 属性に直書き
+      /class="vg-cssgen\d+" style="[^"]*background:#FFF8C5/.test(h) &&
+      // いちばん上（どのタブを開いていても見える）
+      h.indexOf(mark) < h.indexOf('vg-otablist') &&
+      // 印を消せるのはいまの世代の規則だけ
+      R.chromeCss().includes(`.vg-cssgen${Ch.CSS_GEN}{display:none}`) &&
+      !R.chromeCss().includes(`.vg-cssgen${Ch.CSS_GEN - 1}{`);
+  })()],
   ['ERD の CSS が chrome 側にある',
     R.chromeCss().includes('.vg-otab') && R.chromeCss().includes('.vg-erdbox')],
   // メモ（Markdown）。ビューの中から呼ぶので、崩れても落ちないことが要件。
