@@ -719,12 +719,21 @@ const checks = [
       // ラジオも <label> も出さない
       !one.includes('vg-dr') && !one.includes('<label class="vg-dtab');
   })()],
-  ['description が無ければ段ごと出さない（メモだけになる）', (() => {
-    const MARK = require(join(here, 'chrome.js')).NOTE_MARK;
-    const none = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
+  // 1 つも設定されていなくても段は出す。消すと、未設定なのか取り込みに
+  // 失敗しているのか画面から読めず、ただ何も出ない状態になる。
+  ['description が 1 つも無くても段を出す（未設定と取得失敗を書き分ける）', (() => {
+    const names = views.map((v) => v.view_name);
+    const unset = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
+      JSON.stringify([{ v: names, h: '' }]), OPTS);
+    // descs_json が空 = 組が作れない。これは未設定ではなく取れなかったほう
+    const gone = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
       '[]', OPTS);
-    return !none.includes('vg-nhead') && !none.includes('vg-dtab') &&
-      none.includes(`<div class="vg-opanel vg-op1"><div class="vg-root">${MARK}</div>`);
+    return unset.includes('description が設定されていません') &&
+      unset.includes('vg-dstatic') &&
+      gone.includes('description を取得できませんでした') &&
+      !gone.includes('設定されていません') &&
+      // どちらでもメモの段は出る
+      [unset, gone].every((h) => h.includes('vg-nhead">メモ'));
   })()],
   ['page は description が壊れていても落ちない',
     typeof VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',

@@ -167,7 +167,7 @@ const noteCases = [
     html: `<div class="vg-root">` + V.renderNote(base3,
       fakeDescs(base3, (v) => (/jp$/.test(v) ? VIEW_DESC_MD : '')),
       Md.markdownHtml(NOTE_MD)) + `</div>` },
-  { title: 'note（description 無し = シートのメモだけ）',
+  { title: 'note（description が 1 つも無い = 未設定と書く）',
     html: `<div class="vg-root">` + V.renderNote(base3,
       fakeDescs(base3, () => ''), Md.markdownHtml(NOTE_MD)) + `</div>` },
 ];
@@ -790,10 +790,23 @@ const checks = [
     return tabs.length === 2 && tabs[0] === 'abjp, cdjp, efjp' &&
       h.includes('description が設定されていません');
   })()],
-  ['description が無ければ段ごと出さない（シートのメモだけ）', (() => {
+  // 1 つも設定されていなくても段は出す。消すと、未設定なのか取り込みに
+  // 失敗しているのか画面から読めず、ただ何も出ない状態になる。
+  ['description が 1 つも無くても段を出して「未設定」と書く', (() => {
     const h = noteCases[3].html;
-    return !h.includes('vg-nhead') && !h.includes('vg-dtab') &&
-      h.includes('v_daily_sales について');
+    const m = h.match(/<span class="vg-dtab vg-dstatic">([^<]*)<span class="vg-tabn">(\d+)</);
+    return h.includes('vg-nhead">View の description') &&
+      h.includes('description が設定されていません') &&
+      // どの View のことかは見出しに出る（範囲が分かる）
+      m !== null && Number(m[2]) === base3.viewCount &&
+      m[1] === base3.groups.flatMap((g) => g.suffixes).sort().join(', ') &&
+      // メモの段はそのまま出る
+      h.includes('vg-nhead">メモ') && h.includes('v_daily_sales について');
+  })()],
+  ['組がひとつも作れなければ「取得できなかった」と書く（未設定と区別）', (() => {
+    const h = V.renderNote(base3, [], '(メモ)');
+    return h.includes('description を取得できませんでした') &&
+      !h.includes('設定されていません') && h.includes('(メモ)');
   })()],
   ['note タブのラジオは外側・基準・比較・SQL と別のクラス（連動しない）', (() => {
     const css = V.descCss();

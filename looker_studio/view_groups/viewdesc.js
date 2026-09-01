@@ -24,6 +24,9 @@
  * ただしそのときはラジオを持たせず <span> にする（押せそうに見えて何も
  * 起きない状態を作らない）。ロジック差分の「基準」タブと同じ扱い。
  *
+ * **1 つも設定されていなくても段は出す。** 消すと、未設定なのか取り込みに
+ * 失敗しているのか画面から読めず、ただ何も出ない状態になる。
+ *
  * メモは base に 1 つしか無いのでタブの外。加えて、メモだけは作り置きではなく
  * ビューの中で差し込む（NOTE_MARK）ので、タブの中に入れるとタブ 1 枚ぶんの
  * markup を SQL 側が組み立てることになってしまう。
@@ -99,26 +102,41 @@ function descGroups(b, descs) {
   return out;
 }
 
-/** 1 組ぶんの中身。未設定の組は、空白ではなくそう書く（故障と見分けが付く）。 */
+/**
+ * 1 組ぶんの中身。**未設定の組は、空白ではなくそう書く。**
+ * 空にすると「設定していない」のか「取れなかった」のか画面から読めない。
+ * どの View のことかは上の見出しに出ているので、ここでは繰り返さない。
+ */
 function descPanel(g) {
-  return g.empty
-    ? notice('この View には description が設定されていません。')
-    : g.html;
+  return g.empty ? notice('description が設定されていません。') : g.html;
 }
 
 /** タブ 1 枚の見出し。中身は選べても選べなくても同じ形にそろえる。 */
 const tabText = (g) => `${esc(g.label)}<span class="vg-tabn">${g.count}</span>`;
 
 /**
- * description の段。**中身がひとつも無ければ空文字を返す**（段ごと出さない）。
- * description を付けていない base のほうが多いので、そこに空の箱が
- * 毎回出ると、note タブが「無いもの」の説明で埋まる。
+ * description の段。**1 つも設定されていなくても段は出す。**
+ *
+ * 以前は段ごと消していた（「無いものの説明で note タブを埋めない」つもりで）。
+ * だが消すと、note タブを開いた人からは
+ *   ・description を設定していない
+ *   ・取り込みに失敗している
+ *   ・そもそもこのカードに description の段が無い世代
+ * のどれなのか分からず、**ただ何も出ない**。未設定は未設定と書くほうがよい。
+ * 見出しにはどの View のことかも出るので、範囲まで分かる。
  */
 function renderDesc(b, descs) {
   const gs = descGroups(b, descs);
-  if (!gs.some((g) => !g.empty)) return '';
-
   const head = `<div class="vg-nhead">View の description</div>`;
+  // 組がひとつも作れないのは「未設定」ではなく「取れなかった」。区別して書く
+  // （SQL 側は LEFT JOIN なので、正常なら View の数だけ必ず組ができる）。
+  if (!gs.length) {
+    return `<div class="vg-nsec">${head}` +
+      notice('View の description を取得できませんでした。' +
+        'INFORMATION_SCHEMA.TABLE_OPTIONS が読めているか確認してください。') +
+      `</div>`;
+  }
+
   // 1 種類のときも見出しは出す。**あれは飾りではなく caption。**
   // 「この description がどの View のものか」は description そのものと同じくらい
   // 大事な情報で、隠すと 9 本全部に付いているのか 1 本だけなのかが読めない。
@@ -172,14 +190,14 @@ function renderDesc(b, descs) {
  * 日次で作り置きするが、メモはビューの中で毎回作る（シートを直した内容が
  * その場で出るようにするため）。
  *
- * description が無いときは、メモを段で包まずそのまま返す。段の見出しは
- * 「2 つあるうちのどちらか」を示すためのもので、1 つしか無いなら邪魔になる。
+ * 段は常に 2 つ出す。description が 1 つも無いときも上の段は出して
+ * 「未設定」と書く（renderDesc を参照）。片方だけ消すと、出どころの違いを
+ * 示すための見出しが、あるときと無いときで入れ替わって読みにくい。
  */
 function renderNote(b, descs, mark) {
-  const d = renderDesc(b, descs);
   const memo = String(mark == null ? '' : mark);
-  if (!d) return memo;
-  return d + `<div class="vg-nsec"><div class="vg-nhead">メモ</div>${memo}</div>`;
+  return renderDesc(b, descs) +
+    `<div class="vg-nsec"><div class="vg-nhead">メモ</div>${memo}</div>`;
 }
 
 /**
