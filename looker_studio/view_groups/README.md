@@ -628,12 +628,12 @@ DECLARE analysis_include_dataset_patterns ARRAY<STRING> DEFAULT [r'_([A-Za-z]{4}
 DECLARE analysis_exclude_dataset_patterns ARRAY<STRING> DEFAULT [];
 DECLARE analysis_include_object_patterns  ARRAY<STRING> DEFAULT [];
 DECLARE analysis_exclude_object_patterns  ARRAY<STRING> DEFAULT [];
+DECLARE suffix_extra_list ARRAY<STRING> DEFAULT [];       -- 自動抽出に足す suffix
 DECLARE snapshot_time_zone STRING DEFAULT 'Asia/Tokyo';   -- snapshot_date の基準
 
 -- [B] 既定のままで動くもの
 DECLARE suffix_pattern      STRING        DEFAULT r'_([A-Za-z]{4})$';
 DECLARE suffix_list         ARRAY<STRING> DEFAULT [];  -- 書くと自動抽出を置き換える
-DECLARE suffix_extra_list   ARRAY<STRING> DEFAULT [];  -- 自動抽出に足す
 DECLARE suffix_tail_lengths ARRAY<INT64>  DEFAULT [2];
 DECLARE suffix_exclude_list ARRAY<STRING> DEFAULT [];
 DECLARE analyze_options     STRING        DEFAULT '{"mode":"class"}';
@@ -720,7 +720,7 @@ DECLARE target_project_id STRING DEFAULT NULL;
 | `analysis_exclude_object_patterns` | 落とす View 名。include のあとに効く |
 | `suffix_pattern` | データセット名から suffix を切り出す正規表現（1 つ目のキャプチャ） |
 | `suffix_list` | suffix 一覧を丸ごと自分で決める。**書くと自動抽出は行われない（足すのではなく置き換える）** |
-| `suffix_extra_list` | 一覧に**足す** suffix。自動抽出はそのまま残り、末尾の導出は掛からない。1 つだけ強制的に足したいときはこちら |
+| `suffix_extra_list` | 一覧に**足す** suffix。自動抽出はそのまま残り、末尾の導出は掛からない。1 つだけ強制的に足したいときはこちら（[A]） |
 | `suffix_tail_lengths` | 取り出した suffix の末尾 n 文字も suffix として扱う。既定の `[2]` で `abjp` → `jp` |
 | `suffix_exclude_list` | suffix 一覧から落とす値（正規表現ではなく完全一致） |
 | `include_nested_fields` | カラム定義に STRUCT の中身を行として出すか（既定 `TRUE`） |
@@ -1260,6 +1260,7 @@ exclude_dataset = [^mart_ghkr$] suffix: abjp cdjp jp meta ta
 混ぜたいときはこちら。`mart_abjp` の中に `v_x_global` がある、のような形。
 
 ```sql
+-- [A] 環境ごとに必ず見るもの
 DECLARE suffix_extra_list ARRAY<STRING> DEFAULT ['global'];
 ```
 
@@ -1267,6 +1268,10 @@ DECLARE suffix_extra_list ARRAY<STRING> DEFAULT ['global'];
 |---|---|---|
 | `suffix_list` に書く | **行われなくなる**（置き換え） | 書いた値にも掛かる |
 | `suffix_extra_list` に書く | そのまま残る | 掛からない |
+
+`suffix_extra_list` は **[A]（環境ごとに必ず見るもの）** に置いてある。値が環境
+ごとに違ううえ、書き忘れると base が静かに変わるため。`suffix_list` のほうは
+[B] のまま（一覧を丸ごと自分で決めるときにしか触らない）。
 
 **`suffix_list` は「足す」ではなく「置き換える」。** 1 つ書いたつもりで、
 データセット名から取れていた分もろとも消える。エラーは出ず、base の切り出しが
@@ -1291,6 +1296,7 @@ mart_abjp.vw_sample_abjp_xyz123456    suffix にしたいのは abjp_xyz123456
 `abjp` だけなので、枝番付きのほうは自動では拾えない。
 
 ```sql
+-- [A] 環境ごとに必ず見るもの
 DECLARE suffix_extra_list ARRAY<STRING> DEFAULT ['abjp_xyz123456'];
 ```
 

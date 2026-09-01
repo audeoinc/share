@@ -105,6 +105,9 @@ DECLARE analysis_exclude_dataset_patterns ARRAY<STRING> DEFAULT [];
 -- 解析対象の View 名（どの View を集めるか）
 DECLARE analysis_include_object_patterns ARRAY<STRING> DEFAULT [];
 DECLARE analysis_exclude_object_patterns ARRAY<STRING> DEFAULT [];
+-- 自動抽出した suffix 一覧に**足す**値。データセット名にも、その末尾にも
+-- 現れない suffix を混ぜたいとき（詳しくは下の説明）
+DECLARE suffix_extra_list ARRAY<STRING> DEFAULT [];
 -- snapshot_date の基準タイムゾーン
 DECLARE snapshot_time_zone STRING DEFAULT 'Asia/Tokyo';
 -- base ごとのメモ（Markdown）を置くスプレッドシート。空ならメモ機能を使わない
@@ -179,6 +182,27 @@ DECLARE note_sheet_range STRING DEFAULT 'notes!A:E';
 --     r'^v_daily_sales_' のように書く。
 --       include 例: [r'^mart_']  [r'^mart_abjp$', r'^mart_abus$']
 --       exclude 例: [r'_tmp$', r'_bk$', r'^wk_']
+--   suffix_extra_list
+--     自動抽出した suffix 一覧に**足す**値。**自動抽出はそのまま残る。**
+--     データセット名にも、その末尾（suffix_tail_lengths）にも現れない suffix を
+--     混ぜたいときに使う。環境ごとに中身が違うので [A] に置いてある。
+--
+--       mart_abjp.vw_sample_abjp            → suffix は abjp（自動で取れる）
+--       mart_abjp.vw_sample_abjp_xyz123456  → suffix は abjp_xyz123456（取れない）
+--
+--     どちらも base を vw_sample にしたいなら:
+--       suffix_extra_list = ['abjp_xyz123456']
+--
+--     **末尾の導出はここには効かない。** 書いた文字列がそのまま 1 つ増える
+--     だけで、'abjp_xyz123456' から '56' が増えたりはしない（「強制的に
+--     足す」ための設定なので、勝手に増やさない）。除外
+--     （suffix_exclude_list）は最後に効くので、両方に書けば消える。
+--
+--     **[B] の suffix_list とは別物。** あちらは一覧を丸ごと置き換える
+--     （書くと自動抽出が行われなくなる）。足したいだけならこちら。
+--     最終的にどうなったかは 5-4 が全部出す（suffix_origin に出どころが入る）。
+--     枝番が増え続けるなら並べきれないので、そのときは View 名から正規表現で
+--     取る仕組みが要る（いまは無い）。
 --   snapshot_time_zone
 --     snapshot_date（いつ時点の内容かを表す列）をどの日付で刻むか。
 --     このツールはリージョンをまたいで使うので、置き場所によって変える。
@@ -200,18 +224,9 @@ DECLARE suffix_pattern STRING DEFAULT r'_([A-Za-z]{4})$';
 -- 末尾の導出（suffix_tail_lengths）と除外（suffix_exclude_list）は、
 -- ここに書いた値に対しても効く。
 --
--- **1 つだけ足したいなら suffix_extra_list のほう。**
+-- **1 つだけ足したいなら [A] の suffix_extra_list のほう。**
+-- あちらは自動抽出を残したまま値を足す。環境ごとに中身が違うので [A] に置いてある。
 DECLARE suffix_list ARRAY<STRING> DEFAULT [];
--- 一覧に**足す** suffix。自動抽出はそのまま残る。
---
--- データセット名にも、その末尾にも現れない suffix を混ぜたいとき用。
---   mart_abjp の中に v_x_global がある → suffix_extra_list = ['global']
---
--- **末尾の導出（suffix_tail_lengths）はここには効かない。** 書いた文字列が
--- そのまま 1 つ増えるだけ。'global' から 'al' が増えたりはしない
--- （「強制的に 1 つ足す」ための設定なので、勝手に増やさない）。
--- 除外（suffix_exclude_list）は最後に効くので、両方に書けば消える。
-DECLARE suffix_extra_list ARRAY<STRING> DEFAULT [];
 -- 取り出した suffix の**末尾 n 文字も suffix として扱う**長さの一覧。
 -- 既定の [2] で abjp / abus から jp / us が増える。空にすると何も足さない。
 --
