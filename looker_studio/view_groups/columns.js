@@ -528,8 +528,8 @@ function columnsCss() {
     // 文字の大きさは 3 段。**いちばん見たいのは型**なので、そこだけ地の大きさで
     // 出し、ほかは 1 段ずつ落とす。同じ大きさで並べると、どれを先に読めばよいかが
     // 字面から分からなくなる。
-    //   12px  型（セルの本体）
-    //   11px  列名 / グループ見出し / 説明（日本語論理名）
+    //   12px  型（セルの本体）/ 列名 … 行の主役の 2 つ。同じ大きさで並べる
+    //   11px  グループ見出し / 説明の値
     //   10px  説明の表のキー / 内訳の見出し
     //    8px  モード（NULLABLE / REQUIRED / REPEATED）
     // 1px 差は並べても読み取れないので、いちばん弱いモードは 2 段落としてある。
@@ -542,9 +542,10 @@ function columnsCss() {
     `.vg-chead{position:sticky;top:var(--vg-bar);z-index:1;padding:6px 12px;` +
       `border:1px solid #D0D7DE;background:#F6F8FA;color:#24292F;` +
       `font-weight:600;font-size:11px;text-align:left;overflow-wrap:anywhere}`,
-    // 列名は型より 1 段小さいが、太字と等幅で十分に立つ。
+    // 列名は型と同じ大きさ。どちらも行の主役で、片方を落とすと読む順が
+    // かえって分かりにくい（型を探すときも列名を探すときもある）。
     `.vg-cname{padding:5px 12px;border:1px solid #D0D7DE;text-align:left;` +
-      `vertical-align:top;font-weight:600;font-size:11px;color:#24292F;` +
+      `vertical-align:top;font-weight:600;font-size:12px;color:#24292F;` +
       `overflow-wrap:anywhere;word-break:break-all;` +
       `font-family:ui-monospace,SFMono-Regular,Consolas,monospace}`,
     // 列の説明。description が JSON なら日本語論理名を主、英語論理名と

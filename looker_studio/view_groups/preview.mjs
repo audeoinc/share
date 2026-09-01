@@ -888,7 +888,7 @@ const checks = [
     !columnCases[1].html.includes('vg-ctable')],
   // 要素の重要度どおりの大小になっているか。同じ大きさで並べると、どれを先に
   // 読めばよいかが字面から分からなくなる。数字を直すときはここも合わせる。
-  ['文字の大きさが重要度の順になっている（型 > 列名 > モード）', (() => {
+  ['文字の大きさが重要度の順になっている（型 = 列名 > 説明 > モード）', (() => {
     const css = Co.columnsCss();
     const size = (cls) => {
       const rule = css.split('\n').find((r) => r.indexOf('.' + cls + '{') === 0);
@@ -904,9 +904,10 @@ const checks = [
     const val = size('vg-cdv');
     const key = size('vg-cdk');
     const who = size('vg-cdescwho');
-    return type === 12 && name === 11 && head === 11 && desc === 11 &&
+    // 型と列名は行の主役なので同じ大きさ。そこから 1 段ずつ落とす。
+    return type === 12 && name === 12 && head === 11 && desc === 11 &&
       val === 11 && key === 10 && who === 10 && meta === 8 &&
-      type > name && name > key && key > meta;
+      type === name && name > val && val > key && key > meta;
   })()],
   ['カラム定義の CSS は columns.js 側にある',
     Co.columnsCss().includes('.vg-ctable') && !R.chromeCss().includes('.vg-ctable')],

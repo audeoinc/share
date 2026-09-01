@@ -316,7 +316,7 @@ DECLARE css_text STRING DEFAULT r"""
 .vg-ctablewrap{width:100%}
 .vg-ctable{border-collapse:collapse;font-size:12px;width:100%;max-width:1000px;table-layout:fixed}
 .vg-chead{position:sticky;top:var(--vg-bar);z-index:1;padding:6px 12px;border:1px solid #D0D7DE;background:#F6F8FA;color:#24292F;font-weight:600;font-size:11px;text-align:left;overflow-wrap:anywhere}
-.vg-cname{padding:5px 12px;border:1px solid #D0D7DE;text-align:left;vertical-align:top;font-weight:600;font-size:11px;color:#24292F;overflow-wrap:anywhere;word-break:break-all;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.vg-cname{padding:5px 12px;border:1px solid #D0D7DE;text-align:left;vertical-align:top;font-weight:600;font-size:12px;color:#24292F;overflow-wrap:anywhere;word-break:break-all;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
 .vg-cdesc{margin:2px 0 0;font:11px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;font-weight:400;color:#57606A}
 .vg-cdtable{margin:3px 0 0;border-collapse:collapse;width:100%;table-layout:fixed}
 .vg-cdk{padding:1px 6px 1px 0;border-right:1px solid #EAEEF2;text-align:left;vertical-align:top;overflow-wrap:anywhere;font:10px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;font-weight:600;color:#8C959F}
