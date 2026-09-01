@@ -210,6 +210,18 @@ for (const t of ['__T_DIFF_SRC__', '__T_DIFF__']) {
       .test(table));
 }
 
+// --- 5d2. 確認クエリはテーブルを読む ------------------------------------
+// 5 系がビューを読むと、確認 1 本ごとにシート（Drive の外部テーブル）の読み取り・
+// Markdown の JS UDF・数 MB の diff_html への REPLACE をやり直す。base と
+// group_count しか見ない 5-2 でもそれが走る。3b が直前で焼き込んでいるので
+// テーブルを読めば中身は同じで、待ち時間だけが消える。
+{
+  const at = table.indexOf('-- 5. 確認');
+  const sec5 = at > 0 ? table.slice(at) : '';
+  add('確認（5 系）はビューではなくテーブルを読む',
+    at > 0 && !sec5.includes('__V_DIFF__') && sec5.includes('`__T_DIFF__`'));
+}
+
 // --- 5e. STRING_AGG の区切りがリテラルか ------------------------------
 // BigQuery は STRING_AGG の第 2 引数（区切り文字）にリテラルかクエリ
 // パラメータしか許さない。CHR(10) のような式を書くと

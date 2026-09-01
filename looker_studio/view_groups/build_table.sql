@@ -32,7 +32,9 @@
 --   __T_DIFF_SRC__         生成した素のカードのテーブル（project.dataset.table）
 --   __T_DIFF__             メモを差し込み済みのテーブル。レポートはこれを読む
 --   __T_BASE_NOTE__        base ごとのメモの外部テーブル（同上）
---   __V_DIFF__             素のカードにメモを繋ぐビュー（シートの内容がその場で出る）
+--   __V_DIFF__             素のカードにメモを繋ぐビュー。3b の材料であり、
+--                          シートを直した内容をその場で見たいときの窓口
+--                          （レポートも確認クエリもこれは読まない。遅いので）
 --   __UDF_ANALYZE__        analyze 関数（project.dataset.function）
 --   __UDF_RENDER__         render 関数（同上）
 --   __UDF_ERD__            参照関係の図を作る関数（同上）
@@ -60,10 +62,12 @@
 --   したもの）として出す。未設定なら空のテーブルを作るので、ビューの形は
 --   変わらない（メモ欄が「未登録」になるだけ）。
 --   メモを HTML にするのはビュー（セクション 3）。**シートを直した内容が
---   その場で出るのはこちら**で、リアルタイムに確かめたいときはこれを読む。
---   ただしレポートを開くたびに Drive を読んで JS UDF を回すので遅い。
---   レポートが読むのは、それを写した __T_DIFF__（セクション 3b）のほう。
---   シートを直したその場でレポートに反映したいときは 3b だけを流し直す。
+--   その場で出るのはこちら**なので、繋ぎ方を直したいときはここを見る。
+--   ただし読むたびに Drive を読んで JS UDF を回し、数 MB の diff_html に
+--   REPLACE をかけるので遅い。**レポートも確認（5 系）もビューは読まない。**
+--   どちらも、それを写した __T_DIFF__（セクション 3b）のほうを読む。
+--   シートを直した内容を出したいときは 3b だけを流し直す（解析も描画も
+--   やり直さないので早い）。
 -- =====================================================================
 SET @@location = 'asia-northeast1';
 
@@ -907,11 +911,10 @@ USING suffix_list AS suffix_list,
 -- 3. メモを差し込むビュー（スケジュールドクエリに登録する本体・その 2）
 --
 --    素のカード（__T_DIFF_SRC__）に base ごとのメモを繋ぐ。**シートを直した
---    内容がその場で出るのはこちら。** リアルタイムに確かめたいときはこの
---    ビューを読む。
+--    内容がその場で出るのはこちら。** その場で確かめたいときだけこれを読む。
 --
---    レポートが読むのは次のセクションが焼き込む __T_DIFF__ のほう。ビューは
---    レポートを開くたびに
+--    レポートも確認（5 系）も、次のセクションが焼き込む __T_DIFF__ のほうを
+--    読む。ビューは読むたびに
 --      ・スプレッドシートの外部テーブル（Drive）を読み
 --      ・JS UDF で Markdown を HTML にし
 --      ・数 MB の diff_html に REPLACE をかける
@@ -1033,9 +1036,19 @@ EXECUTE IMMEDIATE rendered_sql;
 -- ---------------------------------------------------------------------
 -- 5. 確認（ここから下は実行される）
 --
---    読むのは __V_DIFF__（src ＋ メモ）。シートの内容がその場で反映されるので、
---    メモを直したあと 3b を流す前でも確かめられる。レポートが見ているのは
---    これを写した __T_DIFF__ のほう。
+--    読むのは __T_DIFF__（3b が焼き込んだテーブル）。**ビューは読まない。**
+--    ビューはレポートを開くたびに
+--      ・スプレッドシートの外部テーブル（Drive）を読み
+--      ・JS UDF で Markdown を HTML にし
+--      ・数 MB の diff_html に REPLACE をかける
+--    ので、確認クエリ 1 本ごとにそれを丸ごとやり直すことになる。5-2 のように
+--    base と group_count しか見ないものでも、そこまで走ってから捨てていた。
+--    上から順に流していれば 3b が直前で焼き込んでいるので、テーブルを読んでも
+--    中身は同じ。
+--
+--    **シートを直した内容を確かめたいときは、3b だけを流し直してからここへ来る。**
+--    3b は解析も描画もやり直さない（読むのは __T_DIFF_SRC__ とシートだけ）ので、
+--    メモの繋ぎ直しはそれ 1 本で済む。
 --
 --    それぞれ 1 文ずつ結果が出る。BigQuery の結果タブは番号しか出ないので、
 --    どのクエリの結果かが分かるよう先頭に check_name を付けてある。上から順に
@@ -1063,7 +1076,7 @@ SELECT
   -- base ほど大きくなる（比較の枚数は group_count x (group_count - 1)）。
   -- 極端に大きい base が出てきたら、描画側の予算で打ち切られていないか見る。
   LENGTH(diff_html)                 AS diff_html_length_chars
-FROM `__V_DIFF__` AS v
+FROM `__T_DIFF__` AS v
 ORDER BY base_view_name
 """;
 EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
@@ -1079,7 +1092,7 @@ SELECT
   view_count                        AS views_in_base,
   group_count                       AS logic_group_count,
   group_labels                      AS logic_groups_by_suffix
-FROM `__V_DIFF__`
+FROM `__T_DIFF__`
 WHERE has_multiple
 ORDER BY logic_group_count DESC, base_view_name
 """;
@@ -1094,7 +1107,7 @@ SELECT
   '5-3 suffix を認識できなかった View' AS check_name,
   base                              AS unrecognized_view_name,
   LENGTH(diff_html)                 AS diff_html_length_chars
-FROM `__V_DIFF__`
+FROM `__T_DIFF__`
 WHERE unmatched_count > 0
 ORDER BY unrecognized_view_name
 """;
@@ -1237,14 +1250,14 @@ SELECT
   note_updated_at                   AS note_updated_at,
   note_updated_by                   AS note_updated_by,
   LENGTH(note_md)                   AS note_length_chars
-FROM `__V_DIFF__`
+FROM `__T_DIFF__`
 UNION ALL
 SELECT
   '5-7 メモの登録状況（当たらない base）', TRIM(n.base), FALSE,
   CAST(NULL AS TIMESTAMP), CAST(NULL AS STRING), CAST(NULL AS INT64)
 FROM `__T_BASE_NOTE__` AS n
 WHERE TRIM(COALESCE(n.base, '')) != ''
-  AND TRIM(n.base) NOT IN (SELECT base FROM `__V_DIFF__`)
+  AND TRIM(n.base) NOT IN (SELECT base FROM `__T_DIFF__`)
 ORDER BY note_registered DESC, base_view_name
 """;
 EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
