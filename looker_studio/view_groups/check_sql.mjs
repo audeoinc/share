@@ -141,6 +141,65 @@ add('IF … RAISE ではなく ASSERT を使っている',
   }
 }
 
+// --- 5a2. JS UDF の呼び出しと定義で引数の数が合うか ---------------------
+// 描画は 5 本の UDF に分かれていて、SQL 側からは目印（__UDF_PAGE__ など）で
+// 呼ぶ。引数を 1 本足したときに片方だけ直すと、**BigQuery は落ちずに
+// 「引数が足りない/多い」で関数が見つからないと言う**か、詰めた位置が
+// ずれたまま動く（実際、erd_html を足したときに sql_json の位置へ
+// 別の値が入ったことがある）。実行するまで分からないので静的に見る。
+{
+  const NAMES = {
+    udf_analyze_function_name: '__UDF_ANALYZE__',
+    udf_render_function_name: '__UDF_RENDER__',
+    udf_erd_function_name: '__UDF_ERD__',
+    udf_page_function_name: '__UDF_PAGE__',
+    udf_markdown_function_name: '__UDF_MARKDOWN__',
+  };
+  // 深さ 0 のカンマで引数を数える。< > も数えるのは STRUCT<…> のため。
+  const countArgs = (s) => {
+    let d = 0, n = 1;
+    for (const ch of s) {
+      if (ch === '(' || ch === '<') d++;
+      else if (ch === ')' || ch === '>') d--;
+      else if (ch === ',' && d === 0) n++;
+    }
+    return n;
+  };
+  // 呼び出し側: `__UDF_X__`( … ) の中身を括弧の対応で切り出す
+  const callArgs = (mark) => {
+    const out = [];
+    const open = '`' + mark + '`(';
+    let at = table.indexOf(open);
+    while (at >= 0) {
+      let d = 0, end = -1;
+      for (let i = at + open.length - 1; i < table.length; i++) {
+        const ch = table.charAt(i);
+        if (ch === '(') d++;
+        else if (ch === ')' && --d === 0) { end = i; break; }
+      }
+      if (end < 0) break;
+      out.push(countArgs(table.slice(at + open.length, end)));
+      at = table.indexOf(open, end);
+    }
+    return out;
+  };
+  // 引数が 1 個の markdown だけ 1 行に書いてある（`(md STRING)`）ので、
+  // 改行で割る形と 1 行の形の両方を受ける。
+  const defs = [...udf.matchAll(
+    /CREATE OR REPLACE FUNCTION `%s\.%s\.%s`\((?:\n)?([\s\S]*?)(?:\n)?\)\nRETURNS STRING\nLANGUAGE js AS %s\n''',\n\s*udf_project_id, udf_dataset, (udf_[a-z_]+_function_name)/g)];
+  add('JS UDF の定義を 5 本とも読み取れる', defs.length === 5,
+    `見つかった定義 ${defs.length} 本`);
+  for (const d of defs) {
+    const mark = NAMES[d[2]];
+    if (!mark) continue;
+    const want = countArgs(d[1]);
+    const calls = callArgs(mark);
+    add(`${mark} の引数の数が定義と一致`,
+      calls.length > 0 && calls.every((n) => n === want),
+      `定義 ${want} 個 / 呼び出し [${calls.join(', ')}]`);
+  }
+}
+
 // --- 5b. CTAS の列リストと SELECT の列が一致するか ---------------------
 // 生成は CREATE OR REPLACE TABLE (列リスト) ... AS SELECT で、テーブルごと
 // 差し替える。列リストは説明（OPTIONS）を持たせるために書いてあるので、

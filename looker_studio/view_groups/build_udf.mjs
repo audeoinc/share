@@ -67,6 +67,7 @@ const PAGE_SOURCES = [
   ['chrome.js', join(here, 'chrome.js')],
   ['columns.js', join(here, 'columns.js')],
   ['sqltext.js', join(here, 'sqltext.js')],
+  ['viewdesc.js', join(here, 'viewdesc.js')],
 ];
 // base ごとのメモ（Markdown）の UDF。ほかとは何も共有しない。
 // これだけビューの中から呼ぶ（＝クエリのたびに走る）ので、事前生成の
@@ -81,6 +82,7 @@ const CSS_SOURCES = RENDER_SOURCES.concat([
   ['markdown.js', join(here, 'markdown.js')],
   ['columns.js', join(here, 'columns.js')],
   ['sqltext.js', join(here, 'sqltext.js')],
+  ['viewdesc.js', join(here, 'viewdesc.js')],
 ]);
 
 /**
@@ -121,7 +123,7 @@ const UNUSED_ERD = ['alphaMap', 'alphaMapDetail', 'parameterize', 'groupByLogic'
   'wrapPage'];
 // CSS は viewlgc_group_css が配る。page も erd も markup しか作らないので、
 // CSS の文字列を積むだけ無駄（1 個 32 KB のインライン上限に効いてくる）。
-const UNUSED_PAGE = ['columnsCss', 'sqlCss'];
+const UNUSED_PAGE = ['columnsCss', 'sqlCss', 'descCss'];
 // 外枠で束ねるのは page の仕事。render はロジック差分のカードを作るだけなので
 // wrapPage は要らない（chrome.js を共有しているぶん付いてくる）。
 const UNUSED_RENDER = ['renderFragment3', 'build3Way', 'mapToBase', 'baseCell',
@@ -133,7 +135,8 @@ const UNUSED_CSS = UNUSED_RENDER.concat([
   'mdKind', 'mdIndent', 'mdInline', 'mdLink', 'mdUrl', 'mdEsc',
   'renderColumnsBase', 'renderColumns', 'groupColumns', 'columnOrder',
   'cellInfo', 'mixedTip', 'uniq', 'majority', 'descHtml', 'parseDesc', 'pickKey',
-  'renderSqlBase', 'renderSql', 'sqlViews', 'sqlBody', 'sqlPanel']);
+  'renderSqlBase', 'renderSql', 'sqlViews', 'sqlBody', 'sqlPanel',
+  'renderNote', 'renderDesc', 'descGroups', 'descPanel', 'suffixByView']);
 
 /** CommonJS の体裁を落として素の関数群にする。 */
 function strip(src, file) {
@@ -346,7 +349,7 @@ return __run(analysis_json, options_json);
 // カラム定義の表と View ごとの素の SQL を作り、渡された差分 HTML・参照関係の図と
 // 合わせて外側タブで束ねる。差分も図も作らない（どちらも別の UDF）。
 const pageDriver = `
-function __run(analysis_json, diff_html, erd_html, columns_json, sql_json, options_json) {
+function __run(analysis_json, diff_html, erd_html, columns_json, sql_json, descs_json, options_json) {
   var opts = __opts(options_json);
   var a;
   try { a = JSON.parse(analysis_json); } catch (e) { a = null; }
@@ -367,6 +370,12 @@ function __run(analysis_json, diff_html, erd_html, columns_json, sql_json, optio
     for (var m = 0; m < sarr.length; m++) sqlByView[sarr[m].v] = sarr[m].s;
   } catch (e) { sqlByView = {}; }
 
+  // View 自身の description。[{v: [View 名...], h: HTML}] で来る。
+  // **Markdown を HTML にするのは SQL 側（viewlgc_markdown）。** JS UDF から
+  // 別の UDF は呼べないので、ここへは変換済みのものが来る。
+  var descs = [];
+  try { descs = JSON.parse(descs_json) || []; } catch (e) { descs = []; }
+
   var col = '';
   var sql = '';
   var bases = a.bases || [];
@@ -376,12 +385,13 @@ function __run(analysis_json, diff_html, erd_html, columns_json, sql_json, optio
   }
   if (!col) col = __notice('カラム定義を出せる View がありません。');
   if (!sql) sql = __notice('SQL を出せる View がありません。');
+  var b0 = a.bases && a.bases.length ? a.bases[0] : null;
   return wrapPage(String(diff_html || ''),
     String(erd_html || __notice('参照関係を取得できませんでした。')), col, sql,
-    a.bases && a.bases.length ? a.bases[0] : null);
+    renderNote(b0, descs, NOTE_MARK), b0);
 }
 
-return __run(analysis_json, diff_html, erd_html, columns_json, sql_json, options_json);
+return __run(analysis_json, diff_html, erd_html, columns_json, sql_json, descs_json, options_json);
 `.trim();
 
 // --- markdown のドライバ -----------------------------------------------
@@ -448,6 +458,7 @@ function __fixtureRules(opts) {
 }
 
 return chromeCss() + '\\n' + memoCss() + '\\n' + columnsCss() + '\\n' + sqlCss() + '\\n' +
+  descCss() + '\\n' +
   __rulesToCss(__fixtureRules(__opts(options_json)));
 `.trim();
 
@@ -488,7 +499,7 @@ const VIEWLGC_ANALYZE = new Function('views', 'options_json', analyzePack.code);
 const VIEWLGC_RENDER = new Function('analysis_json', 'options_json', renderPack.code);
 const VIEWLGC_ERD = new Function('analysis_json', 'options_json', erdPack.code);
 const VIEWLGC_PAGE = new Function('analysis_json', 'diff_html', 'erd_html',
-  'columns_json', 'sql_json', 'options_json', pagePack.code);
+  'columns_json', 'sql_json', 'descs_json', 'options_json', pagePack.code);
 const VIEWLGC_MARKDOWN = new Function('md', markdownPack.code);
 const VIEW_GROUP_CSS = new Function('options_json', cssPack.code);
 
@@ -519,6 +530,22 @@ function fakeSql(views) {
   return JSON.stringify(views.map((v) => ({ v: v.view_name, s: v.ddl })));
 }
 
+// View 自身の description の代わり。実際は TABLE_OPTIONS の description を
+// base の中で文面ごとに畳み、viewlgc_markdown を通したものが来る（HTML）。
+// jp だけ別の文面にして、note タブの上段がタブになることを通す。
+function fakeDescs(views) {
+  const by = {};
+  for (const v of views) {
+    const md = /jp$/.test(v.view_name)
+      ? '## 日本向け\n\n税は内税。'
+      : '## 共通\n\n税は外税。';
+    (by[md] = by[md] || []).push(v.view_name);
+  }
+  return JSON.stringify(Object.keys(by).map((md) => ({
+    v: by[md], h: VIEWLGC_MARKDOWN(md),
+  })));
+}
+
 function VIEW_GROUP_INFO(views, options_json) {
   const a = VIEWLGC_ANALYZE(views, options_json);
   const j = JSON.parse(a);
@@ -535,7 +562,7 @@ function VIEW_GROUP_INFO(views, options_json) {
     erd: VIEWLGC_ERD(a, options_json),
     page: VIEWLGC_PAGE(a, VIEWLGC_RENDER(a, options_json),
       VIEWLGC_ERD(a, options_json),
-      fakeColumns(views), fakeSql(views), options_json),
+      fakeColumns(views), fakeSql(views), fakeDescs(views), options_json),
   };
 }
 
@@ -582,7 +609,7 @@ const checks = [
     // page はそれをそのまま持っている
     info.page.includes(info.erd)],
   ['page は図が渡されなくても落ちない',
-    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]', OPTS)
+    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]', '[]', OPTS)
       .includes('参照関係を取得できませんでした')],
   // メモだけは作り置きしない。カードには目印だけを置き、ビューが
   // REPLACE で note_html に差し替える。焼き込むと、シートを直しても
@@ -626,7 +653,7 @@ const checks = [
       sql.includes('<span class="vg-sqln">');
   })()],
   ['page は SQL が渡されなくても落ちない',
-    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '{ broken', OPTS)
+    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '{ broken', '[]', OPTS)
       .includes('SQL を取得できませんでした')],
   ['page はカラム定義の表を出す（定義ごとの列と並び順の ⚠）', (() => {
     const at = (n) => info.page.indexOf(`<div class="vg-opanel vg-op${n}">`);
@@ -643,13 +670,52 @@ const checks = [
       cols.includes('vg-cmix') && cols.includes('vg-cwarn');
   })()],
   ['page はカラム定義が空でも落ちない',
-    typeof VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '{ broken', '[]', OPTS)
+    typeof VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '{ broken', '[]', '[]', OPTS)
       === 'string' &&
-    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', null, '[]', OPTS)
+    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', null, '[]', '[]', OPTS)
       .includes('カラム定義を取得できませんでした')],
-  ['page はメモの目印を 1 つだけ置く（本体は焼き込まない）',
-    info.page.split(require(join(here, 'chrome.js')).NOTE_MARK).length - 1 === 1 &&
-    !info.page.includes('vg-md')],
+  ['page はメモの目印を 1 つだけ置く（本体は焼き込まない）', (() => {
+    const MARK = require(join(here, 'chrome.js')).NOTE_MARK;
+    return info.page.split(MARK).length - 1 === 1 &&
+      // メモの段の中身は目印だけ。すぐ後ろに本体が付いていないこと
+      info.page.includes('<div class="vg-nhead">メモ</div>' + MARK) &&
+      // 「未登録」の枠も焼き込まない（メモが空かどうかはビューが決める）
+      !info.page.includes('vg-mdempty');
+  })()],
+  // note タブは二段構え。上段の description は作り置き（デプロイでしか
+  // 変わらない）、下段のメモはビューが差し込む（シートを直すとその場で変わる）。
+  ['note タブは description の段とメモの段に分かれる', (() => {
+    const at = (n) => info.page.indexOf(`<div class="vg-opanel vg-op${n}">`);
+    const note = info.page.slice(at(1), at(2));
+    return note.includes('<div class="vg-nhead">View の description</div>') &&
+      note.includes('<div class="vg-nhead">メモ</div>') &&
+      // description が先、メモが後
+      note.indexOf('View の description') < note.indexOf('vg-nhead">メモ') &&
+      // 上段の中身は焼き込み済み（Markdown を HTML にするのは SQL 側）
+      note.includes('日本向け') && note.includes('共通');
+  })()],
+  ['description が割れていたらタブになる（同一ならタブは出ない）', (() => {
+    const at = (n) => info.page.indexOf(`<div class="vg-opanel vg-op${n}">`);
+    const note = info.page.slice(at(1), at(2));
+    const tabs = [...note.matchAll(/class="vg-dtab vg-dt\d+"[^>]*>([^<]*)</g)]
+      .map((m) => m[1]);
+    // fixture は jp とそれ以外の 2 文面。見出しは View 名ではなく suffix
+    const one = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
+      JSON.stringify([{ v: views.map((v) => v.view_name), h: '<p>ひとつ</p>' }]), OPTS);
+    return tabs.length === 2 &&
+      tabs.every((t) => /^[a-z]{4}(, [a-z]{4})*$/.test(t)) &&
+      !one.includes('vg-dtab') && one.includes('ひとつ');
+  })()],
+  ['description が無ければ段ごと出さない（メモだけになる）', (() => {
+    const MARK = require(join(here, 'chrome.js')).NOTE_MARK;
+    const none = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
+      '[]', OPTS);
+    return !none.includes('vg-nhead') && !none.includes('vg-dtab') &&
+      none.includes(`<div class="vg-opanel vg-op1"><div class="vg-root">${MARK}</div>`);
+  })()],
+  ['page は description が壊れていても落ちない',
+    typeof VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
+      '{ broken', OPTS) === 'string'],
   ['タイトルが base 名', text.includes('v_daily_sales')],
   ['3 グループでタブになる', html.includes('vg-tablist')],
   ['ペイン見出しに suffix が列記される', text.includes('abjp, abuk, abus')],
@@ -1134,8 +1200,13 @@ LANGUAGE js AS %s
 -- タブは グループではなく View（suffix）単位。
 -- 差分も図も作らない。viewlgc_render / viewlgc_erd の出力をそのまま受け取る。
 --
--- メモの中身もここでは入れない。パネルには目印 '<!--VG_NOTE-->' だけを置き、
--- ビューが REPLACE で note_html に差し替える。ここで焼き込むと、シートを
+-- note タブは二段構え。上段が View 自身の description で、descs_json
+-- （[{v: [View 名...], h: HTML}]）から作る。**Markdown を HTML にするのは
+-- 呼び出し側の SQL（viewlgc_markdown）。** JS UDF から別の UDF は呼べない。
+-- 文面が割れている base ではタブになり、1 種類ならタブは出ない。
+--
+-- 下段のメモの中身はここでは入れない。パネルには目印 '<!--VG_NOTE-->' だけを
+-- 置き、ビューが REPLACE で note_html に差し替える。ここで焼き込むと、シートを
 -- 直しても次の日次実行までレポートが古いままになる。
 -- ---------------------------------------------------------------------
 EXECUTE IMMEDIATE FORMAT('''
@@ -1145,6 +1216,7 @@ CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
   erd_html STRING,
   columns_json STRING,
   sql_json STRING,
+  descs_json STRING,
   options_json STRING
 )
 RETURNS STRING

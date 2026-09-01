@@ -19,6 +19,7 @@ const Ch = require(join(here, 'chrome.js'));
 const Md = require(join(here, 'markdown.js'));
 const Co = require(join(here, 'columns.js'));
 const Sq = require(join(here, 'sqltext.js'));
+const V = require(join(here, 'viewdesc.js'));
 
 const OPTS = { suffixParts: S.SUFFIX_PARTS };
 
@@ -112,8 +113,9 @@ const NOTE_MD = [
   'snake_case_name は斜体にしない。',
 ].join('\n');
 
-// note タブに出すのは「View 自身の description」と「シートのメモ」を繋いだもの。
-// 繋ぐのは SQL 側（ビュー）だが、見え方はここで確かめられる。
+// note タブの上段に出す「View 自身の description」。**Markdown を HTML に
+// するのは SQL 側（viewlgc_markdown）**なので、描画側へは変換済みで渡る。
+// ここでも同じ順で通して、実物と同じものを見る。
 const VIEW_DESC_MD = [
   '## v_daily_sales_abjp',
   '',
@@ -124,19 +126,50 @@ const VIEW_DESC_MD = [
   '| 更新 | 03:00 |',
   '| 所有 | データ基盤チーム |',
 ].join('\n');
-// 空のものを落としてから繋ぐ（区切り線だけが残らないように）。ビュー側の
-// ARRAY_TO_STRING と同じ扱い。
-const joinNote = (...parts) =>
-  parts.filter((p) => p && String(p).trim() !== '').join('\n\n---\n\n');
+const VIEW_DESC_US_MD = [
+  '## v_daily_sales_abus',
+  '',
+  'リージョン別の日次売上。**受注日は UTC** で切っている（jp とここが違う）。',
+].join('\n');
+
+/**
+ * SQL 側の base_descs と同じ形（[{v: [View 名...], h: HTML}]）を作る。
+ * pick(viewName) が返す Markdown ごとに View を畳む。空文字は
+ * 「description が設定されていない組」で、SQL 側も空のまま渡す。
+ */
+const fakeDescs = (b, pick) => {
+  const by = new Map();
+  for (const g of b.groups) for (const m of g.members) {
+    const md = String(pick(m.viewName, g) || '');
+    if (!by.has(md)) by.set(md, []);
+    by.get(md).push(m.viewName);
+  }
+  return [...by.entries()].map(([md, v]) =>
+    ({ v, h: md ? Md.markdownHtml(md) : '' }));
+};
 
 const memoCases = [
-  { title: 'メモ（View の description ＋ シート）',
-    html: Md.markdownHtml(joinNote(VIEW_DESC_MD, NOTE_MD)) },
-  { title: 'メモ（description だけ・シート未登録）',
-    html: Md.markdownHtml(joinNote(VIEW_DESC_MD, null)) },
-  { title: 'メモ（シートだけ・description 無し）',
-    html: Md.markdownHtml(joinNote(null, NOTE_MD)) },
-  { title: 'メモ（どちらも無い）', html: Md.markdownHtml(joinNote(null, null)) },
+  { title: 'メモ（シートに登録あり）', html: Md.markdownHtml(NOTE_MD) },
+  { title: 'メモ（未登録）', html: Md.markdownHtml(null) },
+];
+
+// note タブ。上段が description、下段がシートのメモ。上段は割れていれば
+// タブになり、1 種類ならタブは出ない。どちらも無ければ段そのものを出さない。
+const noteCases = [
+  { title: 'note（description が割れている = 上段がタブ）',
+    html: `<div class="vg-root">` + V.renderNote(base3,
+      fakeDescs(base3, (v) => (/jp$/.test(v) ? VIEW_DESC_MD : VIEW_DESC_US_MD)),
+      Md.markdownHtml(NOTE_MD)) + `</div>` },
+  { title: 'note（description が全 View 同じ = タブなし）',
+    html: `<div class="vg-root">` + V.renderNote(base3,
+      fakeDescs(base3, () => VIEW_DESC_MD), Md.markdownHtml(NOTE_MD)) + `</div>` },
+  { title: 'note（description が一部の View にしか無い）',
+    html: `<div class="vg-root">` + V.renderNote(base3,
+      fakeDescs(base3, (v) => (/jp$/.test(v) ? VIEW_DESC_MD : '')),
+      Md.markdownHtml(NOTE_MD)) + `</div>` },
+  { title: 'note（description 無し = シートのメモだけ）',
+    html: `<div class="vg-root">` + V.renderNote(base3,
+      fakeDescs(base3, () => ''), Md.markdownHtml(NOTE_MD)) + `</div>` },
 ];
 
 // カラム定義の代わり。実際は INFORMATION_SCHEMA.COLUMNS から作った並びが来る。
@@ -239,13 +272,17 @@ const splice = (html, note) => html.replace(Ch.NOTE_MARK, note);
 
 const pageCases = [
   { title: '外側タブ（note / カラム定義 / 参照関係 / ロジック差分 / SQL）',
-    b: baseComplex, opts: {}, note: NOTE_MD },
-  { title: '外側タブ・3 グループ', b: base3, opts: {}, note: NOTE_MD },
-  { title: '外側タブ・メモが未登録の base', b: base2, opts: {}, note: null },
+    b: baseComplex, opts: {}, note: NOTE_MD,
+    pick: (v) => (/jp$/.test(v) ? VIEW_DESC_MD : VIEW_DESC_US_MD) },
+  { title: '外側タブ・3 グループ', b: base3, opts: {}, note: NOTE_MD,
+    pick: () => VIEW_DESC_MD },
+  { title: '外側タブ・メモも description も未登録の base',
+    b: base2, opts: {}, note: null, pick: () => '' },
 ].map((c) => ({ ...c,
   html: splice(
     Ch.wrapPage(R.renderBase(c.b, c.opts), E.renderErdBase(c.b),
       Co.renderColumnsBase(c.b, fakeColumns(c.b)), Sq.renderSqlBase(c.b, fakeSql(c.b)),
+      V.renderNote(c.b, fakeDescs(c.b, c.pick), Ch.NOTE_MARK),
       c.b),
     Md.markdownHtml(c.note)) }));
 
@@ -682,26 +719,59 @@ const checks = [
   ['メモが空なら未登録の枠を返す',
     Md.markdownHtml('').includes('vg-mdempty') &&
     Md.markdownHtml('  \n  ').includes('vg-mdempty')],
-  // note タブは View 自身の description が先、シートのメモが続く。
-  // 片方しか無いときに区切り線だけが残らないこと。
-  ['note は description のあとにシートのメモを出す', (() => {
-    const h = memoCases[0].html;
-    const hr = h.indexOf('<hr class="vg-mdhr">');
-    return hr > 0 &&
-      h.indexOf('データ基盤チーム') < hr &&
-      h.indexOf('v_daily_sales について') > hr;
+  ['メモが空なら未登録の枠を返す（note の下段だけの話）',
+    memoCases[1].html.includes('vg-mdempty')],
+  // note タブは二段構え。上段が View 自身の description、下段がシートのメモ。
+  // 1 本のテキストに繋いでいた頃は、水平線 1 本しか手掛かりが無く、
+  // どこまでが公式の説明でどこからが運用メモなのかが読み取れなかった。
+  ['note は description の段とメモの段に分かれる', (() => {
+    const h = noteCases[0].html;
+    return h.includes('<div class="vg-nhead">View の description</div>') &&
+      h.includes('<div class="vg-nhead">メモ</div>') &&
+      h.indexOf('View の description') < h.indexOf('vg-nhead">メモ') &&
+      h.includes('データ基盤チーム') && h.includes('v_daily_sales について');
   })()],
-  ['片方しか無ければ区切り線を出さない', (() => {
-    const only = [memoCases[1].html, memoCases[2].html];
-    return only.every((h) => !h.includes('<hr class="vg-mdhr">') ||
-      // シート側の本文には元から --- が入っているので、そのぶんは数に入れる
-      (h.match(/<hr class="vg-mdhr">/g) || []).length ===
-        (NOTE_MD.match(/^---$/gm) || []).length) &&
-      memoCases[1].html.includes('データ基盤チーム') &&
-      memoCases[2].html.includes('v_daily_sales について');
+  ['description が割れていたら上段がタブになる（見出しは suffix）', (() => {
+    const h = noteCases[0].html;
+    const tabs = [...h.matchAll(/class="vg-dtab vg-dt\d+"[^>]*>([^<]*)</g)].map((m) => m[1]);
+    // jp とそれ以外の 2 文面。多いほうが先（既定で開くタブ）
+    return tabs.length === 2 &&
+      tabs[0] === 'abus, abuk, cdus, cduk, efus, efuk'.split(', ').sort().join(', ') &&
+      tabs[1] === 'abjp, cdjp, efjp' &&
+      (h.match(/class="vg-dpanel /g) || []).length === 2;
   })()],
-  ['どちらも無ければ未登録の枠になる',
-    memoCases[3].html.includes('vg-mdempty')],
+  ['description が同一ならタブは出さない（押せて何も起きない飾りにしない）', (() => {
+    const h = noteCases[1].html;
+    return !h.includes('vg-dtab') && !h.includes('vg-dr1') &&
+      h.includes('vg-nhead">View の description') && h.includes('受注日は JST');
+  })()],
+  ['description が一部にしか無ければ、その組も出す（黙って消さない）', (() => {
+    const h = noteCases[2].html;
+    const tabs = [...h.matchAll(/class="vg-dtab vg-dt\d+"[^>]*>([^<]*)</g)].map((m) => m[1]);
+    // 中身のある組が先、未設定の組は最後
+    return tabs.length === 2 && tabs[0] === 'abjp, cdjp, efjp' &&
+      h.includes('description が設定されていません');
+  })()],
+  ['description が無ければ段ごと出さない（シートのメモだけ）', (() => {
+    const h = noteCases[3].html;
+    return !h.includes('vg-nhead') && !h.includes('vg-dtab') &&
+      h.includes('v_daily_sales について');
+  })()],
+  ['note タブのラジオは外側・基準・比較・SQL と別のクラス（連動しない）', (() => {
+    const css = V.descCss();
+    return /\.vg-dr1:checked ~ \.vg-dpanels > \.vg-dp1\{display:block\}/.test(css) &&
+      !/\.vg-or\d|\.vg-br\d|\.vg-sr\d/.test(css) &&
+      !/[^d]\.vg-r\d/.test(css);
+  })()],
+  ['note タブの CSS が上限枚数ぶんある', (() => {
+    const css = V.descCss();
+    const n = [...css.matchAll(/\.vg-dr(\d+):checked ~ \.vg-dpanels/g)]
+      .map((m) => Number(m[1]));
+    return n.length === Ch.MAX_DESC_TABS &&
+      Math.max(...n) === Ch.MAX_DESC_TABS;
+  })()],
+  ['note の CSS は viewdesc.js 側にある',
+    V.descCss().includes('.vg-nhead') && !R.chromeCss().includes('.vg-nhead')],
   // カラム定義の列はロジック グループではなく**カラム定義**で束ねる。
   // SQL が同一でも参照先の型や description が違えば別の列になり、逆に別ロジック
   // でも定義が同じなら 1 列にまとまる。ロジック差分には出てこない差がここに出る。
@@ -1137,8 +1207,9 @@ if (!process.argv.includes('--check')) {
     'h2{font:600 14px/1.6 Roboto,system-ui,sans-serif;color:#57606A;' +
     'margin:32px 0 12px;padding-top:16px;border-top:1px solid #D0D7DE}\n' +
     chromeCss() + '\n' + Md.memoCss() + '\n' + Co.columnsCss() + '\n' + Sq.sqlCss() +
+    '\n' + V.descCss() +
     '\n</style>\n</head>\n<body>\n' +
-    pageCases.concat(parts, memoCases, columnCases, sqlCases)
+    pageCases.concat(parts, noteCases, memoCases, columnCases, sqlCases)
       .map((p) => `<h2>${p.title}</h2>\n${p.html}`).join('\n') +
     '\n</body>\n</html>\n';
   await mkdir(join(here, 'dist'), { recursive: true });

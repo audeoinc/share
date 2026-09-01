@@ -14,6 +14,10 @@ const MAX_REF_TABS = 12;
 // SQL タブ（View ごとの素の SQL）のタブ数の上限。ここだけグループではなく
 // View 単位なので、同じ base でも枚数が桁ひとつ多くなりうる。多めに取ってある。
 const MAX_SQL_TABS = 24;
+// note タブの上段（View の description）のタブ数の上限。description が
+// 何種類に割れているかで決まる。全 View が別々の説明を持てば View 数まで
+// 増えうるが、実際にそこまで割れることはまず無いので中間を取ってある。
+const MAX_DESC_TABS = 16;
 // 1 レコードに載せる差分の上限。
 //
 // **これは「重くしない」ための値ではなく、「行が壊れない」ための値。**
@@ -126,8 +130,11 @@ const kindText = (k) => KIND_TEXT[k] || k;
  * どのタブにも同じように効く。別のチャートに分けると、コントロールを
  * 何組もそろえる必要が出て、片方だけずれた状態を作れてしまう。
  *
- * メモのパネルには本体ではなく目印（NOTE_MARK）を置く。上の説明のとおり、
- * メモだけは作り置きではなくビューの中で作るため。
+ * note のパネルの中身は呼び出し側が組み立てて渡す（viewdesc.js の renderNote）。
+ * ここで作らないのは、description の段がタブを持つことがあり、その markup と
+ * CSS を 1 か所にまとめておきたいから。渡されなければ目印だけを置く。
+ * **メモの本体はどちらの経路でも入らない。** 目印（NOTE_MARK）を置くだけで、
+ * 中身はビューが差し替える（シートを直した内容がその場で出るようにするため）。
  *
  * 見出し（base 名・View 数・グループ数）はタブと同じ帯に入れて、まとめて
  * スクロールに追従させる。差分側（renderBase）と参照関係側（renderErdBase）は
@@ -146,13 +153,16 @@ const kindText = (k) => KIND_TEXT[k] || k;
  * 内側のタブとはクラスを分けてある。同じクラスだと内側のラジオが外側の
  * :checked ~ に引っかかり、片方を押すともう片方も切り替わる。
  *
+ * @param {string} noteHtml note タブの中身（description の段 ＋ 目印）。
+ *                         省略したら目印だけ
  * @param {object} base 解析結果の base 1 件分。見出しと id の種に使う
  */
-function wrapPage(diffHtml, erdHtml, colsHtml, sqlHtml, base) {
+function wrapPage(diffHtml, erdHtml, colsHtml, sqlHtml, noteHtml, base) {
   const b = base || {};
   const id = 'vgo' + hashId(b.base || '');
+  const note = noteHtml == null || noteHtml === '' ? NOTE_MARK : String(noteHtml);
   // OUTER_TABS と同じ並び
-  const bodies = [`<div class="vg-root">${NOTE_MARK}</div>`, colsHtml, erdHtml,
+  const bodies = [`<div class="vg-root">${note}</div>`, colsHtml, erdHtml,
     diffHtml, sqlHtml];
   const radios = OUTER_TABS.map((_, i) =>
     `<input class="vg-or vg-or${i + 1}" type="radio" name="${id}"` +
@@ -169,7 +179,8 @@ function wrapPage(diffHtml, erdHtml, colsHtml, sqlHtml, base) {
 }
 
 module.exports = {
-  MAX_TABS, MAX_REF_TABS, MAX_SQL_TABS, MAX_OUTER_TABS, REF_BUDGET, OUTER_TABS,
+  MAX_TABS, MAX_REF_TABS, MAX_SQL_TABS, MAX_DESC_TABS, MAX_OUTER_TABS,
+  REF_BUDGET, OUTER_TABS,
   NOTE_MARK,
   esc, hashId, label, badge, header, notice, KIND_TEXT, kindText, wrapPage,
 };

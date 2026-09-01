@@ -587,6 +587,23 @@ END IF;
 --    作り直すたびに説明が消えることはない。
 --
 --    初回もこの 1 文でテーブルができる。セクション 1 は要らない。
+--
+--    **速さについて（WITH は実体化されない）。**
+--    BigQuery の WITH は「名前を付けた式」で、参照するたびに展開される。
+--    同じ CTE を n 回参照すると、その中の INFORMATION_SCHEMA 読みも n 回
+--    走りうる（オプティマイザが同じ計画をまとめてくれることもあるが、
+--    保証は無い）。いま残っている複数参照は次の 2 つで、どちらも読む先が
+--    小さいので放置している。
+--      keyed       3 回（base_cols / desc_by_base / analyzed）→ VIEWS
+--      suffix_base 2 回（suffixes の UNION ALL）             → SCHEMATA
+--    大きいほう（COLUMNS と COLUMN_FIELD_PATHS）は col_entries の JOIN を
+--    1 回にまとめて 2 回 → 1 回にしてある。opts も 1 回だけの参照にした。
+--    ここが効いていないと分かったら、この塊を CREATE TEMP TABLE で
+--    受けてから最後の SELECT を別文にする（そうすれば全部 1 回になる）。
+--
+--    いちばん重いのは JS UDF（analyze → render / erd → page）で、これは
+--    base ごとに 1 回ずつ。analyzed は集約なので、外側の SELECT が analysis を
+--    何度参照しても解析はやり直されない（集約は展開できないため）。
 -- ---------------------------------------------------------------------
 SET sql_template = """
 CREATE OR REPLACE TABLE `__T_DIFF_SRC__`
@@ -602,8 +619,7 @@ CREATE OR REPLACE TABLE `__T_DIFF_SRC__`
   group_sizes     ARRAY<INT64>   OPTIONS (description = '各グループの View 数'),
   suffixes        ARRAY<STRING>  OPTIONS (description = '認識した suffix 一覧'),
   unmatched_count INT64          OPTIONS (description = 'suffix を認識できなかった View 数。1 ならこの行が単独表示の View'),
-  view_desc_md    STRING         OPTIONS (description = 'View 自身の description（Markdown）。note タブの先頭に出す。未設定なら NULL'),
-  diff_html       STRING         OPTIONS (description = '比較 HTML。Templated Record に渡す')
+  diff_html       STRING         OPTIONS (description = '比較 HTML。Templated Record に渡す。note タブの description の段まで焼き込み済みで、シートのメモの目印だけが空いている')
 )
 CLUSTER BY base
 OPTIONS (
@@ -718,34 +734,32 @@ col_paths AS (
 --
 -- ネストの行は型と説明だけ。ordinal_position も is_nullable も COLUMNS に
 -- しか無いので、親のものを持ってくると嘘になる（描画側も出さない）。
+-- 並べ替えのために ordinal_position だけは親のものを持たせてある
+-- （親のすぐ下に来てほしいので、親と同じ値でよい）。
+--
+-- **JOIN は 1 回。** 最上位とネストを UNION ALL で分けて書くと、
+-- COLUMNS も COLUMN_FIELD_PATHS も 2 回ずつ読むことになる（BigQuery は
+-- WITH を実体化せず、参照のたびに展開する）。結合条件に
+-- 「最上位か、ネストも要るなら全部」を入れれば 1 回で足りる。
+-- include_nested_fields = FALSE のときは最上位の 1 行だけが残る。
 col_entries AS (
   SELECT
     r.table_name       AS view_name,
-    r.column_name      AS field_path,
-    r.data_type        AS data_type,
+    COALESCE(p.field_path, r.column_name) AS field_path,
+    -- 最上位は COLUMNS の型をそのまま使う（COLUMN_FIELD_PATHS が無くても出る）。
+    IF(p.field_path IS NULL OR p.field_path = r.column_name,
+       r.data_type, p.data_type) AS data_type,
     r.ordinal_position AS ordinal_position,
-    r.is_nullable      AS is_nullable,
+    -- ネストの行に親の NULL 制約を持ってくると嘘になる
+    IF(p.field_path IS NULL OR p.field_path = r.column_name,
+       r.is_nullable, CAST(NULL AS STRING)) AS is_nullable,
     COALESCE(p.description, '') AS description
   FROM cols_raw AS r
   LEFT JOIN col_paths AS p
     ON  p.table_schema = r.table_schema
     AND p.table_name   = r.table_name
-    AND p.field_path   = r.column_name
-  UNION ALL
-  SELECT
-    p.table_name,
-    p.field_path,
-    p.data_type,
-    r.ordinal_position,
-    CAST(NULL AS STRING),
-    COALESCE(p.description, '')
-  FROM col_paths AS p
-  JOIN cols_raw AS r
-    ON  r.table_schema = p.table_schema
-    AND r.table_name   = p.table_name
-    AND r.column_name  = p.column_name
-  WHERE p.field_path != p.column_name
-    AND @include_nested_fields
+    AND p.column_name  = r.column_name
+    AND (p.field_path = r.column_name OR @include_nested_fields)
 ),
 cols AS (
   SELECT
@@ -789,45 +803,58 @@ view_opts AS (
 ),
 -- 同じ説明を持つ View をまとめる。base の中で説明が割れているかどうかが
 -- ここで分かる（同じロジックの View なのに説明が違えば、それ自体が情報）。
+--
+-- **LEFT JOIN。** description が付いていない View も 1 組として残す。
+-- 「片方だけ書いてある」も差なので、黙って消すと note タブでは全 View に
+-- 説明が付いているように見えてしまう。
+-- 別名は desc_md にしない。view_opts に同じ名前の列があるので、GROUP BY で
+-- 「FROM 側の列か SELECT の別名か」が決まらず ambiguous で落ちる。
 desc_by_base AS (
   SELECT
     k.base,
-    d.desc_md,
-    STRING_AGG(k.view_name, ', ' ORDER BY k.view_name) AS view_names
+    TRIM(COALESCE(d.desc_md, '')) AS desc_text,
+    ARRAY_AGG(k.view_name ORDER BY k.view_name) AS view_names
   FROM keyed AS k
-  JOIN view_opts AS d ON d.view_name = k.view_name
-  WHERE TRIM(COALESCE(d.desc_md, '')) != ''
-  GROUP BY k.base, d.desc_md
+  LEFT JOIN view_opts AS d ON d.view_name = k.view_name
+  GROUP BY k.base, desc_text
 ),
-base_desc AS (
+-- 描画側（note タブの上段）へ渡す形。[{v: [View 名...], h: HTML}]。
+--
+-- **Markdown を HTML にするのはここ。** JS UDF から別の UDF は呼べないので、
+-- viewlgc_page には変換済みのものを渡す。文面ごとに畳んだあとで呼ぶので、
+-- 呼ぶ回数は View 数ではなく「文面の種類数」で済む。
+-- 空の組に呼ぶと「未登録」の枠が返るので、そこは空文字のまま渡す
+-- （その組をどう見せるかは描画側の判断）。
+base_descs AS (
   SELECT
     base,
-    -- base の中で説明が 1 種類なら、そのまま出す（見出しは邪魔）。
-    -- 割れていたら、どの View のものかを添えて全部出す。黙って 1 つだけ
-    -- 出すと、説明が食い違っていることに気づけない。
-    -- 区切りは STRING_AGG ではなく ARRAY_TO_STRING で入れる。STRING_AGG の
-    -- 区切り文字はリテラルかクエリ パラメータでなければならず、CHR(10) の
-    -- ような式は受け付けない（テンプレートにバックスラッシュを書けないので、
-    -- 改行のリテラルも作れない）。ARRAY_TO_STRING にその制限は無い。
-    IF(COUNT(*) = 1,
-       ANY_VALUE(desc_md),
-       ARRAY_TO_STRING(
-         ARRAY_AGG('**' || view_names || '**' || CHR(10) || CHR(10) || desc_md
-                   ORDER BY view_names),
-         CHR(10) || CHR(10))) AS desc_md
+    TO_JSON_STRING(ARRAY_AGG(
+      STRUCT(
+        view_names AS v,
+        IF(desc_text = '', '', `__UDF_MARKDOWN__`(desc_text)) AS h
+      )
+      ORDER BY view_names[OFFSET(0)]
+    )) AS descs_json
   FROM desc_by_base
   GROUP BY base
 ),
 -- 解析は base ごとに 1 回だけ。結果の JSON をこの段で持っておき、
 -- メタデータは JSON から取り出し、HTML は描画の UDF に渡す。
 -- JS UDF から別の UDF は呼べないので、この 2 段で合成する。
+--
+-- opts は CROSS JOIN で持ってくる。スカラー副問い合わせ（SELECT … FROM opts）を
+-- 使う箇所ごとに書くと、**その数だけ opts が評価されうる**（BigQuery は
+-- WITH を実体化せず、参照のたびに展開する）。opts は suffixes 経由で
+-- INFORMATION_SCHEMA.SCHEMATA を読むので、同じ metadata 読みが何度も走る。
+-- ここで 1 度だけ結び付け、下流は列として持ち回る。
 analyzed AS (
   SELECT
     base,
+    o.options_json AS options_json,
     `__UDF_ANALYZE__`(
       ARRAY_AGG(STRUCT(view_name, ddl) ORDER BY view_name),
       -- suffixes から組み立てた設定（全行で同じ値）
-      (SELECT options_json FROM opts)
+      o.options_json
     ) AS analysis,
     -- SQL タブ用の素のテキスト。解析結果には積んでいない（描画に要らない
     -- ものを UDF 間の JSON で運ぶと 20 倍の大きさになる）ので、ここで
@@ -835,7 +862,8 @@ analyzed AS (
     TO_JSON_STRING(ARRAY_AGG(STRUCT(view_name AS v, ddl AS s) ORDER BY view_name))
       AS sql_json
   FROM keyed
-  GROUP BY base
+  CROSS JOIN opts AS o
+  GROUP BY base, o.options_json
 ),
 -- 基準はカードの中のタブで選ぶので、行は base ごとに 1 本。
 -- 以前は基準ごとに行を作っていたが、基準が意味を持つのはロジック差分だけで、
@@ -849,16 +877,17 @@ refs AS (
     a.base,
     a.analysis,
     a.sql_json,
+    a.options_json,
     -- 取れなかった base でも描画側が落ちないよう、空の並びを渡す
     COALESCE(bc.columns_json, '[]') AS columns_json,
-    -- View に description が無い base もある。その場合は NULL のままにして、
-    -- ビュー側でシートのメモだけを出す。
-    bd.desc_md AS view_desc_md,
+    -- View に description が無い base もある。描画側が段ごと出さないので、
+    -- 空の並びを渡しておけばよい。
+    COALESCE(bd.descs_json, '[]') AS descs_json,
     0 AS ref_index,
     JSON_VALUE_ARRAY(a.analysis, '$.groupLabels')[SAFE_OFFSET(0)] AS ref_label
   FROM analyzed AS a
   LEFT JOIN base_cols AS bc ON bc.base = a.base
-  LEFT JOIN base_desc AS bd ON bd.base = a.base
+  LEFT JOIN base_descs AS bd ON bd.base = a.base
 )
 SELECT
   CURRENT_DATE('__TZ__') AS snapshot_date,
@@ -875,9 +904,6 @@ SELECT
   ) AS group_sizes,
   JSON_VALUE_ARRAY(analysis, '$.suffixes') AS suffixes,
   CAST(JSON_VALUE(analysis, '$.unmatchedCount') AS INT64) AS unmatched_count,
-  view_desc_md,
-  -- どのグループを基準にするかを設定に足して渡す。opts と同じ組み立て方
-  -- （先頭の '{' を落として前に足す）にそろえてある。
   --
   -- 描画は 3 本の UDF に分かれている。render がロジック差分のカード、erd が
   -- 参照関係の図を作り、page がその 2 つを受け取ってカラム定義の表と
@@ -888,11 +914,12 @@ SELECT
   -- （図の解析にはトークナイザが要り、それだけで最小化後 9 KB ある）。
   `__UDF_PAGE__`(
     analysis,
-    `__UDF_RENDER__`(analysis, (SELECT options_json FROM opts)),
-    `__UDF_ERD__`(analysis, (SELECT options_json FROM opts)),
+    `__UDF_RENDER__`(analysis, options_json),
+    `__UDF_ERD__`(analysis, options_json),
     columns_json,
     sql_json,
-    (SELECT options_json FROM opts)
+    descs_json,
+    options_json
   ) AS diff_html
 FROM refs
 """;
@@ -922,11 +949,11 @@ USING suffix_list AS suffix_list,
 --    しておき、焼き込みは SELECT * で写すだけにする。二重に書くと片方だけ
 --    直したときに食い違う。
 --
---    note タブに出すのは 2 つを繋いだもの。View 自身の description（Markdown）
---    が先で、シートのメモが続く。片方しか無ければそれだけを出す。
+--    note タブは二段構え。上段が View 自身の description、下段がシートのメモ。
+--    **ここが作るのは下段だけ。** 上段は生成のとき（セクション 2）に焼き込んで
+--    ある。更新のされ方が違うので、作る場所も分けてある。
 --      description  View に付いた正式な説明。デプロイでしか変わらない
 --      シート       運用中の補足。書き換えたらこのビューにはその場で出る
---    区切りは水平線。出どころが違うことが読み手に分かるようにする。
 --
 --    毎回作り直す（ビューの作り直しは安い）。初回だけにすると、
 --    このファイルを直したときに古い定義が残る。
@@ -956,18 +983,6 @@ joined AS (
     -- レポート側で「値なし」になり、未登録なのか取得に失敗したのか読めない）。
     n.base IS NOT NULL            AS has_note,
     n.note_md                     AS note_md,
-    d.view_desc_md IS NOT NULL    AS has_view_desc,
-    -- 空のものを落としてから繋ぐ（そうしないと区切り線だけが残る）。
-    -- 改行はエスケープ表記で書けない（テンプレートにバックスラッシュを
-    -- 禁じているため。node check_sql.mjs が見張る）ので CHR(10) で組み立てる。
-    ARRAY_TO_STRING(
-      ARRAY(
-        SELECT part
-        FROM UNNEST([d.view_desc_md, n.note_md]) AS part
-        WHERE TRIM(COALESCE(part, '')) != ''
-      ),
-      CHR(10) || CHR(10) || '---' || CHR(10) || CHR(10)
-    )                             AS note_source_md,
     n.updated_at                  AS note_updated_at,
     n.updated_by                  AS note_updated_by
   FROM `__T_DIFF_SRC__` AS d
@@ -975,14 +990,18 @@ joined AS (
 ),
 -- Markdown を HTML にするのは 1 回だけ。カードに差し込む側と、単独で置きたい
 -- とき用の note_html で同じものを使う。
+--
+-- 繋ぐのはシートのメモだけ。**View 自身の description はここには入らない。**
+-- あちらはデプロイでしか変わらないので、カードを作るとき（セクション 2）に
+-- 焼き込んである（note タブの上段。割れていればタブになる）。
 rendered AS (
   SELECT
     j.*,
-    `__UDF_MARKDOWN__`(j.note_source_md) AS note_html
+    `__UDF_MARKDOWN__`(j.note_md) AS note_html
   FROM joined AS j
 )
 SELECT
-  * EXCEPT (diff_html, ref_index, ref_label, note_source_md),
+  * EXCEPT (diff_html, ref_index, ref_label),
   -- 作り置きしたカードのメモ タブに、いま読んだメモを差し込む。目印は
   -- chrome.js の NOTE_MARK と同じ文字列（node check_sql.mjs が突き合わせる）。
   REPLACE(diff_html, '<!--VG_NOTE-->', note_html) AS diff_html
