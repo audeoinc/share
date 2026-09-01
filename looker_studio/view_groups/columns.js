@@ -140,18 +140,14 @@ function descHtml(text) {
   const rows = d.pairs.map((p) =>
     `<tr><th class="vg-cdk">${esc(p.key)}</th>` +
     `<td class="vg-cdv">${esc(p.value)}</td></tr>`).join('');
-  // ★ 列幅は明示する。ブラウザまかせ（table-layout:auto）だと、値側に
-  //   width:100% を置いた時点でキー側は「最小幅」まで詰められる。キーを
-  //   折り返し可にしてあるとその最小幅が 1 文字になり、キーが縦に伸びる。
-  //   実際にそれで一度出した。
+  // 列幅は決め打ちにしない。**キー列はいちばん長いキーの幅**になり、残りが
+  // 値に回る（この寸法合わせは CSS ではなくブラウザの表レイアウトの仕事）。
+  // 割合で決めていた頃は、キーが短いと値との間が空いて対応が読み取りにくく、
+  // 長いと折り返して縦に伸びた。
   //
-  //   30% は妥協点。キーが短いと（ja / en）左に余白が出るが、はみ出すよりよい。
-  //   逆にキーが長くグループも多いと折り返しで縦に伸びる（実測: 6 グループで
-  //   セル 132px・キー列 32px のとき logical_name_ja が 4 行）。キーの綴りに
-  //   合わせて動かすなら、この数字 1 つで済む。
-  return `<table class="vg-cdtable">` +
-    `<colgroup><col style="width:30%"><col style="width:70%"></colgroup>` +
-    `${rows}</table>`;
+  // 効かせ方は .vg-cdk / .vg-cdv の側。**キーは nowrap、値は width:100%。**
+  // 折り返しを許すとキー列は 1 文字まで詰められる（実際にそれで一度出した）。
+  return `<table class="vg-cdtable">${rows}</table>`;
 }
 
 /**
@@ -453,10 +449,12 @@ function renderColumns(b, byView) {
       const meta = nested
         ? (c.repeated ? 'REPEATED' : '')
         : (c.repeated ? 'REPEATED' : c.nulls);
+      // モードは型の右に置く（行の高さを 1 行ぶん節約する）。inline なので、
+      // 型が長くて折り返したときはその末尾に続く。
       const body = c.text
         ? breakType(esc(shown)) + (c.mixed
           ? `<span class="vg-cwarn" data-tip="${esc(mixedTip(e, g))}">${WARN}</span>` : '') +
-          (meta ? `<div class="vg-cmeta">${esc(meta)}</div>` : '') + descCell(e)
+          (meta ? `<span class="vg-cmeta">${esc(meta)}</span>` : '') + descCell(e)
         : '—';
       return `<td class="${cls.join(' ')}">${body}</td>`;
     }).join('');
@@ -555,15 +553,26 @@ function columnsCss() {
     // description が JSON だったときの 2 列の表。キーと値を縦線で分ける。
     // 'key: value' の 1 行だと、値に ':' が入っていると切れ目が読めない。
     // table-layout は auto。キーの長さはまちまちで、値のほうを広く取りたい。
-    `.vg-cdtable{margin:3px 0 0;border-collapse:collapse;width:100%;` +
-      `table-layout:fixed}`,
-    // キーは折り返させる。グループが多いとセルが細くなるので、nowrap にすると
-    // 長いキー（logical_name_ja など）でセルからはみ出す。
+    `.vg-cdtable{margin:3px 0 0;border-collapse:collapse;width:100%}`,
+    // キーは太字にしない。グループ見出し（.vg-chead）と同じ太さになって、
+    // 見出しなのか中身なのかが字面で見分けられなくなる。小ささと色で十分弱い。
+    //
+    // **キーは折り返さない（nowrap）。** 値に width:100% があるので、
+    // ブラウザはキー列を「最小幅」まで詰めようとする。折り返しを許すと
+    // その最小幅が 1 文字になり、キーが縦に伸びる。overflow-wrap:break-word
+    // でも同じで（Chromium の表レイアウトは 13px まで詰めた）、折り返しを
+    // 禁じるしかない。禁じればキー列はいちばん長いキーの幅で止まる。
+    //
+    // 引き換えに、セルより長いキーははみ出す。10px でいちばん細いセル
+    // （6 グループで 133px）に入るのは 25 文字ほどなので、実際の綴り
+    // （ja / name_ja / 日本語論理名）では当たらない。
     `.vg-cdk{padding:1px 6px 1px 0;border-right:1px solid #EAEEF2;text-align:left;` +
-      `vertical-align:top;overflow-wrap:anywhere;` +
+      `vertical-align:top;white-space:nowrap;` +
       `font:10px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;` +
-      `font-weight:600;color:#8C959F}`,
-    `.vg-cdv{padding:1px 0 1px 6px;vertical-align:top;` +
+      `color:#8C959F}`,
+    // 値に width:100% を置くと、残りの幅を全部こちらが取る（= キー列は
+    // いちばん長いキーの幅で止まる）。
+    `.vg-cdv{padding:1px 0 1px 6px;vertical-align:top;width:100%;` +
       `font:11px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;` +
       `font-weight:400;color:#57606A;overflow-wrap:anywhere}`,
     // グループの中で説明が割れているときに、どの View のものかを示す見出し。
@@ -581,10 +590,11 @@ function columnsCss() {
     `.vg-ccell{padding:5px 12px;border:1px solid #D0D7DE;vertical-align:top;` +
       `color:#24292F;overflow-wrap:anywhere;word-break:break-all;` +
       `font-family:ui-monospace,SFMono-Regular,Consolas,monospace}`,
-    // モード。型より弱い情報なので、いちばん小さくして下に添える。
+    // モード。型より弱い情報なので、いちばん小さくして型の右に添える。
     // 1px 差だと並べても違いが読み取れないので、ここだけ 2 段落とす。
-    `.vg-cmeta{margin:2px 0 0;font:8px/1.6 'Roboto','Segoe UI',system-ui,sans-serif;` +
-      `letter-spacing:.04em;color:#8C959F}`,
+    // inline にしてあるのは行の高さを 1 行ぶん節約するため。
+    `.vg-cmeta{margin-left:6px;font:8px/1.6 'Roboto','Segoe UI',system-ui,sans-serif;` +
+      `letter-spacing:.04em;color:#8C959F;white-space:nowrap}`,
     // 基準と違う型。差分の「追加」側と同じ地色で、目が同じ意味に慣れるようにする。
     `.vg-cdiff{background:#dfe7d2}`,
     `.vg-cnone{color:#8C959F;background:#FAFAFA}`,

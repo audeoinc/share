@@ -710,9 +710,7 @@ const checks = [
     /\.vg-ctable\{[^}]*max-width:1000px/.test(Co.columnsCss())],
   ['カラム定義は横スクロールさせない（幅はグループ数で均等割り）', (() => {
     const h = columnCases[0].html;
-    // 外側の表の colgroup だけを見る。セルの中の説明の表にも <col> がある。
-    const outer = (h.match(/<table class="vg-ctable">(<colgroup>[\s\S]*?<\/colgroup>)/) || [])[1] || '';
-    const cols = [...outer.matchAll(/<col style="width:([\d.]+)%">/g)].map((m) => Number(m[1]));
+    const cols = [...h.matchAll(/<col style="width:([\d.]+)%">/g)].map((m) => Number(m[1]));
     const css = Co.columnsCss();
     return cols.length === base3.groupCount + 1 &&
       Math.abs(cols.reduce((a, b) => a + b, 0) - 100) < 0.01 &&
@@ -750,7 +748,7 @@ const checks = [
   // 添えても読めるものが増えず、列を 1 本足すと以降がまとめてずれる。
   ['表に並び順（#N）を出さない', (() => {
     const h = columnCases[0].html;
-    const cells = [...h.matchAll(/<div class="vg-cmeta">([^<]*)<\/div>/g)].map((m) => m[1]);
+    const cells = [...h.matchAll(/<span class="vg-cmeta">([^<]*)<\/span>/g)].map((m) => m[1]);
     return cells.length > 0 && cells.every((c) => c.indexOf('#') < 0) &&
       // モードは出る
       cells.some((c) => c === 'REPEATED') &&
@@ -794,7 +792,7 @@ const checks = [
     const child = columnRow('\u2514currency');
     return parent && parent.includes('vg-cmeta') &&
       // 親はモードだけ（並び順は出さない）。子には NULL 制約も出ない
-      parent.includes('>REPEATED<') && !parent.includes('#') &&
+      parent.includes('vg-cmeta">REPEATED<') && !parent.includes('#') &&
       child && !child.includes('vg-cmeta') && child.includes('通貨');
   })()],
   ['ネストでもグループ間の型の違いが色で出る', (() => {
@@ -849,15 +847,34 @@ const checks = [
     // 日本語 -> 英語 -> 残り。綴りは言い換えない
     return keys.join(',') === 'name_ja,name_en,unit';
   })()],
-  // 列幅を明示しないと、値側の width:100% でキー側が最小幅まで詰められる。
-  // キーは折り返し可なので、その最小幅が 1 文字になってキーが縦に伸びる。
-  ['説明の表は列幅を明示する（キー列が 1 文字に潰れない）', (() => {
+  // 列幅は決め打ちにしない。キー列はいちばん長いキーの幅で止まる。
+  // overflow-wrap:anywhere は「最小幅」の計算まで変えるので、値の width:100% と
+  // 組み合わせるとキー列が 1 文字まで潰れる（実際にそれで一度出した）。
+  // break-word は最小幅を変えないので、キー 1 語ぶんの幅は残る。
+  ['説明の表の列幅はキーの実寸に任せる（決め打ちしない）', (() => {
     const h = Co.descHtml(JSON.stringify({ ja: '受注日' }));
     const css = Co.columnsCss();
-    return h.includes('<colgroup><col style="width:30%"><col style="width:70%"></colgroup>') &&
-      /\.vg-cdtable\{[^}]*table-layout:fixed/.test(css) &&
-      // 値側に width:100% を置くと auto レイアウトでキーが潰れる。置かない
-      !/\.vg-cdv\{[^}]*width:100%/.test(css);
+    return !h.includes('<colgroup') &&
+      !/\.vg-cdtable\{[^}]*table-layout:fixed/.test(css) &&
+      // 値が残りを取る = キー列はいちばん長いキーの幅で止まる
+      /\.vg-cdv\{[^}]*width:100%/.test(css) &&
+      // キーは折り返さない。折り返しを許すと最小幅が 1 文字まで詰められる
+      /\.vg-cdk\{[^}]*white-space:nowrap/.test(css) &&
+      !/\.vg-cdk\{[^}]*overflow-wrap/.test(css);
+  })()],
+  ['説明のキーは太字にしない（グループ見出しと同じ太さにならない）', (() => {
+    const css = Co.columnsCss();
+    const rule = css.split('\n').find((r) => r.indexOf('.vg-cdk{') === 0) || '';
+    return !/font-weight:600/.test(rule) &&
+      // グループ見出しは太字のまま
+      /\.vg-chead\{[^}]*font-weight:600/.test(css);
+  })()],
+  ['モードは型の右に置く（行の高さを節約する）', (() => {
+    const h = columnCases[0].html;
+    const css = Co.columnsCss();
+    return h.includes('<span class="vg-cmeta">') &&
+      !h.includes('<div class="vg-cmeta">') &&
+      /\.vg-cmeta\{margin-left:/.test(css);
   })()],
   ['値に : が入っていてもキーと混ざらない', (() => {
     const h = Co.descHtml(JSON.stringify({ ja: '受注日', note: '10:00 に確定' }));
