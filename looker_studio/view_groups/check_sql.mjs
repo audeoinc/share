@@ -141,6 +141,38 @@ add('IF … RAISE ではなく ASSERT を使っている',
   }
 }
 
+// --- 5a1. テンプレートの @param が USING で渡されているか -----------------
+// テンプレートの中で @x を使ったら、その文の
+//   EXECUTE IMMEDIATE rendered_sql USING x AS x
+// に x が並んでいなければならない。足りないと BigQuery は
+//   Query parameter 'x' not found
+// で落ちる。設定を 1 つ足したときに片方だけ直す形で必ず起きるうえ、実行して
+// 初めて分かる（しかもセクション 2 は重い）ので静的に見る。
+// DECLARE してあるかも一緒に確かめる。
+{
+  // 「SET sql_template = """…""";」から次の「SET sql_template」までを 1 文とみなす。
+  const blocks = [...table.matchAll(
+    /^ *SET sql_template = """([\s\S]*?)""";([\s\S]*?)(?=^ *SET sql_template = |\nEND;)/gm)];
+  const declared = new Set(
+    [...table.matchAll(/^DECLARE ([a-z_][a-z0-9_]*) /gm)].map((m) => m[1]));
+  const bad = [];
+  for (const [i, b] of blocks.entries()) {
+    const params = new Set([...b[1].matchAll(/@([a-z_][a-z0-9_]*)/g)].map((m) => m[1]));
+    if (!params.size) continue;
+    // 本文を組み立てる 1 手目（render_call_sql の USING sql_template）は数えない
+    const tail = b[2].replace(/EXECUTE IMMEDIATE render_call_sql[\s\S]*?;/, '');
+    const m = tail.match(/EXECUTE IMMEDIATE rendered_sql\s*(?:USING([\s\S]*?))?;/);
+    const passed = new Set(
+      [...((m && m[1]) || '').matchAll(/\bAS\s+([a-z_][a-z0-9_]*)/g)].map((x) => x[1]));
+    for (const p of params) {
+      if (!passed.has(p)) bad.push(`${i + 1} 文目: @${p} が USING に無い`);
+      if (!declared.has(p)) bad.push(`${i + 1} 文目: ${p} が DECLARE されていない`);
+    }
+  }
+  add('テンプレートの @param が USING で渡されている', bad.length === 0,
+    bad.join(' / '));
+}
+
 // --- 5a2. JS UDF の呼び出しと定義で引数の数が合うか ---------------------
 // 描画は 5 本の UDF に分かれていて、SQL 側からは目印（__UDF_PAGE__ など）で
 // 呼ぶ。引数を 1 本足したときに片方だけ直すと、**BigQuery は落ちずに

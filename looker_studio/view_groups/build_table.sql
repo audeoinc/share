@@ -193,9 +193,25 @@ DECLARE note_sheet_range STRING DEFAULT 'notes!A:E';
 -- こちらは「同じ意味を持つ文字列をどう取り出すか」。役割が違う。
 DECLARE suffix_pattern STRING DEFAULT r'_([A-Za-z]{4})$';
 -- suffix 一覧。空ならデータセット名から suffix_pattern で自動抽出する。
--- View が suffix を持たないデータセットに置いてある場合など、
--- データセット名から導けないときだけ並べる。
+--
+-- **書くと自動抽出は行われない（足すのではなく置き換える）。** 1 つ書いた
+-- つもりが、データセット名から取れていた分もろとも消えるので注意。
+-- ここに書くのは「一覧を丸ごと自分で決める」ときだけ。
+-- 末尾の導出（suffix_tail_lengths）と除外（suffix_exclude_list）は、
+-- ここに書いた値に対しても効く。
+--
+-- **1 つだけ足したいなら suffix_extra_list のほう。**
 DECLARE suffix_list ARRAY<STRING> DEFAULT [];
+-- 一覧に**足す** suffix。自動抽出はそのまま残る。
+--
+-- データセット名にも、その末尾にも現れない suffix を混ぜたいとき用。
+--   mart_abjp の中に v_x_global がある → suffix_extra_list = ['global']
+--
+-- **末尾の導出（suffix_tail_lengths）はここには効かない。** 書いた文字列が
+-- そのまま 1 つ増えるだけ。'global' から 'al' が増えたりはしない
+-- （「強制的に 1 つ足す」ための設定なので、勝手に増やさない）。
+-- 除外（suffix_exclude_list）は最後に効くので、両方に書けば消える。
+DECLARE suffix_extra_list ARRAY<STRING> DEFAULT [];
 -- 取り出した suffix の**末尾 n 文字も suffix として扱う**長さの一覧。
 -- 既定の [2] で abjp / abus から jp / us が増える。空にすると何も足さない。
 --
@@ -479,8 +495,10 @@ EXECUTE IMMEDIATE rendered_sql INTO target_dataset_count, target_view_count;
 
 ASSERT target_view_count > 0 AS
   '対象の View が 0 件です。@@location / analysis_include_dataset_patterns / analysis_include_object_patterns を確認してください。';
-ASSERT target_dataset_count > 0 OR ARRAY_LENGTH(suffix_list) > 0 AS
-  'suffix を持つデータセットが 0 件です。suffix_pattern / analysis_include_dataset_patterns を確認するか、suffix_list に直接並べてください。';
+ASSERT target_dataset_count > 0
+    OR ARRAY_LENGTH(suffix_list) > 0
+    OR ARRAY_LENGTH(suffix_extra_list) > 0 AS
+  'suffix を持つデータセットが 0 件です。suffix_pattern / analysis_include_dataset_patterns を確認するか、suffix_list に一覧を並べる（自動抽出は行われなくなります）か、suffix_extra_list に足してください。';
 
 
 -- ---------------------------------------------------------------------
@@ -628,6 +646,8 @@ OPTIONS (
 AS
 WITH
 -- suffix 一覧の素。suffix_list が空なら、対象データセットの名前から切り出す。
+-- **書いてあれば置き換える（足すのではない）。** 足したいときは
+-- suffix_extra_list のほうで、こちらは末尾の導出も掛からない。
 -- 除外はここでは効かせない。導出のあとに 1 回だけ効かせることで、
 -- 「4 文字のほうは落として末尾だけ残す」（ghkr を消して kr は残す）が書ける。
 suffix_base AS (
@@ -648,6 +668,9 @@ suffix_base AS (
 -- データセット名に現れない suffix を拾うため（mart_abjp の中の v_x_jp → 'jp'）。
 -- suffix に '_' は入らないので、abjp と jp が同じ一覧に並んでも 1 つの View 名に
 -- 両方が当たることは無い（v_x_abjp は '_jp' では終わらない）。
+--
+-- suffix_extra_list はここで足す。**末尾の導出のあと**なので、書いた文字列が
+-- そのまま 1 つ増えるだけになる（'global' から 'al' は増えない）。
 suffixes AS (
   SELECT DISTINCT suffix
   FROM (
@@ -656,6 +679,10 @@ suffixes AS (
     SELECT SUBSTR(b.suffix, -n) AS suffix
     FROM suffix_base AS b, UNNEST(@suffix_tail_lengths) AS n
     WHERE n > 0 AND LENGTH(b.suffix) > n
+    UNION ALL
+    SELECT x AS suffix
+    FROM UNNEST(@suffix_extra_list) AS x
+    WHERE x IS NOT NULL AND x != ''
   )
   -- 除外はここ 1 か所だけ。書いた値と消える値が 1 対 1 で対応する。
   WHERE suffix NOT IN UNNEST(@suffix_exclude_list)
@@ -928,6 +955,7 @@ ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
   '生成の SQL に未展開のプレースホルダが残っています。';
 EXECUTE IMMEDIATE rendered_sql
 USING suffix_list AS suffix_list,
+      suffix_extra_list AS suffix_extra_list,
       suffix_tail_lengths AS suffix_tail_lengths,
       suffix_exclude_list AS suffix_exclude_list,
       include_nested_fields AS include_nested_fields,
@@ -1169,10 +1197,15 @@ ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
 EXECUTE IMMEDIATE rendered_sql;
 
 -- 5-4 実際に使う suffix の一覧
---     データセット名から取り出したものと、suffix_tail_lengths で末尾から
---     導出したものを並べて出す。「jp が suffix になっているか」はここで確かめる。
---     除外した値も excluded = TRUE で出す（消えた理由が分かるように）。
---     suffix_list を明示している場合は、ここには出ない（一覧がそのまま使われる）。
+--     「jp が suffix になっているか」「強制的に足した値が入っているか」は
+--     ここで確かめる。除外した値も excluded = TRUE で出す（消えた理由が
+--     分かるように）。
+--
+--     **セクション 2 の suffix_base / suffixes と同じ順で組み立てる。**
+--     以前はデータセット名から取り直すだけだったので、suffix_list を書くと
+--     「画面に出る一覧」と「実際に使われる一覧」が食い違っていた。
+--     一覧を自分で決めたときこそ確かめたいので、そこが見えないのは困る。
+--     片方を直したらもう片方も直すこと（node check_sql.mjs が突き合わせる）。
 SET sql_template = """
 WITH
 src AS (
@@ -1182,21 +1215,38 @@ src AS (
   FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.SCHEMATA`
   WHERE REGEXP_CONTAINS(schema_name, r'__SUFFIX_PATTERN__') AND (__SCHEMA_COND__)
 ),
-listed AS (
+-- 土台。suffix_list を書いてあればそちらだけ（データセット名は見ない）。
+chosen AS (
+  SELECT
+    x                        AS suffix,
+    'suffix_list に明示'      AS suffix_origin,
+    '(データセット名からは取らない)' AS detail
+  FROM UNNEST(@suffix_list) AS x
+  WHERE x IS NOT NULL AND x != ''
+  UNION ALL
   SELECT
     suffix                                             AS suffix,
     'データセット名から'                                 AS suffix_origin,
     STRING_AGG(schema_name, ', ' ORDER BY schema_name) AS detail
   FROM src
+  WHERE ARRAY_LENGTH(@suffix_list) = 0
   GROUP BY suffix
+),
+listed AS (
+  SELECT suffix, suffix_origin, detail FROM chosen
   UNION ALL
   SELECT
-    SUBSTR(s.suffix, -n)                             AS suffix,
+    SUBSTR(c.suffix, -n)                             AS suffix,
     FORMAT('末尾 %d 文字', n)                          AS suffix_origin,
-    STRING_AGG(DISTINCT s.suffix, ', ' ORDER BY s.suffix) AS detail
-  FROM src AS s, UNNEST(@suffix_tail_lengths) AS n
-  WHERE n > 0 AND LENGTH(s.suffix) > n
+    STRING_AGG(DISTINCT c.suffix, ', ' ORDER BY c.suffix) AS detail
+  FROM chosen AS c, UNNEST(@suffix_tail_lengths) AS n
+  WHERE n > 0 AND LENGTH(c.suffix) > n
   GROUP BY suffix, suffix_origin
+  UNION ALL
+  -- 強制的に足したもの。末尾の導出は掛からないので、書いた文字列がそのまま
+  SELECT x, 'suffix_extra_list に明示', '(末尾の導出はしない)'
+  FROM UNNEST(@suffix_extra_list) AS x
+  WHERE x IS NOT NULL AND x != ''
 )
 SELECT
   '5-4 実際に使う suffix'                  AS check_name,
@@ -1205,13 +1255,15 @@ SELECT
   detail                                  AS derived_from,
   suffix IN UNNEST(@suffix_exclude_list)  AS excluded
 FROM listed
-ORDER BY excluded, effective_suffix
+ORDER BY excluded, effective_suffix, suffix_origin
 """;
 EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
 ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
   '5-4 の SQL に未展開のプレースホルダが残っています。';
 EXECUTE IMMEDIATE rendered_sql
-USING suffix_tail_lengths AS suffix_tail_lengths,
+USING suffix_list AS suffix_list,
+      suffix_extra_list AS suffix_extra_list,
+      suffix_tail_lengths AS suffix_tail_lengths,
       suffix_exclude_list AS suffix_exclude_list;
 
 -- 5-5 データセット別の対象 View 数

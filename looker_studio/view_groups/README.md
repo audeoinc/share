@@ -632,7 +632,8 @@ DECLARE snapshot_time_zone STRING DEFAULT 'Asia/Tokyo';   -- snapshot_date の�
 
 -- [B] 既定のままで動くもの
 DECLARE suffix_pattern      STRING        DEFAULT r'_([A-Za-z]{4})$';
-DECLARE suffix_list         ARRAY<STRING> DEFAULT [];
+DECLARE suffix_list         ARRAY<STRING> DEFAULT [];  -- 書くと自動抽出を置き換える
+DECLARE suffix_extra_list   ARRAY<STRING> DEFAULT [];  -- 自動抽出に足す
 DECLARE suffix_tail_lengths ARRAY<INT64>  DEFAULT [2];
 DECLARE suffix_exclude_list ARRAY<STRING> DEFAULT [];
 DECLARE analyze_options     STRING        DEFAULT '{"mode":"class"}';
@@ -718,7 +719,8 @@ DECLARE target_project_id STRING DEFAULT NULL;
 | `analysis_include_object_patterns` | 対象 View 名（`table_name`）。空配列なら絞らない |
 | `analysis_exclude_object_patterns` | 落とす View 名。include のあとに効く |
 | `suffix_pattern` | データセット名から suffix を切り出す正規表現（1 つ目のキャプチャ） |
-| `suffix_list` | suffix 一覧。空なら `suffix_pattern` で自動抽出。データセット名から導けないときだけ並べる |
+| `suffix_list` | suffix 一覧を丸ごと自分で決める。**書くと自動抽出は行われない（足すのではなく置き換える）** |
+| `suffix_extra_list` | 一覧に**足す** suffix。自動抽出はそのまま残り、末尾の導出は掛からない。1 つだけ強制的に足したいときはこちら |
 | `suffix_tail_lengths` | 取り出した suffix の末尾 n 文字も suffix として扱う。既定の `[2]` で `abjp` → `jp` |
 | `suffix_exclude_list` | suffix 一覧から落とす値（正規表現ではなく完全一致） |
 | `include_nested_fields` | カラム定義に STRUCT の中身を行として出すか（既定 `TRUE`） |
@@ -1251,6 +1253,32 @@ exclude_dataset = [^mart_ghkr$] suffix: abjp cdjp jp meta ta
 **`suffix_pattern` を `r'_([A-Za-z]{2,4})$'` に広げても解決しない。** あれは
 データセット名に当たるので、`mart_abjp` からはやはり `abjp` しか出てこない。
 そのうえ 2〜3 文字で終わるデータセットの語尾が片端から suffix になる。
+
+#### 強制的に suffix を足す（`suffix_extra_list`）
+
+末尾の導出でも拾えない値 — データセット名にも、その末尾にも現れないもの — を
+混ぜたいときはこちら。`mart_abjp` の中に `v_x_global` がある、のような形。
+
+```sql
+DECLARE suffix_extra_list ARRAY<STRING> DEFAULT ['global'];
+```
+
+| | 自動抽出 | 末尾の導出 |
+|---|---|---|
+| `suffix_list` に書く | **行われなくなる**（置き換え） | 書いた値にも掛かる |
+| `suffix_extra_list` に書く | そのまま残る | 掛からない |
+
+**`suffix_list` は「足す」ではなく「置き換える」。** 1 つ書いたつもりで、
+データセット名から取れていた分もろとも消える。エラーは出ず、base の切り出しが
+静かに変わるだけなので気づきにくい。一覧を丸ごと自分で決めるとき以外は
+`suffix_extra_list` を使う。
+
+`suffix_extra_list` に末尾の導出が掛からないのは、**書いた文字列がそのまま
+1 つ増える**ほうが「強制的に足す」の意味に合うから（`global` から `al` が
+増えては困る）。除外（`suffix_exclude_list`）は最後に効くので、両方に書けば消える。
+
+どちらの書き方でも、**最終的にどうなったかは 5-4 が全部出す**
+（`suffix_origin` にどこから来た値かが入る）。
 
 導出し忘れ（新しい地域が増えたなど）は**静かには壊れない**。その suffix を持つ
 View は「suffix 未認識」として単独で並び、確認クエリ 5-3 に出る。実際に使われて
