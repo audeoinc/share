@@ -496,16 +496,22 @@ const VIEW_GROUP_CSS = new Function('options_json', cssPack.code);
 // ここではその合成を JS で再現して、分割前と同じ検証をそのまま通す。
 // build_table.sql も同じ順（analyze を 1 回 → その結果を render へ）で呼ぶ。
 // カラム定義の代わり。実際は INFORMATION_SCHEMA.COLUMNS から作った JSON が来る。
-// 1 本だけ型を変えて、グループ内で揃っていない場合も本体に通す。
+// 表の列はロジック グループではなくカラム定義で束ね直すので、両方の分かれ方を
+// 通しておく。us だけ型を変えて（別の列になる）、uk だけ並び順を入れ替える
+// （並び順は束ね方の鍵に入れていないので同じ列にまとまり、⚠ だけ出る）。
 function fakeColumns(views) {
-  return JSON.stringify(views.map((v) => ({
-    v: v.view_name,
-    cols: [
-      { n: 'order_date', t: 'DATE', o: 1, u: 'NO', d: '受注日' },
-      { n: 'region', t: 'STRING', o: 2, u: 'YES', d: '' },
-      { n: 'gross_amount', t: v.view_name.endsWith('us') ? 'FLOAT64' : 'NUMERIC', o: 3, u: 'YES', d: '税抜き' },
-    ],
-  })));
+  return JSON.stringify(views.map((v) => {
+    const swap = v.view_name.endsWith('uk');
+    return {
+      v: v.view_name,
+      cols: [
+        { n: 'order_date', t: 'DATE', o: 1, u: 'NO', d: '受注日' },
+        { n: 'region', t: 'STRING', o: swap ? 3 : 2, u: 'YES', d: '' },
+        { n: 'gross_amount', t: v.view_name.endsWith('us') ? 'FLOAT64' : 'NUMERIC',
+          o: swap ? 2 : 3, u: 'YES', d: '税抜き' },
+      ],
+    };
+  }));
 }
 
 // 素の SQL の代わり。実際は INFORMATION_SCHEMA.VIEWS.view_definition が来る。
@@ -622,11 +628,20 @@ const checks = [
   ['page は SQL が渡されなくても落ちない',
     VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '{ broken', OPTS)
       .includes('SQL を取得できませんでした')],
-  ['page はカラム定義の表を出す（型とグループ内の食い違い）',
-    info.page.includes('vg-ctable') &&
-    info.page.includes('gross_amount') &&
-    // 同じグループの中で jp が NUMERIC・us が FLOAT64。印が出ること
-    info.page.includes('vg-cmix') && info.page.includes('vg-cwarn')],
+  ['page はカラム定義の表を出す（定義ごとの列と並び順の ⚠）', (() => {
+    const at = (n) => info.page.indexOf(`<div class="vg-opanel vg-op${n}">`);
+    const cols = info.page.slice(at(2), at(3));
+    // 列はロジック グループではなくカラム定義。us だけ FLOAT64 なので
+    // jp+uk の列と us の列に分かれ、多数派と違う側に色が付く。
+    const heads = [...cols.matchAll(/<th class="vg-chead">([^<]*)</g)].map((m) => m[1]);
+    return cols.includes('vg-ctable') && cols.includes('gross_amount') &&
+      heads.length === 2 &&
+      heads[0].split(', ').length === info.view_count - 3 &&
+      heads[1].split(', ').every((s) => s.endsWith('us')) &&
+      cols.includes('FLOAT64') && cols.includes('vg-cdiff') &&
+      // uk だけ並び順が違う。列は分かれず ⚠ だけ出る
+      cols.includes('vg-cmix') && cols.includes('vg-cwarn');
+  })()],
   ['page はカラム定義が空でも落ちない',
     typeof VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '{ broken', '[]', OPTS)
       === 'string' &&

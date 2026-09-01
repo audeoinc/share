@@ -140,8 +140,12 @@ const memoCases = [
 ];
 
 // カラム定義の代わり。実際は INFORMATION_SCHEMA.COLUMNS から作った並びが来る。
-// 同じグループの中で型が割れる場合（jp は NUMERIC・us は FLOAT64）と、
-// グループによって列が無い場合の両方を入れて、印の出方を目で見られるようにする。
+//
+// 表の列はロジック グループではなくカラム定義で束ね直すので、ここは
+// **View ごとに定義が全部違う**いちばん厳しい形にしてある（型が jp は NUMERIC・
+// us は FLOAT64、モードが uk だけ REQUIRED、説明がロジック グループごとに別、
+// 列の有無もグループごとに別 → 9 本の View が 9 列になる）。列が最大まで
+// 増えたときに幅が持つかを目で見るため。まとまる側は mergedColumns で見る。
 const fakeColumns = (b) => {
   const out = {};
   for (const g of b.groups) {
@@ -182,6 +186,42 @@ const fakeColumns = (b) => {
   return out;
 };
 
+// 定義がまとまる側。ロジックは 3 グループだが、カラム定義は 2 種類しかない
+// （ef 系だけ列が 1 本多い）。ロジック グループを跨いで 1 列にまとまることを見る。
+const mergedColumns = (b) => {
+  const out = {};
+  const last = b.groups[b.groups.length - 1];
+  for (const g of b.groups) {
+    for (const m of g.members) {
+      const cols = [
+        { n: 'order_date', t: 'DATE', o: 1, u: 'NO', d: '{"ja":"受注日","en":"order date"}' },
+        { n: 'region', t: 'STRING', o: 2, u: 'YES', d: '{"ja":"リージョン"}' },
+        { n: 'gross_amount', t: 'NUMERIC', o: 3, u: 'YES', d: '税抜き' },
+      ];
+      if (g === last) cols.push({ n: 'currency', t: 'STRING', o: 4, u: 'YES', d: '通貨コード' });
+      out[m.viewName] = cols;
+    }
+  }
+  return out;
+};
+
+// 並び順だけが違う形。列名・型・モード・説明はどれも同じなので 1 列にまとまり、
+// 食い違いは ⚠ にだけ出る（並び順は列の束ね方の鍵に入れていない）。
+const reorderedColumns = (b) => {
+  const out = {};
+  for (const g of b.groups) {
+    g.members.forEach((m, i) => {
+      const swap = /us$/.test(g.suffixes[i] || m.viewName);
+      out[m.viewName] = [
+        { n: 'order_date', t: 'DATE', o: 1, u: 'NO', d: '受注日' },
+        { n: 'region', t: 'STRING', o: swap ? 3 : 2, u: 'YES', d: 'リージョン' },
+        { n: 'gross_amount', t: 'NUMERIC', o: swap ? 2 : 3, u: 'YES', d: '税抜き' },
+      ];
+    });
+  }
+  return out;
+};
+
 // SQL タブに渡す素のテキスト。実際は INFORMATION_SCHEMA.VIEWS の
 // view_definition が SQL 経由で来る。ここでは解析前の ddl をそのまま使う
 // （preview の base は analyze() の生の結果なので members に残っている）。
@@ -209,12 +249,21 @@ const pageCases = [
       c.b),
     Md.markdownHtml(c.note)) }));
 
+// 列はロジック グループではなくカラム定義で束ね直すので、ロジック差分の
+// タブとは本数が合わない。分かれる／まとまる／並び順だけ違う を並べて見る。
 const columnCases = [
-  { title: 'カラム定義（型が割れているグループあり）',
+  { title: 'カラム定義（View ごとに定義が違う = 列が最大まで増える）',
     html: Co.renderColumnsBase(base3, fakeColumns(base3)) },
+  { title: 'カラム定義（ロジックは 3 グループ・定義は 2 種類）',
+    html: Co.renderColumnsBase(base3, mergedColumns(base3)) },
+  { title: 'カラム定義（並び順だけが違う = 1 列にまとめて ⚠）',
+    html: Co.renderColumnsBase(base3, reorderedColumns(base3)) },
   { title: 'カラム定義（取得できなかった場合）',
     html: Co.renderColumnsBase(base3, {}) },
 ];
+
+/** その HTML に出ている定義グループの本数（= 列名を除いた見出しの数）。 */
+const defGroups = (html) => (html.match(/<th class="vg-chead">/g) || []).length;
 
 const sqlCases = [
   { title: 'SQL（View ごと・インナー タブは suffix）',
@@ -653,24 +702,58 @@ const checks = [
   })()],
   ['どちらも無ければ未登録の枠になる',
     memoCases[3].html.includes('vg-mdempty')],
-  // カラム定義。グループではなく View ごとの属性なので、同じグループの中で
-  // 型が割れることがある。それはロジック差分には出てこないので、必ず印を出す。
+  // カラム定義の列はロジック グループではなく**カラム定義**で束ねる。
+  // SQL が同一でも参照先の型や description が違えば別の列になり、逆に別ロジック
+  // でも定義が同じなら 1 列にまとまる。ロジック差分には出てこない差がここに出る。
   ['カラム定義は 1 枚の表で全グループを並べる', (() => {
     const h = columnCases[0].html;
     const heads = [...h.matchAll(/class="vg-chead[^"]*">(?:<span[^>]*>基準<\/span>)?([^<]*)</g)]
       .map((m) => m[1]);
     return h.includes('vg-ctable') &&
-      heads[0] === '列名' && heads.length === base3.groupCount + 1 &&
-      heads[1] === Ch.label(base3.groups[0]);
+      heads[0] === '列名' && heads.length === defGroups(h) + 1 &&
+      // いちばん多い定義が先頭（同数なら suffix 順）。fixture は全部 1 本ずつ
+      heads[1] === 'abjp';
   })()],
-  ['グループ内で型が割れていたら印を出す（ロジック差分には出ない差）', (() => {
-    const h = columnCases[0].html;
-    return h.includes('vg-cmix') && h.includes('vg-cwarn') &&
-      h.includes('NUMERIC / FLOAT64') &&
+  ['列はロジック グループではなくカラム定義で束ねる', (() => {
+    // fixture は View ごとに定義が違うので、ロジックは 3 グループでも列は 9 本
+    const h0 = columnCases[0].html;
+    // 定義が 2 種類しか無ければ、ロジックが 3 グループでも列は 2 本
+    const h1 = columnCases[1].html;
+    const heads1 = [...h1.matchAll(/<th class="vg-chead">([^<]*)</g)].map((m) => m[1]);
+    return defGroups(h0) === base3.viewCount && base3.groupCount === 3 &&
+      defGroups(h1) === 2 &&
+      // ロジック グループを跨いで 1 列にまとまる（ab と cd が同じ列）
+      heads1[0] === 'abjp, abuk, abus, cdjp, cduk, cdus' &&
+      heads1[1] === 'efjp, efuk, efus' &&
+      h1.includes('カラム定義が 2 種類あります');
+  })()],
+  ['定義が全 View で同じなら列は 1 本（そう言い切る）', (() => {
+    const one = {};
+    for (const g of base3.groups) for (const m of g.members) {
+      one[m.viewName] = [{ n: 'a', t: 'INT64', o: 1, u: 'YES', d: '' }];
+    }
+    const h = Co.renderColumns(base3, one);
+    return defGroups(h) === 1 &&
+      h.includes(`${base3.viewCount} 本の View すべてでカラム定義`) &&
+      !h.includes('vg-cdiff') && !h.includes('vg-cmix');
+  })()],
+  ['並び順だけの違いでは列を分けない（1 列にまとめて ⚠）', (() => {
+    const h = columnCases[2].html;
+    return defGroups(h) === 1 && h.includes('vg-cmix') && h.includes('vg-cwarn') &&
       // 内訳が tooltip に出る（suffix・並び順・型・NULL 制約）
-      /data-tip="[^"]*abus = #5 FLOAT64 NULLABLE/.test(h) &&
-      /data-tip="[^"]*abuk = #5 NUMERIC REQUIRED/.test(h) &&
-      h.includes('揃っていない箇所が');
+      /data-tip="[^"]*abus = #3 STRING NULLABLE/.test(h) &&
+      /data-tip="[^"]*abjp = #2 STRING NULLABLE/.test(h) &&
+      h.includes('並び順（ordinal）だけが食い違っている');
+  })()],
+  ['説明だけが違っても色で分かる（列は増えるのに色が無い、を作らない）', (() => {
+    const byView = {};
+    for (const g of base3.groups) for (const m of g.members) {
+      byView[m.viewName] = [{ n: 'a', t: 'INT64', o: 1, u: 'YES',
+        d: /jp$/.test(m.viewName) ? '受注日' : '受注日（旧）' }];
+    }
+    const h = Co.renderColumns(base3, byView);
+    return defGroups(h) === 2 && h.includes('vg-cdiff') &&
+      h.includes('型・モード・説明のいずれかが揃っていない列が 1 件');
   })()],
   ['多数派と違う型・持っていない列が分かる（基準は立てない）', (() => {
     const h = columnCases[0].html;
@@ -708,16 +791,52 @@ const checks = [
     /\.vg-ccell\{[^}]*overflow-wrap:anywhere;word-break:break-all/.test(Co.columnsCss())],
   ['カラム定義の表に最大幅がある（広いチャートで間延びさせない）',
     /\.vg-ctable\{[^}]*max-width:1000px/.test(Co.columnsCss())],
-  ['カラム定義は横スクロールさせない（幅はグループ数で均等割り）', (() => {
-    const h = columnCases[0].html;
-    const cols = [...h.matchAll(/<col style="width:([\d.]+)%">/g)].map((m) => Number(m[1]));
+  // 列名の欄は px、グループの列は幅を指定せず残りを均等に分ける
+  // （table-layout:fixed の決まり）。割合にすると、列が増えて表を広げたときに
+  // 列名の欄まで一緒に広がり、名前しか入っていない欄に幅を取られる。
+  ['カラム定義の幅は列名だけ px・残りは均等割り', (() => {
+    const h = columnCases[1].html;
     const css = Co.columnsCss();
-    return cols.length === base3.groupCount + 1 &&
-      Math.abs(cols.reduce((a, b) => a + b, 0) - 100) < 0.01 &&
-      new Set(cols.slice(1)).size === 1 &&
+    const cols = h.slice(h.indexOf('<colgroup'), h.indexOf('</colgroup>'));
+    return cols === `<colgroup><col style="width:180px">` +
+        '<col>'.repeat(defGroups(h)) &&
       css.includes('table-layout:fixed') &&
+      // 包む側に overflow は置かない。置くとそこが新しいスクロール箱になり、
+      // 列名行の sticky（.vg-outer 基準）が効かなくなる。
       !css.includes('overflow-x:auto') &&
       !/\.vg-ccell\{[^}]*white-space:nowrap/.test(css);
+  })()],
+  // 列はカラム定義ごとなので、最悪 View の本数まで増える。均等割りのままだと
+  // 1 列が数十 px になって型も説明も読めない。下限を割るときだけ min-width を
+  // 置いて、はみ出したぶんは .vg-outer に横へ流してもらう。
+  ['列が増えたら表に min-width を置く（1 列あたりの下限を守る）', (() => {
+    const wide = columnCases[0].html;    // 9 列
+    const narrow = columnCases[1].html;  // 2 列
+    const css = Co.columnsCss();
+    const max = Number((css.match(/\.vg-ctable\{[^}]*max-width:(\d+)px/) || [])[1]);
+    const min = Number((wide.match(/<table class="vg-ctable" style="min-width:(\d+)px"/) || [])[1]);
+    return max === 1000 &&
+      // 9 列: 列名 180px + 150px × 9 = 1530px
+      min === 1530 && min > max &&
+      // 2 列なら下限を割らないので置かない（狭いカードでは縮んでよい）
+      !narrow.includes('min-width');
+  })()],
+  // 表がカードより広くなったら横にもスクロールする。そのとき列名が流れていくと
+  // どの行を見ているのか分からなくなるので、列名の欄も貼り付ける。
+  // 実測は dist/preview.html を Chromium で開いて確認した（scrollLeft=300 でも
+  // 列名の欄は左端 0 のまま、上下は --vg-bar の位置で止まる）。
+  ['列名の欄を左に貼り付ける（横スクロールでも行が分かる）', (() => {
+    const css = Co.columnsCss();
+    const rule = (cls) => css.split('\n').find((r) => r.indexOf('.' + cls + '{') === 0) || '';
+    return /position:sticky;left:0/.test(rule('vg-cname')) &&
+      // border-collapse:collapse では貼り付いたセルの border が一緒に流れる。
+      // 右の境目は box-shadow で自前に描く
+      /box-shadow:1px 0 0/.test(rule('vg-cname')) &&
+      // 透けると下を通る本文が重なる
+      /background:#fff/.test(rule('vg-cname')) &&
+      // 左上の角は縦にも横にも貼り付くので、どちらのセルより手前
+      /left:0;z-index:2/.test(rule('vg-cnamehead')) &&
+      /\.vg-chead\{[^}]*z-index:1/.test(css);
   })()],
   // 説明は View に付いた属性なので、グループによって違うことがある。
   // 列名の欄にまとめると差が消えるので、グループごとのセルに置く。
@@ -753,8 +872,8 @@ const checks = [
       // モードは出る
       cells.some((c) => c === 'REPEATED') &&
       cells.some((c) => c === 'NULLABLE' || c === 'REQUIRED') &&
-      // グループ内で食い違ったときの内訳にだけ並び順が残る
-      /data-tip="[^"]*#5 /.test(h);
+      // 並び順が食い違ったときの ⚠ の内訳にだけ番号が残る
+      /data-tip="[^"]*#3 /.test(columnCases[2].html);
   })()],
   ['STRUCT の親は RECORD / REPEATED に畳む', (() => {
     const parent = columnRow('amount_breakdown');
@@ -797,7 +916,9 @@ const checks = [
   })()],
   ['ネストでもグループ間の型の違いが色で出る', (() => {
     const net = columnRow('\u2514net');
-    return net && net.includes('FLOAT64') && net.includes('vg-cmix');
+    // us 系だけ FLOAT64。ネストの型も列の束ね方の鍵に入っているので、
+    // us は別の列になり、多数派（NUMERIC）と違うセルに色が付く。
+    return net && net.includes('FLOAT64') && net.includes('vg-cdiff');
   })()],
   ['列の説明はグループごとのセルに出す（列名の欄ではない）', (() => {
     const h = columnCases[0].html;
@@ -901,8 +1022,8 @@ const checks = [
       Co.descHtml(null) === '';
   })()],
   ['カラム定義が取れなければ案内を出す（表は出さない）',
-    columnCases[1].html.includes('カラム定義を取得できませんでした') &&
-    !columnCases[1].html.includes('vg-ctable')],
+    columnCases[3].html.includes('カラム定義を取得できませんでした') &&
+    !columnCases[3].html.includes('vg-ctable')],
   // 要素の重要度どおりの大小になっているか。同じ大きさで並べると、どれを先に
   // 読めばよいかが字面から分からなくなる。数字を直すときはここも合わせる。
   ['文字の大きさが重要度の順になっている（型 = 列名 > 説明 > モード）', (() => {

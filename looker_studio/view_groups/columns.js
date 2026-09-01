@@ -2,23 +2,30 @@
 /**
  * View のカラム定義（INFORMATION_SCHEMA.COLUMNS）を 1 枚の表にする。
  *
- *   1 行 = 1 列名、1 列 = 1 ロジック グループ。セルは型とモード。
+ *   1 行 = 1 列名、1 列 = 1 **カラム定義グループ**。セルは型・モード・説明。
+ *
+ * **列の束ね方はロジック グループではない。** 同じロジック グループなら SQL は
+ * α 等価だが、参照先テーブルの型が違えば出力列の型も違う（amount が jp は
+ * NUMERIC、us は FLOAT64 など）。description も View ごとに付けるものなので、
+ * SQL が 1 文字も違わないのに定義だけ食い違うことがある。これはロジック差分には
+ * 出てこない（SQL は同一だから）。むしろこの表の一番の値打ちがそこなので、
+ * **この表だけはカラム定義そのものでグループを組み直す。**
+ *
+ * 鍵は「列名・型・モード・説明」の集合。**並び順（ordinal）は鍵に入れない**
+ * ので、同じ列が違う順で書いてあるだけの View は 1 つの列にまとまる。
+ * その並び順の食い違いだけは ⚠ の内訳に出す（残った唯一の軸なので黙らせない）。
+ *
+ * 結果として列の本数は最大で View の本数になる。全 View の定義が違えば
+ * 1 View = 1 列になるが、それは「本当に全部違う」ということなので、そう見せる。
  *
  * グループごとのタブにしなかったのは、列名も型も短くて横に並べても収まるから。
  * 全グループを一度に見せれば、どこが揃っていないかをタブを押さずに見つけられる。
  * SQL は横に長いので差分側は 2 ペインだが、こちらは事情が違う。
  *
- * **カラム定義はグループではなく View ごとの属性。** 同じロジック グループなら
- * SQL は α 等価だが、参照先テーブルの型が違えば出力列の型も違う（amount が jp は
- * NUMERIC、us は FLOAT64 など）。これはロジック差分には出てこない。SQL は同一
- * だから。むしろこの表の一番の値打ちがそこなので、グループの代表 1 本を黙って
- * 出すのではなく、グループの中で食い違ったら必ず印を付ける。
- *
  * 出すのは型・モード（NULLABLE / REQUIRED / REPEATED。BigQuery のコンソールと
  * 同じ表記）・説明。**並び順（ordinal）は出さない。**
  * 行がその順に並んでいるので番号を添えても読めるものが増えず、
- * 列を 1 本足すと以降がまとめてずれて目障りになるだけ。グループ内で並び順が
- * 食い違ったときだけ ⚠ の内訳に出す（そこは本物の差なので黙らせない）。
+ * 列を 1 本足すと以降がまとめてずれて目障りになるだけ。
  *
  * **この表に「基準」は無い。** 全グループを横に並べている以上、どれか 1 つを
  * 基準に立てなくても違いはそのまま読める。差分側は「基準と 1 つを見比べる」
@@ -28,8 +35,23 @@
 
 const { esc, label, notice } = require('./chrome.js');
 
-/** グループの中で揃っていないことを示す印。セルの中に置く。 */
+/** 同じ列の中で並び順が食い違っていることを示す印。セルの中に置く。 */
 const WARN = '⚠';
+
+/**
+ * 表の幅まわり。MAX_TABLE_W は columnsCss() の .vg-ctable の max-width と
+ * 同じ値（片方だけ変えると min-width の判定がずれる）。MIN_COL_W は 1 列に
+ * 要る幅の下限で、型（RECORD / REPEATED）と説明の 2 列の表が畳まれずに入る幅。
+ *
+ * **列名の欄だけは px で決める。** 割合にすると、列が増えて表を広げたときに
+ * 列名の欄まで一緒に広がってしまい（18% は 1530px なら 275px）、名前しか
+ * 入っていない欄に幅を取られる。px で止めれば、広げたぶんはすべてグループの
+ * 列に回る。残りの列は幅を指定しない ― table-layout:fixed では、幅の無い列が
+ * 残りを均等に分ける決まりなので、これで「列名 180px ＋ 均等割り」になる。
+ */
+const MAX_TABLE_W = 1000;
+const MIN_COL_W = 150;
+const NAME_COL_W = 180;
 
 /**
  * 型の文字列に折り返し位置を入れる。
@@ -236,14 +258,79 @@ function typeShape(type) {
 const isNested = (name) => String(name).indexOf('.') >= 0;
 
 /**
+ * カラム定義の指紋。同じ指紋の View を 1 つの列にまとめる。
+ *
+ * 入れるのは列名・型・モード（is_nullable）・説明。**並び順は入れない。**
+ * 同じ列を違う順で書いてあるだけの View まで別の列にすると、表が横に伸びる割に
+ * 読めるものが増えない（並び順は表に出していないので、2 つの列が字面では
+ * まったく同じに見えてしまう）。並び順の食い違いは ⚠ の側で出す。
+ *
+ * 列名で並べ替えてから繋ぐので、並び順の違いは指紋に響かない。
+ * 区切りには制御文字を使う。列名・型・説明のどれにも入りえないため。
+ */
+function columnSig(cols) {
+  const rows = (cols || []).map((c) => [
+    String(c.n == null ? '' : c.n),
+    String(c.t == null ? '' : c.t),
+    c.u == null || c.u === '' ? '' : String(c.u).toUpperCase(),
+    String(c.d == null ? '' : c.d),
+  ].join('\u0001'));
+  rows.sort();
+  return rows.join('\u0002');
+}
+
+/**
+ * base の全 View をカラム定義で束ね直す。
+ *
+ * 返すのはロジック グループと同じ形（{ suffixes, members }）なので、
+ * 描画側から下は何も変えずに済む（label() もそのまま効く）。
+ *
+ * 並びはロジック グループに合わせて「大きい順、同数なら suffix 順」。
+ * 先頭が表の行の並びの土台になるので、いちばん多い定義を土台にしたい。
+ */
+function columnGroups(b, byView) {
+  const index = new Map();
+  const out = [];
+  const groups = (b && b.groups) || [];
+  for (let gi = 0; gi < groups.length; gi++) {
+    const g = groups[gi];
+    const members = g.members || [];
+    for (let i = 0; i < members.length; i++) {
+      const m = members[i];
+      const sig = columnSig(byView[m.viewName]);
+      let e = index.get(sig);
+      if (!e) { e = { suffixes: [], members: [] }; index.set(sig, e); out.push(e); }
+      // suffix が取れなかった View は null のまま渡す（label() が View 名で出す）。
+      e.suffixes.push((g.suffixes && g.suffixes[i]) != null ? g.suffixes[i] : null);
+      e.members.push(m);
+    }
+  }
+  const key = (e) => String(e.suffixes[0] == null ? e.members[0].viewName : e.suffixes[0]);
+  for (const e of out) {
+    // suffix 順に並べ替える（suffixes と members は対で動かす）
+    const idx = e.members.map((m, i) => i).sort((x, y) => {
+      const a = String(e.suffixes[x] == null ? e.members[x].viewName : e.suffixes[x]);
+      const c = String(e.suffixes[y] == null ? e.members[y].viewName : e.suffixes[y]);
+      return a < c ? -1 : a > c ? 1 : 0;
+    });
+    e.suffixes = idx.map((i) => e.suffixes[i]);
+    e.members = idx.map((i) => e.members[i]);
+  }
+  out.sort((a, b2) => b2.members.length - a.members.length ||
+    (key(a) < key(b2) ? -1 : key(a) > key(b2) ? 1 : 0));
+  return out;
+}
+
+/**
  * セルに出す説明。
  *
  * **列名の欄ではなくグループごとのセルに置く。** 説明は View に付いた属性なので、
  * グループによって違うことがある（片方だけ書いてある・文面が更新されている）。
  * 1 か所にまとめて出すとその差が消えるが、セルに置けば横に並んで見える。
  *
- * グループの中で割れていたら、どの View のものかを添えて全部出す。
- * note タブの View の description と同じ扱い（黙って 1 つだけ出さない）。
+ * 説明は列の束ね方の鍵（columnSig）に入っているので、1 つの列の中で説明が
+ * 割れることは無い。それでも割れた組を渡されたら、どの View のものかを添えて
+ * 全部出す（黙って 1 つだけ出すと、鍵を緩めたときに情報が消える）。
  */
 function descCell(entry) {
   if (!entry || !entry.descs.length) return '';
@@ -345,20 +432,27 @@ function uniq(list) {
  *
  *   text  型。グループ内で割れていれば ' / ' で並べる
  *   nulls NULL 制約。型より弱い情報なので小さく添える
- *   sig   グループ同士を比べるための鍵。**並び順は入れない**（1 本足すと
- *         以降が全部ずれて、型の差が埋もれるため）
- *   mixed グループの中で揃っていない（型・NULL 制約・並び順のいずれか、
- *         またはこの列を持たない View がいる）
+ *   sig   グループ同士を比べるための鍵。型・モード・説明を入れ、
+ *         **並び順は入れない**（1 本足すと以降が全部ずれて、型の差が埋もれる）
+ *   mixed グループの中で並び順が食い違っている（またはこの列を持たない View が
+ *         いる）。型・モード・説明はグループの鍵に入っているので、ここで
+ *         割れることは無い ― 割れていれば別の列になっている
+ *
+ * 説明を sig に入れてあるのは、**説明だけが違って列が 2 本に分かれたときに、
+ * どの列が違うのかを色で示すため。** 入れないと、列は増えているのに
+ * 色の付いたセルが 1 つも無い、という読み手泣かせの状態になる。
  */
 function cellInfo(entry, memberCount) {
   if (!entry) return { text: null, meta: '', sig: null, mixed: false };
   const types = uniq(entry.vals.map((v) => v.type));
-  const ords = uniq(entry.vals.map((v) => v.ord));
   const nulls = uniq(entry.vals.map((v) => nullText(v.nullable)));
+  // 並び順だけが残った軸。ここは列の束ね方の鍵に入れていないので、
+  // 同じ列の中で食い違いうる（唯一の ⚠ の出どころ）。
   const mixed =
-    uniq(entry.vals.map((v) => `${v.ord}|${v.type}|${v.nullable}`)).length > 1 ||
+    uniq(entry.vals.map((v) => String(v.ord))).length > 1 ||
     entry.vals.length !== memberCount;
   const shapes = entry.vals.map((v) => typeShape(v.type));
+  const descs = entry.descs.map((d) => d.text).join('');
   return {
     // text は型そのまま。shape は Console と同じ畳み方。どちらを出すかは
     // 子の行があるかどうかで描画側が決める（中身が他に出ていないのに
@@ -371,14 +465,14 @@ function cellInfo(entry, memberCount) {
     nulls: nulls.join(' / '),
     // 比べるのは畳む前の型。RECORD 同士でも中身が違えば差として出す
     // （どこが違うかは子の行に出る）。
-    sig: types.join(' / ') + '|' + nulls.join(' / '),
+    sig: types.join(' / ') + '|' + nulls.join(' / ') + '|' + descs,
     mixed: mixed,
   };
 }
 
-/** グループ内で食い違ったときの内訳。tooltip に出す。 */
+/** グループ内で並び順が食い違ったときの内訳。tooltip に出す。 */
 function mixedTip(entry, g) {
-  // ネストした項目は並び順も NULL 制約も持たない。親のものを出すと嘘になる。
+  // ネストした項目は自前の並び順も NULL 制約も持たない（親のものが入っている）。
   const nested = isNested(entry.name);
   const lines = entry.vals.map((v) => nested
     ? `${v.suffix} = ${v.type}`
@@ -396,11 +490,15 @@ function mixedTip(entry, g) {
  * @param {object} b               解析結果の base 1 件分
  * @param {object} byView          { View 名: [{ n: 列名, t: 型, o: 並び順,
  *                                 u: is_nullable, d: 説明 }] }
- * @param {object} opts            referenceIndex を見る
+ *
+ * 列（グループ）はここで組み直す ― 引数は base とカラム定義だけで足りる。
  */
 function renderColumns(b, byView) {
-  const groups = b.groups || [];
-  if (!groups.length) return notice('View が見つかりません。');
+  if (!(b.groups || []).length) return notice('View が見つかりません。');
+  // 列はロジック グループではなくカラム定義で束ね直す。同じ SQL でも参照先の
+  // 型や description が違えば別の列になり、逆に別ロジックでも定義が同じなら
+  // 1 本にまとまる。この表で見たいのは定義の異同なので、そちらを軸にする。
+  const groups = columnGroups(b, byView || {});
   const maps = groups.map((g) => groupColumns(g, byView || {}));
   const order = columnOrder(maps);
   if (!order.length) {
@@ -472,34 +570,47 @@ function renderColumns(b, byView) {
     `<span class="vg-tabn">${g.members.length}</span></th>`).join('');
 
   // 何を見ればよいかを先に出す。表だけ置かれても、どこが問題かは読み取りにくい。
+  // 列がロジック グループではないことは、言っておかないと必ず誤読される
+  // （ロジック差分のタブと列の本数が合わないため）。
   const lead = [];
+  if (groups.length === 1) {
+    lead.push(notice(`${b.viewCount || groups[0].members.length} 本の View すべてで` +
+      `カラム定義（列名・型・モード・説明）が一致しています。`));
+  } else {
+    lead.push(notice(`カラム定義が ${groups.length} 種類あります（列がその本数）。` +
+      `列はロジック グループではなくカラム定義で束ねているので、` +
+      `SQL が同一でも参照先テーブルの型や description が違えば別の列になります` +
+      `（ロジック差分のタブには出てこない差です）。`));
+    if (diffRows) {
+      lead.push(notice(`型・モード・説明のいずれかが揃っていない列が ${diffRows} 件` +
+        `あります（色付きのセル。その列でいちばん多い内容と違うもの）。`));
+    }
+  }
   if (mixedCount) {
-    lead.push(notice(`同じグループの中で型・NULL 制約・並び順が揃っていない箇所が ${mixedCount} 件あります` +
-      `（${WARN} の印。ホバーすると suffix ごとの内訳が出ます）。` +
-      `SQL が同一でも参照先テーブルの型が違えばこうなるので、` +
-      `ロジック差分には出てきません。`));
-  }
-  if (diffRows) {
-    lead.push(notice(`グループ間で型または NULL 制約が揃っていない列が ${diffRows} 件` +
-      `あります（色付きのセル。その列でいちばん多い値と違うもの）。` +
-      `並び順の違いは差として扱っていません` +
-      `（列を 1 本足すと以降がまとめてずれ、型の差が埋もれるため）。`));
-  }
-  if (!lead.length) {
-    lead.push(notice('全グループで列名・型・NULL 制約が一致しています。'));
+    lead.push(notice(`同じ列の中で並び順（ordinal）だけが食い違っている箇所が` +
+      `${mixedCount} 件あります（${WARN} の印。ホバーすると suffix ごとの内訳が出ます）。` +
+      `並び順は列の束ね方にも表の中身にも使っていないので、ここにだけ出ます。`));
   }
 
-  // 幅はグループ数で均等割り。型は ARRAY<STRUCT<…>> のように長くなることが
-  // あるので、横スクロールさせずにセルの中で折り返す。列名の欄は説明も入るぶん
-  // 少し広く取る。table-layout:fixed にしないと、長い型がある列だけが伸びる。
-  // 列名の欄は名前だけ（説明はセルに移した）ので、その分を各グループに回す。
-  const nameW = 18;
-  const colW = ((100 - nameW) / groups.length).toFixed(3);
-  const colgroup = `<colgroup><col style="width:${nameW}%">` +
-    groups.map(() => `<col style="width:${colW}%">`).join('') + `</colgroup>`;
+  // 列名の欄は px で決め打ち、グループの列は幅を指定せず残りを均等に分ける
+  // （table-layout:fixed の決まり）。型は ARRAY<STRUCT<…>> のように長くなる
+  // ことがあるので、セルの中で折り返す。fixed にしないと、長い型がある列だけが
+  // 伸びる。
+  const colgroup = `<colgroup><col style="width:${NAME_COL_W}px">` +
+    groups.map(() => `<col>`).join('') + `</colgroup>`;
+
+  // 列はカラム定義ごとなので、最悪 View の本数まで増える（全 View の定義が
+  // 違うとき）。均等割りのままだと 1 列が数十 px になって型も説明も読めない。
+  // **下限を割るときだけ表に min-width を置く。** min-width は max-width より
+  // 強いので、CSS 側の 1000px を押しのけて広がる。はみ出したぶんは .vg-outer
+  // （カード全体のスクロール箱）が横に流してくれるし、列名行の sticky も
+  // .vg-outer が基準なので効いたまま。ここに overflow を置くと、そこが新しい
+  // スクロール箱になって sticky が壊れる。
+  const need = NAME_COL_W + MIN_COL_W * groups.length;
+  const wide = need > MAX_TABLE_W ? ` style="min-width:${need}px"` : '';
 
   return lead.join('') +
-    `<div class="vg-ctablewrap"><table class="vg-ctable">${colgroup}` +
+    `<div class="vg-ctablewrap"><table class="vg-ctable"${wide}>${colgroup}` +
     `<thead><tr><th class="vg-chead vg-cnamehead">列名</th>${head}</tr></thead>` +
     `<tbody>${rows}</tbody></table></div>`;
 }
@@ -532,7 +643,7 @@ function columnsCss() {
     //    8px  モード（NULLABLE / REQUIRED / REPEATED）
     // 1px 差は並べても読み取れないので、いちばん弱いモードは 2 段落としてある。
     `.vg-ctable{border-collapse:collapse;font-size:12px;` +
-      `width:100%;max-width:1000px;table-layout:fixed}`,
+      `width:100%;max-width:${MAX_TABLE_W}px;table-layout:fixed}`,
     // 列名の行はスクロールしても残す。基準になるのはカードのスクロール箱
     // （.vg-outer）なので、その中で固定されている帯のぶんだけ下げる。ズレると
     // 帯と見出し行の間に本文がちらつくので、preview.mjs で実際に描いて
@@ -542,10 +653,22 @@ function columnsCss() {
       `font-weight:600;font-size:11px;text-align:left;overflow-wrap:anywhere}`,
     // 列名は型と同じ大きさ。どちらも行の主役で、片方を落とすと読む順が
     // かえって分かりにくい（型を探すときも列名を探すときもある）。
-    `.vg-cname{padding:5px 12px;border:1px solid #D0D7DE;text-align:left;` +
+    //
+    // **横にも貼り付ける。** 列がカラム定義ごとになったので本数が増え、表が
+    // カードより広くなることがある（min-width）。そのとき横へスクロールすると、
+    // 列名が流れていってどの行を見ているのか分からなくなる。上の帯と同じ理屈。
+    //   基準は .vg-outer（唯一のスクロール箱）。
+    //   border-collapse:collapse の表では、貼り付いたセルの border は隣のセルが
+    //   描くぶんが一緒に流れてしまう。右の境目だけ box-shadow で自前に描く。
+    //   地色を必ず塗る（透けると下を通る本文が重なって読めなくなる）。
+    `.vg-cname{position:sticky;left:0;z-index:1;background:#fff;` +
+      `padding:5px 12px;border:1px solid #D0D7DE;text-align:left;` +
+      `box-shadow:1px 0 0 #D0D7DE;` +
       `vertical-align:top;font-weight:600;font-size:12px;color:#24292F;` +
       `overflow-wrap:anywhere;word-break:break-all;` +
       `font-family:ui-monospace,SFMono-Regular,Consolas,monospace}`,
+    // 左上の角。縦にも横にも貼り付くので、どちらのセルより手前に出す。
+    `.vg-cnamehead{left:0;z-index:2;box-shadow:1px 0 0 #D0D7DE}`,
     // 列の説明。description が JSON なら日本語論理名を主、英語論理名と
     // 残りのキーを従（薄い色）で下に並べる。素のテキストなら 1 行だけ。
     `.vg-cdesc{margin:2px 0 0;font:11px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;` +
@@ -595,10 +718,12 @@ function columnsCss() {
     // inline にしてあるのは行の高さを 1 行ぶん節約するため。
     `.vg-cmeta{margin-left:6px;font:8px/1.6 'Roboto','Segoe UI',system-ui,sans-serif;` +
       `letter-spacing:.04em;color:#8C959F;white-space:nowrap}`,
-    // 基準と違う型。差分の「追加」側と同じ地色で、目が同じ意味に慣れるようにする。
+    // 多数派と違う型・モード・説明。差分の「追加」側と同じ地色で、目が同じ
+    // 意味に慣れるようにする。
     `.vg-cdiff{background:#dfe7d2}`,
     `.vg-cnone{color:#8C959F;background:#FAFAFA}`,
-    // グループ内で揃っていない箇所。基準との差より強い警告なので枠で示す。
+    // 同じ列（= 同じカラム定義）の中で並び順だけが食い違っている箇所。
+    // 型・モード・説明が違えば別の列になるので、ここに出るのは並び順だけ。
     `.vg-cmix{box-shadow:inset 0 0 0 2px #D4A72C}`,
     `.vg-cwarn{position:relative;margin-left:6px;color:#9A6700;cursor:help}`,
     `.vg-cwarn::after{content:attr(data-tip);display:none;position:absolute;z-index:20;` +
@@ -614,6 +739,7 @@ function columnsCss() {
 module.exports = {
   renderColumns, renderColumnsBase, columnsCss, breakType, descCell,
   structFields, assignOrder, isNested, typeShape,
+  columnSig, columnGroups,
   groupColumns, columnOrder, cellInfo, mixedTip, nullText, majority,
   parseDesc, descHtml, DESC_JA_KEYS, DESC_EN_KEYS,
 };
