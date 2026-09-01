@@ -812,8 +812,8 @@ SET render_call_sql = FORMAT(
   本体は `r""" """` で囲む必要があり、それをさらに `EXECUTE IMMEDIATE` の
   文字列に入れ子にできないため。埋めるときは `TO_JSON_STRING` で SQL の
   文字列リテラルに変換する（JSON のエスケープは BigQuery の文字列リテラルと互換）
-- **スケジュールドクエリには CONFIGURATION と セクション 2・2b を登録する。**
-  設定ブロックが無いと変数が未定義になる。1 と 3 は初回だけ、5 は確認用なので不要
+- **スケジュールドクエリには CONFIGURATION と セクション 2・3・3b を登録する。**
+  設定ブロックが無いと変数が未定義になる。1 は初回だけ、4 と 5 は確認用なので不要
 - **セクション 5 の確認クエリは実行される。** ファイルを丸ごと流すと 8 本の
   結果が順に出る（生成結果 / 割れている base / 未認識の View / 対象データセットと
   suffix / データセット別の View 数 / View 名の条件で落ちた View /
@@ -888,12 +888,13 @@ viewlgc_t_diff_src  CLUSTER BY base（素のカード。メモ差し込み前）
   group_labels / group_sizes / suffixes / unmatched_count
   view_desc_md / diff_html
 
-viewlgc_t_diff  上から ref_index / ref_label を除き、次を足したもの
+viewlgc_vw_t_diff  上から ref_index / ref_label を除き、次を足したもの
   has_note / has_view_desc / note_md / note_html
   note_updated_at / note_updated_by
-  diff_html は目印をメモに差し替え済み
+  diff_html は目印をメモに差し替え済み。**シートの内容がその場で出る**
 
-viewlgc_vw_t_diff  SELECT * FROM viewlgc_t_diff（互換のため残す素通し）
+viewlgc_t_diff  SELECT * FROM viewlgc_vw_t_diff を焼き込んだもの
+  **レポートが読むのはこれ**
 ```
 
 Looker Studio はビューを読むだけ。`diff_html` を Templated Record に渡す。
@@ -922,31 +923,35 @@ AS WITH … SELECT …
 並びが食い違うと BigQuery が落とす**ので、`check_sql.mjs` が両者の列名を
 順番まで突き合わせる。
 
-#### メモの差し込みは焼き込む（表示速度のため）
+#### ビューで繋いで、テーブルに写す
 
-生成は 2 段。**分けてあるのは、シートを直したときに 2 段目だけを流し直せる
-ようにするため。**
+生成は 3 段。
 
 ```
-セクション 2   INFORMATION_SCHEMA → 解析 → 描画 → viewlgc_t_diff_src
-セクション 2b  t_diff_src ＋ メモ（シート）→ viewlgc_t_diff   ← レポートが読む
-セクション 3   viewlgc_vw_t_diff = SELECT * FROM viewlgc_t_diff（互換）
+セクション 2    INFORMATION_SCHEMA → 解析 → 描画 → viewlgc_t_diff_src
+セクション 3    viewlgc_vw_t_diff = t_diff_src ＋ メモ（シート）  ← その場で出る
+セクション 3b   viewlgc_t_diff    = SELECT * FROM vw_t_diff       ← レポートが読む
 ```
 
-**メモの差し込みは以前ビューの中でやっていた。** シートを直した内容がその場で
-出るのが利点だったが、レポートを開くたびに
+**ビューをそのままレポートに読ませると遅い。** 開くたびに
 
 - スプレッドシートの外部テーブル（Drive）を読み
 - JS UDF で Markdown を HTML にし
 - 数 MB の `diff_html` に `REPLACE` をかける
 
-ので遅かった。表示速度を採って焼き込む形に変えてある。**シートを直したその場で
-反映したいときは、セクション 2b だけを流し直す**（解析も描画もやり直さないので
-軽い。読むのは `t_diff_src` とシートだけ）。
+ことになる。だからテーブルに写して、レポートはそちらを読む。
 
-ビューは 1 本だけ残してある。中身は `SELECT * FROM viewlgc_t_diff` の素通しで、
-**レポートのデータソースがこのビューを指しているから**。テーブルを直接指しても
-同じものが出る（列も並びも同じ）。
+**それでもビューを残すのは、シートを直した内容をその場で確かめられるから。**
+メモを直したあと 3b を流す前でも、`vw_t_diff` を見れば反映後の姿が分かる。
+
+> **メモを繋ぐ書き方はビューの定義 1 か所だけ。** 焼き込みは `SELECT *` で
+> 写すだけにしてある。同じ SQL を 2 か所に書くと、片方だけ直したときに
+> 「レポートには出るがリアルタイムには出ない」ような食い違いが起きる。
+> `node check_sql.mjs` が見張る。
+
+**シートを直したその場でレポートに反映したいときは、セクション 3b だけを
+流し直す**（解析も描画もやり直さないので軽い。読むのは `t_diff_src` と
+シートだけ）。待てるなら翌日の日次実行でも同じ結果になる。
 
 ### 基準はカードの中で選ぶ
 

@@ -189,24 +189,25 @@ add('IF … RAISE ではなく ASSERT を使っている',
 // MAX(snapshot_date) を採っていたので隙間があっても前日分が出ていた。
 for (const t of ['__T_DIFF_SRC__', '__T_DIFF__']) {
   add(`${t} はテーブルごと差し替える（読み手に空を見せない）`,
-    new RegExp(`CREATE OR REPLACE TABLE \`${t}\`[\\s\\S]*?\\nAS\\nWITH`).test(table) &&
+    new RegExp(`CREATE OR REPLACE TABLE \`${t}\`[\\s\\S]*?\\nAS\\n(WITH|SELECT)`).test(table) &&
     !new RegExp(`DELETE FROM \`${t}\``).test(table) &&
     !new RegExp(`TRUNCATE TABLE \`${t}\``).test(table) &&
     !new RegExp(`INSERT INTO \`${t}\``).test(table));
 }
 
-// --- 5d. メモの差し込みが焼き込み側にあるか ----------------------------
-// 以前はビューの中で差し込んでいた（シートを直すとその場で出る）が、レポートを
-// 開くたびに外部テーブルを読んで JS UDF を回すので遅かった。焼き込む側
-// （__T_DIFF__ を作る文）に移してある。ビューはその素通し。
+// --- 5d. メモを繋ぐ書き方が 1 か所か ------------------------------------
+// メモを繋ぐのはビューの定義だけ。焼き込み（__T_DIFF__）はそれを SELECT * で
+// 写すだけにしておく。同じ SQL を 2 か所に書くと、片方だけ直したときに
+// 「レポートには出るがリアルタイムには出ない」ような食い違いが起きる。
 {
-  const at = table.indexOf('CREATE OR REPLACE TABLE `__T_DIFF__`');
-  const vAt = table.indexOf('CREATE OR REPLACE VIEW');
+  const vAt = table.indexOf('CREATE OR REPLACE VIEW `__V_DIFF__`');
+  const tAt = table.indexOf('CREATE OR REPLACE TABLE `__T_DIFF__`');
   const splice = table.indexOf("REPLACE(diff_html, '<!--VG_NOTE-->'");
-  add('メモの差し込みは焼き込み側にある（ビューは素通し）',
-    at > 0 && vAt > at && splice > at && splice < vAt &&
+  add('メモを繋ぐのはビューだけ（焼き込みは SELECT * で写す）',
+    vAt > 0 && tAt > vAt && splice > vAt && splice < tAt &&
     (table.match(/CREATE OR REPLACE VIEW/g) || []).length === 1 &&
-    /CREATE OR REPLACE VIEW `__V_DIFF__` AS\nSELECT \* FROM `__T_DIFF__`/.test(table));
+    /CREATE OR REPLACE TABLE `__T_DIFF__`[\s\S]*?\nAS\nSELECT \* FROM `__V_DIFF__`/
+      .test(table));
 }
 
 // --- 5e. STRING_AGG の区切りがリテラルか ------------------------------
