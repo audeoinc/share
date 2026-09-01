@@ -1280,6 +1280,36 @@ DECLARE suffix_extra_list ARRAY<STRING> DEFAULT ['global'];
 どちらの書き方でも、**最終的にどうなったかは 5-4 が全部出す**
 （`suffix_origin` にどこから来た値かが入る）。
 
+##### 例: 同じ base に「素の View」と「枝番付きの View」がある
+
+```
+mart_abjp.vw_sample_abjp              suffix にしたいのは abjp
+mart_abjp.vw_sample_abjp_xyz123456    suffix にしたいのは abjp_xyz123456
+```
+
+どちらも base は `vw_sample` にしたい。データセット名（`mart_abjp`）から取れるのは
+`abjp` だけなので、枝番付きのほうは自動では拾えない。
+
+```sql
+DECLARE suffix_extra_list ARRAY<STRING> DEFAULT ['abjp_xyz123456'];
+```
+
+これで一覧は `abjp` / `jp` / `abjp_xyz123456` になり、base はどちらも
+`vw_sample` に揃う。`vw_sample_abjp_xyz123456` は `_abjp` でも `_jp` でも
+終わらないので、自動抽出の値とは競合しない。末尾の導出は extra には掛からない
+ので `56` のようなゴミも増えない。
+
+> **suffix に `_` が入るのはこの書き方だけ。** 1 つの View 名に 2 つの suffix が
+> 当たりうるようになるので（`zz_abjp` と `abjp`）、**base を決める 2 か所は
+> どちらも最長一致**にしてある — SQL の `keyed`（`ORDER BY LENGTH(s.suffix) DESC`）
+> と UDF の `extractSuffix`。片方だけ変えると、行の `base` 列とカードの中身が
+> 食い違う（エラーは出ない）。`node test.mjs` がこの一致を見ている。
+
+枝番が数個で固定ならこの書き方でよい。**増え続けるなら**、View 名から正規表現で
+suffix を取る仕組みが要る（いまは無い。データセット名に対する `suffix_pattern` と
+対になるもの）。逆に枝番付きを比べたくないなら、
+`analysis_exclude_object_patterns` で対象から外すほうが軽い。
+
 導出し忘れ（新しい地域が増えたなど）は**静かには壊れない**。その suffix を持つ
 View は「suffix 未認識」として単独で並び、確認クエリ 5-3 に出る。実際に使われて
 いる一覧と、それがどこから来たかは 5-4 で確かめられる。
