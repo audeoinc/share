@@ -59,8 +59,9 @@ function breakType(escaped) {
  *
  * **キー名は環境によって違うので、よくある綴りをまとめて受ける。** 決め打ちに
  * すると、綴りが 1 つ違うだけで論理名が丸ごと出なくなる（しかもエラーは出ず、
- * 説明が空に見えるだけ）。拾えなかったキーは捨てずに `key: value` で出すので、
- * **どう書いても画面から消えることはない**。
+ * 説明が空に見えるだけ）。拾えなかったキーも捨てずに表へ並べるので、
+ * **どう書いても画面から消えることはない**。認識できたキーは並び順が
+ * 前に来るだけで、扱いは変わらない。
  *
  * JSON として読めなければ、そのまま素のテキストとして扱う（従来どおり）。
  */
@@ -110,22 +111,36 @@ function parseDesc(text) {
     if (v == null || v === '') continue;
     rest.push({ key: k, value: typeof v === 'object' ? JSON.stringify(v) : String(v) });
   }
-  return { ja: ja ? ja.value : '', en: en ? en.value : '', rest: rest };
+  // pairs は表に出す順。日本語 → 英語 → 残り（JSON に書いてあった順）。
+  const pairs = [];
+  if (ja) pairs.push(ja);
+  if (en) pairs.push(en);
+  for (let i = 0; i < rest.length; i++) pairs.push(rest[i]);
+  return { ja: ja ? ja.value : '', en: en ? en.value : '', rest: rest, pairs: pairs };
 }
 
-/** 列名の下に出す説明。日本語論理名を主、それ以外を従で並べる。 */
+/**
+ * 列名の下に出す説明。
+ *
+ * **JSON だったものは 2 列の表にする。** `key: value` の 1 行で並べると、
+ * どこまでがキーでどこからが値なのかが読み取りにくい（値の中に ':' が
+ * 入っていることもある）。列で分けてしまえば迷いようがない。
+ *
+ * キーは **JSON に書いてあった綴りをそのまま出す。** 'ja' を '日本語' の
+ * ように言い換えると、画面とシートで名前が違うことになり、突き合わせるときに
+ * 一段考える手間が増える。並べる順だけ日本語 → 英語 → 残り にそろえる。
+ *
+ * 素のテキスト（JSON でない）はキーが無いので、これまでどおり 1 行で出す。
+ */
 function descHtml(text) {
   const d = parseDesc(text);
   if (!d) return '';
   if (d.raw) return `<div class="vg-cdesc">${esc(d.raw)}</div>`;
-  let out = '';
-  if (d.ja) out += `<div class="vg-cdesc">${esc(d.ja)}</div>`;
-  if (d.en) out += `<div class="vg-cdesc vg-cdescsub">${esc(d.en)}</div>`;
-  for (let i = 0; i < d.rest.length; i++) {
-    out += `<div class="vg-cdesc vg-cdescsub">` +
-      `${esc(d.rest[i].key)}: ${esc(d.rest[i].value)}</div>`;
-  }
-  return out;
+  if (!d.pairs.length) return '';
+  const rows = d.pairs.map((p) =>
+    `<tr><th class="vg-cdk">${esc(p.key)}</th>` +
+    `<td class="vg-cdv">${esc(p.value)}</td></tr>`).join('');
+  return `<table class="vg-cdtable">${rows}</table>`;
 }
 
 /**
@@ -504,7 +519,7 @@ function columnsCss() {
     // 字面から分からなくなる。
     //   12px  型（セルの本体）
     //   11px  列名 / グループ見出し / 説明（日本語論理名）
-    //   10px  説明の従（英語論理名・その他のキー）/ 内訳の見出し
+    //   10px  説明の表のキー / 内訳の見出し
     //    8px  モード（NULLABLE / REQUIRED / REPEATED）
     // 1px 差は並べても読み取れないので、いちばん弱いモードは 2 段落としてある。
     `.vg-ctable{border-collapse:collapse;font-size:12px;` +
@@ -525,7 +540,19 @@ function columnsCss() {
     // 残りのキーを従（薄い色）で下に並べる。素のテキストなら 1 行だけ。
     `.vg-cdesc{margin:2px 0 0;font:11px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;` +
       `font-weight:400;color:#57606A}`,
-    `.vg-cdescsub{font-size:10px;color:#8C959F}`,
+    // description が JSON だったときの 2 列の表。キーと値を縦線で分ける。
+    // 'key: value' の 1 行だと、値に ':' が入っていると切れ目が読めない。
+    // table-layout は auto。キーの長さはまちまちで、値のほうを広く取りたい。
+    `.vg-cdtable{margin:3px 0 0;border-collapse:collapse;width:100%}`,
+    // キーは折り返させる。グループが多いとセルが細くなるので、nowrap にすると
+    // 長いキー（logical_name_ja など）でセルからはみ出す。
+    `.vg-cdk{padding:1px 6px 1px 0;border-right:1px solid #EAEEF2;text-align:left;` +
+      `vertical-align:top;overflow-wrap:anywhere;` +
+      `font:10px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;` +
+      `font-weight:600;color:#8C959F}`,
+    `.vg-cdv{padding:1px 0 1px 6px;vertical-align:top;width:100%;` +
+      `font:11px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;` +
+      `font-weight:400;color:#57606A;overflow-wrap:anywhere}`,
     // グループの中で説明が割れているときに、どの View のものかを示す見出し。
     `.vg-cdescwho{margin:4px 0 0;font:10px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;` +
       `font-weight:600;color:#8C959F}`,

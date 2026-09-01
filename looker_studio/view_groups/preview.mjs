@@ -225,7 +225,12 @@ const sqlCases = [
 
 // カラム定義の表から、見出しが name の行を引く。見出しはタグを挟む
 // （<span class="vg-cnestmark">└</span>currency）ので、素の substring では拾えない。
-const columnRow = (name, html) => (html || columnCases[0].html).split('<tr>')
+//
+// 区切りは '<tr>' ではなく行の先頭ごと。セルの中にも表（description の
+// key / value）が入っていて、そちらの <tr> でも切れてしまうため。
+const columnRow = (name, html) => (html || columnCases[0].html)
+  .split('<tr><th class="vg-cname')
+  .map((r) => '<th class="vg-cname' + r)
   .find((r) => {
     const th = r.match(/<th class="vg-cname[^"]*">([\s\S]*?)<\/th>/);
     return th && th[1].replace(/<[^>]*>/g, '') === name;
@@ -824,12 +829,27 @@ const checks = [
   })()],
   // description は自由文字列なので、論理名を持たせたければ JSON を入れるしかない。
   // キー名は環境で違うので広めに受け、拾えなかったキーも捨てずに出す。
-  ['description の JSON から日本語 / 英語の論理名を出す', (() => {
+  // JSON だったものは 2 列の表にする。'key: value' の 1 行だと、どこまでが
+  // キーでどこからが値なのかが読み取りにくい（値に ':' が入ることもある）。
+  ['description の JSON は 2 列の表にする', (() => {
     const h = columnCases[0].html;
-    return h.includes('<div class="vg-cdesc">受注日</div>') &&
-      h.includes('<div class="vg-cdesc vg-cdescsub">order date</div>') &&
-      // 素のテキストはそのまま 1 行で出す（従来どおり）
-      h.includes('<div class="vg-cdesc">税抜き。参照先テーブルの型に引きずられる</div>');
+    return h.includes('<table class="vg-cdtable">') &&
+      h.includes('<th class="vg-cdk">ja</th><td class="vg-cdv">受注日</td>') &&
+      h.includes('<th class="vg-cdk">en</th><td class="vg-cdv">order date</td>') &&
+      // 素のテキストはキーが無いので 1 行のまま（従来どおり）
+      h.includes('<div class="vg-cdesc">税抜き。参照先テーブルの型に引きずられる</div>') &&
+      !h.includes('vg-cdescsub');
+  })()],
+  ['キーは JSON に書いてあった綴りのまま出す（並び順だけそろえる）', (() => {
+    const h = Co.descHtml(JSON.stringify(
+      { unit: 'ISO 3166', name_en: 'region', name_ja: 'リージョン' }));
+    const keys = [...h.matchAll(/<th class="vg-cdk">([^<]*)<\/th>/g)].map((m) => m[1]);
+    // 日本語 -> 英語 -> 残り。綴りは言い換えない
+    return keys.join(',') === 'name_ja,name_en,unit';
+  })()],
+  ['値に : が入っていてもキーと混ざらない', (() => {
+    const h = Co.descHtml(JSON.stringify({ ja: '受注日', note: '10:00 に確定' }));
+    return h.includes('<th class="vg-cdk">note</th><td class="vg-cdv">10:00 に確定</td>');
   })()],
   ['description のキー名は綴りを決め打ちにしない', (() => {
     const ja = ['ja', 'name_ja', '日本語論理名', '論理名'];
@@ -840,7 +860,9 @@ const checks = [
   ['拾えなかったキーも捨てずに出す（黙って消えない）', (() => {
     const d = Co.parseDesc('{"name_ja":"リージョン","name_en":"region","unit":"ISO 3166"}');
     return d.rest.length === 1 && d.rest[0].key === 'unit' &&
-      columnCases[0].html.includes('unit: ISO 3166');
+      d.pairs.length === 3 &&
+      columnCases[0].html.includes(
+        '<th class="vg-cdk">unit</th><td class="vg-cdv">ISO 3166</td>');
   })()],
   ['JSON として読めなければ素のテキストとして出す', (() => {
     return Co.parseDesc('{ 壊れた JSON').raw === '{ 壊れた JSON' &&
@@ -867,11 +889,12 @@ const checks = [
     const head = size('vg-chead');
     const desc = size('vg-cdesc');
     const meta = size('vg-cmeta');
-    const sub = size('vg-cdescsub');
+    const val = size('vg-cdv');
+    const key = size('vg-cdk');
     const who = size('vg-cdescwho');
     return type === 12 && name === 11 && head === 11 && desc === 11 &&
-      sub === 10 && who === 10 && meta === 8 &&
-      type > name && name > sub && sub > meta;
+      val === 11 && key === 10 && who === 10 && meta === 8 &&
+      type > name && name > key && key > meta;
   })()],
   ['カラム定義の CSS は columns.js 側にある',
     Co.columnsCss().includes('.vg-ctable') && !R.chromeCss().includes('.vg-ctable')],
