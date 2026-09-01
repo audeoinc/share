@@ -242,7 +242,7 @@ for (const t of ['__T_DIFF_SRC__', '__T_DIFF__']) {
 }
 
 // --- 6. 両ファイルで一致させる必要がある値 -----------------------------
-for (const base of ['analyze', 'render', 'page', 'markdown', 'group_css',
+for (const base of ['analyze', 'render', 'erd', 'page', 'markdown', 'group_css',
   'render_dynamic_sql']) {
   const line = `udf_name_prefix || system_name || '_' || '${base}' || udf_name_suffix`;
   add(`${base} の名前の組み立てが両ファイルで同じ`,

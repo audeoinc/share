@@ -13,7 +13,7 @@
 -- 「空のテーブル」が見える瞬間が無い。** DELETE + INSERT や TRUNCATE + INSERT だと
 -- その隙間にレポートを開いた人には何も出ない。
 --
--- 前提: view_group_html.sql で 6 つの UDF を作成済み。
+-- 前提: view_group_html.sql で 7 つの UDF を作成済み。
 --       system_name / udf_dataset / udf_name_prefix / udf_name_suffix は
 --       両ファイルで一致させること。食い違うと関数が見つからない。
 --
@@ -35,7 +35,8 @@
 --   __V_DIFF__             素のカードにメモを繋ぐビュー（シートの内容がその場で出る）
 --   __UDF_ANALYZE__        analyze 関数（project.dataset.function）
 --   __UDF_RENDER__         render 関数（同上）
---   __UDF_PAGE__           参照関係を作り差分と束ねる関数（同上）
+--   __UDF_ERD__            参照関係の図を作る関数（同上）
+--   __UDF_PAGE__           カラム定義と SQL を作り、外側タブで束ねる関数（同上）
 --   __UDF_MARKDOWN__       メモの Markdown を HTML にする関数（同上）
 --   __UDF_CSS__            group_css 関数（同上）
 --   __TZ__                 snapshot_date（生成日）の基準タイムゾーン
@@ -278,6 +279,7 @@ DECLARE view_diff       STRING;  -- レポートが読むビュー。メモを�
 -- までのため。JS UDF から別の UDF は呼べないので、つなぐのはこの SQL の仕事。
 DECLARE udf_analyze_function_name  STRING;
 DECLARE udf_render_function_name   STRING;
+DECLARE udf_erd_function_name      STRING;
 DECLARE udf_page_function_name     STRING;
 DECLARE udf_markdown_function_name STRING;
 DECLARE udf_css_function_name      STRING;
@@ -357,6 +359,8 @@ SET udf_analyze_function_name =
   udf_name_prefix || system_name || '_' || 'analyze' || udf_name_suffix;
 SET udf_render_function_name =
   udf_name_prefix || system_name || '_' || 'render' || udf_name_suffix;
+SET udf_erd_function_name =
+  udf_name_prefix || system_name || '_' || 'erd' || udf_name_suffix;
 SET udf_page_function_name =
   udf_name_prefix || system_name || '_' || 'page' || udf_name_suffix;
 SET udf_markdown_function_name =
@@ -369,6 +373,8 @@ ASSERT REGEXP_CONTAINS(udf_analyze_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_analyze_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_render_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_render_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_erd_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_erd_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_page_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_page_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_markdown_function_name, r'^[A-Za-z0-9_]+$') AS
@@ -424,13 +430,14 @@ SET view_name_condition = CONCAT(
 -- 固定の設定はここで焼き込み、テンプレートだけを @sql_template で渡す。
 -- 値は %T で埋める。条件文には引用符が入るので、%s だと壊れる。
 SET render_call_sql = FORMAT(
-  """SELECT `%s.%s.%s`(@sql_template, %T, %T, %T, %T, %T, %T, STRUCT(%T AS diff_src, %T AS diff_table, %T AS diff_view, %T AS base_note, %T AS analyze_function, %T AS render_function, %T AS page_function, %T AS markdown_function, %T AS css_function), STRUCT(%T AS time_zone, %T AS suffix_pattern, %T AS note_sheet_url, %T AS note_sheet_range), STRUCT(%T AS schema_condition, %T AS view_dataset_condition, %T AS view_name_condition))""",
+  """SELECT `%s.%s.%s`(@sql_template, %T, %T, %T, %T, %T, %T, STRUCT(%T AS diff_src, %T AS diff_table, %T AS diff_view, %T AS base_note, %T AS analyze_function, %T AS render_function, %T AS erd_function, %T AS page_function, %T AS markdown_function, %T AS css_function), STRUCT(%T AS time_zone, %T AS suffix_pattern, %T AS note_sheet_url, %T AS note_sheet_range), STRUCT(%T AS schema_condition, %T AS view_dataset_condition, %T AS view_name_condition))""",
   udf_project_id, udf_dataset, udf_sql_function_name,
   work_project_id, work_dataset, udf_project_id, udf_dataset,
   target_project_id, job_region,
   table_diff_src, table_diff, view_diff, table_base_note,
   udf_analyze_function_name, udf_render_function_name,
-  udf_page_function_name, udf_markdown_function_name, udf_css_function_name,
+  udf_erd_function_name, udf_page_function_name,
+  udf_markdown_function_name, udf_css_function_name,
   snapshot_time_zone, suffix_pattern,
   note_sheet_url, note_sheet_range,
   schema_condition, view_dataset_condition, view_name_condition);
@@ -443,11 +450,12 @@ SET render_call_sql = FORMAT(
 EXECUTE IMMEDIATE FORMAT(
   "SELECT COUNT(*) FROM `%s.%s.INFORMATION_SCHEMA.ROUTINES` WHERE routine_name IN UNNEST(%T)",
   udf_project_id, udf_dataset,
-  [udf_analyze_function_name, udf_render_function_name, udf_page_function_name,
-   udf_markdown_function_name, udf_css_function_name, udf_sql_function_name]
+  [udf_analyze_function_name, udf_render_function_name, udf_erd_function_name,
+   udf_page_function_name, udf_markdown_function_name, udf_css_function_name,
+   udf_sql_function_name]
 ) INTO udf_found_count;
-ASSERT udf_found_count = 6 AS
-  'UDF が 6 つそろっていません。先に view_group_html.sql を実行してください（system_name / udf_dataset / udf_name_prefix / udf_name_suffix は両ファイルで同じ値に）。';
+ASSERT udf_found_count = 7 AS
+  'UDF が 7 つそろっていません。先に view_group_html.sql を実行してください（system_name / udf_dataset / udf_name_prefix / udf_name_suffix は両ファイルで同じ値に）。';
 
 
 -- 事前チェック。0 件のまま進むと空のテーブルができ、設定の間違いに気づけない。
@@ -867,13 +875,17 @@ SELECT
   -- どのグループを基準にするかを設定に足して渡す。opts と同じ組み立て方
   -- （先頭の '{' を落として前に足す）にそろえてある。
   --
-  -- 描画は 2 段。render がロジック差分のカードを作り、page がそれを受け取って
-  -- 参照関係の図・カラム定義の表・View ごとの素の SQL を足し、外側タブで
-  -- 1 枚に束ねる。
+  -- 描画は 3 本の UDF に分かれている。render がロジック差分のカード、erd が
+  -- 参照関係の図を作り、page がその 2 つを受け取ってカラム定義の表と
+  -- View ごとの素の SQL を足し、外側タブで 1 枚に束ねる。
   -- JS UDF から別の UDF は呼べないので、つなぐのは SQL の仕事。
+  --
+  -- 分けてあるのは、インラインのコード ブロブが 1 個 32 KB までのため
+  -- （図の解析にはトークナイザが要り、それだけで最小化後 9 KB ある）。
   `__UDF_PAGE__`(
     analysis,
     `__UDF_RENDER__`(analysis, (SELECT options_json FROM opts)),
+    `__UDF_ERD__`(analysis, (SELECT options_json FROM opts)),
     columns_json,
     sql_json,
     (SELECT options_json FROM opts)

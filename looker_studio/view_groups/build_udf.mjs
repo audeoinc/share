@@ -3,10 +3,11 @@
 //   node build_udf.mjs          -> view_group_html.sql を生成
 //   node build_udf.mjs --check  -> 生成せず、Node 上で UDF 本体を実行して検証だけ
 //
-// 生成するのは 6 つ:
+// 生成するのは 7 つ:
 //   viewlgc_analyze(views ARRAY<STRUCT<view_name STRING, ddl STRING>>, options_json STRING) -> JSON
 //   viewlgc_render(analysis_json STRING, options_json STRING) -> HTML
-//   viewlgc_page(analysis_json STRING, diff_html STRING, options_json STRING) -> HTML
+//   viewlgc_erd(analysis_json STRING, options_json STRING) -> HTML（参照関係の図）
+//   viewlgc_page(analysis_json STRING, diff_html STRING, erd_html STRING, ...) -> HTML
 //   viewlgc_markdown(md STRING) -> HTML   -- base ごとのメモ。ビューの中から呼ぶ
 //   viewlgc_group_css(options_json STRING)
 //   viewlgc_render_dynamic_sql(...)  -- SQL 関数。build_table.sql の __…__ を展開する
@@ -51,10 +52,19 @@ const RENDER_SOURCES = [
 ];
 // 参照関係の UDF。差分エンジン（diff.js / render.js）は要らないので積まない。
 // 積むと 1 個 32 KB のインライン上限に収まらなくなる。
+//
+// **カラム定義・SQL・外枠とは別の UDF にしてある。** 図を描くには SQL の
+// トークナイザ（analyze.js）が要り、それだけで最小化後 9 KB ある。同居させて
+// いた頃は 1 本で 28 KB（上限比 92%）まで来ていて、カラム定義に手を入れるたびに
+// 枠を気にすることになっていた。依存が独立している場所で割るのが素直。
 const ERD_SOURCES = [
   ['chrome.js', join(here, 'chrome.js')],
   ['analyze.js', join(here, 'analyze.js')],
   ['erd.js', join(here, 'erd.js')],
+];
+// カラム定義・SQL・外枠の UDF。トークナイザは要らない。
+const PAGE_SOURCES = [
+  ['chrome.js', join(here, 'chrome.js')],
   ['columns.js', join(here, 'columns.js')],
   ['sqltext.js', join(here, 'sqltext.js')],
 ];
@@ -104,12 +114,14 @@ function dropFunctions(src, names) {
 // alphaMap は alphaMapDetail の薄い包み。UDF は Detail 側しか呼ばない。
 const UNUSED_ANALYZE = ['alphaMap'];
 // ERD 側はグループ化もパラメータ化もしない。トークナイザと実体名の判定だけ使う。
+// 外枠（wrapPage）を組むのは page の仕事なので、そちらも落とす。
 const UNUSED_ERD = ['alphaMap', 'alphaMapDetail', 'parameterize', 'groupByLogic',
   'analyze', 'maskTokens', 'buildLiteralMap', 'suffixWords', 'parseEquivalents',
   'extractSuffix', 'expandSuffixParts', 'normalizeSpace', 'stripOptionsClause',
-  // CSS は viewlgc_group_css が配る。page は markup しか作らないので、
-  // CSS の文字列を積むだけ無駄（1 個 32 KB のインライン上限に効いてくる）。
-  'columnsCss', 'sqlCss'];
+  'wrapPage'];
+// CSS は viewlgc_group_css が配る。page も erd も markup しか作らないので、
+// CSS の文字列を積むだけ無駄（1 個 32 KB のインライン上限に効いてくる）。
+const UNUSED_PAGE = ['columnsCss', 'sqlCss'];
 // 外枠で束ねるのは page の仕事。render はロジック差分のカードを作るだけなので
 // wrapPage は要らない（chrome.js を共有しているぶん付いてくる）。
 const UNUSED_RENDER = ['renderFragment3', 'build3Way', 'mapToBase', 'baseCell',
@@ -149,6 +161,7 @@ async function bundle(sources, unused) {
 const analyzeLib = await bundle(ANALYZE_SOURCES, UNUSED_ANALYZE);
 const renderLib = await bundle(RENDER_SOURCES, UNUSED_RENDER);
 const erdLib = await bundle(ERD_SOURCES, UNUSED_ERD);
+const pageLib = await bundle(PAGE_SOURCES, UNUSED_PAGE);
 const markdownLib = await bundle(MARKDOWN_SOURCES, []);
 const cssLib = await bundle(CSS_SOURCES, UNUSED_CSS);
 
@@ -313,11 +326,27 @@ function __run(analysis_json, options_json) {
 return __run(analysis_json, options_json);
 `.trim();
 
+// --- erd のドライバ -----------------------------------------------------
+// 解析結果から参照関係の図を作る。図だけを返し、束ねるのは page の仕事。
+const erdDriver = `
+function __run(analysis_json, options_json) {
+  var a;
+  try { a = JSON.parse(analysis_json); } catch (e) { a = null; }
+  if (!a) return __notice('解析結果を読み取れませんでした。');
+  var out = '';
+  var bases = a.bases || [];
+  for (var i = 0; i < bases.length; i++) out += renderErdBase(bases[i]);
+  return out || __notice('図にできる View がありません。');
+}
+
+return __run(analysis_json, options_json);
+`.trim();
+
 // --- page のドライバ ---------------------------------------------------
-// 解析結果から参照関係の図を作り、渡された差分 HTML と外側タブで束ねる。
-// 差分そのものは作らない（差分エンジンを積むと 32 KB に収まらないため）。
+// カラム定義の表と View ごとの素の SQL を作り、渡された差分 HTML・参照関係の図と
+// 合わせて外側タブで束ねる。差分も図も作らない（どちらも別の UDF）。
 const pageDriver = `
-function __run(analysis_json, diff_html, columns_json, sql_json, options_json) {
+function __run(analysis_json, diff_html, erd_html, columns_json, sql_json, options_json) {
   var opts = __opts(options_json);
   var a;
   try { a = JSON.parse(analysis_json); } catch (e) { a = null; }
@@ -338,23 +367,21 @@ function __run(analysis_json, diff_html, columns_json, sql_json, options_json) {
     for (var m = 0; m < sarr.length; m++) sqlByView[sarr[m].v] = sarr[m].s;
   } catch (e) { sqlByView = {}; }
 
-  var erd = '';
   var col = '';
   var sql = '';
   var bases = a.bases || [];
   for (var i = 0; i < bases.length; i++) {
-    erd += renderErdBase(bases[i]);
     col += renderColumnsBase(bases[i], byView);
     sql += renderSqlBase(bases[i], sqlByView);
   }
-  if (!erd) erd = __notice('図にできる View がありません。');
   if (!col) col = __notice('カラム定義を出せる View がありません。');
   if (!sql) sql = __notice('SQL を出せる View がありません。');
-  return wrapPage(String(diff_html || ''), erd, col, sql,
+  return wrapPage(String(diff_html || ''),
+    String(erd_html || __notice('参照関係を取得できませんでした。')), col, sql,
     a.bases && a.bases.length ? a.bases[0] : null);
 }
 
-return __run(analysis_json, diff_html, columns_json, sql_json, options_json);
+return __run(analysis_json, diff_html, erd_html, columns_json, sql_json, options_json);
 `.trim();
 
 // --- markdown のドライバ -----------------------------------------------
@@ -451,15 +478,17 @@ function pack(driver, label, lib, extra) {
 const analyzePack = pack(analyzeDriver, 'viewlgc_analyze', analyzeLib);
 const renderPack = pack(renderDriver, 'viewlgc_render', renderLib, sharedRender);
 const cssPack = pack(cssDriver, 'viewlgc_group_css', cssLib, sharedRender);
-const pagePack = pack(pageDriver, 'viewlgc_page', erdLib);
+const erdPack = pack(erdDriver, 'viewlgc_erd', erdLib);
+const pagePack = pack(pageDriver, 'viewlgc_page', pageLib);
 const markdownPack = pack(markdownDriver, 'viewlgc_markdown', markdownLib);
 
 // --- 検証: 最小化した本体をそのまま実行する -----------------------------
 const S = require(join(here, 'sample_views.js'));
 const VIEWLGC_ANALYZE = new Function('views', 'options_json', analyzePack.code);
 const VIEWLGC_RENDER = new Function('analysis_json', 'options_json', renderPack.code);
-const VIEWLGC_PAGE = new Function(
-  'analysis_json', 'diff_html', 'columns_json', 'sql_json', 'options_json', pagePack.code);
+const VIEWLGC_ERD = new Function('analysis_json', 'options_json', erdPack.code);
+const VIEWLGC_PAGE = new Function('analysis_json', 'diff_html', 'erd_html',
+  'columns_json', 'sql_json', 'options_json', pagePack.code);
 const VIEWLGC_MARKDOWN = new Function('md', markdownPack.code);
 const VIEW_GROUP_CSS = new Function('options_json', cssPack.code);
 
@@ -497,7 +526,9 @@ function VIEW_GROUP_INFO(views, options_json) {
     html: VIEWLGC_RENDER(a, options_json),
     // build_table.sql は render の結果をさらに page へ渡す。ここも同じ順で通し、
     // 最小化した page 本体が実際に動くことを確かめる。
+    erd: VIEWLGC_ERD(a, options_json),
     page: VIEWLGC_PAGE(a, VIEWLGC_RENDER(a, options_json),
+      VIEWLGC_ERD(a, options_json),
       fakeColumns(views), fakeSql(views), options_json),
   };
 }
@@ -539,6 +570,14 @@ const checks = [
   ['page も最小化後に動く（外側タブと図が出る）',
     info.page.includes('vg-otab') && info.page.includes('<svg ') &&
     info.page.includes(html)],
+  // 図は別の UDF。page は受け取ったものをそのまま外枠に入れるだけ。
+  ['erd は図だけを返す（外枠は付けない）',
+    info.erd.includes('<svg ') && !info.erd.includes('vg-otab') &&
+    // page はそれをそのまま持っている
+    info.page.includes(info.erd)],
+  ['page は図が渡されなくても落ちない',
+    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]', OPTS)
+      .includes('参照関係を取得できませんでした')],
   // メモだけは作り置きしない。カードには目印だけを置き、ビューが
   // REPLACE で note_html に差し替える。焼き込むと、シートを直しても
   // 次の日次実行までレポートが古いままになる。
@@ -581,7 +620,7 @@ const checks = [
       sql.includes('<span class="vg-sqln">');
   })()],
   ['page は SQL が渡されなくても落ちない',
-    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '[]', '{ broken', OPTS)
+    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '{ broken', OPTS)
       .includes('SQL を取得できませんでした')],
   ['page はカラム定義の表を出す（型とグループ内の食い違い）',
     info.page.includes('vg-ctable') &&
@@ -589,9 +628,9 @@ const checks = [
     // 同じグループの中で jp が NUMERIC・us が FLOAT64。印が出ること
     info.page.includes('vg-cmix') && info.page.includes('vg-cwarn')],
   ['page はカラム定義が空でも落ちない',
-    typeof VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '{ broken', '[]', OPTS)
+    typeof VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '{ broken', '[]', OPTS)
       === 'string' &&
-    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', null, '[]', OPTS)
+    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', null, '[]', OPTS)
       .includes('カラム定義を取得できませんでした')],
   ['page はメモの目印を 1 つだけ置く（本体は焼き込まない）',
     info.page.split(require(join(here, 'chrome.js')).NOTE_MARK).length - 1 === 1 &&
@@ -745,7 +784,7 @@ const checks = [
 // サイズ検証
 // cssPack は生成時に CSS を作るためだけに使う。SQL には本文を焼き込むので、
 // インラインのコード ブロブの上限とは無関係。
-for (const p of [analyzePack, renderPack, pagePack, markdownPack]) {
+for (const p of [analyzePack, renderPack, erdPack, pagePack, markdownPack]) {
   const size = Buffer.byteLength(p.code);
   checks.push([`${p.label} が ${(SIZE_LIMIT / 1024).toFixed(0)} KB 以内`, size <= SIZE_LIMIT]);
 }
@@ -759,7 +798,7 @@ for (const [name, ok] of checks) {
 const kb = (n) => (n / 1024).toFixed(1) + ' KB';
 console.log(`\n${checks.length - failed}/${checks.length} passed\n`);
 console.log('UDF 本体のサイズ（インライン上限 32 KB）');
-for (const p of [analyzePack, renderPack, pagePack, markdownPack]) {
+for (const p of [analyzePack, renderPack, erdPack, pagePack, markdownPack]) {
   console.log(`  ${p.label.padEnd(20)} 素 ${kb(p.raw).padStart(8)} → ` +
     (p.min === null ? '最小化なし' : `最小化 ${kb(p.min).padStart(8)}`) +
     `  （上限比 ${(Buffer.byteLength(p.code) / SIZE_LIMIT * 100).toFixed(0)}%）`);
@@ -779,10 +818,11 @@ const sql = `-- ================================================================
 --    本体は esbuild で最小化してある（インラインのコード ブロブは
 --    32 KB までに制限されるため。素の連結は約 48 KB で確実に弾かれる）。
 --
--- 作る関数は 6 つ。名前はすべて CONFIGURATION の値から組み立てる。
+-- 作る関数は 7 つ。名前はすべて CONFIGURATION の値から組み立てる。
 --   viewlgc_analyze             View 群を解析して JSON を返す（JavaScript）
 --   viewlgc_render              その JSON を比較 HTML にする（JavaScript）
---   viewlgc_page                参照関係の図を作り、差分と外側タブで束ねる（JavaScript）
+--   viewlgc_erd                 参照関係の図を作る（JavaScript）
+--   viewlgc_page                カラム定義と SQL を作り、外側タブで束ねる（JavaScript）
 --   viewlgc_markdown            base ごとのメモ（Markdown）を HTML にする（JavaScript）
 --   viewlgc_group_css           テンプレートに貼る CSS を返す（JavaScript）
 --   viewlgc_render_dynamic_sql  build_table.sql の __…__ を展開する（SQL）
@@ -854,6 +894,7 @@ DECLARE udf_name_suffix STRING DEFAULT '';
 -- 下の SET を直す。build_table.sql の同名の変数と必ず同じ値にすること。
 DECLARE udf_analyze_function_name  STRING;
 DECLARE udf_render_function_name   STRING;
+DECLARE udf_erd_function_name      STRING;
 DECLARE udf_page_function_name     STRING;
 DECLARE udf_markdown_function_name STRING;
 DECLARE udf_css_function_name      STRING;
@@ -877,6 +918,10 @@ ${analyzePack.code}
 
 DECLARE js_render STRING DEFAULT r"""
 ${renderPack.code}
+""";
+
+DECLARE js_erd STRING DEFAULT r"""
+${erdPack.code}
 """;
 
 DECLARE js_page STRING DEFAULT r"""
@@ -922,6 +967,8 @@ SET udf_render_function_name =
   udf_name_prefix || system_name || '_' || 'render' || udf_name_suffix;
 SET udf_css_function_name =
   udf_name_prefix || system_name || '_' || 'group_css' || udf_name_suffix;
+SET udf_erd_function_name =
+  udf_name_prefix || system_name || '_' || 'erd' || udf_name_suffix;
 SET udf_page_function_name =
   udf_name_prefix || system_name || '_' || 'page' || udf_name_suffix;
 SET udf_markdown_function_name =
@@ -932,6 +979,8 @@ ASSERT REGEXP_CONTAINS(udf_analyze_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_analyze_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_render_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_render_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_erd_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_erd_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_page_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_page_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_css_function_name, r'^[A-Za-z0-9_]+$') AS
@@ -1033,8 +1082,33 @@ LANGUAGE js AS %s
 
 
 -- ---------------------------------------------------------------------
--- 3. viewlgc_page
---    参照関係の図を作り、渡された差分 HTML と外側タブで束ねて 1 枚にする
+-- 3. viewlgc_erd
+--    参照関係の図を作る
+--
+-- 図だけを返す。束ねるのは viewlgc_page の仕事。
+--
+-- **カラム定義・SQL・外枠とは別の UDF にしてある。** 図を描くには SQL の
+-- トークナイザ（analyze.js）が要り、それだけで最小化後 9 KB ある。同居させて
+-- いた頃は 1 本で 28 KB（インライン上限 32 KB に対して 92%）まで来ていて、
+-- カラム定義に手を入れるたびに枠を気にすることになっていた。依存が独立して
+-- いる場所で割ってある。
+-- ---------------------------------------------------------------------
+EXECUTE IMMEDIATE FORMAT('''
+CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
+  analysis_json STRING,
+  options_json STRING
+)
+RETURNS STRING
+LANGUAGE js AS %s
+''',
+  udf_project_id, udf_dataset, udf_erd_function_name,
+  TO_JSON_STRING(js_erd));
+
+
+-- ---------------------------------------------------------------------
+-- 4. viewlgc_page
+--    カラム定義の表と View ごとの素の SQL を作り、渡された差分 HTML・
+--    参照関係の図と合わせて外側タブで束ねて 1 枚にする
 --
 -- タブは左から note / カラム定義 / 参照関係 / ロジック差分 / SQL で、
 -- 既定で開くのは note。
@@ -1043,9 +1117,7 @@ LANGUAGE js AS %s
 -- SQL タブは sql_json（INFORMATION_SCHEMA.VIEWS.view_definition を base ごとに
 -- まとめたもの）から作る。パラメータ化していない素のテキストで、インナーの
 -- タブは グループではなく View（suffix）単位。
--- 差分は作らない。viewlgc_render の出力をそのまま受け取って包むだけ。
--- 図の解析にはトークナイザが要るので、差分側とは別の UDF にしてある
--- （両方を 1 つに積むとインラインの 32 KB に収まらない）。
+-- 差分も図も作らない。viewlgc_render / viewlgc_erd の出力をそのまま受け取る。
 --
 -- メモの中身もここでは入れない。パネルには目印 '<!--VG_NOTE-->' だけを置き、
 -- ビューが REPLACE で note_html に差し替える。ここで焼き込むと、シートを
@@ -1055,6 +1127,7 @@ EXECUTE IMMEDIATE FORMAT('''
 CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
   analysis_json STRING,
   diff_html STRING,
+  erd_html STRING,
   columns_json STRING,
   sql_json STRING,
   options_json STRING
@@ -1067,7 +1140,7 @@ LANGUAGE js AS %s
 
 
 -- ---------------------------------------------------------------------
--- 4. viewlgc_markdown
+-- 5. viewlgc_markdown
 --    base ごとのメモ（Markdown）を HTML にする
 --
 -- これだけはビューの中から呼ぶ（＝レポートを開くたびに走る）。事前生成の
@@ -1087,7 +1160,7 @@ LANGUAGE js AS %s
 
 
 -- ---------------------------------------------------------------------
--- 5. viewlgc_group_css
+-- 6. viewlgc_group_css
 --    mode='class' のときテンプレートへ貼る CSS を返す
 --
 --   SELECT \`<project>.<udf_dataset>.viewlgc_group_css\`(NULL);
@@ -1118,7 +1191,7 @@ AS (%s)
 
 
 -- ---------------------------------------------------------------------
--- 6. viewlgc_render_dynamic_sql
+-- 7. viewlgc_render_dynamic_sql
 --    build_table.sql の SQL テンプレートに含まれる __…__ を展開する
 --
 -- BigQuery は識別子（プロジェクト・データセット・テーブル・関数名）を
@@ -1138,6 +1211,7 @@ AS (%s)
 --   __V_DIFF__             メモを差し込むビュー。レポートはこれを読む
 --   __UDF_ANALYZE__        analyze 関数（project.dataset.function）
 --   __UDF_RENDER__         render 関数（同上）
+--   __UDF_ERD__            参照関係の図を作る関数（同上）
 --   __UDF_PAGE__           page 関数（同上）
 --   __UDF_MARKDOWN__       markdown 関数（同上）
 --   __UDF_CSS__            group_css 関数（同上）
@@ -1168,6 +1242,7 @@ CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
     base_note         STRING,
     analyze_function  STRING,
     render_function   STRING,
+    erd_function      STRING,
     page_function     STRING,
     markdown_function STRING,
     css_function      STRING
@@ -1204,6 +1279,7 @@ AS (
   REPLACE(
   REPLACE(
   REPLACE(
+  REPLACE(
     sql_template,
     '__TARGET_PROJECT__', target_project_id),
     '__JOB_REGION__', job_region),
@@ -1219,6 +1295,8 @@ AS (
       udf_project_id || '.' || udf_dataset || '.' || objects.analyze_function),
     '__UDF_RENDER__',
       udf_project_id || '.' || udf_dataset || '.' || objects.render_function),
+    '__UDF_ERD__',
+      udf_project_id || '.' || udf_dataset || '.' || objects.erd_function),
     '__UDF_PAGE__',
       udf_project_id || '.' || udf_dataset || '.' || objects.page_function),
     '__UDF_MARKDOWN__',
@@ -1237,10 +1315,11 @@ AS (
   udf_project_id, udf_dataset, udf_sql_function_name);
 
 
--- 作った 6 つの名前を出す。build_table.sql に同じ値を入れる。
+-- 作った 7 つの名前を出す。build_table.sql に同じ値を入れる。
 SELECT
   FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_analyze_function_name)  AS analyze_function,
   FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_render_function_name)   AS render_function,
+  FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_erd_function_name)      AS erd_function,
   FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_page_function_name)     AS page_function,
   FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_markdown_function_name) AS markdown_function,
   FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_css_function_name)      AS css_function,
@@ -1263,8 +1342,8 @@ END;
   const marker = 'DECLARE (js_[a-z_]+) STRING DEFAULT r' + '"'.repeat(3) + '\\n';
   const blobs = [...sql.matchAll(
     new RegExp(marker + '([\\s\\S]*?)\\n' + '"'.repeat(3), 'g'))];
-  if (blobs.length !== 4) {
-    console.log(`  FAIL  埋め込んだ JS が 4 つ見つかりません（${blobs.length} 個）`);
+  if (blobs.length !== 5) {
+    console.log(`  FAIL  埋め込んだ JS が 5 つ見つかりません（${blobs.length} 個）`);
     process.exit(1);
   }
   for (const [, name, code] of blobs) {
@@ -1273,7 +1352,7 @@ END;
       process.exit(1);
     }
   }
-  console.log('  PASS  埋め込んだ JS が 4 つとも本物');
+  console.log('  PASS  埋め込んだ JS が 5 つとも本物');
 
   // CSS は JS ではないので別に見る。焼き込んだ本文が template_style.html と
   // 食い違うと、貼った CSS と UDF が返す CSS が別物になる。
@@ -1289,8 +1368,8 @@ END;
   // FORMAT のテンプレートに素の % があると書式指定と解釈される。
   // 引数側（JS 本体）の % は無関係なので、''' … ''' の中だけを見る。
   const templates = [...sql.matchAll(/FORMAT\('''([\s\S]*?)'''/g)].map((m) => m[1]);
-  if (templates.length !== 6) {
-    console.log(`  FAIL  FORMAT のテンプレートが 6 つ見つかりません（${templates.length} 個）`);
+  if (templates.length !== 7) {
+    console.log(`  FAIL  FORMAT のテンプレートが 7 つ見つかりません（${templates.length} 個）`);
     process.exit(1);
   }
   for (const t of templates) {

@@ -508,7 +508,8 @@ node check_sql.mjs          # build_table.sql と view_group_html.sql の突き�
 |---|---|
 | `viewlgc_analyze(views, options_json)` | 解析結果の JSON（`viewCount` / `groupCount` / `groupLabels` / `groupSizes` / `suffixes` / `unmatchedCount` / `bases`） |
 | `viewlgc_render(analysis_json, options_json)` | ロジック差分のカード |
-| `viewlgc_page(analysis_json, diff_html, columns_json, sql_json, options_json)` | 参照関係の図・カラム定義の表・View ごとの素の SQL を作り、メモ（目印のみ）・差分と外側タブで束ねた 1 枚 |
+| `viewlgc_erd(analysis_json, options_json)` | 参照関係の図（それだけ。束ねない） |
+| `viewlgc_page(analysis_json, diff_html, erd_html, columns_json, sql_json, options_json)` | カラム定義の表と View ごとの素の SQL を作り、メモ（目印のみ）・差分・図と外側タブで束ねた 1 枚 |
 | `viewlgc_markdown(md)` | base ごとのメモ（Markdown）の HTML。**ビューの中から呼ぶ** |
 | `viewlgc_group_css(options_json)` | `mode='class'` でテンプレートに貼る CSS。**SQL 関数で、生成時に焼き込んだ固定文字列を返す**（`options_json` は見ない） |
 | `viewlgc_render_dynamic_sql(sql_template, …)` | `build_table.sql` の `__…__` を展開した SQL（JavaScript ではなく SQL 関数） |
@@ -523,7 +524,8 @@ node check_sql.mjs          # build_table.sql と view_group_html.sql の突き�
 ```
 viewlgc_analyze     素 23.7 KB → 最小化 10.7 KB（上限比 36%）
 viewlgc_render      素 45.8 KB → 最小化 27.5 KB（上限比 92%）
-viewlgc_page        素 52.2 KB → 最小化 26.1 KB（上限比 87%）
+viewlgc_erd         素 34.7 KB → 最小化 16.2 KB（上限比 54%）
+viewlgc_page        素 27.9 KB → 最小化 13.5 KB（上限比 45%）
 viewlgc_markdown    素 11.1 KB → 最小化  6.5 KB（上限比 22%）
 ```
 
@@ -540,7 +542,13 @@ viewlgc_markdown    素 11.1 KB → 最小化  6.5 KB（上限比 22%）
 > 必須にしていた頃は、最後のファイルの最後の関数だけ「見つかりません」で
 > 落ちていた（`strip` が末尾を trim するため）。
 
-`viewlgc_render` と `viewlgc_page` はどちらも上限（生成時の閾値 30 KB）に近い。CSS を足すときは
+**`viewlgc_erd` を `viewlgc_page` から割ったのはこのため。** 図を描くには SQL の
+トークナイザ（`analyze.js`）が要り、それだけで最小化後 9 KB ある。同居させて
+いた頃は 1 本で 27.7 KB（92%）まで来ていて、カラム定義に手を入れるたびに枠を
+気にすることになっていた。依存が独立している場所で割れば、両方に余裕ができる
+（54% と 45%）。
+
+残るは `viewlgc_render` の 92%。CSS を足すときは
 `node build_udf.mjs` の最後に出るサイズを見ること。**メモの CSS を
 `markdown.js` の `memoCss()` に置いてあるのはこのため**で、差分側の
 `chromeCss()` に混ぜると `viewlgc_render` にも使わない CSS が乗る。
