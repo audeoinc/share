@@ -812,8 +812,8 @@ SET render_call_sql = FORMAT(
   本体は `r""" """` で囲む必要があり、それをさらに `EXECUTE IMMEDIATE` の
   文字列に入れ子にできないため。埋めるときは `TO_JSON_STRING` で SQL の
   文字列リテラルに変換する（JSON のエスケープは BigQuery の文字列リテラルと互換）
-- **スケジュールドクエリには CONFIGURATION と セクション 2 を登録する。** 設定
-  ブロックが無いと変数が未定義になる。1 と 3 は初回だけ、5 は確認用なので不要
+- **スケジュールドクエリには CONFIGURATION と セクション 2・2b を登録する。**
+  設定ブロックが無いと変数が未定義になる。1 と 3 は初回だけ、5 は確認用なので不要
 - **セクション 5 の確認クエリは実行される。** ファイルを丸ごと流すと 8 本の
   結果が順に出る（生成結果 / 割れている base / 未認識の View / 対象データセットと
   suffix / データセット別の View 数 / View 名の条件で落ちた View /
@@ -882,13 +882,18 @@ Looker の操作のたびに UDF を回すのは重いので、スケジュー�
 `INFORMATION_SCHEMA` の中身は View をデプロイしたときしか変わらない。
 
 ```
-viewlgc_t_diff  CLUSTER BY base（最新の 1 世代だけ）
+viewlgc_t_diff_src  CLUSTER BY base（素のカード。メモ差し込み前）
   snapshot_date / base / ref_index / ref_label
   view_count / group_count / has_multiple
-  group_labels / group_sizes / suffixes / unmatched_count / diff_html
+  group_labels / group_sizes / suffixes / unmatched_count
+  view_desc_md / diff_html
 
-viewlgc_vw_t_diff  上に加えて
-  has_note / note_md / note_html / note_updated_at / note_updated_by
+viewlgc_t_diff  上から ref_index / ref_label を除き、次を足したもの
+  has_note / has_view_desc / note_md / note_html
+  note_updated_at / note_updated_by
+  diff_html は目印をメモに差し替え済み
+
+viewlgc_vw_t_diff  SELECT * FROM viewlgc_t_diff（互換のため残す素通し）
 ```
 
 Looker Studio はビューを読むだけ。`diff_html` を Templated Record に渡す。
@@ -917,22 +922,31 @@ AS WITH … SELECT …
 並びが食い違うと BigQuery が落とす**ので、`check_sql.mjs` が両者の列名を
 順番まで突き合わせる。
 
-#### それでもビューは要る（メモのため）
+#### メモの差し込みは焼き込む（表示速度のため）
 
-「最新だけを採る」仕事は無くなったが、ビューを外すことはできない。もう一つの
-仕事、**base ごとのメモを突き合わせて差し込む処理**がここにあるため。
+生成は 2 段。**分けてあるのは、シートを直したときに 2 段目だけを流し直せる
+ようにするため。**
 
-```sql
-REPLACE(diff_html, '<!--VG_NOTE-->', note_html) AS diff_html
+```
+セクション 2   INFORMATION_SCHEMA → 解析 → 描画 → viewlgc_t_diff_src
+セクション 2b  t_diff_src ＋ メモ（シート）→ viewlgc_t_diff   ← レポートが読む
+セクション 3   viewlgc_vw_t_diff = SELECT * FROM viewlgc_t_diff（互換）
 ```
 
-テーブルを直接レポートに読ませると、この置換が起きずメモのタブが空のままになる
-（目印がそのまま残る）。メモを事前生成に混ぜないのは、シートを直した内容が次の
-日次実行を待たずに出るようにするため。
+**メモの差し込みは以前ビューの中でやっていた。** シートを直した内容がその場で
+出るのが利点だったが、レポートを開くたびに
 
-ビューは 1 本だけ。以前は基準ごとに行を作っていた頃の名前
-（`viewlgc_vw_t_diff_by_ref`）も同じ中身で作っていたが、レポートのデータソースが
-`viewlgc_vw_t_diff` を読んでいることが分かったので消した。
+- スプレッドシートの外部テーブル（Drive）を読み
+- JS UDF で Markdown を HTML にし
+- 数 MB の `diff_html` に `REPLACE` をかける
+
+ので遅かった。表示速度を採って焼き込む形に変えてある。**シートを直したその場で
+反映したいときは、セクション 2b だけを流し直す**（解析も描画もやり直さないので
+軽い。読むのは `t_diff_src` とシートだけ）。
+
+ビューは 1 本だけ残してある。中身は `SELECT * FROM viewlgc_t_diff` の素通しで、
+**レポートのデータソースがこのビューを指しているから**。テーブルを直接指しても
+同じものが出る（列も並びも同じ）。
 
 ### 基準はカードの中で選ぶ
 
@@ -1274,7 +1288,11 @@ QUALIFY ROW_NUMBER() OVER (
 |---|---|
 | 12 | 型（セルの本体） |
 | 11 | 列名 / グループ見出し / 説明（日本語論理名） |
-| 10 | モード / 説明の従（英語論理名・その他のキー）/ 内訳の見出し |
+| 10 | 説明の従（英語論理名・その他のキー）/ 内訳の見出し |
+| 8 | モード（`NULLABLE` / `REQUIRED` / `REPEATED`） |
+
+**1px 差は並べても読み取れない。** いちばん弱いモードは 2 段落として 8px に
+してある（実機で 11px と 10px を見比べても違いが分からなかった）。
 
 列名は型より 1 段小さいが、太字と等幅で十分に立つ。数字を直すときは
 `preview.mjs` の「文字の大きさが重要度の順になっている」も合わせる。

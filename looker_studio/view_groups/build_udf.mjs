@@ -1132,7 +1132,8 @@ AS (%s)
 -- 置き換える目印:
 --   __TARGET_PROJECT__     読み取り対象のプロジェクト
 --   __JOB_REGION__         region- を除いたロケーション
---   __T_DIFF__             生成結果のテーブル（project.dataset.table）
+--   __T_DIFF_SRC__         生成した素のカードのテーブル（project.dataset.table）
+--   __T_DIFF__             メモを差し込み済みのテーブル。レポートはこれを読む
 --   __T_BASE_NOTE__        base ごとのメモの外部テーブル（同上）
 --   __V_DIFF__             メモを差し込むビュー。レポートはこれを読む
 --   __UDF_ANALYZE__        analyze 関数（project.dataset.function）
@@ -1161,6 +1162,7 @@ CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
   target_project_id STRING,
   job_region STRING,
   objects STRUCT<
+    diff_src          STRING,
     diff_table        STRING,
     diff_view         STRING,
     base_note         STRING,
@@ -1201,9 +1203,12 @@ AS (
   REPLACE(
   REPLACE(
   REPLACE(
+  REPLACE(
     sql_template,
     '__TARGET_PROJECT__', target_project_id),
     '__JOB_REGION__', job_region),
+    '__T_DIFF_SRC__',
+      work_project_id || '.' || work_dataset || '.' || objects.diff_src),
     '__T_DIFF__',
       work_project_id || '.' || work_dataset || '.' || objects.diff_table),
     '__T_BASE_NOTE__',

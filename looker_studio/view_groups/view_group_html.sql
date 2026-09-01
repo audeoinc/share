@@ -325,7 +325,7 @@ DECLARE css_text STRING DEFAULT r"""
 .vg-cd3{padding-left:54px}
 .vg-cnestmark{margin-right:4px;color:#8C959F;font-weight:400}
 .vg-ccell{padding:5px 12px;border:1px solid #D0D7DE;vertical-align:top;color:#24292F;overflow-wrap:anywhere;word-break:break-all;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
-.vg-cmeta{margin:2px 0 0;font:10px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;letter-spacing:.02em;color:#8C959F}
+.vg-cmeta{margin:2px 0 0;font:8px/1.6 'Roboto','Segoe UI',system-ui,sans-serif;letter-spacing:.04em;color:#8C959F}
 .vg-cdiff{background:#dfe7d2}
 .vg-cnone{color:#8C959F;background:#FAFAFA}
 .vg-cmix{box-shadow:inset 0 0 0 2px #D4A72C}
@@ -662,7 +662,8 @@ AS (%s)
 -- 置き換える目印:
 --   __TARGET_PROJECT__     読み取り対象のプロジェクト
 --   __JOB_REGION__         region- を除いたロケーション
---   __T_DIFF__             生成結果のテーブル（project.dataset.table）
+--   __T_DIFF_SRC__         生成した素のカードのテーブル（project.dataset.table）
+--   __T_DIFF__             メモを差し込み済みのテーブル。レポートはこれを読む
 --   __T_BASE_NOTE__        base ごとのメモの外部テーブル（同上）
 --   __V_DIFF__             メモを差し込むビュー。レポートはこれを読む
 --   __UDF_ANALYZE__        analyze 関数（project.dataset.function）
@@ -691,6 +692,7 @@ CREATE OR REPLACE FUNCTION `%s.%s.%s`(
   target_project_id STRING,
   job_region STRING,
   objects STRUCT<
+    diff_src          STRING,
     diff_table        STRING,
     diff_view         STRING,
     base_note         STRING,
@@ -731,9 +733,12 @@ AS (
   REPLACE(
   REPLACE(
   REPLACE(
+  REPLACE(
     sql_template,
     '__TARGET_PROJECT__', target_project_id),
     '__JOB_REGION__', job_region),
+    '__T_DIFF_SRC__',
+      work_project_id || '.' || work_dataset || '.' || objects.diff_src),
     '__T_DIFF__',
       work_project_id || '.' || work_dataset || '.' || objects.diff_table),
     '__T_BASE_NOTE__',

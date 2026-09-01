@@ -504,7 +504,9 @@ function columnsCss() {
     // 字面から分からなくなる。
     //   12px  型（セルの本体）
     //   11px  列名 / グループ見出し / 説明（日本語論理名）
-    //   10px  モード / 説明の従（英語論理名・その他のキー）/ 内訳の見出し
+    //   10px  説明の従（英語論理名・その他のキー）/ 内訳の見出し
+    //    8px  モード（NULLABLE / REQUIRED / REPEATED）
+    // 1px 差は並べても読み取れないので、いちばん弱いモードは 2 段落としてある。
     `.vg-ctable{border-collapse:collapse;font-size:12px;` +
       `width:100%;max-width:1000px;table-layout:fixed}`,
     // 列名の行はスクロールしても残す。基準になるのはカードのスクロール箱
@@ -540,8 +542,9 @@ function columnsCss() {
       `color:#24292F;overflow-wrap:anywhere;word-break:break-all;` +
       `font-family:ui-monospace,SFMono-Regular,Consolas,monospace}`,
     // モード。型より弱い情報なので、いちばん小さくして下に添える。
-    `.vg-cmeta{margin:2px 0 0;font:10px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;` +
-      `letter-spacing:.02em;color:#8C959F}`,
+    // 1px 差だと並べても違いが読み取れないので、ここだけ 2 段落とす。
+    `.vg-cmeta{margin:2px 0 0;font:8px/1.6 'Roboto','Segoe UI',system-ui,sans-serif;` +
+      `letter-spacing:.04em;color:#8C959F}`,
     // 基準と違う型。差分の「追加」側と同じ地色で、目が同じ意味に慣れるようにする。
     `.vg-cdiff{background:#dfe7d2}`,
     `.vg-cnone{color:#8C959F;background:#FAFAFA}`,

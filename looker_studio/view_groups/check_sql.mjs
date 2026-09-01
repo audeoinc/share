@@ -148,7 +148,7 @@ add('IF … RAISE ではなく ASSERT を使っている',
 // 落ちる。実行するまで分からないので、ここで並びまで突き合わせる。
 {
   const m = table.match(
-    /CREATE OR REPLACE TABLE `__T_DIFF__`\n\(\n([\s\S]*?)\n\)\nCLUSTER BY/);
+    /CREATE OR REPLACE TABLE `__T_DIFF_SRC__`\n\(\n([\s\S]*?)\n\)\nCLUSTER BY/);
   const declared = m
     ? m[1].split('\n').map((l) => (l.trim().match(/^([a-z_][a-z0-9_]*)\s/) || [])[1])
       .filter(Boolean)
@@ -187,18 +187,27 @@ add('IF … RAISE ではなく ASSERT を使っている',
 // 最新の 1 世代しか持たないので、DELETE + INSERT や TRUNCATE + INSERT に
 // 戻すと、その隙間にレポートを開いた人には何も出ない。以前はビューが
 // MAX(snapshot_date) を採っていたので隙間があっても前日分が出ていた。
-add('生成はテーブルごと差し替える（読み手に空を見せない）',
-  /CREATE OR REPLACE TABLE `__T_DIFF__`[\s\S]*?\nAS\nWITH/.test(table) &&
-  !/DELETE FROM `__T_DIFF__`/.test(table) &&
-  !/TRUNCATE TABLE `__T_DIFF__`/.test(table) &&
-  !/INSERT INTO `__T_DIFF__`/.test(table));
+for (const t of ['__T_DIFF_SRC__', '__T_DIFF__']) {
+  add(`${t} はテーブルごと差し替える（読み手に空を見せない）`,
+    new RegExp(`CREATE OR REPLACE TABLE \`${t}\`[\\s\\S]*?\\nAS\\nWITH`).test(table) &&
+    !new RegExp(`DELETE FROM \`${t}\``).test(table) &&
+    !new RegExp(`TRUNCATE TABLE \`${t}\``).test(table) &&
+    !new RegExp(`INSERT INTO \`${t}\``).test(table));
+}
 
-// --- 5d. ビューがメモを差し込んでいるか --------------------------------
-// 「最新だけを採る」仕事が無くなってもビューは要る。テーブルを直接読ませると
-// メモのタブが空のまま（目印が置き換わらない）になる。
-add('ビューはテーブルを直に読ませず、メモを差し込む',
-  (table.match(/CREATE OR REPLACE VIEW/g) || []).length === 1 &&
-  !/snapshot_date = \(\n\s*SELECT MAX\(snapshot_date\)/.test(table));
+// --- 5d. メモの差し込みが焼き込み側にあるか ----------------------------
+// 以前はビューの中で差し込んでいた（シートを直すとその場で出る）が、レポートを
+// 開くたびに外部テーブルを読んで JS UDF を回すので遅かった。焼き込む側
+// （__T_DIFF__ を作る文）に移してある。ビューはその素通し。
+{
+  const at = table.indexOf('CREATE OR REPLACE TABLE `__T_DIFF__`');
+  const vAt = table.indexOf('CREATE OR REPLACE VIEW');
+  const splice = table.indexOf("REPLACE(diff_html, '<!--VG_NOTE-->'");
+  add('メモの差し込みは焼き込み側にある（ビューは素通し）',
+    at > 0 && vAt > at && splice > at && splice < vAt &&
+    (table.match(/CREATE OR REPLACE VIEW/g) || []).length === 1 &&
+    /CREATE OR REPLACE VIEW `__V_DIFF__` AS\nSELECT \* FROM `__T_DIFF__`/.test(table));
+}
 
 // --- 5e. STRING_AGG の区切りがリテラルか ------------------------------
 // BigQuery は STRING_AGG の第 2 引数（区切り文字）にリテラルかクエリ

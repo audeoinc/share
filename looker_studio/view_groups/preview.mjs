@@ -870,8 +870,8 @@ const checks = [
     const sub = size('vg-cdescsub');
     const who = size('vg-cdescwho');
     return type === 12 && name === 11 && head === 11 && desc === 11 &&
-      meta === 10 && sub === 10 && who === 10 &&
-      type > name && name > meta;
+      sub === 10 && who === 10 && meta === 8 &&
+      type > name && name > sub && sub > meta;
   })()],
   ['カラム定義の CSS は columns.js 側にある',
     Co.columnsCss().includes('.vg-ctable') && !R.chromeCss().includes('.vg-ctable')],

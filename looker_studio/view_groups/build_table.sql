@@ -29,9 +29,10 @@
 -- プレースホルダ（展開は viewlgc_render_dynamic_sql が行う）:
 --   __TARGET_PROJECT__     読み取り対象のプロジェクト
 --   __JOB_REGION__         region- を除いたロケーション
---   __T_DIFF__             生成結果のテーブル（project.dataset.table）
+--   __T_DIFF_SRC__         生成した素のカードのテーブル（project.dataset.table）
+--   __T_DIFF__             メモを差し込み済みのテーブル。レポートはこれを読む
 --   __T_BASE_NOTE__        base ごとのメモの外部テーブル（同上）
---   __V_DIFF__             メモを差し込むビュー。レポートはこれを読む
+--   __V_DIFF__             __T_DIFF__ をそのまま返すビュー（互換のため）
 --   __UDF_ANALYZE__        analyze 関数（project.dataset.function）
 --   __UDF_RENDER__         render 関数（同上）
 --   __UDF_PAGE__           参照関係を作り差分と束ねる関数（同上）
@@ -49,7 +50,7 @@
 -- クエリ パラメータにできないのでこの目印で渡す。配列や JSON は値なので
 -- USING のパラメータで渡す。
 --
--- スケジュールドクエリには CONFIGURATION と セクション 2 を登録する
+-- スケジュールドクエリには CONFIGURATION と セクション 2・2b を登録する
 -- （1 と 3 は初回だけ、5 は確認用なので不要）。
 --
 -- メモ（base ごとの補足説明）について:
@@ -57,8 +58,12 @@
 --   として読み、base で突き合わせてビューに note_html（Markdown を HTML に
 --   したもの）として出す。未設定なら空のテーブルを作るので、ビューの形は
 --   変わらない（メモ欄が「未登録」になるだけ）。
---   メモを HTML にするのは事前生成ではなくビューの中。書き換えた内容が次の
---   日次実行を待たずにレポートへ出るようにするため。
+--   メモを HTML にするのはセクション 2b。**ここは以前ビューの中でやっていた**
+--   （書き換えた内容がその場で出るようにするため）が、レポートを開くたびに
+--   スプレッドシートの外部テーブルを読んで JS UDF を回すので遅かった。
+--   表示速度を採って、日次で焼き込む形に変えてある。
+--   シートを直したその場で反映したいときは、セクション 2b だけを流し直す
+--   （解析も描画もやり直さないので軽い）。
 -- =====================================================================
 SET @@location = 'asia-northeast1';
 
@@ -264,7 +269,8 @@ DECLARE project_token      STRING;
 -- 作るオブジェクトの物理名（下の SET で組み立てる）。データセット名は含まない。
 -- オブジェクトが増えたらここに 1 行足し、SET と本文の __…__ を対で増やし、
 -- viewlgc_render_dynamic_sql にも置換を 1 段足す。
-DECLARE table_diff      STRING;  -- 生成結果のテーブル（最新の 1 世代だけ）
+DECLARE table_diff_src  STRING;  -- 生成した素のカード（メモを差し込む前）
+DECLARE table_diff      STRING;  -- レポートが読むテーブル（メモ差し込み済み）
 DECLARE table_base_note STRING;  -- base ごとのメモ（スプレッドシートの外部テーブル）
 DECLARE view_diff       STRING;  -- レポートが読むビュー。メモを差し込む
 
@@ -325,8 +331,11 @@ ASSERT REGEXP_CONTAINS(udf_dataset, r'^[A-Za-z0-9_]+$') AS
 -- ビュー  : prefix + system_name + '_' + 'vw_' + 区分 + 基本名 + suffix
 -- 区分 't_' は transaction（'m_' は master）。
 -- テーブルとビューは基本名が同じ 'diff' で、'vw_' の有無だけで見分ける。
+-- 素のカードだけを持つ中間テーブルには '_src' を付ける。
 ASSERT REGEXP_CONTAINS(system_name, r'^[A-Za-z0-9_]+$') AS
   'system_name は英数字と _ だけにしてください（ルーチン名に - は使えません）。';
+SET table_diff_src =
+  table_name_prefix || system_name || '_' || 't_' || 'diff_src' || table_name_suffix;
 SET table_diff =
   table_name_prefix || system_name || '_' || 't_' || 'diff' || table_name_suffix;
 -- メモは View のデプロイでは変わらない台帳なので 'm_'（master）。
@@ -334,6 +343,8 @@ SET table_base_note =
   table_name_prefix || system_name || '_' || 'm_' || 'base_note' || table_name_suffix;
 SET view_diff =
   table_name_prefix || system_name || '_' || 'vw_' || 't_' || 'diff' || table_name_suffix;
+ASSERT REGEXP_CONTAINS(table_diff_src, r'^[A-Za-z0-9_-]+$') AS
+  'table_diff_src の名前が不正です。';
 ASSERT REGEXP_CONTAINS(table_diff, r'^[A-Za-z0-9_-]+$') AS
   'table_diff の名前が不正です。';
 ASSERT REGEXP_CONTAINS(table_base_note, r'^[A-Za-z0-9_-]+$') AS
@@ -414,11 +425,11 @@ SET view_name_condition = CONCAT(
 -- 固定の設定はここで焼き込み、テンプレートだけを @sql_template で渡す。
 -- 値は %T で埋める。条件文には引用符が入るので、%s だと壊れる。
 SET render_call_sql = FORMAT(
-  """SELECT `%s.%s.%s`(@sql_template, %T, %T, %T, %T, %T, %T, STRUCT(%T AS diff_table, %T AS diff_view, %T AS base_note, %T AS analyze_function, %T AS render_function, %T AS page_function, %T AS markdown_function, %T AS css_function), STRUCT(%T AS time_zone, %T AS suffix_pattern, %T AS note_sheet_url, %T AS note_sheet_range), STRUCT(%T AS schema_condition, %T AS view_dataset_condition, %T AS view_name_condition))""",
+  """SELECT `%s.%s.%s`(@sql_template, %T, %T, %T, %T, %T, %T, STRUCT(%T AS diff_src, %T AS diff_table, %T AS diff_view, %T AS base_note, %T AS analyze_function, %T AS render_function, %T AS page_function, %T AS markdown_function, %T AS css_function), STRUCT(%T AS time_zone, %T AS suffix_pattern, %T AS note_sheet_url, %T AS note_sheet_range), STRUCT(%T AS schema_condition, %T AS view_dataset_condition, %T AS view_name_condition))""",
   udf_project_id, udf_dataset, udf_sql_function_name,
   work_project_id, work_dataset, udf_project_id, udf_dataset,
   target_project_id, job_region,
-  table_diff, view_diff, table_base_note,
+  table_diff_src, table_diff, view_diff, table_base_note,
   udf_analyze_function_name, udf_render_function_name,
   udf_page_function_name, udf_markdown_function_name, udf_css_function_name,
   snapshot_time_zone, suffix_pattern,
@@ -467,6 +478,13 @@ ASSERT target_dataset_count > 0 OR ARRAY_LENGTH(suffix_list) > 0 AS
 --    差分のテーブルはここでは作らない。セクション 2 が毎回
 --    CREATE OR REPLACE TABLE ... AS SELECT で作り直すので、置き場所を先に
 --    用意しておく必要がない。初回もセクション 2 だけで揃う。
+--
+--    作るオブジェクトは 4 つ。
+--
+--      viewlgc_t_diff_src   セクション 2 が作る。素のカード（メモ差し込み前）
+--      viewlgc_t_diff       セクション 2b が作る。**レポートが読むのはこれ**
+--      viewlgc_vw_t_diff    セクション 3。t_diff の素通し（互換のため残す）
+--      viewlgc_m_base_note  ここで作る。メモのスプレッドシート
 --
 --    【1 回きりの後片付け】名前を変える前・ビューを 2 本作っていた頃の
 --    オブジェクトは、名前が違うので新しい実行では触られず、そのまま残る。
@@ -540,7 +558,11 @@ END IF;
 
 
 -- ---------------------------------------------------------------------
--- 2. 生成（スケジュールドクエリに登録する本体）
+-- 2. 生成（スケジュールドクエリに登録する本体・その 1）
+--
+--    出すのは**素のカード**（メモを差し込む前）。メモを繋ぐのはセクション 2b。
+--    分けてあるのは、シートを直したときに 2b だけを流し直せるようにするため。
+--    こちらは解析も描画もやり直すので重い。
 --
 --    持つのは最新の 1 世代だけ。テーブルごと作り直す。
 --
@@ -556,7 +578,7 @@ END IF;
 --    初回もこの 1 文でテーブルができる。セクション 1 は要らない。
 -- ---------------------------------------------------------------------
 SET sql_template = """
-CREATE OR REPLACE TABLE `__T_DIFF__`
+CREATE OR REPLACE TABLE `__T_DIFF_SRC__`
 (
   snapshot_date   DATE           OPTIONS (description = '生成日。履歴は持たないので、常に最後に実行した日'),
   base            STRING         OPTIONS (description = 'suffix を除いた View 名。Looker のキー。suffix を認識できなかった View は View 名そのもの'),
@@ -574,7 +596,7 @@ CREATE OR REPLACE TABLE `__T_DIFF__`
 )
 CLUSTER BY base
 OPTIONS (
-  description = 'suffix 違い View のロジック グループ比較（事前生成・最新の 1 世代だけ）'
+  description = 'suffix 違い View のロジック グループ比較（素のカード。メモを差し込む前）'
 )
 AS
 WITH
@@ -871,41 +893,35 @@ USING suffix_list AS suffix_list,
 
 
 -- ---------------------------------------------------------------------
--- 3. Looker Studio が読むビュー（初回のみ）
+-- 2b. メモの差し込み（スケジュールドクエリに登録する本体・その 2）
 --
---    **ビューはメモのために要る。** 最新の 1 世代しか持たなくなったので
---    「最新だけを採る」仕事は無くなったが、ビューの本体はもう一つのほう、
---    base ごとのメモを突き合わせて差し込む処理。テーブルを直接読ませると
---    メモのタブが空のまま（目印 <!--VG_NOTE--> が置き換わらない）になる。
+--     素のカード（__T_DIFF_SRC__）に base ごとのメモを繋いで、レポートが読む
+--     テーブル（__T_DIFF__）を作る。
 --
---    メモだけを事前生成に混ぜないのは、シートを直した内容が次の日次実行を
---    待たずにレポートへ出るようにするため。ここはビューのままにする。
+--     **ここは以前ビューの中でやっていた。** シートを直した内容がその場で
+--     出るのが利点だったが、レポートを開くたびにスプレッドシートの外部テーブルを
+--     読んで JS UDF（Markdown → HTML）を回し、数 MB の文字列に REPLACE を
+--     かけるので遅かった。表示速度を採って焼き込む形に変えてある。
 --
---    ビューは 1 本だけ。以前は基準ごとに行を作っていた頃の名前
---    （__V_DIFF_BY_REF__）も同じ中身で作っていたが、レポートのデータソースが
---    __V_DIFF__ を読んでいることが分かったので消した。
+--     **シートを直したその場で反映したいときは、このセクションだけを流し直す。**
+--     解析も描画もやり直さないので軽い（読むのは __T_DIFF_SRC__ とシートだけ）。
 --
---    基準はカードの中のタブで選ぶので、行は base ごとに 1 本しかない。
---    base のコントロール 1 つで 1 レコードに決まる。
---    **レポートの ref_label のコントロールは外してよい**（値が 1 つしか
---    出てこないため）。
+--     note タブに出すのは 2 つを繋いだもの。View 自身の description（Markdown）
+--     が先で、シートのメモが続く。片方しか無ければそれだけを出す。
+--       description  View に付いた正式な説明。デプロイでしか変わらない
+--       シート       運用中の補足
+--     区切りは水平線。出どころが違うことが読み手に分かるようにする。
 --
---    note タブに出すのは 2 つを繋いだもの。View 自身の description（Markdown）
---    が先で、シートのメモが続く。片方しか無ければそれだけを出す。
---      description  View に付いた正式な説明。デプロイでしか変わらない
---      シート       運用中の補足。書き換えたらその場で出る
---    区切りは水平線。出どころが違うことが読み手に分かるようにする。
---
---    ビューは base ごとのメモを LEFT JOIN して、note_html（Markdown を
---    HTML にしたもの）を持つ。同じデータソースに入れてあるので、レポートの
---    base のコントロールがメモのチャートにもそのまま効く。別データソースに
---    すると Looker Studio のコントロールが跨がらず、2 組そろえる必要が出る。
---
---    HTML にするのは事前生成ではなくここ（ビュー）。シートを直した内容が
---    次の日次実行を待たずに出るようにするため。
+--     列の説明（OPTIONS）は付けない。SELECT * で受けているので列リストを
+--     書くと二重管理になる。素のカード側（__T_DIFF_SRC__）には付けてある。
 -- ---------------------------------------------------------------------
 SET sql_template = """
-CREATE OR REPLACE VIEW `__V_DIFF__` AS
+CREATE OR REPLACE TABLE `__T_DIFF__`
+CLUSTER BY base
+OPTIONS (
+  description = 'suffix 違い View のロジック グループ比較（メモ差し込み済み。レポートはこれを読む）'
+)
+AS
 WITH notes AS (
   -- base ごとに 1 行に絞る。シートは人が手で足すので、同じ base の行が
   -- 増えることがある。落とすのではなく、いちばん新しいものを採る。
@@ -930,13 +946,7 @@ joined AS (
     n.base IS NOT NULL            AS has_note,
     n.note_md                     AS note_md,
     d.view_desc_md IS NOT NULL    AS has_view_desc,
-    -- note タブに出す Markdown。View 自身の description が先で、シートの
-    -- メモが続く。どちらも無いこと・片方だけあることがあるので、空のものを
-    -- 落としてから繋ぐ（そうしないと区切り線だけが残る）。
-    --
-    -- 区切りは Markdown の水平線。description は View に付いた正式な説明、
-    -- シートは運用中の補足で、出どころが違うことが読み手に分かるようにする。
-    --
+    -- 空のものを落としてから繋ぐ（そうしないと区切り線だけが残る）。
     -- 改行はエスケープ表記で書けない（テンプレートにバックスラッシュを
     -- 禁じているため。node check_sql.mjs が見張る）ので CHR(10) で組み立てる。
     ARRAY_TO_STRING(
@@ -949,10 +959,8 @@ joined AS (
     )                             AS note_source_md,
     n.updated_at                  AS note_updated_at,
     n.updated_by                  AS note_updated_by
-  FROM `__T_DIFF__` AS d
+  FROM `__T_DIFF_SRC__` AS d
   LEFT JOIN notes AS n ON n.base = d.base
-  -- 絞り込みは要らない。テーブルは最新の 1 世代しか持たず、
-  -- 行も base ごとに 1 本（ref_index は常に 0）。
 ),
 -- Markdown を HTML にするのは 1 回だけ。カードに差し込む側と、単独で置きたい
 -- とき用の note_html で同じものを使う。
@@ -964,11 +972,35 @@ rendered AS (
 )
 SELECT
   * EXCEPT (diff_html, ref_index, ref_label, note_source_md),
-  -- 事前生成したカードのメモ タブに、いま読んだメモを差し込む。目印は
+  -- 作り置きしたカードのメモ タブに、いま読んだメモを差し込む。目印は
   -- chrome.js の NOTE_MARK と同じ文字列（node check_sql.mjs が突き合わせる）。
-  -- カードごと作り置きしないのは、シートを直した内容をその場で出すため。
   REPLACE(diff_html, '<!--VG_NOTE-->', note_html) AS diff_html
 FROM rendered
+""";
+EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+  'メモ差し込みの SQL に未展開のプレースホルダが残っています。';
+EXECUTE IMMEDIATE rendered_sql;
+
+
+-- ---------------------------------------------------------------------
+-- 3. Looker Studio が読むビュー（初回のみ）
+--
+--    中身は __T_DIFF__ をそのまま返すだけ。**残してあるのは互換のため**で、
+--    レポートのデータソースがこのビューを指しているから。テーブルを直接
+--    指しても同じものが出る（列も並びも同じ）。
+--
+--    メモの差し込みはセクション 2b に移した。ビューの中でやっていた頃は、
+--    レポートを開くたびにスプレッドシートを読んで JS UDF を回していた。
+--
+--    基準はカードの中のタブで選ぶので、行は base ごとに 1 本しかない。
+--    base のコントロール 1 つで 1 レコードに決まる。
+--    **レポートの ref_label のコントロールは外してよい**（値が 1 つしか
+--    出てこないため）。
+-- ---------------------------------------------------------------------
+SET sql_template = """
+CREATE OR REPLACE VIEW `__V_DIFF__` AS
+SELECT * FROM `__T_DIFF__`
 """;
 EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
 ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
@@ -990,6 +1022,9 @@ EXECUTE IMMEDIATE rendered_sql;
 
 -- ---------------------------------------------------------------------
 -- 5. 確認（ここから下は実行される）
+--
+--    読むのは __V_DIFF__（= __T_DIFF__ の素通し）なので、セクション 2b まで
+--    流したあとの状態を見ることになる。
 --
 --    それぞれ 1 文ずつ結果が出る。BigQuery の結果タブは番号しか出ないので、
 --    どのクエリの結果かが分かるよう先頭に check_name を付けてある。上から順に
