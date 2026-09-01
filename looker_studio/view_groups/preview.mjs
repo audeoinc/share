@@ -710,7 +710,9 @@ const checks = [
     /\.vg-ctable\{[^}]*max-width:1000px/.test(Co.columnsCss())],
   ['カラム定義は横スクロールさせない（幅はグループ数で均等割り）', (() => {
     const h = columnCases[0].html;
-    const cols = [...h.matchAll(/<col style="width:([\d.]+)%">/g)].map((m) => Number(m[1]));
+    // 外側の表の colgroup だけを見る。セルの中の説明の表にも <col> がある。
+    const outer = (h.match(/<table class="vg-ctable">(<colgroup>[\s\S]*?<\/colgroup>)/) || [])[1] || '';
+    const cols = [...outer.matchAll(/<col style="width:([\d.]+)%">/g)].map((m) => Number(m[1]));
     const css = Co.columnsCss();
     return cols.length === base3.groupCount + 1 &&
       Math.abs(cols.reduce((a, b) => a + b, 0) - 100) < 0.01 &&
@@ -846,6 +848,16 @@ const checks = [
     const keys = [...h.matchAll(/<th class="vg-cdk">([^<]*)<\/th>/g)].map((m) => m[1]);
     // 日本語 -> 英語 -> 残り。綴りは言い換えない
     return keys.join(',') === 'name_ja,name_en,unit';
+  })()],
+  // 列幅を明示しないと、値側の width:100% でキー側が最小幅まで詰められる。
+  // キーは折り返し可なので、その最小幅が 1 文字になってキーが縦に伸びる。
+  ['説明の表は列幅を明示する（キー列が 1 文字に潰れない）', (() => {
+    const h = Co.descHtml(JSON.stringify({ ja: '受注日' }));
+    const css = Co.columnsCss();
+    return h.includes('<colgroup><col style="width:30%"><col style="width:70%"></colgroup>') &&
+      /\.vg-cdtable\{[^}]*table-layout:fixed/.test(css) &&
+      // 値側に width:100% を置くと auto レイアウトでキーが潰れる。置かない
+      !/\.vg-cdv\{[^}]*width:100%/.test(css);
   })()],
   ['値に : が入っていてもキーと混ざらない', (() => {
     const h = Co.descHtml(JSON.stringify({ ja: '受注日', note: '10:00 に確定' }));

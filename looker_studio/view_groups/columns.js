@@ -140,7 +140,18 @@ function descHtml(text) {
   const rows = d.pairs.map((p) =>
     `<tr><th class="vg-cdk">${esc(p.key)}</th>` +
     `<td class="vg-cdv">${esc(p.value)}</td></tr>`).join('');
-  return `<table class="vg-cdtable">${rows}</table>`;
+  // ★ 列幅は明示する。ブラウザまかせ（table-layout:auto）だと、値側に
+  //   width:100% を置いた時点でキー側は「最小幅」まで詰められる。キーを
+  //   折り返し可にしてあるとその最小幅が 1 文字になり、キーが縦に伸びる。
+  //   実際にそれで一度出した。
+  //
+  //   30% は妥協点。キーが短いと（ja / en）左に余白が出るが、はみ出すよりよい。
+  //   逆にキーが長くグループも多いと折り返しで縦に伸びる（実測: 6 グループで
+  //   セル 132px・キー列 32px のとき logical_name_ja が 4 行）。キーの綴りに
+  //   合わせて動かすなら、この数字 1 つで済む。
+  return `<table class="vg-cdtable">` +
+    `<colgroup><col style="width:30%"><col style="width:70%"></colgroup>` +
+    `${rows}</table>`;
 }
 
 /**
@@ -543,14 +554,15 @@ function columnsCss() {
     // description が JSON だったときの 2 列の表。キーと値を縦線で分ける。
     // 'key: value' の 1 行だと、値に ':' が入っていると切れ目が読めない。
     // table-layout は auto。キーの長さはまちまちで、値のほうを広く取りたい。
-    `.vg-cdtable{margin:3px 0 0;border-collapse:collapse;width:100%}`,
+    `.vg-cdtable{margin:3px 0 0;border-collapse:collapse;width:100%;` +
+      `table-layout:fixed}`,
     // キーは折り返させる。グループが多いとセルが細くなるので、nowrap にすると
     // 長いキー（logical_name_ja など）でセルからはみ出す。
     `.vg-cdk{padding:1px 6px 1px 0;border-right:1px solid #EAEEF2;text-align:left;` +
       `vertical-align:top;overflow-wrap:anywhere;` +
       `font:10px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;` +
       `font-weight:600;color:#8C959F}`,
-    `.vg-cdv{padding:1px 0 1px 6px;vertical-align:top;width:100%;` +
+    `.vg-cdv{padding:1px 0 1px 6px;vertical-align:top;` +
       `font:11px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;` +
       `font-weight:400;color:#57606A;overflow-wrap:anywhere}`,
     // グループの中で説明が割れているときに、どの View のものかを示す見出し。
