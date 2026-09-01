@@ -1,0 +1,792 @@
+<title>main.py と demo.py の読み方</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zen+Old+Mincho:wght@400;700&family=Noto+Sans+JP:wght@400;500;700&family=JetBrains+Mono:wght@400;700&display=swap">
+<style>
+:root{
+  --paper:#F6F7F4; --card:#FFFFFF; --ink:#1A1F1B; --ink-soft:#4E5A52; --ink-faint:#7C8880;
+  --rule:#DFE3DC; --rule-soft:#EBEEE8;
+  --accent:#0E6B4B; --accent-soft:#E4EFE8; --accent-line:#BEDACB;
+  --warn:#8A5B08; --warn-soft:#F6EDDB; --warn-line:#E4CFA3;
+  --blue:#1F5FA8;
+  --code-bg:#F1F3EE; --term-bg:#1C221D; --term-ink:#DDE4DC; --term-faint:#8B9A8D;
+  --shadow:0 1px 2px rgba(26,31,27,.05), 0 8px 24px -16px rgba(26,31,27,.28);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#131714; --card:#1A1F1A; --ink:#E7ECE5; --ink-soft:#A9B4AA; --ink-faint:#7E8A80;
+    --rule:#2C332D; --rule-soft:#232A24;
+    --accent:#63C99C; --accent-soft:#1D2B24; --accent-line:#2E4A3C;
+    --warn:#DDA84A; --warn-soft:#2C2418; --warn-line:#4A3B20;
+    --blue:#82B6EA;
+    --code-bg:#171C18; --term-bg:#0D110E; --term-ink:#DDE4DC; --term-faint:#7E8A80;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#131714; --card:#1A1F1A; --ink:#E7ECE5; --ink-soft:#A9B4AA; --ink-faint:#7E8A80;
+  --rule:#2C332D; --rule-soft:#232A24;
+  --accent:#63C99C; --accent-soft:#1D2B24; --accent-line:#2E4A3C;
+  --warn:#DDA84A; --warn-soft:#2C2418; --warn-line:#4A3B20;
+  --blue:#82B6EA;
+  --code-bg:#171C18; --term-bg:#0D110E; --term-ink:#DDE4DC; --term-faint:#7E8A80;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:"Noto Sans JP","Hiragino Kaku Gothic ProN","Yu Gothic",system-ui,sans-serif;
+  font-size:16px; line-height:1.9; margin:0;
+  -webkit-font-smoothing:antialiased;
+}
+code,pre,.mono{font-family:"JetBrains Mono","Noto Sans JP",ui-monospace,SFMono-Regular,Menlo,monospace}
+
+.wrap{max-width:1180px; margin:0 auto; padding:0 24px; display:grid; grid-template-columns:1fr; gap:0}
+.col{max-width:780px; width:100%; margin:0 auto}
+
+/* ---------- header ---------- */
+header.top{border-bottom:1px solid var(--rule); background:var(--card)}
+header.top .col{padding:64px 0 48px}
+.eyebrow{
+  font-size:12px; letter-spacing:.16em; text-transform:uppercase; color:var(--accent);
+  font-weight:700; margin:0 0 18px
+}
+h1{
+  font-family:"Zen Old Mincho","Yu Mincho",serif; font-weight:700;
+  font-size:clamp(30px,5vw,46px); line-height:1.35; letter-spacing:.01em;
+  margin:0 0 20px; text-wrap:balance
+}
+.lead{font-size:17px; color:var(--ink-soft); margin:0; max-width:62ch}
+.meta{
+  margin-top:28px; padding-top:20px; border-top:1px solid var(--rule-soft);
+  display:flex; flex-wrap:wrap; gap:8px 20px; font-size:13px; color:var(--ink-faint)
+}
+.meta b{color:var(--ink-soft); font-weight:500}
+
+/* ---------- sections ---------- */
+main .col{padding:8px 0 0}
+section{padding:52px 0; border-bottom:1px solid var(--rule-soft)}
+section:last-child{border-bottom:0}
+h2{
+  font-family:"Zen Old Mincho","Yu Mincho",serif; font-weight:700;
+  font-size:26px; line-height:1.5; margin:0 0 8px; text-wrap:balance;
+  display:flex; align-items:baseline; gap:12px
+}
+h2 .num{
+  font-family:"JetBrains Mono",monospace; font-size:13px; font-weight:700;
+  color:var(--accent); letter-spacing:.04em; flex:none
+}
+.sub{color:var(--ink-faint); font-size:14px; margin:0 0 30px; padding-left:34px}
+h3{font-size:17px; font-weight:700; margin:38px 0 12px; letter-spacing:.01em}
+h4{font-size:15px; font-weight:700; margin:26px 0 10px; color:var(--ink-soft)}
+p{margin:0 0 16px}
+p:last-child{margin-bottom:0}
+a{color:var(--accent)}
+strong{font-weight:700}
+ul,ol{margin:0 0 16px; padding-left:1.35em}
+li{margin:0 0 8px}
+:focus-visible{outline:2px solid var(--accent); outline-offset:3px; border-radius:3px}
+
+/* ---------- inline code ---------- */
+p code,li code,td code,dd code,dt code{
+  background:var(--code-bg); border:1px solid var(--rule-soft); border-radius:4px;
+  padding:.08em .38em; font-size:.85em
+}
+
+/* ---------- code block ---------- */
+.block{margin:24px 0 8px}
+.block .file{
+  display:flex; align-items:center; justify-content:space-between; gap:12px;
+  background:var(--card); border:1px solid var(--rule); border-bottom:0;
+  border-radius:8px 8px 0 0; padding:9px 16px;
+  font-family:"JetBrains Mono",monospace; font-size:12px; color:var(--ink-faint)
+}
+.block .file .tag{color:var(--accent); font-weight:700}
+pre{
+  margin:0; background:var(--code-bg); border:1px solid var(--rule);
+  border-radius:0 0 8px 8px; padding:18px 16px; overflow-x:auto;
+  font-size:13.5px; line-height:1.75
+}
+.block.solo pre{border-radius:8px}
+pre code{background:none; border:0; padding:0; color:var(--ink)}
+
+/* highlight.js tokens, mapped onto our palette */
+.hljs-keyword,.hljs-built_in{color:var(--accent); font-weight:700}
+.hljs-string{color:var(--warn)}
+.hljs-comment{color:var(--ink-faint); font-style:italic}
+.hljs-number,.hljs-literal,.hljs-meta{color:var(--blue)}
+.hljs-title,.hljs-title.function_,.hljs-title.class_{color:var(--ink); font-weight:700}
+.hljs-params,.hljs-attr,.hljs-property{color:var(--ink)}
+
+/* ---------- annotations ---------- */
+.notes{
+  border:1px solid var(--rule); border-top:0; border-radius:0 0 8px 8px;
+  background:var(--card); overflow:hidden; margin:-8px 0 0
+}
+.block + .notes{margin-top:-1px}
+.block:has(+ .notes) pre{border-radius:0}
+.note{
+  display:grid; grid-template-columns:210px 1fr; gap:4px 18px;
+  padding:16px 18px; border-top:1px solid var(--rule-soft); align-items:start
+}
+.note:first-child{border-top:0}
+.note > code{
+  font-size:12px; line-height:1.6; color:var(--accent); font-weight:700;
+  background:var(--accent-soft); border:1px solid var(--accent-line); border-radius:5px;
+  padding:5px 8px; overflow-wrap:anywhere
+}
+.note.w > code{color:var(--warn); background:var(--warn-soft); border-color:var(--warn-line)}
+.note p{margin:0; font-size:14.5px; line-height:1.85}
+.note p + p{margin-top:8px}
+
+/* ---------- callouts ---------- */
+.callout{
+  background:var(--card); border:1px solid var(--rule); border-left:3px solid var(--accent);
+  border-radius:0 8px 8px 0; padding:18px 20px; margin:24px 0; font-size:14.5px
+}
+.callout.warn{border-left-color:var(--warn)}
+.callout .label{
+  display:block; font-size:11px; letter-spacing:.14em; text-transform:uppercase;
+  font-weight:700; color:var(--accent); margin-bottom:8px
+}
+.callout.warn .label{color:var(--warn)}
+.callout p{font-size:14.5px}
+
+/* ---------- two cards (main vs demo) ---------- */
+.pair{display:grid; grid-template-columns:1fr 1fr; gap:16px; margin:26px 0}
+.pair .card{
+  background:var(--card); border:1px solid var(--rule); border-radius:10px;
+  padding:22px; box-shadow:var(--shadow)
+}
+.pair .card .role{
+  font-size:11px; letter-spacing:.14em; text-transform:uppercase; font-weight:700;
+  color:var(--ink-faint); margin:0 0 10px
+}
+.pair .card h3{
+  margin:0 0 10px; font-family:"JetBrains Mono",monospace; font-size:16px; color:var(--accent)
+}
+.pair .card p{font-size:14px; margin:0; color:var(--ink-soft)}
+
+/* ---------- diagram ---------- */
+figure{margin:30px 0; background:var(--card); border:1px solid var(--rule); border-radius:10px; padding:24px 20px}
+figure svg{display:block; width:100%; height:auto}
+figcaption{margin-top:16px; font-size:13px; color:var(--ink-faint); text-align:center}
+
+/* ---------- glossary ---------- */
+dl.gloss{margin:0; display:grid; grid-template-columns:1fr; gap:0}
+dl.gloss > div{
+  display:grid; grid-template-columns:190px 1fr; gap:6px 18px;
+  padding:16px 0; border-top:1px solid var(--rule-soft)
+}
+dl.gloss > div:first-child{border-top:0}
+dl.gloss dt{font-weight:700; font-size:14.5px}
+dl.gloss dt span{display:block; font-weight:400; font-size:12px; color:var(--ink-faint); font-family:"JetBrains Mono",monospace; margin-top:2px}
+dl.gloss dd{margin:0; font-size:14.5px; color:var(--ink-soft)}
+
+/* ---------- table ---------- */
+.scroll{overflow-x:auto; margin:22px 0; border:1px solid var(--rule); border-radius:8px; background:var(--card)}
+table{border-collapse:collapse; width:100%; font-size:14px; min-width:520px}
+th,td{text-align:left; padding:12px 16px; border-bottom:1px solid var(--rule-soft); vertical-align:top}
+th{font-size:12px; letter-spacing:.06em; color:var(--ink-faint); font-weight:700; background:var(--rule-soft)}
+tr:last-child td{border-bottom:0}
+td.mono{font-family:"JetBrains Mono",monospace; font-size:12.5px; white-space:nowrap}
+
+/* ---------- terminal ---------- */
+.term{
+  background:var(--term-bg); border:1px solid var(--rule); border-radius:10px;
+  padding:0; overflow:hidden; margin:24px 0
+}
+.term .bar{
+  padding:9px 16px; border-bottom:1px solid rgba(255,255,255,.08);
+  font-family:"JetBrains Mono",monospace; font-size:12px; color:var(--term-faint)
+}
+.term pre{
+  background:none; border:0; border-radius:0; color:var(--term-ink);
+  padding:16px; font-size:12.5px; line-height:1.9
+}
+.term .g{color:#63C99C}
+.term .o{color:#DDA84A}
+.term .d{color:var(--term-faint)}
+
+/* ---------- faq ---------- */
+details{
+  background:var(--card); border:1px solid var(--rule); border-radius:8px;
+  padding:0; margin:0 0 10px
+}
+summary{
+  cursor:pointer; padding:15px 18px; font-weight:700; font-size:15px; list-style:none;
+  display:flex; gap:12px; align-items:baseline
+}
+summary::-webkit-details-marker{display:none}
+summary::before{content:"?"; color:var(--accent); font-family:"JetBrains Mono",monospace; font-weight:700; flex:none}
+details[open] summary{border-bottom:1px solid var(--rule-soft)}
+details .body{padding:16px 18px 18px 42px; font-size:14.5px; color:var(--ink-soft)}
+details .body p{font-size:14.5px}
+
+/* ---------- checklist ---------- */
+ol.steps{list-style:none; padding:0; margin:22px 0; counter-reset:s}
+ol.steps li{
+  counter-increment:s; display:grid; grid-template-columns:30px 1fr; gap:14px;
+  padding:14px 0; border-top:1px solid var(--rule-soft); margin:0
+}
+ol.steps li:first-child{border-top:0}
+ol.steps li::before{
+  content:counter(s); font-family:"JetBrains Mono",monospace; font-size:12px; font-weight:700;
+  color:var(--accent); background:var(--accent-soft); border:1px solid var(--accent-line);
+  border-radius:50%; width:26px; height:26px; display:grid; place-items:center
+}
+ol.steps b{display:block; font-size:15px; margin-bottom:2px}
+ol.steps span{font-size:14px; color:var(--ink-soft)}
+
+/* ---------- toc ---------- */
+nav.toc{display:none}
+@media (min-width:1120px){
+  .wrap{grid-template-columns:210px 1fr; gap:48px; align-items:start}
+  header.top .wrap{grid-template-columns:1fr}
+  header.top .col{margin:0}
+  main .col{margin:0}
+  nav.toc{
+    display:block; position:sticky; top:0; padding:64px 0 40px; font-size:13px
+  }
+  nav.toc .t{
+    font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-faint);
+    font-weight:700; margin-bottom:14px
+  }
+  nav.toc a{
+    display:block; padding:6px 0 6px 12px; color:var(--ink-soft); text-decoration:none;
+    border-left:2px solid var(--rule); transition:color .15s, border-color .15s
+  }
+  nav.toc a:hover{color:var(--accent); border-left-color:var(--accent)}
+}
+@media (max-width:640px){
+  body{font-size:15px}
+  header.top .col{padding:44px 0 34px}
+  section{padding:40px 0}
+  .note{grid-template-columns:1fr; gap:10px}
+  .note > code{justify-self:start}
+  .pair{grid-template-columns:1fr}
+  dl.gloss > div{grid-template-columns:1fr; gap:4px}
+}
+@media (prefers-reduced-motion:reduce){
+  *{transition:none !important; animation:none !important}
+}
+footer{border-top:1px solid var(--rule); background:var(--card)}
+footer .col{padding:36px 0 56px; font-size:13px; color:var(--ink-faint)}
+</style>
+
+<header class="top">
+  <div class="wrap"><div class="col">
+    <p class="eyebrow">FastAPI サンプル・第一歩</p>
+    <h1>main.py と demo.py の読み方</h1>
+    <p class="lead">Python をこれから触る人のための、2 ファイルの逐次解説。<code>app/main.py</code> は「API を用意する側」、<code>demo.py</code> は「その API を呼ぶ側」です。この 2 つの関係が分かれば、あとの拡張はほとんど同じ形の繰り返しになります。</p>
+    <div class="meta">
+      <span><b>対象</b> agent/content-generator-api</span>
+      <span><b>前提</b> Python は未経験でも可</span>
+      <span><b>読む順</b> 上から順に</span>
+    </div>
+  </div></div>
+</header>
+
+<div class="wrap">
+  <nav class="toc">
+    <div class="t">目次</div>
+    <a href="#map">1 全体像</a>
+    <a href="#words">2 用語</a>
+    <a href="#python">3 Python の記法</a>
+    <a href="#main">4 main.py</a>
+    <a href="#demo">5 demo.py</a>
+    <a href="#output">6 出力の読み方</a>
+    <a href="#faq">7 つまずきどころ</a>
+    <a href="#try">8 手を動かす</a>
+  </nav>
+
+  <main><div class="col">
+
+  <!-- ============ 1 ============ -->
+  <section id="map">
+    <h2><span class="num">01</span>全体像 — 2 つのファイルの役割</h2>
+    <p class="sub">まず「どちらが店で、どちらが客か」だけ掴む</p>
+
+    <p>この 2 ファイルは、まったく違う仕事をしています。混ざると分からなくなるので、最初にここだけ分けておきます。</p>
+
+    <div class="pair">
+      <div class="card">
+        <p class="role">呼ばれる側</p>
+        <h3>app/main.py</h3>
+        <p>API の本体。「こういう住所（URL）に、こういう内容が来たら、こう返す」という取り決めを並べたファイル。自分から動き出すことはなく、呼ばれるのを待っています。</p>
+      </div>
+      <div class="card">
+        <p class="role">呼ぶ側</p>
+        <h3>demo.py</h3>
+        <p>その API を実際に叩いて、返ってきたものを画面に表示するスクリプト。<code>python demo.py</code> と打つと上から順に実行されます。</p>
+      </div>
+    </div>
+
+    <figure>
+      <svg viewBox="0 0 700 250" role="img" aria-label="demo.py が TestClient を通して main.py の関数を呼び、JSON が返ってくる流れ">
+        <defs>
+          <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"/>
+          </marker>
+          <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M0 0 L10 5 L0 10 z" fill="var(--ink-faint)"/>
+          </marker>
+        </defs>
+
+        <rect x="8" y="70" width="150" height="86" rx="9" fill="var(--accent-soft)" stroke="var(--accent-line)"/>
+        <text x="83" y="103" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="14" font-weight="700" fill="var(--accent)">demo.py</text>
+        <text x="83" y="126" text-anchor="middle" font-family="Noto Sans JP, sans-serif" font-size="11.5" fill="var(--ink-soft)">呼ぶ側</text>
+
+        <rect x="255" y="70" width="150" height="86" rx="9" fill="var(--card)" stroke="var(--rule)"/>
+        <text x="330" y="103" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="13" font-weight="700" fill="var(--ink)">TestClient</text>
+        <text x="330" y="126" text-anchor="middle" font-family="Noto Sans JP, sans-serif" font-size="11.5" fill="var(--ink-soft)">運び役</text>
+
+        <rect x="502" y="70" width="150" height="86" rx="9" fill="var(--card)" stroke="var(--rule)"/>
+        <text x="577" y="103" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="14" font-weight="700" fill="var(--ink)">main.py</text>
+        <text x="577" y="126" text-anchor="middle" font-family="Noto Sans JP, sans-serif" font-size="11.5" fill="var(--ink-soft)">呼ばれる側</text>
+
+        <line x1="162" y1="98" x2="248" y2="98" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#ar)"/>
+        <line x1="409" y1="98" x2="495" y2="98" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#ar)"/>
+        <text x="205" y="88" text-anchor="middle" font-family="Noto Sans JP, sans-serif" font-size="10.5" fill="var(--accent)">リクエスト</text>
+        <text x="452" y="88" text-anchor="middle" font-family="Noto Sans JP, sans-serif" font-size="10.5" fill="var(--accent)">関数を実行</text>
+
+        <line x1="495" y1="134" x2="409" y2="134" stroke="var(--ink-faint)" stroke-width="1.6" marker-end="url(#ar2)"/>
+        <line x1="248" y1="134" x2="162" y2="134" stroke="var(--ink-faint)" stroke-width="1.6" marker-end="url(#ar2)"/>
+        <text x="452" y="152" text-anchor="middle" font-family="Noto Sans JP, sans-serif" font-size="10.5" fill="var(--ink-faint)">戻り値</text>
+        <text x="205" y="152" text-anchor="middle" font-family="Noto Sans JP, sans-serif" font-size="10.5" fill="var(--ink-faint)">レスポンス（JSON）</text>
+
+        <rect x="502" y="182" width="150" height="52" rx="9" fill="var(--code-bg)" stroke="var(--rule)"/>
+        <text x="577" y="204" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11.5" fill="var(--ink-soft)">state.json</text>
+        <text x="577" y="222" text-anchor="middle" font-family="Noto Sans JP, sans-serif" font-size="10.5" fill="var(--ink-faint)">状態の保存先</text>
+        <line x1="577" y1="160" x2="577" y2="176" stroke="var(--rule)" stroke-width="1.6" stroke-dasharray="3 3"/>
+      </svg>
+      <figcaption>普通は <code>demo.py</code> の位置にブラウザやスマホアプリが来る。TestClient はその代役で、サーバを起動せずに直接 main.py を呼ぶ</figcaption>
+    </figure>
+
+    <div class="callout">
+      <span class="label">ここが要点</span>
+      <p><code>main.py</code> の中の関数は、<strong>あなたが呼び出すコードをどこにも書いていません</strong>。「/health に GET が来たらこの関数を呼ぶ」とだけ登録しておき、実際に呼ぶのは FastAPI です。この「登録しておいて、あとは任せる」形が、最初いちばん戸惑うところです。</p>
+    </div>
+  </section>
+
+  <!-- ============ 2 ============ -->
+  <section id="words">
+    <h2><span class="num">02</span>先に言葉を 6 つだけ</h2>
+    <p class="sub">コードの前に、出てくる用語をまとめて片付ける</p>
+
+    <dl class="gloss">
+      <div>
+        <dt>API<span>Application Programming Interface</span></dt>
+        <dd>プログラムから使える窓口。人間向けの画面の代わりに、機械が読みやすい形（JSON）でやりとりします。</dd>
+      </div>
+      <div>
+        <dt>エンドポイント<span>endpoint</span></dt>
+        <dd>窓口ひとつひとつの住所。<code>/health</code> や <code>/echo</code> がそれ。このサンプルには 6 つあります。</dd>
+      </div>
+      <div>
+        <dt>リクエスト / レスポンス<span>request / response</span></dt>
+        <dd>「送るもの」と「返ってくるもの」。必ずこの往復 1 セットで動きます。</dd>
+      </div>
+      <div>
+        <dt>GET / POST<span>HTTP メソッド</span></dt>
+        <dd><b>GET</b> は「読むだけ」、<b>POST</b> は「何かを送って、変えてもらう」。同じ住所でも、この 2 つは別の窓口として扱われます。</dd>
+      </div>
+      <div>
+        <dt>JSON<span>データの書き方</span></dt>
+        <dd><code>{"status": "ok"}</code> のような形式。Python の辞書（後述）とほぼ同じ見た目で、相互に変換できます。</dd>
+      </div>
+      <div>
+        <dt>ステータスコード<span>status code</span></dt>
+        <dd>結果を表す 3 桁の数字。<b>200</b>＝成功、<b>422</b>＝送った内容がおかしい、<b>404</b>＝そんな住所はない、<b>500</b>＝サーバ側で例外が起きた。</dd>
+      </div>
+    </dl>
+  </section>
+
+  <!-- ============ 3 ============ -->
+  <section id="python">
+    <h2><span class="num">03</span>Python の記法を 8 つだけ</h2>
+    <p class="sub">この 2 ファイルを読むのに必要なぶんだけ。文法書は要りません</p>
+
+    <div class="block solo">
+      <pre><code class="language-python">import json                      # 1) 他の人が書いた道具を持ってくる
+
+def show(res):                    # 2) 関数の定義。res は受け取る値の名前
+    print(res)                    #    インデント（字下げ）が中身の範囲
+
+@app.get("/health")               # 3) デコレータ。すぐ下の関数に印をつける
+def health() -> dict[str, str]:   # 4) -> は「返すものの型」のメモ書き
+    return {"status": "ok"}       # 5) {} は辞書。キー: 値 の対応表
+
+class EchoRequest(BaseModel):     # 6) データの形を決める「型」を作る
+    message: str
+
+name = "audeo"
+print(f"やあ、{name}。")            # 7) f"..." の {} に変数が埋め込まれる
+
+with open("a.txt") as f:          # 8) 使い終わったら自動で片付ける書き方
+    print(f.read())</code></pre>
+    </div>
+
+    <div class="notes">
+      <div class="note"><code>import</code>
+        <p>他のファイルやライブラリの機能を持ち込む宣言。<code>from fastapi import FastAPI</code> は「fastapi の中の FastAPI だけ持ってくる」という意味です。</p></div>
+      <div class="note"><code>def 名前(引数):</code>
+        <p>関数（ひとまとまりの処理）を作ります。<strong>Python は字下げで範囲を表す</strong>のが最大の特徴で、他言語の <code>{ }</code> に当たります。ズレるとエラーになります。</p></div>
+      <div class="note"><code>@app.get(...)</code>
+        <p>「デコレータ」。直後の関数に機能を追加したり、目印を付けたりします。ここでは <strong>FastAPI に「この住所はこの関数が担当」と登録する</strong>役目。今回いちばん重要な記法です。</p></div>
+      <div class="note"><code>-&gt; dict[str, str]</code>
+        <p>型ヒント。「文字列をキー・文字列を値とする辞書を返す」というメモです。Python は<strong>実行時にこれを強制しません</strong>が、FastAPI はこの情報を読み取って動作を変えるので、書く意味があります。</p></div>
+      <div class="note"><code>{"status": "ok"}</code>
+        <p>辞書（dict）。<code>キー: 値</code> の対応表で、JSON とほぼ同じ形。<strong>関数がこれを返すと、FastAPI が JSON に変換して送り返します。</strong></p></div>
+      <div class="note"><code>class 名前(BaseModel):</code>
+        <p>クラス＝自前のデータ型。<code>(BaseModel)</code> は「BaseModel の性質を受け継ぐ」という意味で、これだけで検証機能が付いてきます。</p></div>
+      <div class="note"><code>f"...{name}..."</code>
+        <p>f-string。文字列の中の <code>{ }</code> に変数の中身が差し込まれます。</p></div>
+      <div class="note"><code>with ... as f:</code>
+        <p>後片付けを自動化する書き方。ファイルなら閉じ忘れが起きません。demo.py で 3 回登場します。</p></div>
+    </div>
+  </section>
+
+  <!-- ============ 4 ============ -->
+  <section id="main">
+    <h2><span class="num">04</span>app/main.py を読む</h2>
+    <p class="sub">上から 5 つのかたまりに分けて読みます</p>
+
+    <h3>4-1. 準備（1〜27 行目）</h3>
+    <div class="block">
+      <div class="file"><span><span class="tag">app/main.py</span> 16〜27 行目</span><span>準備</span></div>
+      <pre><code class="language-python">from __future__ import annotations
+
+from fastapi import FastAPI
+from pydantic import BaseModel, Field
+
+from app import state_store
+
+app = FastAPI(
+    title="Content Generator API (sample)",
+    description="FastAPI と TestClient の動作確認用サンプル。",
+    version="0.1.0",
+)</code></pre>
+    </div>
+    <div class="notes">
+      <div class="note"><code>from __future__ import annotations</code>
+        <p>古い Python でも新しい型の書き方（<code>dict[str, str]</code> など）を使えるようにするおまじない。<strong>意味は分からなくて構いません</strong>。ファイルの先頭に置く決まりです。</p></div>
+      <div class="note"><code>from app import state_store</code>
+        <p>同じフォルダの <code>state_store.py</code>（JSON ファイルへの読み書き担当）を持ち込みます。役割ごとにファイルを分けておくと、後で保存先を DB に替えるときも、この 1 ファイルだけ直せば済みます。</p></div>
+      <div class="note"><code>app = FastAPI(...)</code>
+        <p>アプリ本体を 1 個作ります。<strong>この <code>app</code> という変数が、以降すべての中心</strong>です。<code>title</code> などは <code>/docs</code> の画面に表示される情報。</p></div>
+    </div>
+
+    <h3>4-2. 受け渡すデータの形を決める（39〜62 行目）</h3>
+    <div class="block">
+      <div class="file"><span><span class="tag">app/main.py</span> 39〜50 行目</span><span>スキーマ</span></div>
+      <pre><code class="language-python">class EchoRequest(BaseModel):
+    message: str = Field(..., min_length=1, description="送りたい文字列")
+    repeat: int = Field(1, ge=1, le=5, description="繰り返す回数（1〜5）")
+
+
+class EchoResponse(BaseModel):
+    message: str
+    length: int</code></pre>
+    </div>
+    <div class="notes">
+      <div class="note"><code>message: str</code>
+        <p>「message という項目があり、それは文字列」という宣言。<strong>数値や欠落が来たら、関数が動く前に弾かれます。</strong></p></div>
+      <div class="note"><code>Field(..., min_length=1)</code>
+        <p>第 1 引数の <code>...</code>（3 つの点。Python では省略記号そのものが値です）は<strong>「初期値なし＝必須」</strong>という意味。<code>min_length=1</code> で空文字も禁止しています。</p></div>
+      <div class="note"><code>Field(1, ge=1, le=5)</code>
+        <p>初期値 1、<code>ge</code>＝1 以上（greater or equal）、<code>le</code>＝5 以下（less or equal）。<strong>この 1 行だけで検証が完成します。</strong>if 文は一切書きません。</p></div>
+      <div class="note"><code>class EchoResponse</code>
+        <p>返す側の形。決めておくと、うっかり余計な情報（内部の値など）が漏れて返ることを防げます。</p></div>
+    </div>
+
+    <div class="callout">
+      <span class="label">なぜクラスを 4 つも作るのか</span>
+      <p>この形（スキーマ）を書いておくと、<strong>①入力の検証 ②レスポンスの形の固定 ③<code>/docs</code> の自動生成</strong> の 3 つが同時に手に入ります。手書きの <code>if</code> で検証するより短く、しかも仕様書が自動で最新になります。</p>
+    </div>
+
+    <h3>4-3. いちばん簡単なエンドポイント（68〜71 行目）</h3>
+    <div class="block">
+      <div class="file"><span><span class="tag">app/main.py</span> 68〜71 行目</span><span>GET /health</span></div>
+      <pre><code class="language-python">@app.get("/health", summary="疎通確認")
+def health() -> dict[str, str]:
+    """サーバが起きているかを返すだけのエンドポイント。"""
+    return {"status": "ok"}</code></pre>
+    </div>
+    <div class="notes">
+      <div class="note"><code>@app.get("/health")</code>
+        <p><strong>これが API の 1 行目にして核心</strong>です。「<code>/health</code> に GET が来たら、下の関数を呼べ」と app に登録しています。<code>@app.post(...)</code> にすれば POST 用になります。</p></div>
+      <div class="note"><code>def health()</code>
+        <p>関数名は自由（URL とは無関係）。引数が無いので、この窓口は何も受け取りません。</p></div>
+      <div class="note"><code>"""..."""</code>
+        <p>三重引用符の文字列＝説明文（docstring）。<strong>FastAPI はこれを読んで <code>/docs</code> の説明欄に出します。</strong>書けば書くほど画面が親切になります。</p></div>
+      <div class="note"><code>return {"status": "ok"}</code>
+        <p>辞書を返すだけで、FastAPI が <code>{"status":"ok"}</code> という JSON に変換し、ステータス 200 を付けて送り返します。</p></div>
+    </div>
+
+    <h3>4-4. 値を受け取る 2 つの方法（74〜92 行目）</h3>
+    <div class="block">
+      <div class="file"><span><span class="tag">app/main.py</span> 74〜92 行目</span><span>GET /greet ・ POST /echo</span></div>
+      <pre><code class="language-python">@app.get("/greet/{name}", summary="パスパラメータの例")
+def greet(name: str, polite: bool = False) -> dict[str, str]:
+    greeting = f"はじめまして、{name} さん。" if polite else f"やあ、{name}。"
+    return {"greeting": greeting}
+
+
+@app.post("/echo", response_model=EchoResponse, summary="リクエスト本文の例")
+def echo(req: EchoRequest) -> EchoResponse:
+    message = req.message * req.repeat
+    return EchoResponse(message=message, length=len(message))</code></pre>
+    </div>
+    <div class="notes">
+      <div class="note"><code>"/greet/{name}"</code>
+        <p>URL の <code>{name}</code> の部分が、そのまま関数の引数 <code>name</code> に入ります（パスパラメータ）。<code>/greet/audeo</code> なら <code>name = "audeo"</code>。</p></div>
+      <div class="note"><code>polite: bool = False</code>
+        <p>URL に無い名前で、かつ初期値がある引数は<strong>クエリパラメータ</strong>扱い。<code>/greet/audeo?polite=true</code> で <code>True</code> になります。<strong>置き場所（URL の一部か、? の後ろか）を FastAPI が自動で見分けています。</strong></p></div>
+      <div class="note"><code>A if 条件 else B</code>
+        <p>Python の三項演算子。「条件が真なら A、偽なら B」。英語の語順で読むと自然です。</p></div>
+      <div class="note"><code>req: EchoRequest</code>
+        <p>型が <code>BaseModel</code> のクラスの場合、FastAPI は<strong>リクエストの本文（body）</strong>として受け取ります。届いた JSON が形に合わなければ、この関数は<strong>そもそも呼ばれず</strong>422 が返ります。</p></div>
+      <div class="note"><code>req.message * req.repeat</code>
+        <p>Python では文字列 × 数値で繰り返しになります。<code>"ping" * 3</code> → <code>"pingpingping"</code>。</p></div>
+      <div class="note"><code>response_model=EchoResponse</code>
+        <p>返す形の指定。ここに書いた項目だけが外に出ます。</p></div>
+    </div>
+
+    <h3>4-5. 状態を読み書きする 3 つ（95〜114 行目）</h3>
+    <div class="block">
+      <div class="file"><span><span class="tag">app/main.py</span> 95〜108 行目</span><span>GET /state ・ POST /state/increment ・ POST /state/reset</span></div>
+      <pre><code class="language-python">@app.get("/state", response_model=StateResponse, summary="現在の状態を読む")
+def read_state() -> StateResponse:
+    return StateResponse(**state_store.load_state())
+
+
+@app.post("/state/increment", response_model=StateResponse, summary="状態を更新する")
+def increment(req: IncrementRequest | None = None) -> StateResponse:
+    step = req.step if req else 1
+    return StateResponse(**state_store.increment_counter(step))</code></pre>
+    </div>
+    <div class="notes">
+      <div class="note"><code>state_store.load_state()</code>
+        <p>別ファイルの関数を呼んで、<code>data/state.json</code> の中身を辞書として受け取ります。<strong>main.py 自身はファイルの扱いを一切知りません</strong>——この分担が後で効いてきます。</p></div>
+      <div class="note"><code>StateResponse(**辞書)</code>
+        <p><code>**</code> は辞書を「バラして引数にする」記号。<code>{"counter": 6}</code> は <code>StateResponse(counter=6)</code> と書いたのと同じになります。</p></div>
+      <div class="note"><code>req: IncrementRequest | None = None</code>
+        <p><code>|</code> は「または」。<strong>本文があってもなくても受け付ける</strong>という意味で、これにより <code>POST /state/increment</code> を本文なしで呼べます（その場合 <code>step</code> は 1）。</p></div>
+      <div class="note"><code>step = req.step if req else 1</code>
+        <p>本文が無かった（<code>req</code> が <code>None</code>）ときの保険。Python では <code>None</code> は偽として扱われます。</p></div>
+    </div>
+
+    <div class="callout">
+      <span class="label">ゴールへの橋渡し</span>
+      <p>このあと作る「開始 / 中断 / 再開」も、まったく同じ形です。<code>counter</code> という状態が <code>jobs</code>（ジョブごとの status と進捗）に変わり、<code>/state/increment</code> が <code>/jobs/{id}/pause</code> に変わるだけ。<strong>仕組みは 1 ミリも変わりません。</strong></p>
+    </div>
+  </section>
+
+  <!-- ============ 5 ============ -->
+  <section id="demo">
+    <h2><span class="num">05</span>demo.py を読む</h2>
+    <p class="sub">こちらは上から順に実行される、普通のスクリプトです</p>
+
+    <h3>5-1. 表示用の小さな関数（18〜21 行目）</h3>
+    <div class="block">
+      <div class="file"><span><span class="tag">demo.py</span> 18〜21 行目</span><span>show()</span></div>
+      <pre><code class="language-python">def show(res) -> None:
+    """1 回の呼び出しの結果を見やすく表示する。"""
+    body = json.dumps(res.json(), ensure_ascii=False)
+    print(f"  {res.request.method:6} {res.request.url.path:20} -> {res.status_code}  {body}")</code></pre>
+    </div>
+    <div class="notes">
+      <div class="note"><code>res.json()</code>
+        <p>返ってきた JSON を Python の辞書に変換します。</p></div>
+      <div class="note"><code>json.dumps(..., ensure_ascii=False)</code>
+        <p>辞書を文字列に戻します。<strong><code>ensure_ascii=False</code> を付けないと日本語が <code>や</code> のような記号列になります。</strong>日本語を扱うときの定番の指定です。</p></div>
+      <div class="note"><code>{res.request.method:6}</code>
+        <p>f-string の書式指定。<code>:6</code> は「6 文字分の幅で左詰め」。<strong>これで各行の <code>-&gt;</code> の位置が縦に揃います。</strong></p></div>
+      <div class="note"><code>-&gt; None</code>
+        <p>「何も返さない」という型ヒント。表示するだけの関数なので値は返りません。</p></div>
+    </div>
+
+    <h3>5-2. 実行の準備（24〜31 行目）</h3>
+    <div class="block">
+      <div class="file"><span><span class="tag">demo.py</span> 24〜31 行目</span><span>main() の冒頭</span></div>
+      <pre><code class="language-python">def main() -> None:
+    # 状態ファイルは一時ディレクトリへ。何度実行しても 0 から始まる。
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["CONTENT_API_STATE_FILE"] = os.path.join(tmp, "state.json")
+
+        from app.main import app  # 環境変数を設定してから import する
+
+        with TestClient(app) as client:</code></pre>
+    </div>
+    <div class="notes">
+      <div class="note"><code>tempfile.TemporaryDirectory()</code>
+        <p>使い捨てのフォルダを作り、<code>with</code> を抜けるときに中身ごと自動で消します。<strong>デモが本物の <code>data/state.json</code> を汚さないための配慮</strong>です。</p></div>
+      <div class="note"><code>os.environ["..."] = ...</code>
+        <p>環境変数の設定。<code>state_store.py</code> はこの値があればそちらのファイルを使うようになっています。<strong>コードを書き換えずに保存先を差し替える</strong>常套手段です。</p></div>
+      <div class="note w"><code>from app.main import app</code>
+        <p><strong>この import がファイル先頭ではなく関数の途中にあるのは、わざとです。</strong>先に環境変数を設定してから読み込む必要があるため、この順序が崩れると保存先の切り替えが効きません。<strong>普段は import を先頭に書いてください</strong>——これは例外的な書き方です。</p></div>
+      <div class="note"><code>with TestClient(app) as client</code>
+        <p>アプリを操作するクライアントを用意します。<strong>uvicorn などのサーバは起動しません。</strong>ネットワークを通さず、直接 app を呼ぶ仕組みです（だから速く、ポートの空き状況にも左右されません）。</p></div>
+    </div>
+
+    <h3>5-3. 実際に呼ぶ（32〜45 行目）</h3>
+    <div class="block">
+      <div class="file"><span><span class="tag">demo.py</span> 32〜45 行目</span><span>呼び出し</span></div>
+      <pre><code class="language-python">            show(client.get("/health"))
+            show(client.get("/greet/audeo", params={"polite": True}))
+            show(client.post("/echo", json={"message": "ping", "repeat": 3}))
+
+            show(client.post("/echo", json={"message": "ping", "repeat": 99}))
+
+            show(client.get("/state"))
+            show(client.post("/state/increment"))
+            show(client.post("/state/increment", json={"step": 5}))</code></pre>
+    </div>
+    <div class="notes">
+      <div class="note"><code>client.get("/health")</code>
+        <p>GET リクエストを 1 回送り、レスポンスを受け取ります。この 1 行が <code>main.py</code> の <code>health()</code> を呼んでいます。</p></div>
+      <div class="note"><code>params={"polite": True}</code>
+        <p>URL の <code>?</code> 以降（クエリパラメータ）になります。実際に送られるのは <code>/greet/audeo?polite=true</code>。</p></div>
+      <div class="note"><code>json={"message": "ping", ...}</code>
+        <p>リクエストの本文として JSON を送ります。<strong>この辞書が <code>EchoRequest</code> の検査を通り、<code>req</code> として関数に渡ります。</strong></p></div>
+      <div class="note w"><code>"repeat": 99</code>
+        <p>わざと上限（5）を超えた値。<strong>ここだけ 422 が返ることを見せるための行</strong>です。<code>echo()</code> 関数は呼ばれません。</p></div>
+      <div class="note"><code>client.post("/state/increment")</code>
+        <p><code>json=</code> を書いていないので本文なし。<code>IncrementRequest | None</code> にしてあるおかげでエラーにならず、<code>step</code> は初期値 1 になります。</p></div>
+    </div>
+
+    <h3>5-4. 状態が残ることの確認（47〜57 行目）</h3>
+    <div class="block">
+      <div class="file"><span><span class="tag">demo.py</span> 47〜57 行目</span><span>締めくくり</span></div>
+      <pre><code class="language-python">        with TestClient(app) as fresh_client:
+            show(fresh_client.get("/state"))
+
+        print("\n[5] 実際に書かれているファイルの中身")
+        with open(os.environ["CONTENT_API_STATE_FILE"], encoding="utf-8") as f:
+            print("  " + f.read().replace("\n", "\n  "))
+
+
+if __name__ == "__main__":
+    main()</code></pre>
+    </div>
+    <div class="notes">
+      <div class="note"><code>fresh_client</code>
+        <p><strong>クライアントを作り直しても値が 6 のまま</strong>なのが、この行の見どころ。状態がメモリではなくファイルにあることの証明で、実運用では「サーバを再起動しても消えない」に相当します。</p></div>
+      <div class="note"><code>encoding="utf-8"</code>
+        <p>文字コードの明示。<strong>特に Windows では、これを省くと日本語が文字化けします。</strong>ファイルを開くときは常に付ける習慣を。</p></div>
+      <div class="note"><code>if __name__ == "__main__":</code>
+        <p>Python の定型句。<strong>「このファイルを直接実行したときだけ中を動かす」</strong>という意味です。他のファイルから import されたときは動きません。<code>main()</code> という関数名は慣習で、特別な意味はありません。</p></div>
+    </div>
+  </section>
+
+  <!-- ============ 6 ============ -->
+  <section id="output">
+    <h2><span class="num">06</span>出力の読み方</h2>
+    <p class="sub"><code>python demo.py</code> の実際の結果</p>
+
+    <div class="term">
+      <div class="bar">$ python demo.py</div>
+<pre>
+<span class="d">[1] 基本のエンドポイント</span>
+  GET    /health              -&gt; <span class="g">200</span>  {"status": "ok"}
+  GET    /greet/audeo         -&gt; <span class="g">200</span>  {"greeting": "やあ、audeo。"}
+  GET    /greet/audeo         -&gt; <span class="g">200</span>  {"greeting": "はじめまして、audeo さん。"}
+  POST   /echo                -&gt; <span class="g">200</span>  {"message": "pingpingping", "length": 12}
+
+<span class="d">[2] 入力が不正なとき（FastAPI が自動で 422 を返す）</span>
+  POST   /echo                -&gt; <span class="o">422</span>  {"detail": [{"type": "less_than_equal", ...}]}
+
+<span class="d">[3] JSON ファイルで持つ状態</span>
+  GET    /state               -&gt; <span class="g">200</span>  {"counter": 0}
+  POST   /state/increment     -&gt; <span class="g">200</span>  {"counter": 1}
+  POST   /state/increment     -&gt; <span class="g">200</span>  {"counter": 6}
+  GET    /state               -&gt; <span class="g">200</span>  {"counter": 6}
+
+<span class="d">[4] クライアントを作り直しても状態は残る</span>
+  GET    /state               -&gt; <span class="g">200</span>  {"counter": 6}
+</pre>
+    </div>
+
+    <div class="scroll">
+      <table>
+        <thead><tr><th>行</th><th>見るべきところ</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">2 行目と 3 行目</td><td>URL の表示は同じですが、3 行目は <code>?polite=true</code> 付き。<code>show()</code> がパス部分しか出さないためで、返る文章が違うことで区別できます。</td></tr>
+          <tr><td class="mono">POST /echo → 200</td><td><code>"ping"</code> が 3 回繰り返されて 12 文字。<code>length</code> は <code>main.py</code> が計算した値です。</td></tr>
+          <tr><td class="mono">POST /echo → 422</td><td><strong>この行だけ、あなたの書いた関数は 1 行も動いていません。</strong>FastAPI が入口で弾き、どの項目がなぜ駄目かを <code>detail</code> に入れて返しています。</td></tr>
+          <tr><td class="mono">counter: 1 → 6</td><td>1 回目は本文なしで +1、2 回目は <code>step: 5</code> で +5。合計 6。</td></tr>
+          <tr><td class="mono">[4] の 6</td><td>新しいクライアントでも 6。ファイルに書かれているからです。</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ 7 ============ -->
+  <section id="faq">
+    <h2><span class="num">07</span>つまずきやすいところ</h2>
+    <p class="sub">最初に必ず出会うものを先に</p>
+
+    <details>
+      <summary>ModuleNotFoundError: No module named 'app' と出る</summary>
+      <div class="body"><p>実行している場所が違います。<code>content-generator-api</code> フォルダの<strong>直下</strong>で <code>python demo.py</code> を実行してください。Python は「今いる場所」を基準に <code>app/</code> を探します。</p></div>
+    </details>
+    <details>
+      <summary>IndentationError と出る</summary>
+      <div class="body"><p>字下げのズレです。Python では字下げが構文そのもの。<strong>タブと半角スペースの混在</strong>が原因のことが多いので、スペース 4 個に統一してください。</p></div>
+    </details>
+    <details>
+      <summary>422 は「バグ」ですか？</summary>
+      <div class="body"><p>いいえ、<strong>設計どおりの正しい動作</strong>です。「送られた内容が決めた形に合っていない」と API が正しく指摘した状態。500（サーバ側の想定外エラー）とは意味がまったく違います。</p></div>
+    </details>
+    <details>
+      <summary>uvicorn で起動するのと demo.py は何が違う？</summary>
+      <div class="body">
+        <p><code>uvicorn</code> は本物のサーバを立ち上げ、ブラウザや他の PC から <code>http://127.0.0.1:8000</code> でアクセスできるようにします。<code>demo.py</code>（TestClient）はサーバを立てず、同じプロセスの中で直接 app を呼びます。</p>
+        <p><strong>呼ばれる <code>main.py</code> 側のコードは、どちらでも完全に同じ</strong>です。だからテストで確かめた動作は、本番でもそのまま通用します。</p>
+      </div>
+    </details>
+    <details>
+      <summary>counter が 0 に戻らない / 変な値になった</summary>
+      <div class="body"><p><code>POST /state/reset</code> を呼ぶか、<code>data/state.json</code> を削除してください。次回アクセス時に初期値から作り直されます。なお demo.py は毎回一時フォルダを使うので、常に 0 から始まります。</p></div>
+    </details>
+    <details>
+      <summary>関数名と URL は揃えるべき？</summary>
+      <div class="body"><p>揃える必要はありません。結び付けているのは <code>@app.get("/health")</code> の行だけで、関数名は人間が読むためのものです。ただし揃えておくと探しやすくなります。</p></div>
+    </details>
+  </section>
+
+  <!-- ============ 8 ============ -->
+  <section id="try">
+    <h2><span class="num">08</span>手を動かして確かめる</h2>
+    <p class="sub">読むより 1 回いじるほうが早く分かります</p>
+
+    <ol class="steps">
+      <li><b>まず <code>/docs</code> を開く</b><span><code>uvicorn app.main:app --reload --port 8000</code> を実行し、ブラウザで <code>http://127.0.0.1:8000/docs</code> へ。書いた docstring や <code>Field</code> の説明がそのまま画面になっているのが分かります。<strong>その場で API を試せます。</strong></span></li>
+      <li><b>挨拶の文面を変える</b><span><code>main.py</code> の <code>greet()</code> の中の文字列を書き換えて、<code>python demo.py</code> を再実行。変更が出力に出れば、どこが何に対応しているか腑に落ちます。</span></li>
+      <li><b>上限を 5 から 10 に変える</b><span><code>repeat</code> の <code>le=5</code> を <code>le=10</code> に。demo.py の 422 の行が 200 に変わります（<code>repeat: 99</code> はまだ超過なので、<code>le=100</code> まで上げると変化します）。</span></li>
+      <li><b>エンドポイントを 1 つ足す</b><span>既存の 4 行をコピーして、<code>@app.get("/ping")</code> と <code>def ping()</code> に。<code>demo.py</code> に <code>show(client.get("/ping"))</code> を 1 行足して確認します。</span></li>
+      <li><b>state.json を直接開く</b><span><code>POST /state/increment</code> を何度か呼んだあと <code>data/state.json</code> をエディタで開いてみてください。<strong>「DB を使わず状態を持つ」の正体がただのテキストファイルだと分かります。</strong></span></li>
+    </ol>
+
+    <div class="callout">
+      <span class="label">次の一歩</span>
+      <p>ここが読めたなら、<code>tests/test_main.py</code> も読めます。書いてあることは demo.py とほぼ同じで、<code>show(...)</code> で表示する代わりに <code>assert</code> で「期待どおりか」を機械に判定させているだけです。</p>
+    </div>
+  </section>
+
+  </div></main>
+</div>
+
+<footer><div class="wrap"><div class="col">
+  agent/content-generator-api — 対象ファイル: <code>app/main.py</code>（114 行）、<code>demo.py</code>（57 行）。行番号は現在のコードに対応します。
+</div></div></footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+<script>
+  if (window.hljs) {
+    document.querySelectorAll('pre code.language-python').forEach(function (el) {
+      hljs.highlightElement(el);
+    });
+  }
+</script>
