@@ -1079,7 +1079,11 @@ EXECUTE IMMEDIATE rendered_sql;
 --      5-5 データセット別の対象 View 数
 --      5-5b View 名の条件で落ちた View
 --      5-6 条件から外れたデータセット
---      5-7 メモの登録状況
+--      5-7 メモの登録状況（**コメントのまま。必要なときだけ外す**）
+--
+--    5-7 だけ外してあるのは、あれがスプレッドシートの外部テーブル（Drive）を
+--    読む唯一の確認だから。時間がかかることがあり、しかもメモを直したときに
+--    しか見ない。混ぜておくと「確認が遅い」の原因が分かりにくくなる。
 -- ---------------------------------------------------------------------
 
 -- 5-1 生成結果の中身
@@ -1258,29 +1262,41 @@ ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
 EXECUTE IMMEDIATE rendered_sql;
 
 -- 5-7 メモの登録状況
+--     **これだけコメントのまま。** 必要なときに下の 4 文（SET から
+--     EXECUTE IMMEDIATE まで）のコメントを外して実行する。
+--
+--     ここだけスプレッドシートの外部テーブル（__T_BASE_NOTE__ = Drive）を
+--     読むので、シートの機嫌や大きさで時間がかかることがある。ほかの 5 系は
+--     BigQuery のテーブルと INFORMATION_SCHEMA しか読まないので、これを
+--     混ぜておくと「確認が遅い」の原因がここだと分かりにくい。
+--     メモを直したときにだけ見れば足りる種類の確認でもある。
+--
 --     note_sheet_url が未設定なら全部 FALSE になる（＝テーブルが空）。
 --     シートの base を書き間違えるとどの行にも当たらないので、
---     「シートにあるのにビューに出ない base」を最後に別立てで出す。
-SET sql_template = """
-SELECT
-  '5-7 メモの登録状況'                 AS check_name,
-  base                              AS base_view_name,
-  has_note                          AS note_registered,
-  note_updated_at                   AS note_updated_at,
-  note_updated_by                   AS note_updated_by,
-  LENGTH(note_md)                   AS note_length_chars
-FROM `__T_DIFF__`
-UNION ALL
-SELECT
-  '5-7 メモの登録状況（当たらない base）', TRIM(n.base), FALSE,
-  CAST(NULL AS TIMESTAMP), CAST(NULL AS STRING), CAST(NULL AS INT64)
-FROM `__T_BASE_NOTE__` AS n
-WHERE TRIM(COALESCE(n.base, '')) != ''
-  AND TRIM(n.base) NOT IN (SELECT base FROM `__T_DIFF__`)
-ORDER BY note_registered DESC, base_view_name
-""";
-EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
-  '5-7 の SQL に未展開のプレースホルダが残っています。';
-EXECUTE IMMEDIATE rendered_sql;
+--     「シートにあるのにテーブルに出ない base」を最後に別立てで出す。
+--
+--     読むのは __T_DIFF__ なので、シートを直した直後に見るなら
+--     3b を流し直してからにする（3b がメモを焼き込む）。
+-- SET sql_template = """
+-- SELECT
+--   '5-7 メモの登録状況'                 AS check_name,
+--   base                              AS base_view_name,
+--   has_note                          AS note_registered,
+--   note_updated_at                   AS note_updated_at,
+--   note_updated_by                   AS note_updated_by,
+--   LENGTH(note_md)                   AS note_length_chars
+-- FROM `__T_DIFF__`
+-- UNION ALL
+-- SELECT
+--   '5-7 メモの登録状況（当たらない base）', TRIM(n.base), FALSE,
+--   CAST(NULL AS TIMESTAMP), CAST(NULL AS STRING), CAST(NULL AS INT64)
+-- FROM `__T_BASE_NOTE__` AS n
+-- WHERE TRIM(COALESCE(n.base, '')) != ''
+--   AND TRIM(n.base) NOT IN (SELECT base FROM `__T_DIFF__`)
+-- ORDER BY note_registered DESC, base_view_name
+-- """;
+-- EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+-- ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+--   '5-7 の SQL に未展開のプレースホルダが残っています。';
+-- EXECUTE IMMEDIATE rendered_sql;
 END;
