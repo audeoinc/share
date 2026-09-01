@@ -135,7 +135,8 @@ pre code{background:none; border:0; padding:0; color:var(--ink)}
   padding:5px 8px; overflow-wrap:anywhere
 }
 .note.w > code{color:var(--warn); background:var(--warn-soft); border-color:var(--warn-line)}
-.note p{margin:0; font-size:14.5px; line-height:1.85}
+.note p{grid-column:2; margin:0; font-size:14.5px; line-height:1.85}
+.note > code{grid-column:1}
 .note p + p{margin-top:8px}
 
 /* ---------- callouts ---------- */
@@ -225,17 +226,20 @@ details .body p{font-size:14.5px}
 /* ---------- checklist ---------- */
 ol.steps{list-style:none; padding:0; margin:22px 0; counter-reset:s}
 ol.steps li{
-  counter-increment:s; display:grid; grid-template-columns:30px 1fr; gap:14px;
+  counter-increment:s; display:grid; grid-template-columns:30px 1fr; gap:2px 14px;
   padding:14px 0; border-top:1px solid var(--rule-soft); margin:0
 }
 ol.steps li:first-child{border-top:0}
 ol.steps li::before{
   content:counter(s); font-family:"JetBrains Mono",monospace; font-size:12px; font-weight:700;
   color:var(--accent); background:var(--accent-soft); border:1px solid var(--accent-line);
-  border-radius:50%; width:26px; height:26px; display:grid; place-items:center
+  border-radius:50%; width:26px; height:26px; display:grid; place-items:center;
+  grid-column:1; grid-row:1; align-self:start
 }
-ol.steps b{display:block; font-size:15px; margin-bottom:2px}
-ol.steps span{font-size:14px; color:var(--ink-soft)}
+/* 連番は 1 列目、見出しと説明は必ず 2 列目に積む
+   （指定しないと 3 つ目の要素が 30px 側へ回り込んで潰れる） */
+ol.steps b{grid-column:2; grid-row:1; display:block; font-size:15px; margin-bottom:2px}
+ol.steps span{grid-column:2; grid-row:2; font-size:14px; color:var(--ink-soft)}
 
 /* ---------- toc ---------- */
 nav.toc{display:none}
@@ -262,7 +266,9 @@ nav.toc{display:none}
   header.top .col{padding:44px 0 34px}
   section{padding:40px 0}
   .note{grid-template-columns:1fr; gap:10px}
-  .note > code{justify-self:start}
+  .note > code{grid-column:1; justify-self:start}
+  .note p{grid-column:1}
+  ol.steps li{grid-template-columns:26px 1fr; gap:2px 12px}
   .pair{grid-template-columns:1fr}
   dl.gloss > div{grid-template-columns:1fr; gap:4px}
 }
@@ -477,6 +483,75 @@ app = FastAPI(
     </div>
 
     <h3>4-2. 受け渡すデータの形を決める（39〜62 行目）</h3>
+
+    <h4>その前に — BaseModel とは何か</h4>
+    <p><code>BaseModel</code> は <strong>pydantic（パイダンティック）というライブラリが用意している、既製のクラス</strong>です。自分で作ったものでも、Python に元から入っているものでもありません。main.py の冒頭で <code>from pydantic import BaseModel, Field</code> と書いて持ち込んでいます。</p>
+    <p>役割はひとことで言えば <strong>「データの形を宣言すると、その形どおりか検査してくれる型」の土台</strong>です。</p>
+
+    <div class="block solo">
+      <pre><code class="language-python">class EchoRequest(BaseModel):
+    #              ^^^^^^^^^ この括弧の中が「親」。
+    #              EchoRequest は BaseModel の機能をそのまま受け継ぐ
+    message: str</code></pre>
+    </div>
+    <div class="notes">
+      <div class="note"><code>class 子(親):</code>
+        <p>Python の<strong>継承</strong>という書き方です。「親クラスが持っている機能を、そのまま引き継いだ新しいクラスを作る」という意味。<strong>ここでは <code>message: str</code> の 1 行しか書いていないのに、検証の機能一式が付いてきます</strong>——それは全部 BaseModel 側にあるからです。</p></div>
+    </div>
+
+    <p>継承したことで <code>EchoRequest</code> が手に入れる機能は、主に次の 4 つです。</p>
+
+    <div class="scroll">
+      <table>
+        <thead><tr><th>手に入る機能</th><th>具体的には</th></tr></thead>
+        <tbody>
+          <tr><td><b>検証</b></td><td>宣言した形に合わないデータを弾く。<code>message</code> が無ければエラー</td></tr>
+          <tr><td><b>型の変換</b></td><td>JSON の <code>"3"</code> を <code>int</code> の <code>3</code> に直すなど、常識的な変換を自動で行う</td></tr>
+          <tr><td><b>辞書 / JSON との往復</b></td><td><code>EchoRequest(**辞書)</code> で作れて、<code>.model_dump()</code> で辞書に戻せる</td></tr>
+          <tr><td><b>エラーの説明文</b></td><td>どの項目がなぜ駄目かを構造化して出力（422 の <code>detail</code> の中身がこれ）</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h4>BaseModel が無かったら、どう書くことになるか</h4>
+    <p>同じ検査を手書きすると、こうなります。左が今のコード、右が BaseModel を使わない場合です。</p>
+
+    <div class="block">
+      <div class="file"><span><span class="tag">BaseModel を使う</span> 実際のコード</span><span>3 行</span></div>
+      <pre><code class="language-python">class EchoRequest(BaseModel):
+    message: str = Field(..., min_length=1)
+    repeat: int = Field(1, ge=1, le=5)</code></pre>
+    </div>
+
+    <div class="block">
+      <div class="file"><span><span class="tag">使わない場合</span> 手書きした場合の例</span><span>約 12 行 × 窓口の数</span></div>
+      <pre><code class="language-python">def echo(body: dict):
+    if "message" not in body:
+        return {"error": "message は必須です"}, 422
+    if not isinstance(body["message"], str):
+        return {"error": "message は文字列にしてください"}, 422
+    if len(body["message"]) &lt; 1:
+        return {"error": "message を空にはできません"}, 422
+
+    repeat = body.get("repeat", 1)
+    if not isinstance(repeat, int):
+        return {"error": "repeat は整数にしてください"}, 422
+    if repeat &lt; 1 or repeat &gt; 5:
+        return {"error": "repeat は 1〜5 です"}, 422
+    # ↑ ここまで全部書いて、やっと本題に入れる</code></pre>
+    </div>
+
+    <div class="callout">
+      <span class="label">FastAPI との関係</span>
+      <p>FastAPI は関数の引数を見て、<strong>その型が BaseModel を継承したクラスなら「リクエストの本文（body）」として扱う</strong>と決めています。<code>str</code> や <code>int</code> ならパスやクエリ、BaseModel なら本文——この使い分けが自動で効くのは、BaseModel が目印になっているからです。</p>
+    </div>
+
+    <div class="callout warn">
+      <span class="label">紛らわしい言葉</span>
+      <p>ここでの「モデル」は <strong>AI のモデルとは無関係</strong>です。データベースの世界で言う「モデル（テーブルに対応するクラス）」に近い意味で、<strong>「データの形の定義」</strong>と読み替えてください。</p>
+    </div>
+
+    <h4>実際のコード</h4>
     <div class="block">
       <div class="file"><span><span class="tag">app/main.py</span> 39〜50 行目</span><span>スキーマ</span></div>
       <pre><code class="language-python">class EchoRequest(BaseModel):
