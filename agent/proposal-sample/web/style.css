@@ -393,6 +393,7 @@ body.resizing .splitter::before { background: var(--primary); width: 3px; }
 .hi-actions { display: flex; gap: 6px; flex-shrink: 0; }
 .badge.src-generate { background: rgba(109,139,255,.16); color: var(--primary); }
 .badge.src-refine { background: rgba(62,207,142,.16); color: var(--green); }
+.badge.src-chat { background: rgba(246,195,68,.18); color: var(--amber); }
 
 /* 版の比較ボックス */
 .compare-box {
@@ -521,6 +522,60 @@ body.resizing .splitter::before { background: var(--primary); width: 3px; }
   max-height: 240px; overflow-y: auto;
   font-family: "Consolas", "SF Mono", "Yu Gothic UI", monospace;
 }
+
+/* エージェントと相談して作る（対話チャット） */
+.card.chat { margin-top: 12px; }
+.card.chat > summary {
+  cursor: pointer; font-size: 14px; font-weight: 700;
+  list-style: none; display: flex; align-items: baseline; gap: 6px;
+}
+.card.chat > summary::-webkit-details-marker { display: none; }
+.card.chat > summary::before { content: "▸"; color: var(--muted); font-weight: 400; }
+.card.chat[open] > summary::before { content: "▾"; }
+.card.chat[open] > summary { margin-bottom: 10px; }
+.chat-hint { font-size: 12px; padding: 6px 2px; }
+.chat-log {
+  display: flex; flex-direction: column; gap: 8px;
+  max-height: 340px; overflow-y: auto; margin-bottom: 10px;
+}
+.chat-msg { display: flex; flex-direction: column; max-width: 88%; }
+.chat-msg.user { align-self: flex-end; align-items: flex-end; }
+.chat-msg.agent { align-self: flex-start; align-items: flex-start; }
+.chat-msg.system { align-self: center; max-width: 100%; }
+.chat-msg .bubble {
+  border: 1px solid var(--border); border-radius: 12px;
+  padding: 8px 12px; font-size: 13px; line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.chat-msg.user .bubble {
+  background: rgba(109,139,255,.16); border-color: rgba(109,139,255,.35);
+}
+.chat-msg.agent .bubble { background: var(--panel); }
+.chat-msg .bubble p:first-child { margin-top: 0; }
+.chat-msg .bubble p:last-child { margin-bottom: 0; }
+.chat-msg.system .sys {
+  color: var(--green); font-size: 12px; font-weight: 700;
+}
+.chat-msg .cl-think > summary {
+  cursor: pointer; color: var(--muted); font-size: 11px; margin-top: 4px;
+  list-style: none; display: inline-flex; align-items: center; gap: 4px;
+}
+.chat-msg .cl-think > summary::-webkit-details-marker { display: none; }
+.chat-msg .cl-think > summary::before { content: "▸"; }
+.chat-msg .cl-think[open] > summary::before { content: "▾"; }
+.chat-msg .cl-think-text {
+  margin-top: 6px; padding: 8px; border: 1px dashed var(--border); border-radius: 6px;
+  color: var(--muted); font-size: 12px; line-height: 1.6;
+  max-height: 220px; overflow-y: auto;
+  font-family: "Consolas", "SF Mono", "Yu Gothic UI", monospace;
+}
+.chat-row { display: flex; gap: 8px; }
+.chat-row input {
+  flex: 1; min-width: 0;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 9px 12px; color: var(--text); font-size: 13px;
+}
+.chat-row input:focus { outline: none; border-color: var(--primary); }
 
 /* モデルの思考プロセス（折りたたみ） */
 .thinking-box {
