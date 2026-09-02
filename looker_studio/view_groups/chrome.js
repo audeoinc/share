@@ -18,6 +18,10 @@ const MAX_SQL_TABS = 24;
 // 何種類に割れているかで決まる。全 View が別々の説明を持てば View 数まで
 // 増えうるが、実際にそこまで割れることはまず無いので中間を取ってある。
 const MAX_DESC_TABS = 16;
+// note タブのラベル（View の labels）のタブ数の上限。タブが出るのは base の
+// 中でラベルが割れているときだけで、そのときも「揃っている多数派 ＋ 外れた
+// 数本」の形になる。description ほど散らばらないので少なめでよい。
+const MAX_LABEL_TABS = 8;
 // 1 レコードに載せる差分の上限。
 //
 // **これは「重くしない」ための値ではなく、「行が壊れない」ための値。**
@@ -85,12 +89,14 @@ const NOTE_MARK = '<!--VG_NOTE-->';
  * note タブ）。原因が「CSS を貼っていない」であることは画面から読み取れない。
  *
  * そこでカード側に世代の印を埋め、**その世代の CSS だけが消せる**ようにする。
- *   カード  <div class="vg-cssgen3" style="…">CSS が古い</div>
- *   CSS     .vg-cssgen3{display:none}
+ *   カード  <div class="vg-cssgen4" style="…">CSS が古い</div>
+ *   CSS     .vg-cssgen4{display:none}
  * 古い CSS にはこの規則が無いので、案内がそのまま出る。style 属性で直に
  * 飾ってあるので、CSS が 1 行も効いていなくても読める形で出る。
+ *
+ * 世代 4 ＝ note タブのラベル（.vg-lb*）。また頭ごと増えたので上げてある。
  */
-const CSS_GEN = 3;
+const CSS_GEN = 4;
 
 /**
  * CSS が古いときだけ出る案内。上の CSS_GEN を参照。
@@ -133,7 +139,7 @@ function badge(txt, fg, bg) {
   return `<span class="vg-badge" style="color:${fg};background:${bg}">${esc(txt)}</span>`;
 }
 
-function header(base, viewCount, groupCount, unmatched) {
+function header(base, viewCount, groupCount, unmatched, labelSplit) {
   const warn = groupCount > 1;
   return (
     `<div class="vg-header">` +
@@ -144,6 +150,11 @@ function header(base, viewCount, groupCount, unmatched) {
       warn ? '#FFF8C5' : '#DAFBE1') +
     // 命名規則から外れていること自体が情報なので、一覧で拾えるようにする
     (unmatched ? badge('suffix 未認識', '#9A6700', '#FFF8C5') : '') +
+    // ラベルが base の中で割れているのも同じたぐいの情報。値そのものは
+    // note タブに出すが、**割れていることだけは note を開かずに拾えるように
+    // する。** 揃っているときは何も出さない（揃っているのが普通なので、
+    // 全カードに 1 個ずつバッジが増えても読む手掛かりにならない）。
+    (labelSplit ? badge('ラベル不一致', '#9A6700', '#FFF8C5') : '') +
     `</div>`
   );
 }
@@ -192,8 +203,10 @@ const kindText = (k) => KIND_TEXT[k] || k;
  * @param {string} noteHtml note タブの中身（description の段 ＋ 目印）。
  *                         省略したら目印だけ
  * @param {object} base 解析結果の base 1 件分。見出しと id の種に使う
+ * @param {boolean} labelSplit base の中でラベルが割れているか。見出しの
+ *                             バッジに出す。値そのものは note タブの担当
  */
-function wrapPage(diffHtml, erdHtml, colsHtml, sqlHtml, noteHtml, base) {
+function wrapPage(diffHtml, erdHtml, colsHtml, sqlHtml, noteHtml, base, labelSplit) {
   const b = base || {};
   const id = 'vgo' + hashId(b.base || '');
   const note = noteHtml == null || noteHtml === '' ? NOTE_MARK : String(noteHtml);
@@ -208,7 +221,8 @@ function wrapPage(diffHtml, erdHtml, colsHtml, sqlHtml, noteHtml, base) {
   const panels = OUTER_TABS.map((_, i) =>
     `<div class="vg-opanel vg-op${i + 1}">${bodies[i] || ''}</div>`).join('');
   const head = b.base
-    ? header(b.base, b.viewCount, (b.groups || []).length, b.unmatched) : '';
+    ? header(b.base, b.viewCount, (b.groups || []).length, b.unmatched,
+      labelSplit) : '';
   // 世代の案内はいちばん上。CSS が古ければ出て、合っていれば消える。
   // ラジオより前に置いてよい（:checked ~ が見るのはラジオの「後ろ」だけ）。
   return `<div class="vg-outer">${cssGuard()}${radios}` +
@@ -217,7 +231,8 @@ function wrapPage(diffHtml, erdHtml, colsHtml, sqlHtml, noteHtml, base) {
 }
 
 module.exports = {
-  MAX_TABS, MAX_REF_TABS, MAX_SQL_TABS, MAX_DESC_TABS, MAX_OUTER_TABS,
+  MAX_TABS, MAX_REF_TABS, MAX_SQL_TABS, MAX_DESC_TABS, MAX_LABEL_TABS,
+  MAX_OUTER_TABS,
   REF_BUDGET, OUTER_TABS,
   NOTE_MARK, CSS_GEN, cssGuard,
   esc, hashId, label, badge, header, notice, KIND_TEXT, kindText, wrapPage,

@@ -11,7 +11,7 @@
   含まないため、こちらの表示には使えない（タブが動かない）。
 -->
 <style>
-.vg-cssgen3{display:none}
+.vg-cssgen4{display:none}
 .vg-root{font:13px/1.6 'Roboto','Segoe UI',system-ui,-apple-system,sans-serif;color:#24292F}
 .vg-header{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 10px}
 .vg-title{font-weight:600;font-size:15px;line-height:1.6;color:#1A1A1A}
@@ -262,12 +262,17 @@
 .vg-nsec{margin:0 0 18px}
 .vg-nsec:last-child{margin-bottom:0}
 .vg-nhead{margin:0 0 6px;padding:0 0 4px;border-bottom:1px solid #EAEEF2;font:11px/1.6 'Roboto','Segoe UI',system-ui,sans-serif;font-weight:600;letter-spacing:.04em;color:#57606A}
-.vg-dr{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}
-.vg-dtablist{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 8px}
-.vg-dtab{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border:1px solid #D0D7DE;border-radius:14px;color:#57606A;cursor:pointer;user-select:none;font-weight:600;font-size:12px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
-.vg-dtab:hover{background:#F6F8FA;color:#24292F}
-.vg-dpanel{display:none}
+.vg-dr,.vg-lbr{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}
+.vg-dtablist,.vg-lbtablist{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 8px}
+.vg-dtab,.vg-lbtab{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border:1px solid #D0D7DE;border-radius:14px;color:#57606A;cursor:pointer;user-select:none;font-weight:600;font-size:12px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.vg-dtab:hover,.vg-lbtab:hover{background:#F6F8FA;color:#24292F}
+.vg-dpanel,.vg-lbpanel{display:none}
 .vg-dtab.vg-dstatic{background:#EAEEF2;border-color:#8C959F;color:#24292F;cursor:default}
+.vg-lbchips{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 14px}
+.vg-lbchip{display:inline-flex;align-items:stretch;border:1px solid #D0D7DE;border-radius:4px;overflow:hidden;font:11px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace}
+.vg-lbk{padding:1px 7px;background:#F6F8FA;color:#57606A;font-weight:600;border-right:1px solid #D0D7DE}
+.vg-lbv{padding:1px 8px;color:#24292F}
+.vg-lbpanels .vg-lbchips{margin-bottom:0}
 .vg-dr1:checked ~ .vg-dpanels > .vg-dp1{display:block}
 .vg-dr1:checked ~ .vg-dtablist > .vg-dt1{background:#EAEEF2;border-color:#8C959F;color:#24292F}
 .vg-dr2:checked ~ .vg-dpanels > .vg-dp2{display:block}
@@ -300,6 +305,22 @@
 .vg-dr15:checked ~ .vg-dtablist > .vg-dt15{background:#EAEEF2;border-color:#8C959F;color:#24292F}
 .vg-dr16:checked ~ .vg-dpanels > .vg-dp16{display:block}
 .vg-dr16:checked ~ .vg-dtablist > .vg-dt16{background:#EAEEF2;border-color:#8C959F;color:#24292F}
+.vg-lbr1:checked ~ .vg-lbpanels > .vg-lbp1{display:block}
+.vg-lbr1:checked ~ .vg-lbtablist > .vg-lbt1{background:#EAEEF2;border-color:#8C959F;color:#24292F}
+.vg-lbr2:checked ~ .vg-lbpanels > .vg-lbp2{display:block}
+.vg-lbr2:checked ~ .vg-lbtablist > .vg-lbt2{background:#EAEEF2;border-color:#8C959F;color:#24292F}
+.vg-lbr3:checked ~ .vg-lbpanels > .vg-lbp3{display:block}
+.vg-lbr3:checked ~ .vg-lbtablist > .vg-lbt3{background:#EAEEF2;border-color:#8C959F;color:#24292F}
+.vg-lbr4:checked ~ .vg-lbpanels > .vg-lbp4{display:block}
+.vg-lbr4:checked ~ .vg-lbtablist > .vg-lbt4{background:#EAEEF2;border-color:#8C959F;color:#24292F}
+.vg-lbr5:checked ~ .vg-lbpanels > .vg-lbp5{display:block}
+.vg-lbr5:checked ~ .vg-lbtablist > .vg-lbt5{background:#EAEEF2;border-color:#8C959F;color:#24292F}
+.vg-lbr6:checked ~ .vg-lbpanels > .vg-lbp6{display:block}
+.vg-lbr6:checked ~ .vg-lbtablist > .vg-lbt6{background:#EAEEF2;border-color:#8C959F;color:#24292F}
+.vg-lbr7:checked ~ .vg-lbpanels > .vg-lbp7{display:block}
+.vg-lbr7:checked ~ .vg-lbtablist > .vg-lbt7{background:#EAEEF2;border-color:#8C959F;color:#24292F}
+.vg-lbr8:checked ~ .vg-lbpanels > .vg-lbp8{display:block}
+.vg-lbr8:checked ~ .vg-lbtablist > .vg-lbt8{background:#EAEEF2;border-color:#8C959F;color:#24292F}
 .d13bjngc{padding:0 4px;background-color:#FAFAFA;background-image:repeating-linear-gradient(45deg,rgba(120,130,140,.10),rgba(120,130,140,.10) 3px,transparent 3px,transparent 7px);}
 .d13c6wgv{padding:0 4px;text-align:center;color:#6a7d4b;}
 .d199it5c{color:#874a4a;font-weight:400;}

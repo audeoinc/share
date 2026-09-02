@@ -344,6 +344,34 @@ for (const t of ['__T_DIFF_SRC__', '__T_DIFF__']) {
     bad.join(' / '));
 }
 
+// --- 5f. ラベルの取り込み ----------------------------------------------
+// ラベルは「揃っているかどうか」を見るためのものなので、取り込み方を間違えると
+// 静かに嘘をつく。落ちずに間違った絵を出す 3 通りを静的に止める。
+{
+  const at = table.indexOf('view_labels AS (');
+  const sec = at > 0 ? table.slice(at, table.indexOf('analyzed AS (', at)) : '';
+
+  // (1) 付いていない View を落とすと、8 本に付いていて 1 本だけ無い状態が
+  //     「全 View に付いている」と読めてしまう。差そのものが消える。
+  add('ラベルは LEFT JOIN で取り込む（付いていない View も 1 組として残す）',
+    at > 0 && /LEFT JOIN view_labels AS l ON l\.view_name = k\.view_name/.test(sec));
+
+  // (2) option_value は JSON ではなく [STRUCT("k", "v")] というリテラル風の
+  //     文字列。PARSE_JSON で読もうとすると NULL になり、ラベルが 1 つも
+  //     付いていないのと同じ見え方（何も出ない）になる。
+  add('ラベルは option_value を JSON として読まない（[STRUCT(...)] の形）',
+    at > 0 && sec.includes("option_name = 'labels'") &&
+    sec.includes('REGEXP_EXTRACT_ALL(option_value') &&
+    !/PARSE_JSON\(option_value\)/.test(sec));
+
+  // (3) 既に JSON の文字列を STRUCT に入れて TO_JSON_STRING すると、
+  //     文字列として再エスケープされ、描画側の JSON.parse で
+  //     配列ではなく文字列になる（＝ラベルが 1 つも読めない）。
+  add('ラベルの JSON を二重にエンコードしない（labels_text をそのまま埋める）',
+    at > 0 && table.includes(`',"l":', labels_text, '}'`) &&
+    !/STRUCT\([^)]*labels_text/.test(table));
+}
+
 // --- 6. 両ファイルで一致させる必要がある値 -----------------------------
 for (const base of ['analyze', 'render', 'erd', 'page', 'markdown', 'group_css',
   'render_dynamic_sql']) {

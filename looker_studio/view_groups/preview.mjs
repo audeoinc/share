@@ -153,23 +153,49 @@ const memoCases = [
   { title: 'メモ（未登録）', html: Md.markdownHtml(null) },
 ];
 
-// note タブ。上段が description、下段がシートのメモ。上段は割れていれば
-// タブになり、1 種類ならタブは出ない。どちらも無ければ段そのものを出さない。
+/**
+ * SQL 側の base_labels と同じ形（[{v: [View 名...], l: [{k, v}...]}]）を作る。
+ * pick(viewName) が返すラベルの並びごとに View を畳む。空配列は
+ * 「ラベルが付いていない組」で、SQL 側も空のまま渡す。
+ */
+const fakeLabels = (b, pick) => {
+  const by = new Map();
+  for (const g of b.groups) for (const m of g.members) {
+    const l = pick(m.viewName, g) || [];
+    const key = JSON.stringify(l);
+    if (!by.has(key)) by.set(key, { l, v: [] });
+    by.get(key).v.push(m.viewName);
+  }
+  return [...by.values()];
+};
+// キーはわざと逆順で渡す。並べ直すのは描画側の仕事。
+const LABELS_COMMON = [{ k: 'tier', v: 'gold' }, { k: 'domain', v: 'sales' }];
+const LABELS_ODD = [{ k: 'tier', v: 'gold' }, { k: 'domain', v: 'finance' }];
+
+// note タブ。ラベル → description → メモ の順。description は割れていれば
+// タブになり、1 種類ならタブは出ない。1 つも無ければ「未設定」と書く。
+// ラベルだけは量に合わせて重さが変わる（無ければ出ない・揃っていればチップ
+// だけ・割れていれば段に昇格）ので、その 3 通りを並べて見る。
+const note = (descPick, labelPick) => `<div class="vg-root">` +
+  V.renderNote(base3, fakeDescs(base3, descPick), Md.markdownHtml(NOTE_MD),
+    labelPick ? fakeLabels(base3, labelPick) : []) + `</div>`;
 const noteCases = [
   { title: 'note（description が割れている = 上段がタブ）',
-    html: `<div class="vg-root">` + V.renderNote(base3,
-      fakeDescs(base3, (v) => (/jp$/.test(v) ? VIEW_DESC_MD : VIEW_DESC_US_MD)),
-      Md.markdownHtml(NOTE_MD)) + `</div>` },
+    html: note((v) => (/jp$/.test(v) ? VIEW_DESC_MD : VIEW_DESC_US_MD)) },
   { title: 'note（description が全 View 同じ = 押せない見出し 1 枚）',
-    html: `<div class="vg-root">` + V.renderNote(base3,
-      fakeDescs(base3, () => VIEW_DESC_MD), Md.markdownHtml(NOTE_MD)) + `</div>` },
+    html: note(() => VIEW_DESC_MD) },
   { title: 'note（description が一部の View にしか無い）',
-    html: `<div class="vg-root">` + V.renderNote(base3,
-      fakeDescs(base3, (v) => (/jp$/.test(v) ? VIEW_DESC_MD : '')),
-      Md.markdownHtml(NOTE_MD)) + `</div>` },
+    html: note((v) => (/jp$/.test(v) ? VIEW_DESC_MD : '')) },
   { title: 'note（description が 1 つも無い = 未設定と書く）',
-    html: `<div class="vg-root">` + V.renderNote(base3,
-      fakeDescs(base3, () => ''), Md.markdownHtml(NOTE_MD)) + `</div>` },
+    html: note(() => '') },
+  { title: 'note（ラベルが全 View 同じ = 見出し無しのチップだけ）',
+    html: note(() => VIEW_DESC_MD, () => LABELS_COMMON) },
+  { title: 'note（ラベルが割れている = 段に昇格してタブ）',
+    html: note(() => VIEW_DESC_MD,
+      (v) => (/us$/.test(v) ? LABELS_ODD : LABELS_COMMON)) },
+  { title: 'note（ラベルが一部の View にしか無い）',
+    html: note(() => VIEW_DESC_MD,
+      (v) => (/us$/.test(v) ? [] : LABELS_COMMON)) },
 ];
 
 // カラム定義の代わり。実際は INFORMATION_SCHEMA.COLUMNS から作った並びが来る。
@@ -274,16 +300,19 @@ const pageCases = [
   { title: '外側タブ（note / カラム定義 / 参照関係 / ロジック差分 / SQL）',
     b: baseComplex, opts: {}, note: NOTE_MD,
     pick: (v) => (/jp$/.test(v) ? VIEW_DESC_MD : VIEW_DESC_US_MD) },
-  { title: '外側タブ・3 グループ', b: base3, opts: {}, note: NOTE_MD,
-    pick: () => VIEW_DESC_MD },
-  { title: '外側タブ・メモも description も未登録の base',
-    b: base2, opts: {}, note: null, pick: () => '' },
+  // ラベルが割れた base。見出しの「ラベル不一致」バッジが出る形も見る。
+  { title: '外側タブ・3 グループ（ラベルが割れている）', b: base3, opts: {},
+    note: NOTE_MD, pick: () => VIEW_DESC_MD,
+    labels: (v) => (/us$/.test(v) ? LABELS_ODD : LABELS_COMMON) },
+  { title: '外側タブ・メモも description もラベルも未登録の base',
+    b: base2, opts: {}, note: null, pick: () => '', labels: () => [] },
 ].map((c) => ({ ...c,
   html: splice(
     Ch.wrapPage(R.renderBase(c.b, c.opts), E.renderErdBase(c.b),
       Co.renderColumnsBase(c.b, fakeColumns(c.b)), Sq.renderSqlBase(c.b, fakeSql(c.b)),
-      V.renderNote(c.b, fakeDescs(c.b, c.pick), Ch.NOTE_MARK),
-      c.b),
+      V.renderNote(c.b, fakeDescs(c.b, c.pick), Ch.NOTE_MARK,
+        fakeLabels(c.b, c.labels || (() => LABELS_COMMON))),
+      c.b, V.labelsSplit(c.b, fakeLabels(c.b, c.labels || (() => LABELS_COMMON)))),
     Md.markdownHtml(c.note)) }));
 
 // 列はロジック グループではなくカラム定義で束ね直すので、ロジック差分の
@@ -778,10 +807,13 @@ const checks = [
       // 緑は使わない。このカードでは緑に別の意味がある（差分の追加・
       // 「1 グループ = 全部同じ」バッジ）ので、選択状態と読み分けられなくなる
       !/\.vg-d[a-z]*[0-9]*[^}]*#DAFBE1/.test(css) &&
-      // hover は選択中より 1 段薄い。同じ色だと選択とマウス位置が区別できない
-      css.includes('.vg-dtab:hover{background:#F6F8FA;color:#24292F}') &&
+      // hover は選択中より 1 段薄い。同じ色だと選択とマウス位置が区別できない。
+      // 見た目の規則は description とラベルで共有する（別にすべきなのは
+      // ラジオの名前空間だけで、塗りまで二重に書く理由が無い）。
+      css.includes('.vg-dtab:hover,.vg-lbtab:hover{background:#F6F8FA;color:#24292F}') &&
+      css.includes(`.vg-lbr1:checked ~ .vg-lbtablist > .vg-lbt1{${on}}`) &&
       // 押せない見出しは hover のあとに置いて勝たせる（乗っても光らない）
-      css.indexOf('.vg-dtab.vg-dstatic{') > css.indexOf('.vg-dtab:hover{');
+      css.indexOf('.vg-dtab.vg-dstatic{') > css.indexOf('.vg-dtab:hover,');
   })()],
   ['description が一部にしか無ければ、その組も出す（黙って消さない）', (() => {
     const h = noteCases[2].html;
@@ -823,6 +855,72 @@ const checks = [
   })()],
   ['note の CSS は viewdesc.js 側にある',
     V.descCss().includes('.vg-nhead') && !R.chromeCss().includes('.vg-nhead')],
+  // ラベルは内容の量に合わせて重さを変える。揃っているのが普通なので、
+  // そこに段 1 つ（見出し・罫線・余白）を使うと note を開くたびに主題が
+  // 下へ押し下げられる。揃っているときはチップ 1 列だけにする。
+  ['ラベルが揃っていれば見出しもタブも出さない（チップだけ）', (() => {
+    const h = noteCases[4].html;
+    const chips = [...h.matchAll(
+      /<span class="vg-lbk">([^<]*)<\/span><span class="vg-lbv">([^<]*)</g)]
+      .map((m) => `${m[1]}=${m[2]}`);
+    // キー名のアルファベット順（渡したのは tier → domain の順）
+    return chips.join(',') === 'domain=sales,tier=gold' &&
+      !h.includes('vg-nhead">ラベル') && !h.includes('vg-lbtab') &&
+      // 位置は note の先頭。description の段より前
+      h.indexOf('vg-lbchips') < h.indexOf('vg-nhead">View の description');
+  })()],
+  // 逆に割れているのは滅多に起きず、起きたときは**それ自体が拾いたい差**。
+  // 同じロジックの View なのに 1 本だけ別の値、という状態を畳んで消さない。
+  ['ラベルが割れていれば段に昇格してタブになる', (() => {
+    const h = noteCases[5].html;
+    const tabs = [...h.matchAll(/class="vg-lbtab vg-lbt\d+"[^>]*>([^<]*)</g)]
+      .map((m) => m[1]);
+    return h.includes('vg-nhead">ラベル') &&
+      h.includes('ラベルが割れています') && tabs.length === 2 &&
+      // 多い側が先（＝既定で開く）。us の 3 本だけが finance
+      tabs[0] === 'abjp, abuk, cdjp, cduk, efjp, efuk' &&
+      tabs[1] === 'abus, cdus, efus' && h.includes('finance');
+  })()],
+  ['ラベルが一部の View にしか無いのも割れとして出す', (() => {
+    const h = noteCases[6].html;
+    const tabs = [...h.matchAll(/class="vg-lbtab vg-lbt\d+"[^>]*>([^<]*)</g)]
+      .map((m) => m[1]);
+    // 中身のある組が先、未設定の組は最後（description の並べ方と同じ）
+    return tabs.length === 2 && tabs[0] === 'abjp, abuk, cdjp, cduk, efjp, efuk' &&
+      h.includes('ラベルが設定されていません');
+  })()],
+  // 1 つも無ければ何も出さない。description と違い labels は付いていない
+  // ほうが普通なので、「未設定」と書くと使っていない base 全部に行が並ぶ。
+  ['ラベルが 1 つも無ければ何も出さない（description とは扱いを変える）', (() => {
+    const none = V.renderNote(base3, [], '(メモ)', [{ v: [], l: [] }]);
+    const gone = V.renderNote(base3, [], '(メモ)', []);
+    return [none, gone].every((h) =>
+      !h.includes('vg-lb') && h.includes('vg-nhead">メモ'));
+  })()],
+  ['割れているときだけ見出しに「ラベル不一致」バッジが出る', (() => {
+    const split = pageCases[1].html;   // us だけ finance
+    const same = pageCases[0].html;    // 全 View 同じ
+    // 見出しに出るのは「割れている」ことだけ。値そのものは note タブの担当
+    // （見出しに並べると base ごとに帯が伸びるうえ、揃っている base では
+    // 全カードに同じ値が 1 個ずつ増えて手掛かりにならない）。
+    const head = split.slice(split.indexOf('<div class="vg-header">'),
+      split.indexOf('<label class="vg-otab'));
+    return split.includes('ラベル不一致') && !same.includes('ラベル不一致') &&
+      head.includes('ラベル不一致') && !head.includes('vg-lbchip');
+  })()],
+  ['ラベルのラジオは外側・基準・比較・SQL・description と別のクラス', (() => {
+    const css = V.descCss();
+    return /\.vg-lbr1:checked ~ \.vg-lbpanels > \.vg-lbp1\{display:block\}/.test(css) &&
+      // description のラジオがラベルのパネルに届かない（逆も同じ）
+      !/\.vg-dr\d+:checked ~ \.vg-lb/.test(css) &&
+      !/\.vg-lbr\d+:checked ~ \.vg-d/.test(css);
+  })()],
+  ['ラベルのタブの CSS が上限枚数ぶんある', (() => {
+    const css = V.descCss();
+    const n = [...css.matchAll(/\.vg-lbr(\d+):checked ~ \.vg-lbpanels/g)]
+      .map((m) => Number(m[1]));
+    return n.length === Ch.MAX_LABEL_TABS && Math.max(...n) === Ch.MAX_LABEL_TABS;
+  })()],
   // カラム定義の列はロジック グループではなく**カラム定義**で束ねる。
   // SQL が同一でも参照先の型や description が違えば別の列になり、逆に別ロジック
   // でも定義が同じなら 1 列にまとまる。ロジック差分には出てこない差がここに出る。

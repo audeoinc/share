@@ -885,6 +885,64 @@ base_descs AS (
   FROM desc_by_base
   GROUP BY base
 ),
+-- View に付いた labels（key:value）。note タブの先頭に出す。
+--
+-- **option_value は JSON ではない。** description と同じ TABLE_OPTIONS だが、
+-- labels のほうは
+--   [STRUCT("domain", "sales"), STRUCT("tier", "gold")]
+-- という SQL リテラル風の文字列で入っており、PARSE_JSON では読めない。
+-- 引用符で囲まれた文字列を出てくる順に拾い、key・value の順で 2 つずつ組に
+-- する。ラベルに使える文字は英小文字・数字・`_`・`-` と国際文字だけで
+-- 引用符は入らないので、この拾い方で欠けたり混ざったりしない。
+--
+-- 並びはキー名順。SQL 側と描画側の両方で並べる（片方だけだと、実行のたびに
+-- 並びが変わって「値は同じなのに別の組」に見えることがある）。
+view_labels AS (
+  SELECT
+    view_name,
+    ARRAY(
+      SELECT AS STRUCT toks[OFFSET(i)] AS k, toks[OFFSET(i + 1)] AS v
+      FROM UNNEST(GENERATE_ARRAY(0, ARRAY_LENGTH(toks) - 2, 2)) AS i
+      ORDER BY toks[OFFSET(i)]
+    ) AS labels
+  FROM (
+    SELECT
+      table_name AS view_name,
+      REGEXP_EXTRACT_ALL(option_value, r'"([^"]*)"') AS toks
+    FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.TABLE_OPTIONS`
+    WHERE option_name = 'labels'
+      AND (__VIEW_DATASET_COND__) AND (__VIEW_NAME_COND__)
+  )
+),
+-- 同じラベルを持つ View をまとめる。**LEFT JOIN。** ラベルの付いていない
+-- View も 1 組として残す ― 「8 本には付いていて 1 本だけ無い」も差なので、
+-- 黙って落とすと全 View に付いているように見えてしまう。
+-- 別名は labels にしない（view_labels に同じ名前の列があり、GROUP BY で
+-- 「FROM 側の列か SELECT の別名か」が決まらず ambiguous で落ちる）。
+labels_by_base AS (
+  SELECT
+    k.base,
+    -- 突き合わない View（ラベルなし）は空の並びとして扱う。ARRAY 型の
+    -- COALESCE は空配列の型が決まらないので、JSON にしてから寄せる。
+    IF(l.view_name IS NULL, '[]', TO_JSON_STRING(l.labels)) AS labels_text,
+    ARRAY_AGG(k.view_name ORDER BY k.view_name) AS view_names
+  FROM keyed AS k
+  LEFT JOIN view_labels AS l ON l.view_name = k.view_name
+  GROUP BY k.base, labels_text
+),
+-- 描画側へ渡す形。[{v: [View 名...], l: [{k, v}...]}]。
+-- labels_text は既に JSON なので、そのまま埋めて二重にエンコードしない
+-- （STRUCT に入れて TO_JSON_STRING すると文字列として再エスケープされる）。
+base_labels AS (
+  SELECT
+    base,
+    CONCAT('[', STRING_AGG(
+      CONCAT('{"v":', TO_JSON_STRING(view_names), ',"l":', labels_text, '}'),
+      ',' ORDER BY view_names[OFFSET(0)]
+    ), ']') AS labels_json
+  FROM labels_by_base
+  GROUP BY base
+),
 -- 解析は base ごとに 1 回だけ。結果の JSON をこの段で持っておき、
 -- メタデータは JSON から取り出し、HTML は描画の UDF に渡す。
 -- JS UDF から別の UDF は呼べないので、この 2 段で合成する。
@@ -930,11 +988,14 @@ refs AS (
     -- View に description が無い base もある。描画側が段ごと出さないので、
     -- 空の並びを渡しておけばよい。
     COALESCE(bd.descs_json, '[]') AS descs_json,
+    -- ラベルを 1 つも使っていない環境もある。描画側は空なら何も出さない。
+    COALESCE(bl.labels_json, '[]') AS labels_json,
     0 AS ref_index,
     JSON_VALUE_ARRAY(a.analysis, '$.groupLabels')[SAFE_OFFSET(0)] AS ref_label
   FROM analyzed AS a
   LEFT JOIN base_cols AS bc ON bc.base = a.base
   LEFT JOIN base_descs AS bd ON bd.base = a.base
+  LEFT JOIN base_labels AS bl ON bl.base = a.base
 )
 SELECT
   CURRENT_DATE('__TZ__') AS snapshot_date,
@@ -966,6 +1027,7 @@ SELECT
     columns_json,
     sql_json,
     descs_json,
+    labels_json,
     options_json
   ) AS diff_html
 FROM refs

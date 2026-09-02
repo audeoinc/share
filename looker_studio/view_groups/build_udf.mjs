@@ -137,7 +137,8 @@ const UNUSED_CSS = UNUSED_RENDER.concat([
   'renderColumnsBase', 'renderColumns', 'groupColumns', 'columnOrder',
   'cellInfo', 'mixedTip', 'uniq', 'majority', 'descHtml', 'parseDesc', 'pickKey',
   'renderSqlBase', 'renderSql', 'sqlViews', 'sqlBody', 'sqlPanel',
-  'renderNote', 'renderDesc', 'descGroups', 'descPanel', 'suffixByView']);
+  'renderNote', 'renderDesc', 'descGroups', 'descPanel', 'suffixByView',
+  'tabGroups', 'labelGroups', 'labelChips', 'labelsSplit', 'renderLabels']);
 
 /** CommonJS の体裁を落として素の関数群にする。 */
 function strip(src, file) {
@@ -350,7 +351,7 @@ return __run(analysis_json, options_json);
 // カラム定義の表と View ごとの素の SQL を作り、渡された差分 HTML・参照関係の図と
 // 合わせて外側タブで束ねる。差分も図も作らない（どちらも別の UDF）。
 const pageDriver = `
-function __run(analysis_json, diff_html, erd_html, columns_json, sql_json, descs_json, options_json) {
+function __run(analysis_json, diff_html, erd_html, columns_json, sql_json, descs_json, labels_json, options_json) {
   var opts = __opts(options_json);
   var a;
   try { a = JSON.parse(analysis_json); } catch (e) { a = null; }
@@ -377,6 +378,11 @@ function __run(analysis_json, diff_html, erd_html, columns_json, sql_json, descs
   var descs = [];
   try { descs = JSON.parse(descs_json) || []; } catch (e) { descs = []; }
 
+  // View に付いた labels。[{v: [View 名...], l: [{k, v}...]}] で来る。
+  // 大半の base では 1 組（全 View で同じ）になる。
+  var labels = [];
+  try { labels = JSON.parse(labels_json) || []; } catch (e) { labels = []; }
+
   var col = '';
   var sql = '';
   var bases = a.bases || [];
@@ -389,10 +395,10 @@ function __run(analysis_json, diff_html, erd_html, columns_json, sql_json, descs
   var b0 = a.bases && a.bases.length ? a.bases[0] : null;
   return wrapPage(String(diff_html || ''),
     String(erd_html || __notice('参照関係を取得できませんでした。')), col, sql,
-    renderNote(b0, descs, NOTE_MARK), b0);
+    renderNote(b0, descs, NOTE_MARK, labels), b0, labelsSplit(b0, labels));
 }
 
-return __run(analysis_json, diff_html, erd_html, columns_json, sql_json, descs_json, options_json);
+return __run(analysis_json, diff_html, erd_html, columns_json, sql_json, descs_json, labels_json, options_json);
 `.trim();
 
 // --- markdown のドライバ -----------------------------------------------
@@ -500,7 +506,8 @@ const VIEWLGC_ANALYZE = new Function('views', 'options_json', analyzePack.code);
 const VIEWLGC_RENDER = new Function('analysis_json', 'options_json', renderPack.code);
 const VIEWLGC_ERD = new Function('analysis_json', 'options_json', erdPack.code);
 const VIEWLGC_PAGE = new Function('analysis_json', 'diff_html', 'erd_html',
-  'columns_json', 'sql_json', 'descs_json', 'options_json', pagePack.code);
+  'columns_json', 'sql_json', 'descs_json', 'labels_json', 'options_json',
+  pagePack.code);
 const VIEWLGC_MARKDOWN = new Function('md', markdownPack.code);
 const VIEW_GROUP_CSS = new Function('options_json', cssPack.code);
 
@@ -547,6 +554,18 @@ function fakeDescs(views) {
   })));
 }
 
+// ラベルの代わり。実際は INFORMATION_SCHEMA.TABLE_OPTIONS の labels から
+// 作った JSON が来る。**全 View で同じ値**にしてある（これが普通の姿で、
+// そのときカードは見出しを持たないチップ 1 列になる）。割れたときの姿は
+// 下の表明で別に作って確かめる。
+// キーはわざと逆順（tier → domain）で渡す。並べ直しは描画側の仕事。
+function fakeLabels(views) {
+  return JSON.stringify([{
+    v: views.map((v) => v.view_name),
+    l: [{ k: 'tier', v: 'gold' }, { k: 'domain', v: 'sales' }],
+  }]);
+}
+
 function VIEW_GROUP_INFO(views, options_json) {
   const a = VIEWLGC_ANALYZE(views, options_json);
   const j = JSON.parse(a);
@@ -563,7 +582,8 @@ function VIEW_GROUP_INFO(views, options_json) {
     erd: VIEWLGC_ERD(a, options_json),
     page: VIEWLGC_PAGE(a, VIEWLGC_RENDER(a, options_json),
       VIEWLGC_ERD(a, options_json),
-      fakeColumns(views), fakeSql(views), fakeDescs(views), options_json),
+      fakeColumns(views), fakeSql(views), fakeDescs(views), fakeLabels(views),
+      options_json),
   };
 }
 
@@ -610,7 +630,7 @@ const checks = [
     // page はそれをそのまま持っている
     info.page.includes(info.erd)],
   ['page は図が渡されなくても落ちない',
-    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]', '[]', OPTS)
+    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]', '[]', '[]', OPTS)
       .includes('参照関係を取得できませんでした')],
   // メモだけは作り置きしない。カードには目印だけを置き、ビューが
   // REPLACE で note_html に差し替える。焼き込むと、シートを直しても
@@ -654,7 +674,8 @@ const checks = [
       sql.includes('<span class="vg-sqln">');
   })()],
   ['page は SQL が渡されなくても落ちない',
-    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '{ broken', '[]', OPTS)
+    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '{ broken', '[]', '[]',
+      OPTS)
       .includes('SQL を取得できませんでした')],
   ['page はカラム定義の表を出す（定義ごとの列と並び順の ⚠）', (() => {
     const at = (n) => info.page.indexOf(`<div class="vg-opanel vg-op${n}">`);
@@ -671,9 +692,10 @@ const checks = [
       cols.includes('vg-cmix') && cols.includes('vg-cwarn');
   })()],
   ['page はカラム定義が空でも落ちない',
-    typeof VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '{ broken', '[]', '[]', OPTS)
+    typeof VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '{ broken', '[]', '[]', '[]',
+      OPTS)
       === 'string' &&
-    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', null, '[]', '[]', OPTS)
+    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', null, '[]', '[]', '[]', OPTS)
       .includes('カラム定義を取得できませんでした')],
   ['page はメモの目印を 1 つだけ置く（本体は焼き込まない）', (() => {
     const MARK = require(join(here, 'chrome.js')).NOTE_MARK;
@@ -710,7 +732,7 @@ const checks = [
   ['description が 1 種類でも suffix の見出しを出す（押せない <span>）', (() => {
     const names = views.map((v) => v.view_name);
     const one = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
-      JSON.stringify([{ v: names, h: '<p>ひとつ</p>' }]), OPTS);
+      JSON.stringify([{ v: names, h: '<p>ひとつ</p>' }]), '[]', OPTS);
     const m = one.match(/<span class="vg-dtab vg-dstatic">([^<]*)<span class="vg-tabn">(\d+)</);
     return m !== null && one.includes('ひとつ') &&
       // 全 View ぶんの suffix が並ぶ
@@ -724,10 +746,10 @@ const checks = [
   ['description が 1 つも無くても段を出す（未設定と取得失敗を書き分ける）', (() => {
     const names = views.map((v) => v.view_name);
     const unset = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
-      JSON.stringify([{ v: names, h: '' }]), OPTS);
+      JSON.stringify([{ v: names, h: '' }]), '[]', OPTS);
     // descs_json が空 = 組が作れない。これは未設定ではなく取れなかったほう
     const gone = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
-      '[]', OPTS);
+      '[]', '[]', OPTS);
     return unset.includes('description が設定されていません') &&
       unset.includes('vg-dstatic') &&
       gone.includes('description を取得できませんでした') &&
@@ -737,6 +759,65 @@ const checks = [
   })()],
   ['page は description が壊れていても落ちない',
     typeof VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
+      '{ broken', '{ broken', OPTS) === 'string'],
+  // ラベルは内容の量に合わせて重さを変える。揃っているのが普通なので、
+  // そのときは見出しも罫線もタブも出さず、チップ 1 列だけにする。
+  ['ラベルが揃っているときは見出しもタブも出さない（チップだけ）', (() => {
+    const chips = [...info.page.matchAll(
+      /<span class="vg-lbk">([^<]*)<\/span><span class="vg-lbv">([^<]*)</g)]
+      .map((m) => m[1] + '=' + m[2]);
+    return chips.join(',') === 'domain=sales,tier=gold' &&
+      // キー名のアルファベット順（渡したのは tier → domain の順）
+      !info.page.includes('vg-nhead">ラベル') &&
+      !info.page.includes('vg-lbtab') && !info.page.includes('vg-lbr') &&
+      // 見出しのバッジも出ない（揃っているのは正常）
+      !info.page.includes('ラベル不一致');
+  })()],
+  ['ラベルが割れているときは段に昇格してタブになる', (() => {
+    const names = views.map((v) => v.view_name);
+    const split = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
+      '[]', JSON.stringify([
+        { v: names.slice(0, 8), l: [{ k: 'domain', v: 'sales' }] },
+        { v: names.slice(8), l: [{ k: 'domain', v: 'finance' }] },
+      ]), OPTS);
+    const tabs = [...split.matchAll(/class="vg-lbtab vg-lbt\d+"[^>]*>([^<]*)</g)]
+      .map((m) => m[1]);
+    return split.includes('vg-nhead">ラベル') &&
+      split.includes('ラベルが割れています') &&
+      tabs.length === 2 &&
+      // 多い側が先（＝既定で開く）
+      tabs[0].split(', ').length === 8 && tabs[1].split(', ').length === 1 &&
+      split.includes('finance') &&
+      // 見出しのバッジで、note を開かなくても割れが拾える
+      split.includes('ラベル不一致');
+  })()],
+  ['ラベルが片方だけ付いていないのも割れとして出す', (() => {
+    const names = views.map((v) => v.view_name);
+    const half = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
+      '[]', JSON.stringify([
+        { v: names.slice(0, 8), l: [{ k: 'domain', v: 'sales' }] },
+        { v: names.slice(8), l: [] },
+      ]), OPTS);
+    return half.includes('ラベル不一致') &&
+      half.includes('ラベルが設定されていません') &&
+      // 中身のある側が先頭（既定で開くタブ）
+      half.indexOf('vg-lbp1') < half.indexOf('ラベルが設定されていません');
+  })()],
+  ['ラベルが 1 つも無ければ何も出さない', (() => {
+    const names = views.map((v) => v.view_name);
+    const none = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
+      '[]', JSON.stringify([{ v: names, l: [] }]), OPTS);
+    // 取り込めなかったときも同じ（付いていないのが正常でありうるので、
+    // description のように「未設定」と書いて全カードに 1 行増やさない）
+    const gone = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
+      '[]', '[]', OPTS);
+    return [none, gone].every((h) =>
+      !h.includes('vg-lb') && !h.includes('ラベル不一致') &&
+      // note の段そのものは出る
+      h.includes('vg-nhead">メモ'));
+  })()],
+  ['page はラベルが壊れていても落ちない',
+    typeof VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]', '[]',
       '{ broken', OPTS) === 'string'],
   ['タイトルが base 名', text.includes('v_daily_sales')],
   ['3 グループでタブになる', html.includes('vg-tablist')],
@@ -1244,12 +1325,22 @@ LANGUAGE js AS %s
 -- タブは グループではなく View（suffix）単位。
 -- 差分も図も作らない。viewlgc_render / viewlgc_erd の出力をそのまま受け取る。
 --
--- note タブは二段構え。上段が View 自身の description で、descs_json
--- （[{v: [View 名...], h: HTML}]）から作る。**Markdown を HTML にするのは
--- 呼び出し側の SQL（viewlgc_markdown）。** JS UDF から別の UDF は呼べない。
+-- note タブは三段。先頭が View に付いた labels、次が View 自身の description、
+-- 最後がメモ。
+--
+-- ラベルは labels_json（[{v: [View 名...], l: [{k, v}...]}]）から作る。
+-- **量に合わせて重さを変える。** 全 View で同じなら見出しを持たないチップ
+-- 1 列、base の中で割れていればタブ付きの段に昇格し、見出しにも
+-- 「ラベル不一致」のバッジが出る。1 つも付いていなければ何も出さない
+-- （labels は付いていない View のほうが普通なので、「未設定」と書くと
+-- 使っていない base 全部にその行が並ぶ）。キーはアルファベット順に並べ直す。
+--
+-- description は descs_json（[{v: [View 名...], h: HTML}]）から作る。
+-- **Markdown を HTML にするのは呼び出し側の SQL（viewlgc_markdown）。**
+-- JS UDF から別の UDF は呼べない。
 -- 文面が割れている base ではタブになり、1 種類ならタブは出ない。
 --
--- 下段のメモの中身はここでは入れない。パネルには目印 '<!--VG_NOTE-->' だけを
+-- メモの中身はここでは入れない。パネルには目印 '<!--VG_NOTE-->' だけを
 -- 置き、ビューが REPLACE で note_html に差し替える。ここで焼き込むと、シートを
 -- 直しても次の日次実行までレポートが古いままになる。
 -- ---------------------------------------------------------------------
@@ -1261,6 +1352,7 @@ CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
   columns_json STRING,
   sql_json STRING,
   descs_json STRING,
+  labels_json STRING,
   options_json STRING
 )
 RETURNS STRING
