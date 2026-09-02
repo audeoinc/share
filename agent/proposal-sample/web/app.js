@@ -3,7 +3,7 @@
 
 const yen = (n) => "¥" + Number(n || 0).toLocaleString("ja-JP");
 const riskLabel = { low: "低", medium: "中", high: "高" };
-const SRC_LABEL = { generate: "生成", refine: "再提案" };
+const SRC_LABEL = { generate: "生成", refine: "再提案", chat: "対話" };
 const fmtTime = (iso) => (iso ? iso.replace("T", " ").slice(5, 16) : "");
 const prodNames = (ids) =>
   (ids || []).map((id) => (productsById[id] ? productsById[id].name : id)).join(", ");
@@ -18,6 +18,7 @@ let previewDropHandled = false; // preview発ドラッグが有効な場所に�
 let compareA = null; // 版比較で1件目に選んだ版
 let conversationLog = []; // 会話の流れ: [{kind:'generate'|'refine', instruction, thinking}]
 let currentThinking = ""; // 直近生成のモデル思考（版に保存/復元）
+let chatMessages = []; // 対話チャット: [{role:'user'|'agent'|'system', text, thinking?}]
 
 async function api(path, options) {
   const res = await fetch(path, options);
@@ -157,6 +158,8 @@ async function selectCustomer(customerId, cardEl) {
   document.getElementById("thinking-box").classList.add("hidden");
   conversationLog = []; // 顧客が変わったら会話表示をクリア
   renderConversationLog();
+  chatMessages = []; // 対話チャットもクリア（次回の初回送信でサーバ側もリセット）
+  renderChatLog();
 
   const [c, purchases] = await Promise.all([
     api(`/api/customers/${customerId}`),
@@ -820,6 +823,139 @@ async function refine() {
   }
 }
 
+// ---- エージェントと相談して作る（対話・往復） ------------------------------
+
+function renderChatLog() {
+  const el = document.getElementById("chat-log");
+  if (!el) return;
+  if (!chatMessages.length) {
+    el.innerHTML =
+      `<div class="chat-hint muted">顧客について相談すると、エージェントが必要に応じて質問し、` +
+      `要件が固まったら提案を作成して右のフォームに反映します。</div>`;
+    return;
+  }
+  el.innerHTML = chatMessages
+    .map((m) => {
+      if (m.role === "user") {
+        return `<div class="chat-msg user"><div class="bubble">${escapeHtml(m.text)}</div></div>`;
+      }
+      if (m.role === "system") {
+        return `<div class="chat-msg system"><div class="sys">${escapeHtml(m.text)}</div></div>`;
+      }
+      const think = (m.thinking || "").trim()
+        ? `<details class="cl-think"><summary>🧠 このターンの思考プロセス</summary>` +
+          `<div class="cl-think-text">${renderMarkdown(m.thinking)}</div></details>`
+        : "";
+      const text = (m.text || "").trim()
+        ? renderMarkdown(m.text)
+        : `<span class="muted">…</span>`;
+      return `<div class="chat-msg agent"><div class="bubble">${text}</div>${think}</div>`;
+    })
+    .join("");
+  el.scrollTop = el.scrollHeight;
+}
+
+function resetChat() {
+  chatMessages = [];
+  renderChatLog();
+  // 次回の初回送信で reset=true が付き、サーバ側の会話セッションも破棄される。
+  toast("会話をリセットしました");
+}
+
+async function sendChat() {
+  if (!currentCustomer) {
+    toast("先に顧客を選んでください");
+    return;
+  }
+  const input = document.getElementById("chat-input");
+  const message = input.value.trim();
+  if (!message) return;
+
+  const isFirst = chatMessages.length === 0; // 会話の最初＝サーバ側もリセットして開始
+  chatMessages.push({ role: "user", text: message });
+  const agentMsg = { role: "agent", text: "", thinking: "" }; // ライブ更新用
+  chatMessages.push(agentMsg);
+  renderChatLog();
+  input.value = "";
+
+  const btn = document.getElementById("btn-chat-send");
+  btn.disabled = true;
+  showActivity("エージェントが考えています…");
+
+  let replyAcc = "";
+  let thinkingAcc = "";
+  try {
+    const res = await fetch("/api/chat_stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ customer_id: currentCustomer.id, message, reset: isFirst }),
+    });
+    if (!res.ok || !res.body) throw new Error(`${res.status} ${res.statusText}`);
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let doneData = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const chunk = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        if (!chunk.trim()) continue;
+        const { event, data } = parseSSEChunk(chunk);
+        if (event === "thinking_delta") {
+          thinkingAcc += data.text || "";
+          agentMsg.thinking = thinkingAcc;
+          renderChatLog();
+        } else if (event === "reply_delta") {
+          replyAcc += data.text || "";
+          agentMsg.text = replyAcc;
+          renderChatLog();
+        } else if (event === "status") {
+          setActivityStatus(data.text || "");
+        } else if (event === "error") {
+          throw new Error(data.text || "server error");
+        } else if (event === "done") {
+          doneData = data;
+        }
+      }
+    }
+
+    if (!doneData) throw new Error("ストリームが完了しませんでした");
+
+    agentMsg.text =
+      doneData.reply ||
+      replyAcc ||
+      (doneData.proposal ? "提案を作成しました。右のフォームでご確認ください。" : "");
+    agentMsg.thinking = doneData.thinking || thinkingAcc;
+
+    // 提案が確定したら、生成/再提案と同じように右のフォーム・プレビューへ反映。
+    if (doneData.proposal) {
+      currentProposalId = null; // 対話での作成は“新規”扱い（保存すると新規作成）
+      showProposalForm(doneData.proposal, {
+        analysisNote:
+          "対話（チャット）で作成した提案です。AIの分析を見るには「✨生成」または「再提案」してください。",
+        thinking: doneData.thinking || thinkingAcc,
+        draftId: doneData.draft_id,
+      });
+      chatMessages.push({ role: "system", text: "✅ 提案を作成し、右のフォームに反映しました。" });
+      await loadVersions(currentCustomer.id); // 履歴を更新
+    }
+    renderChatLog();
+  } catch (e) {
+    agentMsg.text = `（エラー: ${e.message}）`;
+    renderChatLog();
+    toast("対話に失敗しました: " + e.message);
+  } finally {
+    hideActivity();
+    btn.disabled = false;
+  }
+}
+
 // ---- 保存済み提案を編集 ----------------------------------------------------
 
 function editSavedProposal(p) {
@@ -939,6 +1075,11 @@ document.getElementById("btn-refine").addEventListener("click", refine);
 document.getElementById("btn-evaluate").addEventListener("click", evaluateProposal);
 document.getElementById("refine-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") refine();
+});
+document.getElementById("btn-chat-send").addEventListener("click", sendChat);
+document.getElementById("btn-chat-reset").addEventListener("click", resetChat);
+document.getElementById("chat-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") sendChat();
 });
 // 手動編集をプレビューへライブ反映
 document.getElementById("prop-title-input").addEventListener("input", (e) => {

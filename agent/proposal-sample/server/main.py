@@ -34,6 +34,7 @@ from pydantic import BaseModel  # noqa: E402
 from proposal_app import store, tools  # noqa: E402
 from server.evaluator import evaluate  # noqa: E402
 from server.pipeline import (  # noqa: E402
+    chat_stream,
     generate_proposal,
     generate_proposal_stream,
     refine_proposal,
@@ -83,6 +84,12 @@ class RefineReq(BaseModel):
     analysis: str
     previous_proposal: dict
     instruction: str
+
+
+class ChatReq(BaseModel):
+    customer_id: str
+    message: str
+    reset: bool = False  # True=これまでの会話を破棄して新しく相談を始める
 
 
 class ApproveReq(BaseModel):
@@ -292,6 +299,47 @@ async def api_refine_stream(req: RefineReq):
                         "draft_id": draft.get("draft_id"),
                         "version_id": version.get("id"),
                     })
+                else:
+                    yield _sse(msg["type"], msg)
+        except Exception as e:
+            yield _sse("error", {"text": str(e)})
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/chat_stream")
+async def api_chat_stream(req: ChatReq):
+    """対話（往復）をSSEでストリーミング。
+
+    エージェントは質問を返すこともあり（proposal=None）、要件が揃うと emit_proposal で
+    提案を確定する。確定時は下書き保存＋版履歴への記録まで行い、生成/再提案と同じ導線
+    （評価・承認・履歴）にそのまま乗せられるようにする。
+    """
+
+    async def event_gen():
+        try:
+            async for msg in chat_stream(req.customer_id, req.message, reset=req.reset):
+                if msg["type"] == "final":
+                    reply = msg.get("reply", "")
+                    thinking = msg.get("thinking", "")
+                    proposal = msg.get("proposal")
+                    done = {"reply": reply, "thinking": thinking, "proposal": None}
+                    if proposal:
+                        draft = tools.save_draft_to_gcs(
+                            customer_id=req.customer_id,
+                            title=proposal.get("title", ""),
+                            body=proposal.get("body", ""),
+                            recommended_product_ids=proposal.get("recommended_product_ids", []),
+                        )
+                        version = _record_version(req.customer_id, "chat", "", proposal, thinking)
+                        done["proposal"] = proposal
+                        done["draft_id"] = draft.get("draft_id")
+                        done["version_id"] = version.get("id")
+                    yield _sse("done", done)
                 else:
                     yield _sse(msg["type"], msg)
         except Exception as e:
