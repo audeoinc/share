@@ -1,4 +1,4 @@
-<title>main.py と demo.py の読み方</title>
+<title>FastAPI サンプルの読み方</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zen+Old+Mincho:wght@400;700&family=Noto+Sans+JP:wght@400;500;700&family=JetBrains+Mono:wght@400;700&display=swap">
 <style>
 :root{
@@ -282,8 +282,8 @@ footer .col{padding:36px 0 56px; font-size:13px; color:var(--ink-faint)}
 <header class="top">
   <div class="wrap"><div class="col">
     <p class="eyebrow">FastAPI サンプル・第一歩</p>
-    <h1>main.py と demo.py の読み方</h1>
-    <p class="lead">Python をこれから触る人のための、2 ファイルの逐次解説。<code>app/main.py</code> は「API を用意する側」、<code>demo.py</code> は「その API を呼ぶ側」です。この 2 つの関係が分かれば、あとの拡張はほとんど同じ形の繰り返しになります。</p>
+    <h1>FastAPI サンプルの読み方</h1>
+    <p class="lead">Python をこれから触る人のための、3 ファイルの逐次解説。<code>app/main.py</code> は「API を用意する側」、<code>app/state_store.py</code> は「状態を保存する側」、<code>demo.py</code> は「API を呼ぶ側」です。この 3 つの関係が分かれば、あとの拡張はほとんど同じ形の繰り返しになります。</p>
     <div class="meta">
       <span><b>対象</b> agent/content-generator-api</span>
       <span><b>前提</b> Python は未経験でも可</span>
@@ -299,10 +299,11 @@ footer .col{padding:36px 0 56px; font-size:13px; color:var(--ink-faint)}
     <a href="#words">2 用語</a>
     <a href="#python">3 Python の記法</a>
     <a href="#main">4 main.py</a>
-    <a href="#demo">5 demo.py</a>
-    <a href="#output">6 出力の読み方</a>
-    <a href="#faq">7 つまずきどころ</a>
-    <a href="#try">8 手を動かす</a>
+    <a href="#store">5 state_store.py</a>
+    <a href="#demo">6 demo.py</a>
+    <a href="#output">7 出力の読み方</a>
+    <a href="#faq">8 つまずきどころ</a>
+    <a href="#try">9 手を動かす</a>
   </nav>
 
   <main><div class="col">
@@ -362,7 +363,7 @@ footer .col{padding:36px 0 56px; font-size:13px; color:var(--ink-faint)}
 
         <rect x="502" y="182" width="150" height="52" rx="9" fill="var(--code-bg)" stroke="var(--rule)"/>
         <text x="577" y="204" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11.5" fill="var(--ink-soft)">state.json</text>
-        <text x="577" y="222" text-anchor="middle" font-family="Noto Sans JP, sans-serif" font-size="10.5" fill="var(--ink-faint)">状態の保存先</text>
+        <text x="577" y="222" text-anchor="middle" font-family="Noto Sans JP, sans-serif" font-size="10.5" fill="var(--ink-faint)">state_store.py が読み書き</text>
         <line x1="577" y1="160" x2="577" y2="176" stroke="var(--rule)" stroke-width="1.6" stroke-dasharray="3 3"/>
       </svg>
       <figcaption>普通は <code>demo.py</code> の位置にブラウザやスマホアプリが来る。TestClient はその代役で、サーバを起動せずに直接 main.py を呼ぶ</figcaption>
@@ -658,11 +659,179 @@ def increment(req: IncrementRequest | None = None) -> StateResponse:
   </section>
 
   <!-- ============ 5 ============ -->
+  <section id="store">
+    <h2><span class="num">05</span>app/state_store.py を読む</h2>
+    <p class="sub">「DB を使わずに状態を持つ」の正体。68 行しかありません</p>
+
+    <p><code>main.py</code> の中に <code>state_store.load_state()</code> という呼び出しがありました。その相手がこのファイルです。<strong>ファイルの読み書きを、ここ 1 か所に閉じ込めてあります。</strong></p>
+
+    <div class="callout">
+      <span class="label">なぜ分けてあるのか</span>
+      <p><code>main.py</code> は「どのファイルに、どんな形式で保存されているか」を<strong>一切知りません</strong>。知っているのは <code>load_state()</code> という名前だけ。こうしておくと、将来 JSON をやめてデータベースや GCS に替えるとき、<strong>直すのはこのファイルだけで済み、<code>main.py</code> は 1 文字も変えずに動きます。</strong>「呼ぶ側」と「実際にやる側」を切り離しておく、という設計です。</p>
+    </div>
+
+    <h3>5-1. 置き場所と初期値を決める（21〜32 行目）</h3>
+    <div class="block">
+      <div class="file"><span><span class="tag">app/state_store.py</span> 21〜32 行目</span><span>準備</span></div>
+      <pre><code class="language-python">_DEFAULT_STATE_FILE = Path(__file__).resolve().parent.parent / "data" / "state.json"
+
+# 状態の初期値。ファイルが無いときはこれが使われる。
+_INITIAL_STATE: dict[str, Any] = {"counter": 0}
+
+_lock = threading.Lock()
+
+
+def state_file() -> Path:
+    """状態ファイルのパス。環境変数があればそちらを優先する。"""
+    override = os.getenv("CONTENT_API_STATE_FILE")
+    return Path(override) if override else _DEFAULT_STATE_FILE</code></pre>
+    </div>
+    <div class="notes">
+      <div class="note"><code>_DEFAULT_STATE_FILE</code>
+        <p>先頭の <code>_</code>（アンダースコア）は<strong>「このファイルの内部用。外から触らないで」という目印</strong>です。Python はこれを強制しませんが、読み手への合図として広く使われている慣習です。</p></div>
+      <div class="note"><code>Path(__file__).resolve()</code>
+        <p><code>__file__</code> は<strong>「今まさに実行されているこのファイル自身の場所」</strong>を表す特別な変数。<code>.resolve()</code> でフルパスに直します。</p></div>
+      <div class="note"><code>.parent.parent</code>
+        <p><code>.parent</code> は 1 つ上のフォルダ。2 回たどって <code>app/</code> の親、つまりプロジェクト直下を指しています。<strong>こう書くと、どのフォルダから実行しても保存先が変わりません。</strong>「今いる場所」を基準にすると、実行のしかたで場所がずれてしまいます。</p></div>
+      <div class="note"><code>/ "data" / "state.json"</code>
+        <p>Path 同士は<strong>割り算の記号でつなげる</strong>という決まりです（文字列の連結ではありません）。Windows の <code>\</code> と Mac / Linux の <code>/</code> の違いも自動で吸収してくれます。</p></div>
+      <div class="note"><code>_INITIAL_STATE</code>
+        <p>状態の初期値。<strong>この 1 行が「状態にどんな項目があるか」の定義</strong>にもなっています。ジョブ管理に進むとき、まずここが変わります。</p></div>
+      <div class="note"><code>threading.Lock()</code>
+        <p>順番待ちの整理券のようなもの。用途は 5-4 で説明します。</p></div>
+      <div class="note"><code>os.getenv("CONTENT_API_STATE_FILE")</code>
+        <p>環境変数を読みます。<strong>設定されていなければ <code>None</code>（値なし）</strong>が返り、既定の場所が使われます。この 2 行のおかげで、<code>demo.py</code> やテストは保存先を一時フォルダへ逃がせます。</p></div>
+    </div>
+
+    <h3>5-2. 読む（35〜41 行目）</h3>
+    <div class="block">
+      <div class="file"><span><span class="tag">app/state_store.py</span> 35〜41 行目</span><span>load_state()</span></div>
+      <pre><code class="language-python">def load_state() -> dict[str, Any]:
+    """状態を読み込む。ファイルが無ければ初期状態を返す。"""
+    path = state_file()
+    if not path.exists():
+        return dict(_INITIAL_STATE)
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)</code></pre>
+    </div>
+    <div class="notes">
+      <div class="note"><code>if not path.exists():</code>
+        <p>ファイルがまだ無い＝<strong>初回の起動</strong>。エラーにせず初期値を返します。<strong>おかげで「最初に一度だけ初期化する処理」をどこにも書かずに済みます。</strong></p></div>
+      <div class="note w"><code>dict(_INITIAL_STATE)</code>
+        <p><strong>ここが地味ですが重要です。</strong><code>dict(...)</code> で<strong>コピーを作って</strong>返しています。<code>return _INITIAL_STATE</code> と書いてしまうと、受け取った側が中身を書き換えたときに<strong>初期値そのものが書き換わり</strong>、次に「初期状態」を求めたとき 0 ではない値が返ってきます。</p></div>
+      <div class="note"><code>json.load(f)</code>
+        <p>開いたファイルの JSON を読み、<strong>Python の辞書に変換</strong>します。名前が似た <code>json.loads()</code>（末尾に s）は文字列から読む別の関数です。</p></div>
+    </div>
+
+    <h3>5-3. 書く — 壊さないための工夫（44〜51 行目）</h3>
+    <div class="block">
+      <div class="file"><span><span class="tag">app/state_store.py</span> 44〜51 行目</span><span>save_state()</span></div>
+      <pre><code class="language-python">def save_state(state: dict[str, Any]) -> None:
+    """状態を保存する（一時ファイルへ書いてから置き換える）。"""
+    path = state_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)</code></pre>
+    </div>
+    <div class="notes">
+      <div class="note"><code>mkdir(parents=True, exist_ok=True)</code>
+        <p>保存先のフォルダが無ければ作ります。<code>parents=True</code>＝途中のフォルダもまとめて作る、<code>exist_ok=True</code>＝<strong>既にあってもエラーにしない</strong>。この 2 つが無いと初回や 2 回目で落ちます。</p></div>
+      <div class="note"><code>path.with_suffix(... + ".tmp")</code>
+        <p>作業用の名前を作ります。<code>state.json</code> に対して <code>state.json.tmp</code>。</p></div>
+      <div class="note"><code>open(tmp, "w", ...)</code>
+        <p><code>"w"</code> は書き込みモード（既存の中身は消えます）。<code>encoding="utf-8"</code> は<strong>日本語の文字化けを防ぐため</strong>で、特に Windows では省略できません。</p></div>
+      <div class="note"><code>ensure_ascii=False, indent=2</code>
+        <p>前者は<strong>日本語をそのまま書く</strong>ための指定（無いと <code>\u3042</code> のような記号列になります）。後者は 2 文字分の字下げで、<strong>人がエディタで開いて読める形</strong>にするためです。</p></div>
+      <div class="note w"><code>os.replace(tmp, path)</code>
+        <p><strong>このファイルで最も重要な 1 行です。</strong>下の図で説明します。</p></div>
+    </div>
+
+    <h4>なぜ直接 state.json に書かないのか</h4>
+    <p>本命のファイルに直接書くと、<strong>書いている途中で強制終了や電源断が起きたとき、中途半端な JSON が残ります。</strong>そうなると次回の読み込みが必ず失敗し、状態が失われます。</p>
+    <p>そこで、別名のファイルに<strong>完全に書き切ってから</strong>、名前を差し替えます。この差し替えは OS が「一瞬で終わる操作」として保証しているので、<code>state.json</code> は<strong>常に「前の完全な内容」か「新しい完全な内容」のどちらか</strong>になり、壊れた状態が存在しません。これを<strong>アトミック（不可分）な書き込み</strong>と呼びます。</p>
+
+    <figure>
+      <svg viewBox="0 0 700 176" role="img" aria-label="一時ファイルに書き切ってから置き換えることで、state.json が壊れた状態にならない仕組み">
+        <text x="8" y="16" font-family="Noto Sans JP, sans-serif" font-size="11.5" font-weight="700" fill="var(--ink)">① 一時ファイルに書く</text>
+        <rect x="8" y="30" width="206" height="44" rx="7" fill="var(--accent-soft)" stroke="var(--accent-line)"/>
+        <text x="20" y="49" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--accent)">state.json</text>
+        <text x="20" y="66" font-family="Noto Sans JP, sans-serif" font-size="10.5" fill="var(--ink-soft)">counter: 6（無傷のまま）</text>
+        <rect x="8" y="84" width="206" height="44" rx="7" fill="none" stroke="var(--rule)" stroke-dasharray="4 3"/>
+        <text x="20" y="103" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--ink-faint)">state.json.tmp</text>
+        <text x="20" y="120" font-family="Noto Sans JP, sans-serif" font-size="10.5" fill="var(--ink-faint)">書き込み中…</text>
+
+        <text x="247" y="16" font-family="Noto Sans JP, sans-serif" font-size="11.5" font-weight="700" fill="var(--ink)">② 書き終わる</text>
+        <rect x="247" y="30" width="206" height="44" rx="7" fill="var(--accent-soft)" stroke="var(--accent-line)"/>
+        <text x="259" y="49" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--accent)">state.json</text>
+        <text x="259" y="66" font-family="Noto Sans JP, sans-serif" font-size="10.5" fill="var(--ink-soft)">counter: 6（まだ古い）</text>
+        <rect x="247" y="84" width="206" height="44" rx="7" fill="var(--card)" stroke="var(--rule)"/>
+        <text x="259" y="103" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--ink)">state.json.tmp</text>
+        <text x="259" y="120" font-family="Noto Sans JP, sans-serif" font-size="10.5" fill="var(--ink-soft)">counter: 7（完全）</text>
+
+        <text x="486" y="16" font-family="Noto Sans JP, sans-serif" font-size="11.5" font-weight="700" fill="var(--ink)">③ os.replace で置き換え</text>
+        <rect x="486" y="30" width="206" height="44" rx="7" fill="var(--accent-soft)" stroke="var(--accent-line)"/>
+        <text x="498" y="49" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--accent)">state.json</text>
+        <text x="498" y="66" font-family="Noto Sans JP, sans-serif" font-size="10.5" fill="var(--ink-soft)">counter: 7（一瞬で交代）</text>
+        <text x="498" y="110" font-family="Noto Sans JP, sans-serif" font-size="10.5" fill="var(--ink-faint)">.tmp は無くなる</text>
+
+        <line x1="222" y1="79" x2="239" y2="79" stroke="var(--ink-faint)" stroke-width="1.4"/>
+        <line x1="461" y1="79" x2="478" y2="79" stroke="var(--ink-faint)" stroke-width="1.4"/>
+      </svg>
+      <figcaption>どの時点で中断されても <code>state.json</code> は必ず読める状態のまま。失われるのは書きかけの <code>.tmp</code> だけ</figcaption>
+    </figure>
+
+    <h3>5-4. 読んで、変えて、書く（54〜68 行目）</h3>
+    <div class="block">
+      <div class="file"><span><span class="tag">app/state_store.py</span> 54〜68 行目</span><span>increment_counter() ・ reset_state()</span></div>
+      <pre><code class="language-python">def increment_counter(step: int = 1) -> dict[str, Any]:
+    """カウンタを増やして、更新後の状態を返す。"""
+    with _lock:
+        state = load_state()
+        state["counter"] = int(state.get("counter", 0)) + step
+        save_state(state)
+        return state
+
+
+def reset_state() -> dict[str, Any]:
+    """状態を初期値へ戻す。"""
+    with _lock:
+        state = dict(_INITIAL_STATE)
+        save_state(state)
+        return state</code></pre>
+    </div>
+    <div class="notes">
+      <div class="note"><code>step: int = 1</code>
+        <p>引数の初期値。呼ぶ側が省略すれば 1 になります。<code>main.py</code> が本文なしの POST を受けたときにここへ来ます。</p></div>
+      <div class="note w"><code>with _lock:</code>
+        <p>この <code>with</code> の中は<strong>同時に 1 つの処理しか入れません</strong>。理由は下の枠で説明しますが、<strong>「読む → 変える → 書く」の 3 手の途中に割り込まれると、片方の更新が消えてしまう</strong>ためです。</p></div>
+      <div class="note"><code>state.get("counter", 0)</code>
+        <p>「<code>counter</code> というキーがあればその値、<strong>無ければ 0</strong>」。<code>state["counter"]</code> と書くとキーが無いときエラー（KeyError）になります。壊れかけのファイルにも耐えるための保険です。</p></div>
+      <div class="note"><code>state["counter"] = ... + step</code>
+        <p>辞書の値を書き換えています。ここが<strong>このファイルで唯一の「業務ロジック」</strong>で、残りはすべて出し入れの世話です。</p></div>
+      <div class="note"><code>return state</code>
+        <p>更新後の状態を返します。<code>main.py</code> はこれをそのままレスポンスにするので、<strong>API を呼んだ人は「今どうなったか」をすぐ受け取れます。</strong></p></div>
+    </div>
+
+    <div class="callout warn">
+      <span class="label">Lock が無いと何が起きるか</span>
+      <p>カウンタが 6 のときに、2 つの処理がほぼ同時に +1 しようとしたとします。両方が「6 を読む」→ 両方が「7 を作る」→ 両方が「7 を書く」。<strong>2 回増やしたのに、結果は 8 ではなく 7 になります</strong>（片方の更新が消える）。Lock は、この 3 手をひとまとまりとして守るためのものです。</p>
+      <p><strong>ただし、この Lock が効くのは 1 つのプロセスの中だけです。</strong>サーバを複数ワーカーや複数台で動かすと守れません。その規模になったら、JSON ファイルではなくデータベースなど専用の仕組みへ移る合図です。</p>
+    </div>
+
+    <div class="callout">
+      <span class="label">ゴールへの橋渡し</span>
+      <p>ジョブの開始 / 中断 / 再開に進んでも、このファイルの骨格は変わりません。<strong><code>load_state()</code> と <code>save_state()</code> はそのまま使えます。</strong>変わるのは <code>_INITIAL_STATE</code> の中身（<code>{"counter": 0}</code> → <code>{"jobs": {}}</code>）と、<code>increment_counter()</code> の代わりに <code>start_job()</code> / <code>pause_job()</code> / <code>resume_job()</code> が並ぶことだけです。<strong>「読んで、変えて、書く」という 3 手の形も同じ</strong>です。</p>
+    </div>
+  </section>
+
+  <!-- ============ 6 ============ -->
   <section id="demo">
-    <h2><span class="num">05</span>demo.py を読む</h2>
+    <h2><span class="num">06</span>demo.py を読む</h2>
     <p class="sub">こちらは上から順に実行される、普通のスクリプトです</p>
 
-    <h3>5-1. 表示用の小さな関数（18〜21 行目）</h3>
+    <h3>6-1. 表示用の小さな関数（18〜21 行目）</h3>
     <div class="block">
       <div class="file"><span><span class="tag">demo.py</span> 18〜21 行目</span><span>show()</span></div>
       <pre><code class="language-python">def show(res) -> None:
@@ -681,7 +850,7 @@ def increment(req: IncrementRequest | None = None) -> StateResponse:
         <p>「何も返さない」という型ヒント。表示するだけの関数なので値は返りません。</p></div>
     </div>
 
-    <h3>5-2. 実行の準備（24〜31 行目）</h3>
+    <h3>6-2. 実行の準備（24〜31 行目）</h3>
     <div class="block">
       <div class="file"><span><span class="tag">demo.py</span> 24〜31 行目</span><span>main() の冒頭</span></div>
       <pre><code class="language-python">def main() -> None:
@@ -704,7 +873,7 @@ def increment(req: IncrementRequest | None = None) -> StateResponse:
         <p>アプリを操作するクライアントを用意します。<strong>uvicorn などのサーバは起動しません。</strong>ネットワークを通さず、直接 app を呼ぶ仕組みです（だから速く、ポートの空き状況にも左右されません）。</p></div>
     </div>
 
-    <h3>5-3. 実際に呼ぶ（32〜45 行目）</h3>
+    <h3>6-3. 実際に呼ぶ（32〜45 行目）</h3>
     <div class="block">
       <div class="file"><span><span class="tag">demo.py</span> 32〜45 行目</span><span>呼び出し</span></div>
       <pre><code class="language-python">            show(client.get("/health"))
@@ -730,7 +899,7 @@ def increment(req: IncrementRequest | None = None) -> StateResponse:
         <p><code>json=</code> を書いていないので本文なし。<code>IncrementRequest | None</code> にしてあるおかげでエラーにならず、<code>step</code> は初期値 1 になります。</p></div>
     </div>
 
-    <h3>5-4. 状態が残ることの確認（47〜57 行目）</h3>
+    <h3>6-4. 状態が残ることの確認（47〜57 行目）</h3>
     <div class="block">
       <div class="file"><span><span class="tag">demo.py</span> 47〜57 行目</span><span>締めくくり</span></div>
       <pre><code class="language-python">        with TestClient(app) as fresh_client:
@@ -754,9 +923,9 @@ if __name__ == "__main__":
     </div>
   </section>
 
-  <!-- ============ 6 ============ -->
+  <!-- ============ 7 ============ -->
   <section id="output">
-    <h2><span class="num">06</span>出力の読み方</h2>
+    <h2><span class="num">07</span>出力の読み方</h2>
     <p class="sub"><code>python demo.py</code> の実際の結果</p>
 
     <div class="term">
@@ -796,9 +965,9 @@ if __name__ == "__main__":
     </div>
   </section>
 
-  <!-- ============ 7 ============ -->
+  <!-- ============ 8 ============ -->
   <section id="faq">
-    <h2><span class="num">07</span>つまずきやすいところ</h2>
+    <h2><span class="num">08</span>つまずきやすいところ</h2>
     <p class="sub">最初に必ず出会うものを先に</p>
 
     <details>
@@ -821,6 +990,13 @@ if __name__ == "__main__":
       </div>
     </details>
     <details>
+      <summary>state.json はどこにできますか？</summary>
+      <div class="body">
+        <p>既定では <code>agent/content-generator-api/data/state.json</code> です。<code>state_store.py</code> が<strong>自分自身のファイルの位置</strong>を基準に決めているので（5-1 参照）、どのフォルダから実行しても同じ場所になります。フォルダが無ければ自動で作られます。</p>
+        <p>環境変数 <code>CONTENT_API_STATE_FILE</code> を設定すると、そちらが優先されます。<code>demo.py</code> とテストはこれを使って一時フォルダへ逃がしています。</p>
+      </div>
+    </details>
+    <details>
       <summary>counter が 0 に戻らない / 変な値になった</summary>
       <div class="body"><p><code>POST /state/reset</code> を呼ぶか、<code>data/state.json</code> を削除してください。次回アクセス時に初期値から作り直されます。なお demo.py は毎回一時フォルダを使うので、常に 0 から始まります。</p></div>
     </details>
@@ -830,9 +1006,9 @@ if __name__ == "__main__":
     </details>
   </section>
 
-  <!-- ============ 8 ============ -->
+  <!-- ============ 9 ============ -->
   <section id="try">
-    <h2><span class="num">08</span>手を動かして確かめる</h2>
+    <h2><span class="num">09</span>手を動かして確かめる</h2>
     <p class="sub">読むより 1 回いじるほうが早く分かります</p>
 
     <ol class="steps">
@@ -853,7 +1029,7 @@ if __name__ == "__main__":
 </div>
 
 <footer><div class="wrap"><div class="col">
-  agent/content-generator-api — 対象ファイル: <code>app/main.py</code>（114 行）、<code>demo.py</code>（57 行）。行番号は現在のコードに対応します。
+  agent/content-generator-api — 対象ファイル: <code>app/main.py</code>（114 行）、<code>app/state_store.py</code>（68 行）、<code>demo.py</code>（57 行）。行番号は現在のコードに対応します。
 </div></div></footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>

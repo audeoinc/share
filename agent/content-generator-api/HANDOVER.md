@@ -4,7 +4,7 @@
 > 読み終えたら「4. 現在地」と「7. 次にやること」に従って作業を始め、
 > 作業を終える前に必ず「10. この文書の更新ルール」に従ってこの文書を更新すること。
 
-最終更新: 2026-09-01 / 更新者セッション: `session_0183xEt4og13HgpAcuvfp5rN`
+最終更新: 2026-09-02 / 更新者セッション: `session_0183xEt4og13HgpAcuvfp5rN`
 
 ---
 
@@ -61,7 +61,8 @@ DB は使わず、状態は **JSON ファイル 1 枚**で管理する。
 - `python demo.py` で呼び出しとレスポンスが目視できる
 - `uvicorn` での実サーバ起動と `/docs` の表示を確認済み
 - 状態が JSON ファイルに永続化され、プロセスをまたいで残ることを確認済み
-- Python 未経験者向けの解説ページ（`docs/code-walkthrough.html`）
+- Python 未経験者向けの解説ページ（`docs/code-walkthrough.html`）。
+  `main.py` / `state_store.py` / `demo.py` の 3 ファイルを逐次解説（全 9 章）
 
 ### まだ無いもの（意図的に作っていない）
 
@@ -202,8 +203,11 @@ uvicorn app.main:app --reload --port 8000   # 実サーバ → http://127.0.0.1:
    ```
 
 2. **解説ページの行番号はコードと連動していない**
-   `docs/code-walkthrough.html` は `main.py` / `demo.py` の行番号を本文に埋め込んでいる。
-   コードを編集したら、ページ側の行番号も直すこと。
+   `docs/code-walkthrough.html` は `main.py`（114 行）/ `state_store.py`（68 行）/
+   `demo.py`（57 行）の行番号を本文に埋め込んでいる。
+   コードを編集したら、ページ側の行番号と章末のフッタ表記も直すこと。
+   章構成は 01 全体像 / 02 用語 / 03 Python の記法 / 04 main.py / 05 state_store.py /
+   06 demo.py / 07 出力の読み方 / 08 つまずきどころ / 09 手を動かす。
 
 3. **解説ページの Artifact URL**
    公開済み: https://claude.ai/code/artifact/a9bc33ae-8579-42f3-a999-68c28dce648e
@@ -246,7 +250,8 @@ uvicorn app.main:app --reload --port 8000   # 実サーバ → http://127.0.0.1:
 | 2026-09-01 | 依頼により、一式を zip で固めてコミット | `e304add` |
 | 2026-09-01 | 初心者向け解説ページ `docs/code-walkthrough.html` を追加・公開 | `04efbb4` |
 | 2026-09-01 | 解説ページに BaseModel の説明を追加。手順一覧のレイアウト崩れ（グリッド列指定漏れ）を修正 | `4da28d7` |
-| 2026-09-01 | この引き継ぎ資料と、ルート `CLAUDE.md` を追加 | （このコミット） |
+| 2026-09-01 | この引き継ぎ資料と、ルート `CLAUDE.md` を追加 | `2c0a268` |
+| 2026-09-02 | 解説ページに `state_store.py` の章を追加（アトミック書き込みの図、Lock の必要性）。章番号を繰り下げ、タイトルを 3 ファイル構成に合わせて変更 | （このコミット） |
 
 ---
 
