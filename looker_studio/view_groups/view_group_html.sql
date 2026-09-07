@@ -797,9 +797,20 @@ AS (%s)
 --   __SCHEMA_COND__        SCHEMATA 用の絞り込み条件（SQL 片）
 --   __VIEW_DATASET_COND__  VIEWS 用のデータセット条件（SQL 片）
 --   __VIEW_NAME_COND__     VIEWS 用の View 名条件（SQL 片）
+--   __SRC_SCHEMATA__       SCHEMATA の読み元（SQL 片）
+--   __SRC_VIEWS__          VIEWS の読み元（同上）
+--   __SRC_COLUMNS__        COLUMNS の読み元（同上）
+--   __SRC_FIELD_PATHS__    COLUMN_FIELD_PATHS の読み元（同上）
+--   __SRC_TABLE_OPTS__     TABLE_OPTIONS の読み元（同上）
 --
--- 中身が SQL になるもの（__*_COND__）を最後に置くのは、置き換えた中身が
--- さらに走査されないようにするため。
+-- __SRC_*__ は「読み元」をまるごと差し替えるための目印。拠点だけを見るなら
+-- リージョン修飾の INFORMATION_SCHEMA がそのまま入り、別リージョンぶんを
+-- 混ぜるなら「拠点の INFORMATION_SCHEMA UNION ALL 運んできたテーブル」に
+-- なる。**どちらを入れるかは build_table.sql が決める。** テンプレートは
+-- 読み元の形を知らないので、混ぜる／混ぜないでテンプレートは変わらない。
+--
+-- 中身が SQL になるもの（__*_COND__ と __SRC_*__）を最後に置くのは、
+-- 置き換えた中身がさらに走査されないようにするため。
 -- ---------------------------------------------------------------------
 EXECUTE IMMEDIATE FORMAT('''
 CREATE OR REPLACE FUNCTION `%s.%s.%s`(
@@ -832,10 +843,22 @@ CREATE OR REPLACE FUNCTION `%s.%s.%s`(
     schema_condition       STRING,
     view_dataset_condition STRING,
     view_name_condition    STRING
+  >,
+  sources STRUCT<
+    schemata    STRING,
+    views       STRING,
+    columns     STRING,
+    field_paths STRING,
+    table_opts  STRING
   >
 )
 RETURNS STRING
 AS (
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
   REPLACE(
   REPLACE(
   REPLACE(
@@ -884,7 +907,12 @@ AS (
     '__NOTE_SHEET_RANGE__', options.note_sheet_range),
     '__SCHEMA_COND__', conditions.schema_condition),
     '__VIEW_DATASET_COND__', conditions.view_dataset_condition),
-    '__VIEW_NAME_COND__', conditions.view_name_condition)
+    '__VIEW_NAME_COND__', conditions.view_name_condition),
+    '__SRC_SCHEMATA__', sources.schemata),
+    '__SRC_VIEWS__', sources.views),
+    '__SRC_COLUMNS__', sources.columns),
+    '__SRC_FIELD_PATHS__', sources.field_paths),
+    '__SRC_TABLE_OPTS__', sources.table_opts)
 )
 ''',
   udf_project_id, udf_dataset, udf_sql_function_name);

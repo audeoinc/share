@@ -1091,29 +1091,64 @@ prefix + system_name + '_' + 't_' + 'meta_' + 種類 + suffix
 実行して初めて分かる形で出る**ので、目で数えると必ず間違えるところだけ
 機械に見てもらう。
 
-### まだやっていないこと
+### 拠点側の配線
 
-**`build_table.sql` の側はまだ差し替えていない。** いまは 5 か所が
-`region-<拠点>.INFORMATION_SCHEMA.*` を直接読んでいる。これを
-「拠点の `INFORMATION_SCHEMA` ＋ 取り込んだ `viewlgc_t_meta_*`」の `UNION ALL` に
-する必要がある。
+`build_table.sql` の `[A]` に 1 つ足す。
 
 ```sql
--- いま
-FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.VIEWS`
-
--- こうする
-FROM (
-  SELECT table_schema, table_name, view_definition
-  FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.VIEWS`
-  UNION ALL
-  SELECT table_schema, table_name, view_definition
-  FROM `__T_IMP_VIEWS__`
-)
+-- 別リージョンから運んできたメタデータを混ぜるリージョンの一覧。
+-- 空なら混ぜない（このリージョンの INFORMATION_SCHEMA だけ。従来どおり）。
+DECLARE import_source_regions ARRAY<STRING> DEFAULT ['asia-southeast1'];
 ```
 
-プレースホルダを 5 つ増やし、`DECLARE` / `SET` / `viewlgc_render_dynamic_sql`
-の置換を対で足す（README の「オブジェクトが増えたら」の手順と同じ）。
+**空なら、いままでとまったく同じ SQL になる。** 並べたときだけ、5 つの読み元が
+`UNION ALL` に変わる。
+
+```sql
+-- 空のとき（従来どおり）
+FROM `<project>.region-asia-northeast1.INFORMATION_SCHEMA.VIEWS`
+
+-- 並べたとき
+FROM (SELECT table_schema, table_name, view_definition
+      FROM `<project>.region-asia-northeast1.INFORMATION_SCHEMA.VIEWS`
+      UNION ALL
+      SELECT table_schema, table_name, view_definition
+      FROM `<project>.<work_dataset>.viewlgc_t_meta_views`
+      WHERE source_region IN UNNEST(['asia-southeast1']))
+```
+
+読み元は `__SRC_SCHEMATA__` / `__SRC_VIEWS__` / `__SRC_COLUMNS__` /
+`__SRC_FIELD_PATHS__` / `__SRC_TABLE_OPTS__` の 5 つの目印で差し替える。
+**テンプレートは読み元の形を知らない**ので、混ぜる／混ぜないでテンプレートは
+変わらない。組み立ては `SET src_*` にある。
+
+`UNION ALL` の両側で**列を明示している**のは、運んできた側に `source_region`
+列が余分にあるため（`SELECT *` では列数が合わない）。
+
+運んできた側は必ず `source_region` で絞る。テーブルには過去に運んだ別の
+リージョンの行が残っていることがあり、絞らないと `import_source_regions` から
+外したはずのリージョンが解析に入る。**万一 `cross_region_export.sql` を拠点で
+流して自分のメタデータを書き込んでしまっても、この絞り込みがあれば二重計上に
+ならない。**
+
+5 系（確認クエリ）は拠点だけを見る診断なので、`INFORMATION_SCHEMA` を直に
+読んだままにしてある。
+
+#### 静かに欠けるのを止める（拠点側）
+
+| | 見るもの | 拾える壊れ方 |
+|---|---|---|
+| `job_region NOT IN import_source_regions` | 拠点自身を並べていないか | 同じ View が 2 回入る |
+| `imported_region_count` | 並べたリージョンの行が実際にあるか | 取り込みが落ちたまま解析が走る |
+
+2 つ目が要るのは、**`cross_region_import.sql` が落ちても `build_table.sql` は
+動いてしまう**から（別のスケジュールなので）。そのまま通すと、そのリージョンの
+View だけが消えたカードができる。グループ数も差分も辻褄が合ったまま出るので、
+画面から間違いに気づけない。落ちれば前の日のカードが残る。
+
+`node check_sql.mjs` が、直読みが残っていないか・5 つの読み元が全部使われて
+いるか・2 枝になっているか・`source_region` で絞っているか・上の 2 つの
+`ASSERT` があるか、を静的に見る。
 
 ## 事前生成テーブル（build_table.sql）
 

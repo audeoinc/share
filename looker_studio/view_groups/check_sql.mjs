@@ -372,6 +372,54 @@ for (const t of ['__T_DIFF_SRC__', '__T_DIFF__']) {
     !/STRUCT\([^)]*labels_text/.test(table));
 }
 
+// --- 5g. 別リージョンのメタデータの混ぜ方 -------------------------------
+// import_source_regions が空なら**いままでとまったく同じ SQL** になり、
+// 並べたときだけ UNION ALL になる。ここを壊すと、混ぜていないつもりで
+// 混ざる／混ぜたつもりで混ざらない、のどちらかが静かに起きる。
+{
+  const srcs = ['schemata', 'views', 'columns', 'field_paths', 'table_opts'];
+
+  // (1) INFORMATION_SCHEMA の直読みがテンプレートに残っていないか。
+  //     残っていると、そこだけ拠点のぶんしか見ない（そのリージョンの View が
+  //     カードから消えるが、辻褄は合うので画面から気づけない）。
+  //     5 系（確認クエリ）は拠点だけを見る診断なので対象外。
+  const at5 = table.indexOf('-- 5. 確認');
+  const head = at5 > 0 ? table.slice(0, at5) : table;
+  const direct = [...head.matchAll(
+    /region-__JOB_REGION__\.INFORMATION_SCHEMA\.([A-Z_]+)/g)].map((m) => m[1]);
+  add('解析の読み元に INFORMATION_SCHEMA の直読みが残っていない',
+    direct.length === 0, direct.join(','));
+
+  // (2) 5 つの読み元がすべて使われているか。
+  const unused = srcs.filter((k) => !head.includes(`__SRC_${k.toUpperCase()}__`));
+  add('5 つの読み元がすべてテンプレートで使われている',
+    unused.length === 0, unused.join(','));
+
+  // (3) 空なら従来どおり、並べたら UNION ALL。両方の枝があるか。
+  const bad = srcs.filter((k) => !new RegExp(
+    `SET src_${k} = IF\\(ARRAY_LENGTH\\(import_source_regions\\) = 0,`).test(table) ||
+    !new RegExp(`SET src_${k} = IF[\\s\\S]*?UNION ALL[\\s\\S]*?source_region IN UNNEST`)
+      .test(table.slice(table.indexOf(`SET src_${k} =`))));
+  add('読み元は「空なら従来どおり・並べたら UNION ALL」の 2 枝',
+    bad.length === 0, bad.join(','));
+
+  // (4) 運んできた側を source_region で絞っているか。
+  //     絞らないと、import_source_regions から外したリージョンや、誤って
+  //     拠点で書き出した自分のぶんまで解析に入る（＝二重計上）。
+  const n = (table.match(/WHERE source_region IN UNNEST\(%T\)/g) || []).length;
+  add('運んできた側を source_region で絞っている（5 か所）', n === srcs.length,
+    `${n} か所`);
+
+  // (5) 拠点自身を並べていないか（同じ View が 2 回入る）。
+  add('拠点自身を import_source_regions に入れられない',
+    /ASSERT job_region NOT IN UNNEST\(import_source_regions\)/.test(table));
+
+  // (6) 並べたリージョンの行が無いまま通さないか。
+  //     取り込みが落ちても build_table は動くので、ここが最後の砦になる。
+  add('並べたリージョンの行が無ければ止まる',
+    /ASSERT imported_region_count = ARRAY_LENGTH\(import_source_regions\)/.test(table));
+}
+
 // --- 6. 両ファイルで一致させる必要がある値 -----------------------------
 for (const base of ['analyze', 'render', 'erd', 'page', 'markdown', 'group_css',
   'render_dynamic_sql']) {

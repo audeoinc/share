@@ -48,6 +48,17 @@
 --   __SCHEMA_COND__        SCHEMATA 用の絞り込み条件（SQL 片）
 --   __VIEW_DATASET_COND__  VIEWS 用のデータセット条件（SQL 片）
 --   __VIEW_NAME_COND__     VIEWS 用の View 名条件（SQL 片）
+--   __SRC_SCHEMATA__       SCHEMATA の読み元（SQL 片）
+--   __SRC_VIEWS__          VIEWS の読み元（同上）
+--   __SRC_COLUMNS__        COLUMNS の読み元（同上）
+--   __SRC_FIELD_PATHS__    COLUMN_FIELD_PATHS の読み元（同上）
+--   __SRC_TABLE_OPTS__     TABLE_OPTIONS の読み元（同上）
+--
+-- __SRC_*__ は読み元をまるごと差し替える目印。import_source_regions が空なら
+-- リージョン修飾の INFORMATION_SCHEMA がそのまま入り、並べると
+-- 「このリージョンの INFORMATION_SCHEMA UNION ALL 運んできたテーブル」になる。
+-- **テンプレートは読み元の形を知らない**ので、混ぜる／混ぜないでテンプレートは
+-- 変わらない。組み立ては下の SET src_* を参照。
 --
 -- 識別子（プロジェクト・データセット・テーブル・関数名・正規表現）は
 -- クエリ パラメータにできないのでこの目印で渡す。配列や JSON は値なので
@@ -108,6 +119,21 @@ DECLARE analysis_exclude_object_patterns ARRAY<STRING> DEFAULT [];
 -- 自動抽出した suffix 一覧に**足す**値。データセット名にも、その末尾にも
 -- 現れない suffix を混ぜたいとき（詳しくは下の説明）
 DECLARE suffix_extra_list ARRAY<STRING> DEFAULT [];
+-- 別リージョンから運んできたメタデータを混ぜるリージョンの一覧。
+--
+-- **空なら混ぜない**（このリージョンの INFORMATION_SCHEMA だけを見る。
+-- 従来どおりの動き）。並べると、cross_region_import.sql が作った
+-- viewlgc_t_meta_* の中から**そのリージョンの行だけ**を足して解析する。
+--
+-- 同じ base の View がリージョンをまたいでいるとき、ここに並べて初めて
+-- 「両方を並べた 1 枚のカード」になる。並べないと、リージョンごとに
+-- 別々のカードができてリージョン間の差が見えない。
+--
+-- **このリージョン自身は入れない。** 拠点のぶんは INFORMATION_SCHEMA から
+-- 直接読んでいるので、入れると同じ View が 2 回入る（下の ASSERT で止める）。
+-- 取り込みの鮮度は cross_region_import.sql が見る。ここでは「行があるか」
+-- だけを確かめる。
+DECLARE import_source_regions ARRAY<STRING> DEFAULT [];
 -- snapshot_date の基準タイムゾーン
 DECLARE snapshot_time_zone STRING DEFAULT 'Asia/Tokyo';
 -- base ごとのメモ（Markdown）を置くスプレッドシート。空ならメモ機能を使わない
@@ -308,6 +334,23 @@ DECLARE table_diff_src  STRING;  -- 生成した素のカード（メモを差�
 DECLARE table_diff      STRING;  -- レポートが読むテーブル（メモ差し込み済み）
 DECLARE table_base_note STRING;  -- base ごとのメモ（スプレッドシートの外部テーブル）
 DECLARE view_diff       STRING;  -- レポートが読むビュー。メモを差し込む
+-- 別リージョンから運んできたメタデータ（cross_region_import.sql の作った先）。
+-- **あちらと同じ規則で組み立てる。** 食い違うと「そんなテーブルは無い」で
+-- 落ちる。import_source_regions が空なら参照しない。
+DECLARE table_meta_schemata    STRING;
+DECLARE table_meta_views       STRING;
+DECLARE table_meta_columns     STRING;
+DECLARE table_meta_field_paths STRING;
+DECLARE table_meta_table_opts  STRING;
+
+-- 5 つの読み元（SQL 片）。拠点だけなら INFORMATION_SCHEMA がそのまま入り、
+-- 混ぜるなら UNION ALL になる。テンプレートは形を知らない。
+DECLARE src_schemata    STRING;
+DECLARE src_views       STRING;
+DECLARE src_columns     STRING;
+DECLARE src_field_paths STRING;
+DECLARE src_table_opts  STRING;
+DECLARE imported_region_count INT64;
 
 -- view_group_html.sql が作った関数名。同じ規則で組み立てて突き合わせる。
 -- 解析と描画が別の UDF なのは、インラインのコード ブロブが 1 個あたり 32 KB
@@ -388,6 +431,25 @@ ASSERT REGEXP_CONTAINS(table_base_note, r'^[A-Za-z0-9_-]+$') AS
 ASSERT REGEXP_CONTAINS(view_diff, r'^[A-Za-z0-9_-]+$') AS
   'view_diff の名前が不正です。';
 
+-- 運んできたメタデータのテーブル。**cross_region_import.sql と同じ規則。**
+-- 区分は 't_'（日次で作り直すため）。基本名は 'meta_' ＋ 種類。
+-- あちらの table_name_prefix / table_name_suffix / system_name と
+-- 同じ値でなければ見つからない（node check_cross_region.mjs が既定値を
+-- 突き合わせる）。
+SET table_meta_schemata =
+  table_name_prefix || system_name || '_' || 't_' || 'meta_schemata' || table_name_suffix;
+SET table_meta_views =
+  table_name_prefix || system_name || '_' || 't_' || 'meta_views' || table_name_suffix;
+SET table_meta_columns =
+  table_name_prefix || system_name || '_' || 't_' || 'meta_columns' || table_name_suffix;
+SET table_meta_field_paths =
+  table_name_prefix || system_name || '_' || 't_' || 'meta_field_paths' || table_name_suffix;
+SET table_meta_table_opts =
+  table_name_prefix || system_name || '_' || 't_' || 'meta_table_opts' || table_name_suffix;
+
+ASSERT job_region NOT IN UNNEST(import_source_regions) AS
+  'import_source_regions にこのリージョン自身が入っています。拠点のぶんは INFORMATION_SCHEMA から直接読むので、入れると同じ View が 2 回入ります。';
+
 -- UDF: udf_prefix + system_name + '_' + 基本名 + udf_suffix
 --      （view_group_html.sql と同じ。system_name も同じ値でなければ見つからない）
 SET udf_analyze_function_name =
@@ -460,12 +522,63 @@ SET view_name_condition = CONCAT(
     (SELECT CONCAT(' AND NOT (', STRING_AGG(FORMAT("REGEXP_CONTAINS(table_name, r'%s')", p), ' OR '), ')')
      FROM UNNEST(analysis_exclude_object_patterns) AS p)));
 
+-- ---------------------------------------------------------------------
+-- 5 つの読み元を組み立てる
+--
+-- **import_source_regions が空なら、いままでとまったく同じ SQL になる。**
+-- リージョン修飾の INFORMATION_SCHEMA がそのまま入るだけ。
+--
+-- 並べたときは「このリージョンの INFORMATION_SCHEMA UNION ALL 運んできた
+-- テーブル」にする。UNION ALL は列の並びと数がそろっている必要があるので、
+-- **両側とも列を明示する。** 運んできた側には source_region 列が余分に
+-- あり、拠点側には無いので、SELECT * では合わない。
+--
+-- 運んできた側は source_region で絞る。テーブルには過去に運んだ他の
+-- リージョンの行が残っていることがあり、そのまま混ぜると
+-- import_source_regions から外したはずのリージョンが解析に入ってしまう。
+-- **万一 cross_region_export.sql を拠点で流して自分のメタデータを
+-- 書き込んでしまっても、この絞り込みがあれば二重計上にはならない。**
+--
+-- 条件（__*_COND__）はテンプレート側の WHERE が当てる。ここでは読み元の
+-- 形だけを作るので、混ぜる／混ぜないでテンプレートは変わらない。
+-- ---------------------------------------------------------------------
+SET src_schemata = IF(ARRAY_LENGTH(import_source_regions) = 0,
+  FORMAT('`%s.region-%s.INFORMATION_SCHEMA.SCHEMATA`', target_project_id, job_region),
+  FORMAT('(SELECT catalog_name, schema_name FROM `%s.region-%s.INFORMATION_SCHEMA.SCHEMATA` UNION ALL SELECT catalog_name, schema_name FROM `%s.%s.%s` WHERE source_region IN UNNEST(%T))',
+    target_project_id, job_region,
+    work_project_id, work_dataset, table_meta_schemata, import_source_regions));
+
+SET src_views = IF(ARRAY_LENGTH(import_source_regions) = 0,
+  FORMAT('`%s.region-%s.INFORMATION_SCHEMA.VIEWS`', target_project_id, job_region),
+  FORMAT('(SELECT table_schema, table_name, view_definition FROM `%s.region-%s.INFORMATION_SCHEMA.VIEWS` UNION ALL SELECT table_schema, table_name, view_definition FROM `%s.%s.%s` WHERE source_region IN UNNEST(%T))',
+    target_project_id, job_region,
+    work_project_id, work_dataset, table_meta_views, import_source_regions));
+
+SET src_columns = IF(ARRAY_LENGTH(import_source_regions) = 0,
+  FORMAT('`%s.region-%s.INFORMATION_SCHEMA.COLUMNS`', target_project_id, job_region),
+  FORMAT('(SELECT table_schema, table_name, column_name, ordinal_position, data_type, is_nullable FROM `%s.region-%s.INFORMATION_SCHEMA.COLUMNS` UNION ALL SELECT table_schema, table_name, column_name, ordinal_position, data_type, is_nullable FROM `%s.%s.%s` WHERE source_region IN UNNEST(%T))',
+    target_project_id, job_region,
+    work_project_id, work_dataset, table_meta_columns, import_source_regions));
+
+SET src_field_paths = IF(ARRAY_LENGTH(import_source_regions) = 0,
+  FORMAT('`%s.region-%s.INFORMATION_SCHEMA.COLUMN_FIELD_PATHS`', target_project_id, job_region),
+  FORMAT('(SELECT table_schema, table_name, column_name, field_path, data_type, description FROM `%s.region-%s.INFORMATION_SCHEMA.COLUMN_FIELD_PATHS` UNION ALL SELECT table_schema, table_name, column_name, field_path, data_type, description FROM `%s.%s.%s` WHERE source_region IN UNNEST(%T))',
+    target_project_id, job_region,
+    work_project_id, work_dataset, table_meta_field_paths, import_source_regions));
+
+SET src_table_opts = IF(ARRAY_LENGTH(import_source_regions) = 0,
+  FORMAT('`%s.region-%s.INFORMATION_SCHEMA.TABLE_OPTIONS`', target_project_id, job_region),
+  FORMAT('(SELECT table_schema, table_name, option_name, option_value FROM `%s.region-%s.INFORMATION_SCHEMA.TABLE_OPTIONS` UNION ALL SELECT table_schema, table_name, option_name, option_value FROM `%s.%s.%s` WHERE source_region IN UNNEST(%T))',
+    target_project_id, job_region,
+    work_project_id, work_dataset, table_meta_table_opts, import_source_regions));
+
+
 -- 永続関数への呼び出しを 1 度だけ組み立てて使い回す。関数の場所は
 -- udf_project_id / udf_dataset / udf_render_function_name で決まる。
 -- 固定の設定はここで焼き込み、テンプレートだけを @sql_template で渡す。
 -- 値は %T で埋める。条件文には引用符が入るので、%s だと壊れる。
 SET render_call_sql = FORMAT(
-  """SELECT `%s.%s.%s`(@sql_template, %T, %T, %T, %T, %T, %T, STRUCT(%T AS diff_src, %T AS diff_table, %T AS diff_view, %T AS base_note, %T AS analyze_function, %T AS render_function, %T AS erd_function, %T AS page_function, %T AS markdown_function, %T AS css_function), STRUCT(%T AS time_zone, %T AS suffix_pattern, %T AS note_sheet_url, %T AS note_sheet_range), STRUCT(%T AS schema_condition, %T AS view_dataset_condition, %T AS view_name_condition))""",
+  """SELECT `%s.%s.%s`(@sql_template, %T, %T, %T, %T, %T, %T, STRUCT(%T AS diff_src, %T AS diff_table, %T AS diff_view, %T AS base_note, %T AS analyze_function, %T AS render_function, %T AS erd_function, %T AS page_function, %T AS markdown_function, %T AS css_function), STRUCT(%T AS time_zone, %T AS suffix_pattern, %T AS note_sheet_url, %T AS note_sheet_range), STRUCT(%T AS schema_condition, %T AS view_dataset_condition, %T AS view_name_condition), STRUCT(%T AS schemata, %T AS views, %T AS columns, %T AS field_paths, %T AS table_opts))""",
   udf_project_id, udf_dataset, udf_sql_function_name,
   work_project_id, work_dataset, udf_project_id, udf_dataset,
   target_project_id, job_region,
@@ -475,7 +588,8 @@ SET render_call_sql = FORMAT(
   udf_markdown_function_name, udf_css_function_name,
   snapshot_time_zone, suffix_pattern,
   note_sheet_url, note_sheet_range,
-  schema_condition, view_dataset_condition, view_name_condition);
+  schema_condition, view_dataset_condition, view_name_condition,
+  src_schemata, src_views, src_columns, src_field_paths, src_table_opts);
 
 
 -- 前提の確認。UDF を作り直す前にこのファイルを流すと、動的 SQL の展開や
@@ -497,10 +611,10 @@ ASSERT udf_found_count = 7 AS
 SET sql_template = """
 SELECT
   (SELECT COUNT(*)
-   FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.SCHEMATA`
+   FROM __SRC_SCHEMATA__
    WHERE REGEXP_CONTAINS(schema_name, r'__SUFFIX_PATTERN__') AND (__SCHEMA_COND__)),
   (SELECT COUNT(*)
-   FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.VIEWS`
+   FROM __SRC_VIEWS__
    WHERE (__VIEW_DATASET_COND__) AND (__VIEW_NAME_COND__))
 """;
 EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
@@ -514,6 +628,31 @@ ASSERT target_dataset_count > 0
     OR ARRAY_LENGTH(suffix_list) > 0
     OR ARRAY_LENGTH(suffix_extra_list) > 0 AS
   'suffix を持つデータセットが 0 件です。suffix_pattern / analysis_include_dataset_patterns を確認するか、suffix_list に一覧を並べる（自動抽出は行われなくなります）か、suffix_extra_list に足してください。';
+
+
+-- 運んできたぶんが本当に入っているか。
+--
+-- **並べたリージョンの行が 1 つも無いまま通さない。** 取り込みが失敗しても
+-- （cross_region_import.sql は別のスケジュールなので落ちても止まらない）
+-- ここは動いてしまい、**そのリージョンの View だけが消えたカード**ができる。
+-- グループ数も差分も辻褄が合ったまま出るので、画面から間違いに気づけない。
+-- 落ちれば前の日のカードが残る（欠けたカードで上書きされない）。
+--
+-- 鮮度そのものは cross_region_import.sql が見る。ここは「テーブルがあるか・
+-- 並べたリージョンの行があるか」だけを確かめる。
+--
+-- ここは render_call_sql（テンプレートの仕組み）を通さない。読むテーブルの
+-- 名前はもう組み立て済みで、目印に置き換えるものが無いため。プロジェクトの
+-- 自動検出や UDF の数え上げと同じ書き方にそろえてある。
+IF ARRAY_LENGTH(import_source_regions) > 0 THEN
+  EXECUTE IMMEDIATE FORMAT(
+    "SELECT COUNT(DISTINCT source_region) FROM `%s.%s.%s` WHERE source_region IN UNNEST(@regions)",
+    work_project_id, work_dataset, table_meta_views)
+  INTO imported_region_count
+  USING import_source_regions AS regions;
+  ASSERT imported_region_count = ARRAY_LENGTH(import_source_regions) AS
+    '運んできたメタデータに、import_source_regions のリージョンの行が足りません。cross_region_import.sql が流れているか確認してください（そのリージョンの View だけが消えたカードができるのを防いでいます）。';
+END IF;
 
 
 -- ---------------------------------------------------------------------
@@ -672,7 +811,7 @@ suffix_base AS (
        @suffix_list,
        ARRAY(
          SELECT DISTINCT REGEXP_EXTRACT(schema_name, r'__SUFFIX_PATTERN__')
-         FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.SCHEMATA`
+         FROM __SRC_SCHEMATA__
          WHERE REGEXP_CONTAINS(schema_name, r'__SUFFIX_PATTERN__')
            AND (__SCHEMA_COND__)
        ))
@@ -728,7 +867,7 @@ opts AS (
 -- View 自身の名前も入らないため、パラメータには参照先の差だけが残る。
 src AS (
   SELECT table_name AS view_name, view_definition AS ddl
-  FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.VIEWS`
+  FROM __SRC_VIEWS__
   WHERE (__VIEW_DATASET_COND__) AND (__VIEW_NAME_COND__)
 ),
 keyed AS (
@@ -760,7 +899,7 @@ keyed AS (
 -- JOIN してから当てると曖昧になる。それぞれ単独の CTE で絞ってから繋ぐ。
 cols_raw AS (
   SELECT table_schema, table_name, column_name, ordinal_position, data_type, is_nullable
-  FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.COLUMNS`
+  FROM __SRC_COLUMNS__
   WHERE (__VIEW_DATASET_COND__) AND (__VIEW_NAME_COND__)
 ),
 -- COLUMN_FIELD_PATHS は STRUCT の中まで 1 行ずつ持っている。
@@ -770,7 +909,7 @@ cols_raw AS (
 -- ネストした項目もそれぞれ description を持てるので、論理名もここから取れる。
 col_paths AS (
   SELECT table_schema, table_name, column_name, field_path, data_type, description
-  FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.COLUMN_FIELD_PATHS`
+  FROM __SRC_FIELD_PATHS__
   WHERE (__VIEW_DATASET_COND__) AND (__VIEW_NAME_COND__)
 ),
 -- 最上位とネストを 1 本に束ねる。
@@ -844,7 +983,7 @@ view_opts AS (
   SELECT
     table_name AS view_name,
     COALESCE(SAFE.STRING(SAFE.PARSE_JSON(option_value)), option_value) AS desc_md
-  FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.TABLE_OPTIONS`
+  FROM __SRC_TABLE_OPTS__
   WHERE option_name = 'description'
     AND (__VIEW_DATASET_COND__) AND (__VIEW_NAME_COND__)
 ),
@@ -909,7 +1048,7 @@ view_labels AS (
     SELECT
       table_name AS view_name,
       REGEXP_EXTRACT_ALL(option_value, r'"([^"]*)"') AS toks
-    FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.TABLE_OPTIONS`
+    FROM __SRC_TABLE_OPTS__
     WHERE option_name = 'labels'
       AND (__VIEW_DATASET_COND__) AND (__VIEW_NAME_COND__)
   )
