@@ -355,7 +355,7 @@ DECLARE src_views       STRING;
 DECLARE src_columns     STRING;
 DECLARE src_field_paths STRING;
 DECLARE src_table_opts  STRING;
-DECLARE imported_region_count INT64;
+DECLARE import_diag STRING;  -- 取り込みが足りないときの説明。足りていれば NULL
 
 -- view_group_html.sql が作った関数名。同じ規則で組み立てて突き合わせる。
 -- 解析と描画が別の UDF なのは、インラインのコード ブロブが 1 個あたり 32 KB
@@ -696,35 +696,39 @@ ASSERT target_dataset_count > 0
 -- 名前はもう組み立て済みで、目印に置き換えるものが無いため。プロジェクトの
 -- 自動検出や UDF の数え上げと同じ書き方にそろえてある。
 IF ARRAY_LENGTH(import_sources) > 0 THEN
-  EXECUTE IMMEDIATE FORMAT("SELECT COUNTIF(n > 0) FROM (%s)", (
+  --
+  -- **見つからなかったときは、探したものと実際にあったものを両方出す。**
+  -- ASSERT の説明文は文字列リテラルしか書けず、「どのテーブルの、どの
+  -- source_region を探したか」を埋め込めない。それが無いと、原因が
+  --   ・source_region の書き方違い（リージョン名そのもの。'sgp' などの略称ではない）
+  --   ・table_name_suffix の食い違い（別のテーブルを見ている）
+  --   ・そもそも取り込みが流れていない
+  -- のどれなのか、落ちた人が自分で切り分けることになる。ERROR() なら
+  -- 文言を組み立てられるので、そちらを使う。
+  -- （RAISE は使わない。このファイルの他の停止は ASSERT にそろえてある。）
+  EXECUTE IMMEDIATE FORMAT("""
+    SELECT STRING_AGG(msg, ' / ') FROM (
+      SELECT FORMAT('%%s に source_region = %%s の行がありません（そのテーブルにあるのは: %%s）',
+                    tbl, want, IFNULL(have, '(空)')) AS msg
+      FROM (%s) WHERE n = 0)
+  """, (
     SELECT STRING_AGG(
-      FORMAT("SELECT (SELECT COUNT(*) FROM `%s.%s.%s` WHERE source_region = %T) AS n",
-        work_project_id, work_dataset,
-        table_name_prefix || system_name || '_' || 't_' || 'meta_views' || s.table_name_suffix,
-        s.source_region),
+      FORMAT("SELECT %T AS tbl, %T AS want, (SELECT COUNT(*) FROM `%s` WHERE source_region = %T) AS n, (SELECT STRING_AGG(DISTINCT source_region, ', ') FROM `%s`) AS have",
+        tbl, s.source_region, tbl, s.source_region, tbl),
       ' UNION ALL ' ORDER BY s.source_region)
-    FROM UNNEST(import_sources) AS s))
-  INTO imported_region_count;
-  --
-  -- **ここで落ちたときの調べ方。**
-  -- ASSERT の説明文は文字列リテラルしか書けないので、何を探して見つからな
-  -- かったのかを message に埋め込めない。代わりに手順をここに置いておく。
-  --
-  -- テーブル名が違えば「Not found: Table」で落ちる。この ASSERT が出たと
-  -- いうことは**テーブルは見つかっている**ので、原因は source_region の値か、
-  -- その行が入っていないかのどちらか。まずテーブルの中身を見る:
-  --
-  --   SELECT source_region, COUNT(*) AS n
-  --   FROM `<work_project>.<work_dataset>.<prefix>viewlgc_t_meta_views<suffix>`
-  --   GROUP BY source_region;
-  --
-  --   ・別のリージョン名が出る  → import_sources の source_region の書き方違い
-  --                              （リージョン名そのもの。'sgp' などの略称ではない）
-  --   ・0 行                    → cross_region_import.sql が流れていない
-  --   ・そもそも別のテーブルを  → import_sources の table_name_suffix が
-  --     見ていた                  cross_region_import.sql の値と違う
-  ASSERT imported_region_count = ARRAY_LENGTH(import_sources) AS
-    '運んできたメタデータに、import_sources の送り元の行が足りません。テーブルは見つかっているので、source_region の値か table_name_suffix を疑ってください（調べ方はこの ASSERT の直前のコメント）。cross_region_import.sql が流れているかも確認を。';
+    FROM UNNEST(import_sources) AS s,
+      UNNEST([FORMAT('%s.%s.%s', work_project_id, work_dataset,
+        table_name_prefix || system_name || '_' || 't_' || 'meta_views' || s.table_name_suffix
+      )]) AS tbl))
+  INTO import_diag;
+
+  IF import_diag IS NOT NULL THEN
+    SELECT ERROR(CONCAT(
+      '運んできたメタデータが足りません: ', import_diag,
+      '。import_sources の source_region はリージョン名そのもの（asia-southeast1 など）で、',
+      'sgp のような略称ではありません。table_name_suffix が cross_region_import.sql と',
+      '同じ値かも確認してください。cross_region_import.sql が流れているかも。'));
+  END IF;
 END IF;
 
 

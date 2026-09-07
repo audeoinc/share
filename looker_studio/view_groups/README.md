@@ -1205,21 +1205,20 @@ View だけが消えたカードができる。グループ数も差分も辻褄
 
 3 つ目は **suffix の書き間違いも拾う**（そのテーブルには行が無いので）。
 
-> **「送り元の行が足りません」で落ちたら。** テーブル名が違えば
-> 「Not found: Table」で落ちるので、この `ASSERT` が出た時点で**テーブルは
-> 見つかっている**。原因は `source_region` の値か、行が入っていないか。
+> **取り込みが足りないときは、探したものと実際にあったものを両方出す。**
 >
-> ```sql
-> SELECT source_region, COUNT(*) AS n
-> FROM `<work_project>.<work_dataset>.<prefix>viewlgc_t_meta_views<suffix>`
-> GROUP BY source_region;
+> ```
+> 運んできたメタデータが足りません: proj.ops_meta.viewlgc_t_meta_views に
+> source_region = sgp の行がありません（そのテーブルにあるのは: asia-southeast1）。
+> import_sources の source_region はリージョン名そのもの（asia-southeast1 など）で、
+> sgp のような略称ではありません。…
 > ```
 >
-> | 結果 | 原因 |
-> |---|---|
-> | 別のリージョン名が出る | `import_sources` の `source_region` の書き方違い（リージョン名そのもの。`sgp` などの略称ではない） |
-> | 0 行 | `cross_region_import.sql` が流れていない |
-> | 見ていたのが別のテーブル | `import_sources` の `table_name_suffix` が `cross_region_import.sql` の値と違う |
+> `ASSERT` の説明文は文字列リテラルしか書けず、どのテーブルのどの
+> `source_region` を探したかを埋め込めない。それが無いと、
+> **書き方違い／`table_name_suffix` の食い違い／取り込み未実行**のどれなのかを
+> 落ちた人が自分で切り分けることになるので、ここだけ `ERROR()` で文言を
+> 組み立てている。
 
 `node check_sql.mjs` が、直読みが残っていないか・5 つの読み元が全部使われて
 いるか・2 枝になっているか・**送り元ごとに枝分かれするか**・`source_region` で

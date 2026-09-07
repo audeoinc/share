@@ -484,8 +484,16 @@ for (const t of ['__T_DIFF_SRC__', '__T_DIFF__']) {
 
   // (8) 並べた送り元の行が無いまま通さないか。
   //     取り込みが落ちても build_table は動くので、ここが最後の砦になる。
-  add('並べた送り元の行が無ければ止まる',
-    /ASSERT imported_region_count = ARRAY_LENGTH\(import_sources\)/.test(table));
+  // 止め方は ASSERT ではなく ERROR()。ASSERT の説明文は文字列リテラルしか
+  // 書けず、「どのテーブルの、どの source_region を探したか」を埋め込めない。
+  // それが無いと、書き方違い／suffix の食い違い／取り込み未実行 のどれかを
+  // 落ちた人が自分で切り分けることになる（実際にそうなった）。
+  add('並べた送り元の行が無ければ止まる（探したものと実際にあったものを出す）',
+    /INTO import_diag;/.test(table) &&
+    /IF import_diag IS NOT NULL THEN\s*\n\s*SELECT ERROR\(/.test(table) &&
+    // 期待した source_region と、そのテーブルに実際にある値の両方を出す
+    /source_region = %%s の行がありません（そのテーブルにあるのは: %%s）/.test(table) &&
+    /STRING_AGG\(DISTINCT source_region/.test(table));
 }
 
 // --- 6. 両ファイルで一致させる必要がある値 -----------------------------
