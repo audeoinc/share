@@ -2253,8 +2253,27 @@ DDL は SQL なので、1 本が極端に大きくなることは考えにくい
 
 #### 再開するとき
 
-まず**どの base が重いか**を測る。base の切り出しは概算（末尾 1 語を落とす）
-だが、外れ値を見つけるには足りる。
+**原因はグループ数で確定している。** リージョンを減らしたら通ったので、
+1 View の DDL でも取り込みの不備でもなく `G` が効いている。下の診断クエリを
+流す必要はもう無い（`max_ddl_kb` の裏取りをしたいときだけ）。
+
+**閾値は実データから決める。** 減らした構成で `t_diff` ができているので、
+そこにグループ数の分布がそのまま入っている。
+
+```sql
+SELECT base, view_count, group_count
+FROM `<project>.<work_dataset>.<prefix>viewlgc_t_diff<suffix>`
+ORDER BY group_count DESC
+LIMIT 20;
+```
+
+これで「いま最大いくつか」「リージョンを全部入れると何倍になりそうか」が
+読めるので、案 D の上限を外挿ではなく実測から置ける。
+
+<details>
+<summary>参考: 取り込み前に測りたいときの診断クエリ</summary>
+
+base の切り出しは概算（末尾 1 語を落とす）だが、外れ値を見つけるには足りる。
 
 ```sql
 WITH src AS (
@@ -2275,7 +2294,7 @@ FROM src
 GROUP BY base_guess ORDER BY ddl_mb DESC LIMIT 20;
 ```
 
-**グループ数が効いているのか、1 View の DDL が巨大なのか**で選ぶ手が変わる。
+</details>
 
 とりあえず動かすだけなら、`import_sources` を `[]` に戻せば確実に元に戻る
 （取り込みテーブルを 1 か所も参照しなくなる）。重い base が特定できていれば
