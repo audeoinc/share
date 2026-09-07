@@ -923,11 +923,11 @@ Not found: Dataset ... was not found in location asia-northeast1
 テーブルに落とし、そのテーブルを書き出す。
 
 ```
-INFORMATION_SCHEMA ── CTAS ──→ viewlgc_stg_*（送り元のリージョン）
+INFORMATION_SCHEMA ── CTAS ──→ viewlgc_t_meta_*（送り元のリージョン）
                                      └─ EXPORT DATA ──→ GCS
 ```
 
-中継の `viewlgc_stg_*` は、拠点側の `viewlgc_imp_*` と同じ形をしている。
+中継のテーブルは、拠点側の取り込み先と同じ名前・同じ形をしている。
 書き出しが失敗したときに、どこまでできていたかを送り元で直に見られる。
 中継テーブルを置くデータセット（`work_dataset`）は**送り元のリージョンに
 作っておくこと。**
@@ -951,7 +951,7 @@ asia-southeast1                        asia-northeast1（拠点）
 │     export.sql（日次）  │            │           ↓            │
 │ gs://…-se1/viewlgc/    │ ←─ LOAD ── │ cross_region_          │
 └────────────────────────┘    DATA    │   import.sql（日次）    │
-                                       │ viewlgc_imp_*（5 本）   │
+                                       │ viewlgc_t_meta_*（5 本）   │
                                        │           ↓            │
                                        │ build_table.sql        │
                                        └────────────────────────┘
@@ -979,9 +979,21 @@ asia-southeast1                        asia-northeast1（拠点）
 組み立てる。
 
 ```
-中継（送り元）  table_name_prefix + system_name + '_stg_' + 種類 + table_name_suffix
-取り込み（拠点） table_name_prefix + system_name + '_imp_' + 種類 + table_name_suffix
+prefix + system_name + '_' + 't_' + 'meta_' + 種類 + suffix
+    →  viewlgc_t_meta_views / viewlgc_t_meta_columns / …
 ```
+
+区分 `t_` は transaction（日次で作り直すため）。既存の
+`viewlgc_t_diff_src` / `viewlgc_m_base_note` と同じ規則。
+
+**送り元の中継テーブルと拠点の取り込みテーブルは、まったく同じ名前。**
+中身もどちらも「収集したメタデータのスナップショット」で、どのリージョンの
+ものかは `source_region` 列が持っている。データセットはリージョンごとに別
+なので衝突しない。
+
+> だからこそ **`cross_region_export.sql` を拠点のリージョンで流さないこと。**
+> 拠点の取り込み先を自分のメタデータで上書きしてしまう。拠点のぶんは
+> `build_table.sql` が `INFORMATION_SCHEMA` から直接読むので、運ぶ必要が無い。
 
 `prefix` / `suffix` に書いた `{project_token}` は、自動検出したプロジェクト ID
 から `project_token_pattern` で切り出した値に置き換わる（`build_table.sql` と
@@ -996,7 +1008,7 @@ asia-southeast1                        asia-northeast1（拠点）
 既定値を 3 ファイルで突き合わせ、置換を省いていないかも見る。
 
 > 置換を省くと、`build_table.sql` から `table_name_prefix='{project_token}_'` を
-> そのまま持ってきたときに `{project_token}_viewlgc_stg_views` という名前の
+> そのまま持ってきたときに `{project_token}_viewlgc_t_meta_views` という名前の
 > テーブルを作りに行って落ちる。
 
 ### 運ぶもの
@@ -1069,7 +1081,7 @@ asia-southeast1                        asia-northeast1（拠点）
 
 **`build_table.sql` の側はまだ差し替えていない。** いまは 5 か所が
 `region-<拠点>.INFORMATION_SCHEMA.*` を直接読んでいる。これを
-「拠点の `INFORMATION_SCHEMA` ＋ 取り込んだ `viewlgc_imp_*`」の `UNION ALL` に
+「拠点の `INFORMATION_SCHEMA` ＋ 取り込んだ `viewlgc_t_meta_*`」の `UNION ALL` に
 する必要がある。
 
 ```sql

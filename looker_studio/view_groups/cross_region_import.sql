@@ -13,7 +13,7 @@
 --   │ INFORMATION_SCHEMA│               │ INFORMATION_SCHEMA      │
 --   │        ↓ export   │               │            ＋            │
 --   │ gs://…-se1/…      │ ←─ LOAD DATA ─│            ↓ このファイル │
---   └──────────────────┘               │ viewlgc_imp_*（5 本）    │
+--   └──────────────────┘               │ viewlgc_t_meta_*（5 本）    │
 --                                       │            ↓            │
 --                                       │ build_table.sql         │
 --                                       └────────────────────────┘
@@ -110,8 +110,11 @@ DECLARE project_token      STRING;
 DECLARE source_regions ARRAY<STRING>;
 
 -- 取り込む 5 本 ＋ マニフェスト。名前は build_table.sql と同じ規則で組み立てる
--- （table_name_prefix || system_name || '_imp_' || 種類 || table_name_suffix）。
--- 種類の文字列は cross_region_export.sql のファイル名と 1 対 1。
+-- （prefix + system_name + '_' + 区分 + 基本名 + suffix。区分は 't_'）。
+-- **送り元の中継テーブルとまったく同じ名前。** 中身もどちらも「収集した
+-- メタデータのスナップショット」で、どのリージョンのものかは source_region 列が
+-- 持っている。データセットはリージョンごとに別なので衝突しない。
+-- 種類の文字列は cross_region_export.sql の parts と 1 対 1。
 DECLARE kinds ARRAY<STRING> DEFAULT
   ['schemata', 'views', 'columns', 'field_paths', 'table_opts', 'manifest'];
 DECLARE kind          STRING;
@@ -187,7 +190,7 @@ WHILE i < ARRAY_LENGTH(kinds) DO
   SET kind = kinds[OFFSET(i)];
   SET table_fqn = FORMAT('%s.%s.%s',
     work_project_id, work_dataset,
-    CONCAT(table_name_prefix, system_name, '_imp_', kind, table_name_suffix));
+    CONCAT(table_name_prefix, system_name, '_', 't_', 'meta_', kind, table_name_suffix));
 
   -- ['gs://…/asia-southeast1/views-*.avro', …] を組み立てる。
   -- **バケットは送り元ごとに引く。** 既定は送り元のバケットを直に読む形
@@ -275,11 +278,11 @@ SELECT STRING_AGG(msg, ' / ') FROM (
 )
 """,
   manifest_fqn,
-  FORMAT('%s.%s.%s', work_project_id, work_dataset, CONCAT(table_name_prefix, system_name, '_imp_schemata',    table_name_suffix)),
-  FORMAT('%s.%s.%s', work_project_id, work_dataset, CONCAT(table_name_prefix, system_name, '_imp_views',       table_name_suffix)),
-  FORMAT('%s.%s.%s', work_project_id, work_dataset, CONCAT(table_name_prefix, system_name, '_imp_columns',     table_name_suffix)),
-  FORMAT('%s.%s.%s', work_project_id, work_dataset, CONCAT(table_name_prefix, system_name, '_imp_field_paths', table_name_suffix)),
-  FORMAT('%s.%s.%s', work_project_id, work_dataset, CONCAT(table_name_prefix, system_name, '_imp_table_opts',  table_name_suffix))
+  FORMAT('%s.%s.%s', work_project_id, work_dataset, CONCAT(table_name_prefix, system_name, '_', 't_', 'meta_schemata',    table_name_suffix)),
+  FORMAT('%s.%s.%s', work_project_id, work_dataset, CONCAT(table_name_prefix, system_name, '_', 't_', 'meta_views',       table_name_suffix)),
+  FORMAT('%s.%s.%s', work_project_id, work_dataset, CONCAT(table_name_prefix, system_name, '_', 't_', 'meta_columns',     table_name_suffix)),
+  FORMAT('%s.%s.%s', work_project_id, work_dataset, CONCAT(table_name_prefix, system_name, '_', 't_', 'meta_field_paths', table_name_suffix)),
+  FORMAT('%s.%s.%s', work_project_id, work_dataset, CONCAT(table_name_prefix, system_name, '_', 't_', 'meta_table_opts',  table_name_suffix))
 ) INTO count_mismatch;
 ASSERT count_mismatch IS NULL AS
   '取り込んだ行数がマニフェストと合いません。GCS のコピーが途中か、古い世代の avro が混ざっています。';

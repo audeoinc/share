@@ -293,6 +293,17 @@ for (const [name, src] of [['cross_region_export.sql', exp],
     `build_table=${t ? t[1] : 'なし'} / export=${e ? e[1] : 'なし'} / import=${i ? i[1] : 'なし'}`);
 }
 
+// 送り元の中継テーブルと拠点の取り込みテーブルは**同じ名前**にしてある
+// （中身はどちらも「収集したメタデータのスナップショット」で、どのリージョンの
+// ものかは source_region 列が持つ）。片方の組み立て方だけ変えると、名前が
+// 静かにずれる ―― 書き出しは成功し、取り込みも成功し、**拠点が読むテーブルだけ
+// が別物**になる。build_table.sql の命名規則（区分は 't_' / 'm_'）にも合わせる。
+{
+  const re = /CONCAT\(table_name_prefix, system_name, '_', 't_', 'meta_', kind, table_name_suffix\)/;
+  add('中継と取り込みのテーブル名の組み立てが同じ（区分は t_）',
+    re.test(exp) && re.test(imp));
+}
+
 // prefix / suffix に書いた '{project_token}' は、プロジェクト ID から
 // 切り出したトークンに置き換わる。**この置換を持っていないファイルがあると、
 // build_table.sql から prefix をそのまま持ってきたときに

@@ -20,11 +20,17 @@
 -- （メタデータのテーブルは参照できない）。いったん普通のテーブルに落とし、
 -- そのテーブルを書き出す。
 --
---   INFORMATION_SCHEMA ── CTAS ──→ viewlgc_stg_*（このリージョン）
+--   INFORMATION_SCHEMA ── CTAS ──→ viewlgc_t_meta_*（このリージョン）
 --                                        └─ EXPORT DATA ──→ GCS
 --
--- 落とした viewlgc_stg_* は、拠点側の viewlgc_imp_* と同じ形をしている。
+-- **名前は拠点側の取り込み先とまったく同じ。** 中身もどちらも「収集した
+-- メタデータのスナップショット」で、どのリージョンのものかは source_region 列が
+-- 持っている。データセットはリージョンごとに別なので名前は衝突しない。
 -- 書き出しが失敗したときに、どこまでできていたかを直に見られる。
+--
+-- ただし **このファイルを拠点のリージョンで流さないこと。** 同じ名前なので、
+-- 拠点の取り込み先を自分のメタデータで上書きしてしまう。拠点のぶんは
+-- build_table.sql が INFORMATION_SCHEMA から直接読むので、運ぶ必要が無い。
 --
 -- **バケットは 1 つ。書き出したものを拠点から直に読む。**
 -- 書き出す側は同一ロケーションが要る（EXPORT DATA の宛先は、書き出す
@@ -39,7 +45,7 @@
 --   ┌──────────────────┐               ┌──────────────────┐
 --   │ INFORMATION_SCHEMA│               │ cross_region_    │
 --   │        ↓ CTAS     │               │   import.sql     │
---   │ viewlgc_stg_*     │               │        ↓          │
+--   │ viewlgc_t_meta_*     │               │        ↓          │
 --   │        ↓ EXPORT   │               │ build_table.sql  │
 --   │ gs://…-se1/…      │ ←─ LOAD DATA ─│                  │
 --   └──────────────────┘               └──────────────────┘
@@ -70,6 +76,7 @@ DECLARE gcs_export_prefix STRING DEFAULT 'gs://CHANGE-ME-se1/viewlgc';
 
 -- 中継のテーブルを置くデータセット。**このリージョンに作ってあること。**
 -- INFORMATION_SCHEMA を直に書き出せないので、一度ここへ落とす。
+-- 拠点の work_dataset と同じ名前でよい（リージョンが違えば別物）。
 DECLARE work_dataset STRING DEFAULT 'ops_meta';
 
 -- 解析対象のデータセット / View。**拠点側（build_table.sql）と同じ値にする。**
@@ -274,7 +281,7 @@ SET parts = [
 WHILE i < ARRAY_LENGTH(parts) DO
   SET kind = parts[OFFSET(i)].kind;
   SET stg_fqn = FORMAT('%s.%s.%s', work_project_id, work_dataset,
-    CONCAT(table_name_prefix, system_name, '_stg_', kind, table_name_suffix));
+    CONCAT(table_name_prefix, system_name, '_', 't_', 'meta_', kind, table_name_suffix));
 
   EXECUTE IMMEDIATE FORMAT(ctas_stmt, stg_fqn, parts[OFFSET(i)].body);
   EXECUTE IMMEDIATE FORMAT("SELECT COUNT(*) FROM `%s`", stg_fqn) INTO n_rows;
@@ -321,7 +328,7 @@ SET manifest_sql = (
   FROM UNNEST(counts) AS c);
 
 SET stg_fqn = FORMAT('%s.%s.%s', work_project_id, work_dataset,
-  CONCAT(table_name_prefix, system_name, '_stg_manifest', table_name_suffix));
+  CONCAT(table_name_prefix, system_name, '_', 't_', 'meta_manifest', table_name_suffix));
 EXECUTE IMMEDIATE FORMAT(ctas_stmt, stg_fqn, manifest_sql);
 EXECUTE IMMEDIATE FORMAT(export_stmt,
   gcs_export_prefix, job_region, 'manifest', stg_fqn);
