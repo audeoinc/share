@@ -410,6 +410,32 @@ for (const t of ['__T_DIFF_SRC__', '__T_DIFF__']) {
   add('運んできた側を source_region で絞っている（5 か所）', n === srcs.length,
     `${n} か所`);
 
+  // (4b) 読み元がテーブル名を**変数経由**で組み立てているか。
+  //      リテラルで 'viewlgc_t_meta_views' と書くと prefix / suffix が
+  //      効かない。prefix が空の環境では動いてしまい、リージョンの略称を
+  //      入れた環境でだけ「そんなテーブルは無い」になる。
+  {
+    const lit = srcs.filter((k) => {
+      const at = table.indexOf(`SET src_${k} =`);
+      const body = table.slice(at, table.indexOf(';', at));
+      return !body.includes(`table_meta_${k}`) ||
+        /'[a-z_]*viewlgc_t_meta_/.test(body);
+    });
+    add('読み元のテーブル名を変数で組み立てている（prefix / suffix が効く）',
+      lit.length === 0, lit.join(','));
+  }
+
+  // (4c) その変数が build_table.sql の命名規則で組み立てられているか。
+  //      cross_region_import.sql と同じ形（区分は 't_'）でなければ、
+  //      あちらが作ったテーブルと名前がずれる。
+  {
+    const bad = srcs.filter((k) => !new RegExp(
+      `SET table_meta_${k} =\\s*\\n?\\s*table_name_prefix \\|\\| system_name \\|\\| '_' \\|\\| 't_' \\|\\| 'meta_${k}' \\|\\| table_name_suffix;`
+    ).test(table));
+    add('読み元の名前が build_table.sql の命名規則どおり', bad.length === 0,
+      bad.join(','));
+  }
+
   // (5) 拠点自身を並べていないか（同じ View が 2 回入る）。
   add('拠点自身を import_source_regions に入れられない',
     /ASSERT job_region NOT IN UNNEST\(import_source_regions\)/.test(table));

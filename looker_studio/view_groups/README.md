@@ -1113,9 +1113,15 @@ FROM (SELECT table_schema, table_name, view_definition
       FROM `<project>.region-asia-northeast1.INFORMATION_SCHEMA.VIEWS`
       UNION ALL
       SELECT table_schema, table_name, view_definition
-      FROM `<project>.<work_dataset>.viewlgc_t_meta_views`
+      FROM `<project>.<work_dataset>.<prefix>viewlgc_t_meta_views<suffix>`
       WHERE source_region IN UNNEST(['asia-southeast1']))
 ```
+
+読み元のテーブル名は `table_name_prefix` / `table_name_suffix` を効かせて
+組み立てる（`cross_region_import.sql` とまったく同じ規則）。リテラルで書くと
+prefix が空の環境では動いてしまい、リージョンの略称を入れた環境でだけ
+「そんなテーブルは無い」になるので、`node check_sql.mjs` が変数経由で
+組み立てているかと、命名規則どおりかを見る。
 
 読み元は `__SRC_SCHEMATA__` / `__SRC_VIEWS__` / `__SRC_COLUMNS__` /
 `__SRC_FIELD_PATHS__` / `__SRC_TABLE_OPTS__` の 5 つの目印で差し替える。
