@@ -2186,6 +2186,79 @@ ORDER BY base;
 
 やると決めていて、まだ手を付けていないもの。着手するときの前提もここに書く。
 
+### 0. グループが増えても落ちない形にする（**最優先・進行中**）
+
+リージョンを足したところ、`t_diff_src` の生成で
+**`Resources exceeded during execution: UDF out of memory`** が出た。
+
+**前提: リージョンはこれからも増える。** いま入れたのは一部で、グループ数は
+確実に増える。**その前提で設計する。**
+
+#### なぜ落ちるか
+
+比較ペインの枚数は `min(G, MAX_REF_TABS) × (G − 1)`。**G に対して二乗**で
+増える。リージョンが増えると base あたりの View 数が増え、G が増える。
+
+止めているつもりだった `REF_BUDGET`（40 MB）は**行の大きさを守る値**で、
+UDF のメモリを守る値ではない。しかも
+
+```js
+const html = refPanel(b, i, opts);           // 先に丸ごと作る
+if (shown.length && size + html.length > REF_BUDGET) break;
+shown.push(html);                            // 40 MB まで JS のメモリに溜める
+```
+
+**作ってから測る**ので、1 枚目が大きいと打つ手が無い。これまで当たらなかった
+のは、実測で基準 1 つあたり最大 690 KB だったから。
+
+#### 効きそうな手（診断のあとで選ぶ）
+
+二乗の係数 `G` は「**どのグループも基準にできる**」ことから来ている。
+比較そのものは基準 1 つにつき `G − 1` 枚で、こちらは線形。
+
+| | 案 | 枚数 | 備考 |
+|---|---|---|---|
+| A | 予算を UDF のメモリに見合う値へ下げ、**作る前に見積もる** | 変わらず | 対症療法。二乗は残る |
+| B | 基準を 1 つ（いちばん大きいグループ）に固定 | `G − 1` | 線形になる。基準を選ぶ自由を失う |
+| C | **基準ごとに行を分け、Looker のコントロールで選ぶ** | 1 行 `G − 1` | `ref_index` / `ref_label` 列は**この用途を見越して残してある**（「基準ごとに行を作っていた」名残） |
+| D | グループ数に上限を設け、超えたら出さずにそう書く | 打ち切り | 最後の砦。単体では情報が落ちる |
+
+**C が本命**だと思う。行が増えるだけで 1 行は線形に収まり、レポート側は
+コントロールを 1 つ足すだけ。JS を使わない制約とも衝突しない。
+ただし base のプルダウンと基準のプルダウンが 2 段になるので、
+使い勝手を確かめてから決める。A と D は C と併用する。
+
+#### 再開するとき
+
+まず**どの base が重いか**を測る。base の切り出しは概算（末尾 1 語を落とす）
+だが、外れ値を見つけるには足りる。
+
+```sql
+WITH src AS (
+  SELECT table_schema, table_name, view_definition
+  FROM `<project>.region-asia-northeast1.INFORMATION_SCHEMA.VIEWS`
+  WHERE REGEXP_CONTAINS(table_schema, r'_([A-Za-z]{4})$')
+  UNION ALL
+  SELECT table_schema, table_name, view_definition
+  FROM `<project>.<work_dataset>.<prefix>viewlgc_t_meta_views<suffix>`
+  WHERE source_region = 'asia-southeast1'
+)
+SELECT
+  REGEXP_REPLACE(table_name, r'_[A-Za-z0-9]+$', '') AS base_guess,
+  COUNT(*) AS views,
+  ROUND(SUM(LENGTH(view_definition)) / 1024 / 1024, 2) AS ddl_mb,
+  ROUND(MAX(LENGTH(view_definition)) / 1024, 0) AS max_ddl_kb
+FROM src
+GROUP BY base_guess ORDER BY ddl_mb DESC LIMIT 20;
+```
+
+**グループ数が効いているのか、1 View の DDL が巨大なのか**で選ぶ手が変わる。
+
+とりあえず動かすだけなら、`import_sources` を `[]` に戻せば確実に元に戻る
+（取り込みテーブルを 1 か所も参照しなくなる）。重い base が特定できていれば
+`analysis_exclude_object_patterns` で外すほうが、片リージョンに戻すより情報が
+落ちない。
+
 ### 1. カラムの description（JSON）を編集する仕組み
 
 いまカラム定義タブに出している論理名は、View のカラムに付けた description を
