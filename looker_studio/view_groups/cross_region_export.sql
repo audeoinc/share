@@ -80,8 +80,16 @@ DECLARE analysis_exclude_dataset_patterns ARRAY<STRING> DEFAULT [];
 DECLARE analysis_include_object_patterns ARRAY<STRING> DEFAULT [];
 DECLARE analysis_exclude_object_patterns ARRAY<STRING> DEFAULT [];
 
--- このシステムを表す名前と、テーブルの命名。
--- **build_table.sql / cross_region_import.sql と同じ値にすること。**
+-- 命名。**build_table.sql / cross_region_import.sql と同じ値にすること。**
+-- 食い違うと、拠点側がこのファイルの作ったテーブルを見つけられない。
+--
+-- project_token_pattern は、自動検出したプロジェクト ID からトークンを
+-- 切り出す正規表現（キャプチャがあればグループ 1）。切り出した値が、
+-- 下の 3 つに書いた '{project_token}' をすべて置き換える。例えば
+-- プロジェクト 'mycompany-prod-123' に r'-([^-]+)-' なら 'prod' になるので、
+-- table_name_prefix='{project_token}_' が 'prod_' になる。
+-- 既定は最初のハイフン区切り。build_table.sql と合わせること。
+DECLARE project_token_pattern STRING DEFAULT r'^([^-]+)';
 DECLARE system_name STRING DEFAULT 'viewlgc';
 DECLARE table_name_prefix STRING DEFAULT '';
 DECLARE table_name_suffix STRING DEFAULT '';
@@ -91,6 +99,7 @@ DECLARE job_region STRING DEFAULT @@location;
 DECLARE default_project_id STRING;
 DECLARE target_project_id  STRING DEFAULT NULL;  -- 読み取り対象
 DECLARE work_project_id    STRING DEFAULT NULL;  -- 中継テーブルの置き場所
+DECLARE project_token      STRING;
 
 -- include / exclude から組み立てる条件文。見る列が違うので 3 本作る。
 DECLARE schema_condition       STRING;  -- SCHEMATA.schema_name
@@ -135,6 +144,25 @@ ASSERT default_project_id IS NOT NULL AS
   'プロジェクト ID を自動検出できません（このリージョンにデータセットが無い？）。target_project_id にリテラルを入れて固定してください。';
 SET target_project_id = COALESCE(target_project_id, default_project_id);
 SET work_project_id   = COALESCE(work_project_id,   default_project_id);
+
+-- 名前を組み立てる前に '{project_token}' を置き換える。
+-- build_table.sql と同じ手順・同じ順序にそろえてある。ここを省くと、
+-- build_table.sql から prefix をそのまま持ってきたときに
+-- '{project_token}_viewlgc_…' という名前のテーブルを作りに行って落ちる。
+SET project_token =
+  COALESCE(REGEXP_EXTRACT(default_project_id, project_token_pattern), '');
+SET work_dataset      = REPLACE(work_dataset,      '{project_token}', project_token);
+SET table_name_prefix = REPLACE(table_name_prefix, '{project_token}', project_token);
+SET table_name_suffix = REPLACE(table_name_suffix, '{project_token}', project_token);
+
+ASSERT REGEXP_CONTAINS(work_dataset, r'^[A-Za-z0-9_]+$') AS
+  'work_dataset は英数字と _ だけにしてください（置換されていない {project_token} が残っていませんか）。';
+ASSERT REGEXP_CONTAINS(system_name, r'^[A-Za-z0-9_]+$') AS
+  'system_name は英数字と _ だけにしてください。';
+ASSERT REGEXP_CONTAINS(table_name_prefix, r'^[A-Za-z0-9_-]*$') AS
+  'table_name_prefix は英数字と _ - だけにしてください（置換されていない {project_token} が残っていませんか）。';
+ASSERT REGEXP_CONTAINS(table_name_suffix, r'^[A-Za-z0-9_-]*$') AS
+  'table_name_suffix は英数字と _ - だけにしてください（置換されていない {project_token} が残っていませんか）。';
 
 ASSERT NOT STARTS_WITH(gcs_export_prefix, 'gs://CHANGE-ME') AS
   'gcs_export_prefix を書き換えてください（このリージョンと同じロケーションのバケットを指すこと）。';

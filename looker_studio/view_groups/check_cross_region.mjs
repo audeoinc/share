@@ -287,10 +287,32 @@ for (const [name, src] of [['cross_region_export.sql', exp],
 // 「見つからない」で落ちる。system_name の既定値だけでも突き合わせておく。
 {
   const re = /^DECLARE system_name STRING DEFAULT '([^']*)';$/m;
-  const t = table.match(re), i = imp.match(re);
-  add('system_name の既定値が build_table.sql と同じ',
-    t !== null && i !== null && t[1] === i[1],
-    `build_table=${t ? t[1] : 'なし'} / import=${i ? i[1] : 'なし'}`);
+  const t = table.match(re), i = imp.match(re), e = exp.match(re);
+  add('system_name の既定値が 3 ファイルで同じ',
+    t !== null && i !== null && e !== null && t[1] === i[1] && t[1] === e[1],
+    `build_table=${t ? t[1] : 'なし'} / export=${e ? e[1] : 'なし'} / import=${i ? i[1] : 'なし'}`);
+}
+
+// prefix / suffix に書いた '{project_token}' は、プロジェクト ID から
+// 切り出したトークンに置き換わる。**この置換を持っていないファイルがあると、
+// build_table.sql から prefix をそのまま持ってきたときに
+// '{project_token}_viewlgc_…' というテーブルを作りに行って落ちる。**
+// 切り出し方が食い違えば、落ちずに別の名前のテーブルを見に行く（もっと悪い）。
+{
+  const re = /^DECLARE project_token_pattern STRING DEFAULT (r'[^']*');$/m;
+  const t = table.match(re), i = imp.match(re), e = exp.match(re);
+  add('project_token_pattern の既定値が 3 ファイルで同じ',
+    t !== null && i !== null && e !== null && t[1] === i[1] && t[1] === e[1],
+    `build_table=${t ? t[1] : 'なし'} / export=${e ? e[1] : 'なし'} / import=${i ? i[1] : 'なし'}`);
+
+  for (const [name, src] of [['cross_region_export.sql', exp],
+    ['cross_region_import.sql', imp]]) {
+    const need = ['work_dataset', 'table_name_prefix', 'table_name_suffix'];
+    const missing = need.filter((v) =>
+      !new RegExp(`SET ${v}\\s*= REPLACE\\(${v},\\s*'\\{project_token\\}'`).test(src));
+    add(`${name}: '{project_token}' を置き換えている`, missing.length === 0,
+      missing.join(' / '));
+  }
 }
 
 // --- 結果 --------------------------------------------------------------

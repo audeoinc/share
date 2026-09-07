@@ -973,6 +973,32 @@ asia-southeast1                        asia-northeast1（拠点）
 > 今回 1 つで足りたとき、宛先に前回の 2 つ目が残る。ワイルドカードで読むので
 > 古い行が混ざる。直に読む形ならこの問題自体が起きない。
 
+### 命名は 3 ファイルで揃える
+
+中継テーブルと取り込みテーブルの物理名は、`build_table.sql` と同じ規則で
+組み立てる。
+
+```
+中継（送り元）  table_name_prefix + system_name + '_stg_' + 種類 + table_name_suffix
+取り込み（拠点） table_name_prefix + system_name + '_imp_' + 種類 + table_name_suffix
+```
+
+`prefix` / `suffix` に書いた `{project_token}` は、自動検出したプロジェクト ID
+から `project_token_pattern` で切り出した値に置き換わる（`build_table.sql` と
+同じ仕組み・同じ順序）。
+
+**`system_name` / `project_token_pattern` / `table_name_prefix` /
+`table_name_suffix` は 3 ファイルで同じ値にすること。** 拠点側は
+`cross_region_import.sql` が作ったテーブルを同じ規則で組み立てて読むので、
+食い違うと見つからない。`project_token_pattern` だけは切り出し方が違っても
+**落ちずに別の名前を見に行く**ので、いちばん質が悪い。
+`node check_cross_region.mjs` が `system_name` と `project_token_pattern` の
+既定値を 3 ファイルで突き合わせ、置換を省いていないかも見る。
+
+> 置換を省くと、`build_table.sql` から `table_name_prefix='{project_token}_'` を
+> そのまま持ってきたときに `{project_token}_viewlgc_stg_views` という名前の
+> テーブルを作りに行って落ちる。
+
 ### 運ぶもの
 
 `build_table.sql` が実際に読む 5 本だけ。列も読むものだけに絞ってある。

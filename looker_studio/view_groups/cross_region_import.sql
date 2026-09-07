@@ -82,12 +82,20 @@ DECLARE sources ARRAY<STRUCT<source_region STRING, gcs_prefix STRING>> DEFAULT [
 -- 日次で回すなら 36 時間くらい（1 日ぶんの遅れは許し、2 日は許さない）。
 DECLARE max_staleness_hours INT64 DEFAULT 36;
 
--- このシステムを表す名前。すべてのオブジェクト名の先頭に入る。
--- **build_table.sql と同じ値にすること。**
-DECLARE system_name STRING DEFAULT 'viewlgc';
 -- 取り込み先のデータセット。build_table.sql の work_dataset と同じでよい。
 DECLARE work_dataset STRING DEFAULT 'ops_meta';
--- テーブルの命名（prefix / suffix）。build_table.sql と同じ値にすること。
+
+-- 命名。**build_table.sql と同じ値にすること。** 拠点側はこのファイルが
+-- 作ったテーブルを同じ規則で組み立てて読むので、食い違うと見つからない。
+--
+-- project_token_pattern は、自動検出したプロジェクト ID からトークンを
+-- 切り出す正規表現（キャプチャがあればグループ 1）。切り出した値が、
+-- 下の 3 つと work_dataset に書いた '{project_token}' をすべて置き換える。
+-- 例えばプロジェクト 'mycompany-prod-123' に r'-([^-]+)-' なら 'prod' に
+-- なるので、table_name_prefix='{project_token}_' が 'prod_' になる。
+-- 既定は最初のハイフン区切り。build_table.sql と合わせること。
+DECLARE project_token_pattern STRING DEFAULT r'^([^-]+)';
+DECLARE system_name STRING DEFAULT 'viewlgc';
 DECLARE table_name_prefix STRING DEFAULT '';
 DECLARE table_name_suffix STRING DEFAULT '';
 
@@ -95,6 +103,7 @@ DECLARE table_name_suffix STRING DEFAULT '';
 DECLARE job_region STRING DEFAULT @@location;
 DECLARE default_project_id STRING;
 DECLARE work_project_id    STRING DEFAULT NULL;  -- テーブルの置き場所
+DECLARE project_token      STRING;
 -- 送り元のリージョン名だけを取り出したもの。下の検証で使う。
 -- DECLARE の DEFAULT では組み立てない（副問い合わせを書ける場所が
 -- 処理系で違うので、確実に通る SET のほうに寄せる）。
@@ -125,6 +134,25 @@ EXECUTE IMMEDIATE FORMAT(
 ASSERT default_project_id IS NOT NULL AS
   'プロジェクト ID を自動検出できません。work_project_id にリテラルを入れて固定してください。';
 SET work_project_id = COALESCE(work_project_id, default_project_id);
+
+-- 名前を組み立てる前に '{project_token}' を置き換える。
+-- build_table.sql と同じ手順・同じ順序にそろえてある。ここを省くと、
+-- build_table.sql から prefix をそのまま持ってきたときに
+-- '{project_token}_viewlgc_…' という名前のテーブルを作りに行って落ちる。
+SET project_token =
+  COALESCE(REGEXP_EXTRACT(default_project_id, project_token_pattern), '');
+SET work_dataset      = REPLACE(work_dataset,      '{project_token}', project_token);
+SET table_name_prefix = REPLACE(table_name_prefix, '{project_token}', project_token);
+SET table_name_suffix = REPLACE(table_name_suffix, '{project_token}', project_token);
+
+ASSERT REGEXP_CONTAINS(work_dataset, r'^[A-Za-z0-9_]+$') AS
+  'work_dataset は英数字と _ だけにしてください（置換されていない {project_token} が残っていませんか）。';
+ASSERT REGEXP_CONTAINS(system_name, r'^[A-Za-z0-9_]+$') AS
+  'system_name は英数字と _ だけにしてください。';
+ASSERT REGEXP_CONTAINS(table_name_prefix, r'^[A-Za-z0-9_-]*$') AS
+  'table_name_prefix は英数字と _ - だけにしてください（置換されていない {project_token} が残っていませんか）。';
+ASSERT REGEXP_CONTAINS(table_name_suffix, r'^[A-Za-z0-9_-]*$') AS
+  'table_name_suffix は英数字と _ - だけにしてください（置換されていない {project_token} が残っていませんか）。';
 
 SET source_regions = ARRAY(SELECT source_region FROM UNNEST(sources) ORDER BY source_region);
 
