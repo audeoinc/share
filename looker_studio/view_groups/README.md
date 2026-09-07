@@ -1134,9 +1134,22 @@ asia-northeast1   viewlgc_t_meta_views_sgp   （運んできたもの）
 `import_sources` が送り元ごとの suffix を持ち、`SET src_*` は suffix ごとに
 `UNION ALL` の枝を足す。
 
-1 つのテーブルに複数の送り元をまとめている（`cross_region_import.sql` の
-`sources` に 2 つ以上並べた）なら、`import_sources` の複数行に**同じ suffix**を
-書けばよい。枝は 1 本だけ出て、`source_region` で両方を拾う。
+#### 送り元を増やす 2 通り
+
+| | 取り込み側 | `import_sources` |
+|---|---|---|
+| (1) 1 本のテーブルにまとめる | `sources` に 2 行、suffix は 1 つ | 同じ suffix を 2 行 |
+| (2) 送り元ごとに分ける | スケジュールドクエリを送り元ごとに、suffix も分ける | 違う suffix を 2 行 |
+
+(1) は**並べた送り元を 1 回の `LOAD DATA` でまとめて読む**（`uris` に全部の
+パスを並べる）ので上書きし合わない。(2) は片方の送り元が止まってももう片方に
+波及しない。
+
+> **(2) をやるなら `table_name_suffix` を必ず分けること。** 同じテーブルに
+> 向けて 2 回流すと、`LOAD DATA OVERWRITE` は後の実行が前の実行の中身を丸ごと
+> 消すので、**最後の送り元しか残らない。** しかも取り込み側の件数の
+> 突き合わせはその実行の `sources` しか見ないので、そこでは落ちない。
+> 落ちるのは `build_table.sql` の「並べた送り元の行があるか」のほう。
 
 > 揃えるのは **`table_name_prefix`** と `system_name` だけ。`suffix` は
 > `build_table.sql` と `cross_region_import.sql` で意味が違うので、

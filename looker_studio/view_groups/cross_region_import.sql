@@ -49,7 +49,23 @@ BEGIN
 -- 取り込む送り元と、その avro をどこから読むか。
 -- cross_region_export.sql を流したリージョンを 1 行ずつ並べる。
 -- **拠点自身（asia-northeast1）は入れない**（運ぶ必要が無く、入れると
--- 同じ行が 2 回入る）。増やすときはここに 1 行足すだけ。
+-- 同じ行が 2 回入る）。
+--
+-- **増やし方は 2 通りある。**
+--
+--   (1) ここに 1 行足す。**並べた送り元は 1 回の LOAD DATA でまとめて
+--       読む**（下の uris_literal が全部の URI を並べる）ので、上書きし
+--       合わない。テーブルは 1 本のままで、source_region 列で区別する。
+--
+--   (2) 送り元ごとにこのファイルを別のスケジュールドクエリにする。
+--       そのときは **table_name_suffix も送り元ごとに分けること**
+--       （'_sgp' / '_syd' など）。同じテーブルに向けて 2 回流すと、
+--       後の実行が前の実行の中身を丸ごと消して最後の 1 つしか残らない。
+--       分けておけば、片方の送り元が止まってももう片方に波及しない。
+--
+-- build_table.sql の import_sources には、どちらの形かがそのまま出る
+--   (1) → 同じ suffix を複数行に書く
+--   (2) → 送り元ごとに違う suffix を書く
 --
 -- **gcs_prefix は送り元ごとに持たせてある。** 読み方が 2 通りあるため。
 --
@@ -117,9 +133,9 @@ DECLARE source_regions ARRAY<STRING>;
 
 -- 取り込む 5 本 ＋ マニフェスト。名前は build_table.sql と同じ規則で組み立てる
 -- （prefix + system_name + '_' + 区分 + 基本名 + suffix。区分は 't_'）。
--- **送り元の中継テーブルとまったく同じ名前。** 中身もどちらも「収集した
--- メタデータのスナップショット」で、どのリージョンのものかは source_region 列が
--- 持っている。データセットはリージョンごとに別なので衝突しない。
+-- 中身は送り元の中継テーブルと同じ「収集したメタデータのスナップショット」で、
+-- どのリージョンのものかは source_region 列が持っている。送り元と同じ名前に
+-- しても構わない（データセットがリージョンごとに別なので衝突しない）。
 -- 種類の文字列は cross_region_export.sql の parts と 1 対 1。
 DECLARE kinds ARRAY<STRING> DEFAULT
   ['schemata', 'views', 'columns', 'field_paths', 'table_opts', 'manifest'];
@@ -208,6 +224,24 @@ WHILE i < ARRAY_LENGTH(kinds) DO
     FROM UNNEST(sources) AS s
     ORDER BY s.source_region));
 
+  -- **OVERWRITE だが、送り元ごとに上書きしているわけではない。**
+  -- uris に全送り元のパスを並べて 1 文で読むので、sources に 2 つ並べれば
+  -- 2 つとも同じテーブルに入る。上書きされるのは「前回このスクリプトが
+  -- 入れた中身」だけ。
+  --
+  -- **裏を返すと、送り元ごとに実行を分けるなら table_name_suffix も
+  -- 分けること。** 同じテーブルに向けて 2 回流すと、後の実行が前の実行の
+  -- 中身を丸ごと消し、最後の送り元しか残らない。しかも件数の突き合わせは
+  -- その実行の sources しか見ないので、ここでは落ちない
+  -- （build_table.sql 側の「並べた送り元の行があるか」で落ちる）。
+  --
+  --   1 回で全部        sources = [sgp, syd]、suffix = ''
+  --                     → viewlgc_t_meta_views に両方入る
+  --   送り元ごとに実行   sources = [sgp]、suffix = '_sgp'
+  --                     sources = [syd]、suffix = '_syd'
+  --                     → テーブルが分かれるので上書きし合わない
+  --
+  -- 後者のほうが、片方の送り元が止まってももう片方に波及しない。
   EXECUTE IMMEDIATE FORMAT(
     "LOAD DATA OVERWRITE `%s` FROM FILES (format = 'AVRO', uris = %s)",
     table_fqn, uris_literal);
