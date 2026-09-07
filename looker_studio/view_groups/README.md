@@ -991,21 +991,35 @@ prefix + system_name + '_' + 't_' + 'meta_' + 種類 + suffix
 ものかは `source_region` 列が持っている。データセットはリージョンごとに別
 なので衝突しない。
 
-> だからこそ **`cross_region_export.sql` を拠点のリージョンで流さないこと。**
-> 拠点の取り込み先を自分のメタデータで上書きしてしまう。拠点のぶんは
-> `build_table.sql` が `INFORMATION_SCHEMA` から直接読むので、運ぶ必要が無い。
+> 基本名が同じなので、**`table_name_prefix` にリージョンの略称を入れて
+> 分けておくこと**（`sgp_` / `tky_`）。分けないと、万一
+> `cross_region_export.sql` を拠点のリージョンで流したときに、拠点の取り込み先を
+> 自分のメタデータで上書きしてしまう。そもそも拠点のぶんは `build_table.sql` が
+> `INFORMATION_SCHEMA` から直接読むので、運ぶ必要は無い。
 
 `prefix` / `suffix` に書いた `{project_token}` は、自動検出したプロジェクト ID
 から `project_token_pattern` で切り出した値に置き換わる（`build_table.sql` と
 同じ仕組み・同じ順序）。
 
-**`system_name` / `project_token_pattern` / `table_name_prefix` /
-`table_name_suffix` は 3 ファイルで同じ値にすること。** 拠点側は
-`cross_region_import.sql` が作ったテーブルを同じ規則で組み立てて読むので、
-食い違うと見つからない。`project_token_pattern` だけは切り出し方が違っても
-**落ちずに別の名前を見に行く**ので、いちばん質が悪い。
-`node check_cross_region.mjs` が `system_name` と `project_token_pattern` の
-既定値を 3 ファイルで突き合わせ、置換を省いていないかも見る。
+揃える範囲は 2 つに分かれる。
+
+| | 揃える範囲 | 揃えないと |
+|---|---|---|
+| `system_name` / `project_token_pattern` | **3 ファイル全部** | 名前が静かにずれる |
+| `table_name_prefix` / `table_name_suffix` | **`build_table.sql` と `cross_region_import.sql`** | 拠点が取り込み先を見つけられない |
+
+**`cross_region_export.sql` の `prefix` / `suffix` は揃えなくてよい。**
+中継テーブルを名前で引くのは `cross_region_export.sql` 自身だけで、GCS の
+パスは `gcs_export_prefix` とリージョン名から作るため、テーブル名は外に
+出ていかない。**むしろリージョンの略称（`sgp_` / `tky_` など）を入れて
+分けておくほうがよい。** 基本名が送り元と拠点で同じなので、prefix まで同じだと
+万一 `cross_region_export.sql` を拠点で流したときに取り込み先を上書きする。
+
+`node check_cross_region.mjs` が、`system_name` と `project_token_pattern` を
+3 ファイルで、`table_name_prefix` / `table_name_suffix` を
+`build_table.sql` ↔ `cross_region_import.sql` で突き合わせ、`{project_token}` の
+置換を省いていないかも見る。**`export` の `prefix` は比べない**（分けるのが
+正しい設定なので、比べると正しい設定が FAIL になる）。
 
 > 置換を省くと、`build_table.sql` から `table_name_prefix='{project_token}_'` を
 > そのまま持ってきたときに `{project_token}_viewlgc_t_meta_views` という名前の

@@ -85,8 +85,14 @@ DECLARE max_staleness_hours INT64 DEFAULT 36;
 -- 取り込み先のデータセット。build_table.sql の work_dataset と同じでよい。
 DECLARE work_dataset STRING DEFAULT 'ops_meta';
 
--- 命名。**build_table.sql と同じ値にすること。** 拠点側はこのファイルが
--- 作ったテーブルを同じ規則で組み立てて読むので、食い違うと見つからない。
+-- 命名。**4 つとも build_table.sql と同じ値にすること。**
+-- build_table.sql はこのファイルが作ったテーブルを同じ規則で組み立てて読む。
+-- 食い違うと「そんなテーブルは無い」で落ちる。
+--
+-- **送り元（cross_region_export.sql）とは揃えなくてよい。** あちらの
+-- prefix / suffix はあちらのリージョンの中だけで閉じている（中継テーブルを
+-- 名前で引くのはあのファイル自身だけ）。リージョンの略称を入れて
+-- 'sgp_' / 'tky_' のように分けておくほうがむしろ安全。
 --
 -- project_token_pattern は、自動検出したプロジェクト ID からトークンを
 -- 切り出す正規表現（キャプチャがあればグループ 1）。切り出した値が、

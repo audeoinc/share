@@ -23,14 +23,15 @@
 --   INFORMATION_SCHEMA ── CTAS ──→ viewlgc_t_meta_*（このリージョン）
 --                                        └─ EXPORT DATA ──→ GCS
 --
--- **名前は拠点側の取り込み先とまったく同じ。** 中身もどちらも「収集した
--- メタデータのスナップショット」で、どのリージョンのものかは source_region 列が
--- 持っている。データセットはリージョンごとに別なので名前は衝突しない。
+-- 基本名は拠点側の取り込み先と同じ。中身もどちらも「収集したメタデータの
+-- スナップショット」で、どのリージョンのものかは source_region 列が持っている。
 -- 書き出しが失敗したときに、どこまでできていたかを直に見られる。
 --
--- ただし **このファイルを拠点のリージョンで流さないこと。** 同じ名前なので、
--- 拠点の取り込み先を自分のメタデータで上書きしてしまう。拠点のぶんは
--- build_table.sql が INFORMATION_SCHEMA から直接読むので、運ぶ必要が無い。
+-- **table_name_prefix にリージョンの略称（'sgp_' など）を入れておくとよい。**
+-- 基本名が同じなので、prefix が同じだと、万一このファイルを拠点のリージョンで
+-- 流したときに拠点の取り込み先を自分のメタデータで上書きしてしまう。
+-- （そもそも拠点のぶんは build_table.sql が INFORMATION_SCHEMA から直接読むので
+-- 運ぶ必要が無く、このファイルを拠点で流す場面は無い。）
 --
 -- **バケットは 1 つ。書き出したものを拠点から直に読む。**
 -- 書き出す側は同一ロケーションが要る（EXPORT DATA の宛先は、書き出す
@@ -87,15 +88,23 @@ DECLARE analysis_exclude_dataset_patterns ARRAY<STRING> DEFAULT [];
 DECLARE analysis_include_object_patterns ARRAY<STRING> DEFAULT [];
 DECLARE analysis_exclude_object_patterns ARRAY<STRING> DEFAULT [];
 
--- 命名。**build_table.sql / cross_region_import.sql と同じ値にすること。**
--- 食い違うと、拠点側がこのファイルの作ったテーブルを見つけられない。
+-- 命名。
 --
+-- **table_name_prefix / table_name_suffix はこのリージョン固有でよい。**
+-- ここで作る中継テーブルを名前で引くのは、このファイル自身だけ。GCS の
+-- パスは gcs_export_prefix とリージョン名から作るので、テーブル名は関係
+-- しない。リージョンの略称（'sgp_' など）を入れておくと、万一このファイルを
+-- 拠点のリージョンで流しても、拠点の取り込み先を上書きせずに済む。
+--
+-- **system_name と project_token_pattern は 3 ファイルで揃えること。**
+-- system_name はどのシステムのオブジェクトかを名前で見分けるためのもの。
 -- project_token_pattern は、自動検出したプロジェクト ID からトークンを
 -- 切り出す正規表現（キャプチャがあればグループ 1）。切り出した値が、
 -- 下の 3 つに書いた '{project_token}' をすべて置き換える。例えば
 -- プロジェクト 'mycompany-prod-123' に r'-([^-]+)-' なら 'prod' になるので、
 -- table_name_prefix='{project_token}_' が 'prod_' になる。
--- 既定は最初のハイフン区切り。build_table.sql と合わせること。
+-- 既定は最初のハイフン区切り。切り出し方が食い違うと、落ちずに別の名前の
+-- テーブルを作りに行くので質が悪い。
 DECLARE project_token_pattern STRING DEFAULT r'^([^-]+)';
 DECLARE system_name STRING DEFAULT 'viewlgc';
 DECLARE table_name_prefix STRING DEFAULT '';

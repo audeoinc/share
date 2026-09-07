@@ -326,6 +326,24 @@ for (const [name, src] of [['cross_region_export.sql', exp],
   }
 }
 
+// prefix / suffix は **import と build_table.sql だけ**が揃っている必要がある。
+// build_table.sql は取り込み先を同じ規則で組み立てて読むので、ずれれば
+// 「そんなテーブルは無い」で落ちる（落ちるので、まだ気づける）。
+//
+// **export は揃えなくてよい。** 中継テーブルを名前で引くのは export 自身だけで、
+// GCS のパスは gcs_export_prefix とリージョン名から作る。むしろリージョンの
+// 略称を入れて分けておくほうが、拠点で誤って流したときの上書きを防げる。
+// だからここでは export を比べない。比べると、正しい設定が FAIL になる。
+{
+  for (const v of ['table_name_prefix', 'table_name_suffix']) {
+    const re = new RegExp(`^DECLARE ${v} STRING DEFAULT '([^']*)';$`, 'm');
+    const t = table.match(re), i = imp.match(re);
+    add(`${v} の既定値が build_table.sql と import で同じ`,
+      t !== null && i !== null && t[1] === i[1],
+      `build_table='${t ? t[1] : 'なし'}' / import='${i ? i[1] : 'なし'}'`);
+  }
+}
+
 // --- 結果 --------------------------------------------------------------
 let failed = 0;
 for (const [name, ok, detail] of checks) {
