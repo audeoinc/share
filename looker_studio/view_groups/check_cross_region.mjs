@@ -254,7 +254,7 @@ add('cross_region_export.sql: バケットの既定値のままでは流せな�
   /DECLARE gcs_export_prefix STRING DEFAULT 'gs:\/\/CHANGE-ME/.test(exp));
 add('cross_region_import.sql: バケットの既定値のままでは流せない',
   /WHERE STARTS_WITH\(s\.gcs_prefix, 'gs:\/\/CHANGE-ME'\)/.test(imp) &&
-  /'gs:\/\/CHANGE-ME\/viewlgc' AS gcs_prefix/.test(imp));
+  /'gs:\/\/CHANGE-ME[^']*' AS gcs_prefix/.test(imp));
 
 // --- 8. テンプレートにバックスラッシュが無いか --------------------------
 // check_sql.mjs と同じ理由。"""…""" は raw な文字列なので、

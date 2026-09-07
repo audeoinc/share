@@ -15,28 +15,22 @@
 -- 運ぶのはメタデータだけ。データそのものは 1 バイトも動かない。
 -- view_definition は 1 本あたり数 KB なので、View が 1000 本でも数 MB。
 --
--- **バケットは 2 つ要る。**
--- BigQuery は GCS との間で「同じロケーション」を要求する。書き出す側の
--- データセットが asia-southeast1 なら、バケットも asia-southeast1
--- （かそれを含むデュアルリージョン）でなければならない。読み込む側も同じで、
--- asia-northeast1 のデータセットには asia-northeast1 のバケットが要る。
--- そして **asia-northeast1 と asia-southeast1 を組にしたデュアルリージョンは
--- 無い**（ASIA1 は asia-northeast1 ＋ asia-northeast2）。1 つのバケットで
--- 両方を兼ねることはできない。
+-- **バケットは 1 つ。書き出したものを拠点から直に読む。**
+-- 書き出す側は同一ロケーションが要る（EXPORT DATA の宛先は、書き出す
+-- データセットと同じロケーションでなければならない）ので、バケットは
+-- このリージョン（asia-southeast1）に置く。
+-- 読み込む側にその縛りは無く、**拠点（asia-northeast1）の LOAD DATA から
+-- このバケットをそのまま読める**（実環境で確認済み。別リージョンなので
+-- 転送料金はかかるが、運ぶのは数 MB のメタデータだけ）。
+-- GCS → GCS のコピーも、拠点側のバケットも要らない。
 --
---   asia-southeast1                     asia-northeast1
+--   asia-southeast1                     asia-northeast1（拠点）
 --   ┌──────────────────┐               ┌──────────────────┐
---   │ INFORMATION_SCHEMA│               │                  │
---   │        ↓ このファイル│               │                  │
---   │ gs://…-se1/…      │ ── コピー ──→ │ gs://…-ne1/…     │
---   └──────────────────┘  （GCS → GCS）  │        ↓          │
---                                        │ cross_region_    │
---                                        │   import.sql     │
---                                        └──────────────────┘
---
--- 真ん中のコピーは SQL では書けない。Storage Transfer Service に
--- ジョブを 1 本作るのがいちばん手間が少ない（コンソールで設定でき、
--- スケジュールも持てる）。
+--   │ INFORMATION_SCHEMA│               │ cross_region_    │
+--   │        ↓ このファイル│               │   import.sql     │
+--   │ gs://…-se1/…      │ ←─ LOAD DATA ─│        ↓          │
+--   └──────────────────┘               │ build_table.sql  │
+--                                       └──────────────────┘
 --
 -- 形式は AVRO。列名と型がそのまま往復するので、読み込む側でスキーマを
 -- 書かなくてよい。CSV だと view_definition の改行と引用符が地雷になる。
