@@ -373,9 +373,9 @@ for (const t of ['__T_DIFF_SRC__', '__T_DIFF__']) {
 }
 
 // --- 5g. 別リージョンのメタデータの混ぜ方 -------------------------------
-// import_source_regions が空なら**いままでとまったく同じ SQL** になり、
-// 並べたときだけ UNION ALL になる。ここを壊すと、混ぜていないつもりで
-// 混ざる／混ぜたつもりで混ざらない、のどちらかが静かに起きる。
+// import_sources が空なら**いままでとまったく同じ SQL** になり、並べたときだけ
+// UNION ALL になる。ここを壊すと、混ぜていないつもりで混ざる／混ぜたつもりで
+// 混ざらない、のどちらかが静かに起きる。
 {
   const srcs = ['schemata', 'views', 'columns', 'field_paths', 'table_opts'];
 
@@ -396,54 +396,59 @@ for (const t of ['__T_DIFF_SRC__', '__T_DIFF__']) {
     unused.length === 0, unused.join(','));
 
   // (3) 空なら従来どおり、並べたら UNION ALL。両方の枝があるか。
-  const bad = srcs.filter((k) => !new RegExp(
-    `SET src_${k} = IF\\(ARRAY_LENGTH\\(import_source_regions\\) = 0,`).test(table) ||
-    !new RegExp(`SET src_${k} = IF[\\s\\S]*?UNION ALL[\\s\\S]*?source_region IN UNNEST`)
-      .test(table.slice(table.indexOf(`SET src_${k} =`))));
+  const bad = srcs.filter((k) => {
+    const at = table.indexOf(`SET src_${k} =`);
+    if (at < 0) return true;
+    const body = table.slice(at, table.indexOf('AS g));', at));
+    return !body.includes('IF(ARRAY_LENGTH(import_sources) = 0,') ||
+      !body.includes('UNION ALL');
+  });
   add('読み元は「空なら従来どおり・並べたら UNION ALL」の 2 枝',
     bad.length === 0, bad.join(','));
 
-  // (4) 運んできた側を source_region で絞っているか。
-  //     絞らないと、import_source_regions から外したリージョンや、誤って
-  //     拠点で書き出した自分のぶんまで解析に入る（＝二重計上）。
+  // (4) 運んできたテーブルは**送り元ごとに分かれうる**。
+  //     cross_region_import.sql の table_name_suffix に送り元を表す値
+  //     （'_sgp' など）を付ける運用ができるので、import_sources の suffix
+  //     ごとに枝を出す。1 本決め打ちにすると、2 つ目の送り元が黙って
+  //     解析から落ちる（辻褄は合うので画面から気づけない）。
+  const fan = srcs.filter((k) => {
+    const at = table.indexOf(`SET src_${k} =`);
+    const body = at < 0 ? '' : table.slice(at, table.indexOf('AS g));', at));
+    return !body.includes('STRING_AGG(') ||
+      !body.includes('GROUP BY table_name_suffix') ||
+      !body.includes("|| g.sfx");
+  });
+  add('読み元が送り元ごとのテーブルに枝分かれする', fan.length === 0,
+    fan.join(','));
+
+  // (5) 運んできた側を source_region で絞っているか。
+  //     絞らないと、import_sources から外したリージョンや、誤って拠点で
+  //     書き出した自分のぶんまで解析に入る（＝二重計上）。
   const n = (table.match(/WHERE source_region IN UNNEST\(%T\)/g) || []).length;
   add('運んできた側を source_region で絞っている（5 か所）', n === srcs.length,
     `${n} か所`);
 
-  // (4b) 読み元がテーブル名を**変数経由**で組み立てているか。
-  //      リテラルで 'viewlgc_t_meta_views' と書くと prefix / suffix が
-  //      効かない。prefix が空の環境では動いてしまい、リージョンの略称を
-  //      入れた環境でだけ「そんなテーブルは無い」になる。
-  {
-    const lit = srcs.filter((k) => {
-      const at = table.indexOf(`SET src_${k} =`);
-      const body = table.slice(at, table.indexOf(';', at));
-      return !body.includes(`table_meta_${k}`) ||
-        /'[a-z_]*viewlgc_t_meta_/.test(body);
-    });
-    add('読み元のテーブル名を変数で組み立てている（prefix / suffix が効く）',
-      lit.length === 0, lit.join(','));
-  }
+  // (6) テーブル名を変数と規則で組み立てているか。
+  //     リテラルで書くと prefix / suffix が効かない。prefix が空の環境では
+  //     動いてしまい、リージョンの略称を入れた環境でだけ落ちる。
+  const lit = srcs.filter((k) => !new RegExp(
+    `table_name_prefix \\|\\| system_name \\|\\| '_' \\|\\| 't_' \\|\\| 'meta_${k}' \\|\\| g\\.sfx`
+  ).test(table));
+  add('読み元の名前が命名規則どおり組み立てられている（prefix が効く）',
+    lit.length === 0, lit.join(','));
 
-  // (4c) その変数が build_table.sql の命名規則で組み立てられているか。
-  //      cross_region_import.sql と同じ形（区分は 't_'）でなければ、
-  //      あちらが作ったテーブルと名前がずれる。
-  {
-    const bad = srcs.filter((k) => !new RegExp(
-      `SET table_meta_${k} =\\s*\\n?\\s*table_name_prefix \\|\\| system_name \\|\\| '_' \\|\\| 't_' \\|\\| 'meta_${k}' \\|\\| table_name_suffix;`
-    ).test(table));
-    add('読み元の名前が build_table.sql の命名規則どおり', bad.length === 0,
-      bad.join(','));
-  }
+  // (7) 拠点自身を並べていないか／同じ送り元を 2 回並べていないか。
+  add('拠点自身を import_sources に入れられない',
+    /ASSERT job_region NOT IN \(SELECT source_region FROM UNNEST\(import_sources\)\)/
+      .test(table));
+  add('同じ送り元を 2 回並べられない',
+    /ASSERT ARRAY_LENGTH\(import_sources\) = ARRAY_LENGTH\(\s*\n?\s*ARRAY\(SELECT DISTINCT source_region FROM UNNEST\(import_sources\)\)\)/
+      .test(table));
 
-  // (5) 拠点自身を並べていないか（同じ View が 2 回入る）。
-  add('拠点自身を import_source_regions に入れられない',
-    /ASSERT job_region NOT IN UNNEST\(import_source_regions\)/.test(table));
-
-  // (6) 並べたリージョンの行が無いまま通さないか。
+  // (8) 並べた送り元の行が無いまま通さないか。
   //     取り込みが落ちても build_table は動くので、ここが最後の砦になる。
-  add('並べたリージョンの行が無ければ止まる',
-    /ASSERT imported_region_count = ARRAY_LENGTH\(import_source_regions\)/.test(table));
+  add('並べた送り元の行が無ければ止まる',
+    /ASSERT imported_region_count = ARRAY_LENGTH\(import_sources\)/.test(table));
 }
 
 // --- 6. 両ファイルで一致させる必要がある値 -----------------------------

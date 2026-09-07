@@ -326,22 +326,35 @@ for (const [name, src] of [['cross_region_export.sql', exp],
   }
 }
 
-// prefix / suffix は **import と build_table.sql だけ**が揃っている必要がある。
-// build_table.sql は取り込み先を同じ規則で組み立てて読むので、ずれれば
-// 「そんなテーブルは無い」で落ちる（落ちるので、まだ気づける）。
+// **prefix だけ**が import と build_table.sql で揃っている必要がある。
+// 取り込み先の名前は
+//   table_name_prefix + system_name + '_' + 't_' + 'meta_' + 種類 + suffix
+// で、build_table.sql はこれを同じ規則で組み立てて読む。prefix がずれれば
+// 「そんなテーブルは無い」で落ちる。
 //
-// **export は揃えなくてよい。** 中継テーブルを名前で引くのは export 自身だけで、
+// **suffix は比べない。** import の suffix は「どの送り元のメタデータか」を
+// 表す値（'_sgp' など）で、送り元ごとにテーブルを分けるために使う。
+// build_table.sql 自身の table_name_suffix は t_diff などに付く環境 suffix で、
+// 別物。build_table.sql は送り元ごとの suffix を import_sources に持つ。
+//
+// **export も比べない。** 中継テーブルを名前で引くのは export 自身だけで、
 // GCS のパスは gcs_export_prefix とリージョン名から作る。むしろリージョンの
 // 略称を入れて分けておくほうが、拠点で誤って流したときの上書きを防げる。
-// だからここでは export を比べない。比べると、正しい設定が FAIL になる。
+// どちらも、比べると正しい設定が FAIL になる。
 {
-  for (const v of ['table_name_prefix', 'table_name_suffix']) {
-    const re = new RegExp(`^DECLARE ${v} STRING DEFAULT '([^']*)';$`, 'm');
-    const t = table.match(re), i = imp.match(re);
-    add(`${v} の既定値が build_table.sql と import で同じ`,
-      t !== null && i !== null && t[1] === i[1],
-      `build_table='${t ? t[1] : 'なし'}' / import='${i ? i[1] : 'なし'}'`);
-  }
+  const v = 'table_name_prefix';
+  const re = new RegExp(`^DECLARE ${v} STRING DEFAULT '([^']*)';$`, 'm');
+  const t = table.match(re), i = imp.match(re);
+  add(`${v} の既定値が build_table.sql と import で同じ`,
+    t !== null && i !== null && t[1] === i[1],
+    `build_table='${t ? t[1] : 'なし'}' / import='${i ? i[1] : 'なし'}'`);
+
+  // 送り元ごとの suffix は build_table.sql 側では import_sources が持つ。
+  // 環境 suffix（table_name_suffix）で代用すると、送り元が 2 つになった
+  // ときに片方しか読めない。
+  add('build_table.sql が送り元ごとの suffix を import_sources で持つ',
+    /DECLARE import_sources ARRAY<STRUCT<source_region STRING, table_name_suffix STRING>>/
+      .test(table));
 }
 
 // --- 結果 --------------------------------------------------------------

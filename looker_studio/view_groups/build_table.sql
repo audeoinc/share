@@ -54,7 +54,7 @@
 --   __SRC_FIELD_PATHS__    COLUMN_FIELD_PATHS の読み元（同上）
 --   __SRC_TABLE_OPTS__     TABLE_OPTIONS の読み元（同上）
 --
--- __SRC_*__ は読み元をまるごと差し替える目印。import_source_regions が空なら
+-- __SRC_*__ は読み元をまるごと差し替える目印。import_sources が空なら
 -- リージョン修飾の INFORMATION_SCHEMA がそのまま入り、並べると
 -- 「このリージョンの INFORMATION_SCHEMA UNION ALL 運んできたテーブル」になる。
 -- **テンプレートは読み元の形を知らない**ので、混ぜる／混ぜないでテンプレートは
@@ -119,21 +119,35 @@ DECLARE analysis_exclude_object_patterns ARRAY<STRING> DEFAULT [];
 -- 自動抽出した suffix 一覧に**足す**値。データセット名にも、その末尾にも
 -- 現れない suffix を混ぜたいとき（詳しくは下の説明）
 DECLARE suffix_extra_list ARRAY<STRING> DEFAULT [];
--- 別リージョンから運んできたメタデータを混ぜるリージョンの一覧。
+-- 別リージョンから運んできたメタデータを混ぜる送り元の一覧。
 --
 -- **空なら混ぜない**（このリージョンの INFORMATION_SCHEMA だけを見る。
--- 従来どおりの動き）。並べると、cross_region_import.sql が作った
--- viewlgc_t_meta_* の中から**そのリージョンの行だけ**を足して解析する。
+-- 従来どおりの動き）。並べると、cross_region_import.sql が作ったテーブルの
+-- 中から**そのリージョンの行だけ**を足して解析する。
 --
 -- 同じ base の View がリージョンをまたいでいるとき、ここに並べて初めて
 -- 「両方を並べた 1 枚のカード」になる。並べないと、リージョンごとに
 -- 別々のカードができてリージョン間の差が見えない。
 --
+-- **table_name_suffix は送り元ごとに持つ。**
+-- 取り込んだテーブルの名前は cross_region_import.sql の設定で決まり、
+-- 送り元を表す suffix（'_sgp' など）を付けて送り元ごとに分ける運用ができる。
+-- そのときテーブルは送り元の数だけあるので、下の table_name_suffix
+-- （このシステム自身の環境 suffix。t_diff などに付く）とは別に持つ必要がある。
+--
+--   STRUCT('asia-southeast1', '_sgp')  → viewlgc_t_meta_views_sgp を読む
+--
+-- **cross_region_import.sql の table_name_suffix と同じ値を書くこと。**
+-- 1 つのテーブルに複数の送り元を入れている（あちらの sources に 2 つ以上
+-- 並べた）なら、同じ suffix を複数行に書けばよい。まとめて 1 回だけ読み、
+-- source_region で絞る。
+--
 -- **このリージョン自身は入れない。** 拠点のぶんは INFORMATION_SCHEMA から
 -- 直接読んでいるので、入れると同じ View が 2 回入る（下の ASSERT で止める）。
 -- 取り込みの鮮度は cross_region_import.sql が見る。ここでは「行があるか」
 -- だけを確かめる。
-DECLARE import_source_regions ARRAY<STRING> DEFAULT [];
+DECLARE import_sources ARRAY<STRUCT<source_region STRING, table_name_suffix STRING>>
+  DEFAULT [];
 -- snapshot_date の基準タイムゾーン
 DECLARE snapshot_time_zone STRING DEFAULT 'Asia/Tokyo';
 -- base ごとのメモ（Markdown）を置くスプレッドシート。空ならメモ機能を使わない
@@ -334,15 +348,6 @@ DECLARE table_diff_src  STRING;  -- 生成した素のカード（メモを差�
 DECLARE table_diff      STRING;  -- レポートが読むテーブル（メモ差し込み済み）
 DECLARE table_base_note STRING;  -- base ごとのメモ（スプレッドシートの外部テーブル）
 DECLARE view_diff       STRING;  -- レポートが読むビュー。メモを差し込む
--- 別リージョンから運んできたメタデータ（cross_region_import.sql の作った先）。
--- **あちらと同じ規則で組み立てる。** 食い違うと「そんなテーブルは無い」で
--- 落ちる。import_source_regions が空なら参照しない。
-DECLARE table_meta_schemata    STRING;
-DECLARE table_meta_views       STRING;
-DECLARE table_meta_columns     STRING;
-DECLARE table_meta_field_paths STRING;
-DECLARE table_meta_table_opts  STRING;
-
 -- 5 つの読み元（SQL 片）。拠点だけなら INFORMATION_SCHEMA がそのまま入り、
 -- 混ぜるなら UNION ALL になる。テンプレートは形を知らない。
 DECLARE src_schemata    STRING;
@@ -431,24 +436,19 @@ ASSERT REGEXP_CONTAINS(table_base_note, r'^[A-Za-z0-9_-]+$') AS
 ASSERT REGEXP_CONTAINS(view_diff, r'^[A-Za-z0-9_-]+$') AS
   'view_diff の名前が不正です。';
 
--- 運んできたメタデータのテーブル。**cross_region_import.sql と同じ規則。**
--- 区分は 't_'（日次で作り直すため）。基本名は 'meta_' ＋ 種類。
--- あちらの table_name_prefix / table_name_suffix / system_name と
--- 同じ値でなければ見つからない（node check_cross_region.mjs が既定値を
--- 突き合わせる）。
-SET table_meta_schemata =
-  table_name_prefix || system_name || '_' || 't_' || 'meta_schemata' || table_name_suffix;
-SET table_meta_views =
-  table_name_prefix || system_name || '_' || 't_' || 'meta_views' || table_name_suffix;
-SET table_meta_columns =
-  table_name_prefix || system_name || '_' || 't_' || 'meta_columns' || table_name_suffix;
-SET table_meta_field_paths =
-  table_name_prefix || system_name || '_' || 't_' || 'meta_field_paths' || table_name_suffix;
-SET table_meta_table_opts =
-  table_name_prefix || system_name || '_' || 't_' || 'meta_table_opts' || table_name_suffix;
+-- 運んできたメタデータのテーブルは、送り元ごとに名前が違いうるので
+-- ここでは組み立てない（下の SET src_* が import_sources から作る）。
+-- 名前の規則は cross_region_import.sql と同じ:
+--   table_name_prefix + system_name + '_' + 't_' + 'meta_' + 種類
+--     + その送り元の table_name_suffix
+-- prefix と system_name はあちらと同じ値でなければ見つからない
+-- （node check_cross_region.mjs が既定値を突き合わせる）。
 
-ASSERT job_region NOT IN UNNEST(import_source_regions) AS
-  'import_source_regions にこのリージョン自身が入っています。拠点のぶんは INFORMATION_SCHEMA から直接読むので、入れると同じ View が 2 回入ります。';
+ASSERT job_region NOT IN (SELECT source_region FROM UNNEST(import_sources)) AS
+  'import_sources にこのリージョン自身が入っています。拠点のぶんは INFORMATION_SCHEMA から直接読むので、入れると同じ View が 2 回入ります。';
+ASSERT ARRAY_LENGTH(import_sources) = ARRAY_LENGTH(
+    ARRAY(SELECT DISTINCT source_region FROM UNNEST(import_sources))) AS
+  'import_sources に同じ source_region が 2 回出てきます。同じ View が 2 回入ります。';
 
 -- UDF: udf_prefix + system_name + '_' + 基本名 + udf_suffix
 --      （view_group_html.sql と同じ。system_name も同じ値でなければ見つからない）
@@ -525,52 +525,103 @@ SET view_name_condition = CONCAT(
 -- ---------------------------------------------------------------------
 -- 5 つの読み元を組み立てる
 --
--- **import_source_regions が空なら、いままでとまったく同じ SQL になる。**
+-- **import_sources が空なら、いままでとまったく同じ SQL になる。**
 -- リージョン修飾の INFORMATION_SCHEMA がそのまま入るだけ。
 --
 -- 並べたときは「このリージョンの INFORMATION_SCHEMA UNION ALL 運んできた
--- テーブル」にする。UNION ALL は列の並びと数がそろっている必要があるので、
--- **両側とも列を明示する。** 運んできた側には source_region 列が余分に
+-- テーブル…」にする。UNION ALL は列の並びと数がそろっている必要があるので、
+-- **どの枝でも列を明示する。** 運んできた側には source_region 列が余分に
 -- あり、拠点側には無いので、SELECT * では合わない。
 --
--- 運んできた側は source_region で絞る。テーブルには過去に運んだ他の
--- リージョンの行が残っていることがあり、そのまま混ぜると
--- import_source_regions から外したはずのリージョンが解析に入ってしまう。
--- **万一 cross_region_export.sql を拠点で流して自分のメタデータを
--- 書き込んでしまっても、この絞り込みがあれば二重計上にはならない。**
+-- **運んできたテーブルは 1 つとは限らない。** cross_region_import.sql の
+-- table_name_suffix に送り元を表す値（'_sgp' など）を付けて送り元ごとに
+-- テーブルを分ける運用ができるので、import_sources の suffix ごとに枝を
+-- 足す。同じ suffix に複数の送り元が入っている（1 つのテーブルにまとめて
+-- 取り込んでいる）なら、その枝は 1 回だけ出て source_region で複数を拾う。
+--
+-- 運んできた側は必ず source_region で絞る。テーブルには過去に運んだ他の
+-- リージョンの行が残っていることがあり、そのまま混ぜると import_sources から
+-- 外したはずのリージョンが解析に入ってしまう。**万一 cross_region_export.sql を
+-- 拠点で流して自分のメタデータを書き込んでしまっても、この絞り込みがあれば
+-- 二重計上にはならない。**
 --
 -- 条件（__*_COND__）はテンプレート側の WHERE が当てる。ここでは読み元の
 -- 形だけを作るので、混ぜる／混ぜないでテンプレートは変わらない。
 -- ---------------------------------------------------------------------
-SET src_schemata = IF(ARRAY_LENGTH(import_source_regions) = 0,
+SET src_schemata = IF(ARRAY_LENGTH(import_sources) = 0,
   FORMAT('`%s.region-%s.INFORMATION_SCHEMA.SCHEMATA`', target_project_id, job_region),
-  FORMAT('(SELECT catalog_name, schema_name FROM `%s.region-%s.INFORMATION_SCHEMA.SCHEMATA` UNION ALL SELECT catalog_name, schema_name FROM `%s.%s.%s` WHERE source_region IN UNNEST(%T))',
-    target_project_id, job_region,
-    work_project_id, work_dataset, table_meta_schemata, import_source_regions));
+  (SELECT FORMAT('(SELECT %s FROM `%s.region-%s.INFORMATION_SCHEMA.SCHEMATA`%s)',
+     'catalog_name, schema_name', target_project_id, job_region,
+     STRING_AGG(
+       FORMAT(' UNION ALL SELECT %s FROM `%s.%s.%s` WHERE source_region IN UNNEST(%T)',
+         'catalog_name, schema_name', work_project_id, work_dataset,
+         table_name_prefix || system_name || '_' || 't_' || 'meta_schemata' || g.sfx,
+         g.regions),
+       '' ORDER BY g.sfx))
+   FROM (
+     SELECT table_name_suffix AS sfx, ARRAY_AGG(source_region ORDER BY source_region) AS regions
+     FROM UNNEST(import_sources) GROUP BY table_name_suffix
+   ) AS g));
 
-SET src_views = IF(ARRAY_LENGTH(import_source_regions) = 0,
+SET src_views = IF(ARRAY_LENGTH(import_sources) = 0,
   FORMAT('`%s.region-%s.INFORMATION_SCHEMA.VIEWS`', target_project_id, job_region),
-  FORMAT('(SELECT table_schema, table_name, view_definition FROM `%s.region-%s.INFORMATION_SCHEMA.VIEWS` UNION ALL SELECT table_schema, table_name, view_definition FROM `%s.%s.%s` WHERE source_region IN UNNEST(%T))',
-    target_project_id, job_region,
-    work_project_id, work_dataset, table_meta_views, import_source_regions));
+  (SELECT FORMAT('(SELECT %s FROM `%s.region-%s.INFORMATION_SCHEMA.VIEWS`%s)',
+     'table_schema, table_name, view_definition', target_project_id, job_region,
+     STRING_AGG(
+       FORMAT(' UNION ALL SELECT %s FROM `%s.%s.%s` WHERE source_region IN UNNEST(%T)',
+         'table_schema, table_name, view_definition', work_project_id, work_dataset,
+         table_name_prefix || system_name || '_' || 't_' || 'meta_views' || g.sfx,
+         g.regions),
+       '' ORDER BY g.sfx))
+   FROM (
+     SELECT table_name_suffix AS sfx, ARRAY_AGG(source_region ORDER BY source_region) AS regions
+     FROM UNNEST(import_sources) GROUP BY table_name_suffix
+   ) AS g));
 
-SET src_columns = IF(ARRAY_LENGTH(import_source_regions) = 0,
+SET src_columns = IF(ARRAY_LENGTH(import_sources) = 0,
   FORMAT('`%s.region-%s.INFORMATION_SCHEMA.COLUMNS`', target_project_id, job_region),
-  FORMAT('(SELECT table_schema, table_name, column_name, ordinal_position, data_type, is_nullable FROM `%s.region-%s.INFORMATION_SCHEMA.COLUMNS` UNION ALL SELECT table_schema, table_name, column_name, ordinal_position, data_type, is_nullable FROM `%s.%s.%s` WHERE source_region IN UNNEST(%T))',
-    target_project_id, job_region,
-    work_project_id, work_dataset, table_meta_columns, import_source_regions));
+  (SELECT FORMAT('(SELECT %s FROM `%s.region-%s.INFORMATION_SCHEMA.COLUMNS`%s)',
+     'table_schema, table_name, column_name, ordinal_position, data_type, is_nullable', target_project_id, job_region,
+     STRING_AGG(
+       FORMAT(' UNION ALL SELECT %s FROM `%s.%s.%s` WHERE source_region IN UNNEST(%T)',
+         'table_schema, table_name, column_name, ordinal_position, data_type, is_nullable', work_project_id, work_dataset,
+         table_name_prefix || system_name || '_' || 't_' || 'meta_columns' || g.sfx,
+         g.regions),
+       '' ORDER BY g.sfx))
+   FROM (
+     SELECT table_name_suffix AS sfx, ARRAY_AGG(source_region ORDER BY source_region) AS regions
+     FROM UNNEST(import_sources) GROUP BY table_name_suffix
+   ) AS g));
 
-SET src_field_paths = IF(ARRAY_LENGTH(import_source_regions) = 0,
+SET src_field_paths = IF(ARRAY_LENGTH(import_sources) = 0,
   FORMAT('`%s.region-%s.INFORMATION_SCHEMA.COLUMN_FIELD_PATHS`', target_project_id, job_region),
-  FORMAT('(SELECT table_schema, table_name, column_name, field_path, data_type, description FROM `%s.region-%s.INFORMATION_SCHEMA.COLUMN_FIELD_PATHS` UNION ALL SELECT table_schema, table_name, column_name, field_path, data_type, description FROM `%s.%s.%s` WHERE source_region IN UNNEST(%T))',
-    target_project_id, job_region,
-    work_project_id, work_dataset, table_meta_field_paths, import_source_regions));
+  (SELECT FORMAT('(SELECT %s FROM `%s.region-%s.INFORMATION_SCHEMA.COLUMN_FIELD_PATHS`%s)',
+     'table_schema, table_name, column_name, field_path, data_type, description', target_project_id, job_region,
+     STRING_AGG(
+       FORMAT(' UNION ALL SELECT %s FROM `%s.%s.%s` WHERE source_region IN UNNEST(%T)',
+         'table_schema, table_name, column_name, field_path, data_type, description', work_project_id, work_dataset,
+         table_name_prefix || system_name || '_' || 't_' || 'meta_field_paths' || g.sfx,
+         g.regions),
+       '' ORDER BY g.sfx))
+   FROM (
+     SELECT table_name_suffix AS sfx, ARRAY_AGG(source_region ORDER BY source_region) AS regions
+     FROM UNNEST(import_sources) GROUP BY table_name_suffix
+   ) AS g));
 
-SET src_table_opts = IF(ARRAY_LENGTH(import_source_regions) = 0,
+SET src_table_opts = IF(ARRAY_LENGTH(import_sources) = 0,
   FORMAT('`%s.region-%s.INFORMATION_SCHEMA.TABLE_OPTIONS`', target_project_id, job_region),
-  FORMAT('(SELECT table_schema, table_name, option_name, option_value FROM `%s.region-%s.INFORMATION_SCHEMA.TABLE_OPTIONS` UNION ALL SELECT table_schema, table_name, option_name, option_value FROM `%s.%s.%s` WHERE source_region IN UNNEST(%T))',
-    target_project_id, job_region,
-    work_project_id, work_dataset, table_meta_table_opts, import_source_regions));
+  (SELECT FORMAT('(SELECT %s FROM `%s.region-%s.INFORMATION_SCHEMA.TABLE_OPTIONS`%s)',
+     'table_schema, table_name, option_name, option_value', target_project_id, job_region,
+     STRING_AGG(
+       FORMAT(' UNION ALL SELECT %s FROM `%s.%s.%s` WHERE source_region IN UNNEST(%T)',
+         'table_schema, table_name, option_name, option_value', work_project_id, work_dataset,
+         table_name_prefix || system_name || '_' || 't_' || 'meta_table_opts' || g.sfx,
+         g.regions),
+       '' ORDER BY g.sfx))
+   FROM (
+     SELECT table_name_suffix AS sfx, ARRAY_AGG(source_region ORDER BY source_region) AS regions
+     FROM UNNEST(import_sources) GROUP BY table_name_suffix
+   ) AS g));
 
 
 -- 永続関数への呼び出しを 1 度だけ組み立てて使い回す。関数の場所は
@@ -644,14 +695,18 @@ ASSERT target_dataset_count > 0
 -- ここは render_call_sql（テンプレートの仕組み）を通さない。読むテーブルの
 -- 名前はもう組み立て済みで、目印に置き換えるものが無いため。プロジェクトの
 -- 自動検出や UDF の数え上げと同じ書き方にそろえてある。
-IF ARRAY_LENGTH(import_source_regions) > 0 THEN
-  EXECUTE IMMEDIATE FORMAT(
-    "SELECT COUNT(DISTINCT source_region) FROM `%s.%s.%s` WHERE source_region IN UNNEST(@regions)",
-    work_project_id, work_dataset, table_meta_views)
-  INTO imported_region_count
-  USING import_source_regions AS regions;
-  ASSERT imported_region_count = ARRAY_LENGTH(import_source_regions) AS
-    '運んできたメタデータに、import_source_regions のリージョンの行が足りません。cross_region_import.sql が流れているか確認してください（そのリージョンの View だけが消えたカードができるのを防いでいます）。';
+IF ARRAY_LENGTH(import_sources) > 0 THEN
+  EXECUTE IMMEDIATE FORMAT("SELECT COUNTIF(n > 0) FROM (%s)", (
+    SELECT STRING_AGG(
+      FORMAT("SELECT (SELECT COUNT(*) FROM `%s.%s.%s` WHERE source_region = %T) AS n",
+        work_project_id, work_dataset,
+        table_name_prefix || system_name || '_' || 't_' || 'meta_views' || s.table_name_suffix,
+        s.source_region),
+      ' UNION ALL ' ORDER BY s.source_region)
+    FROM UNNEST(import_sources) AS s))
+  INTO imported_region_count;
+  ASSERT imported_region_count = ARRAY_LENGTH(import_sources) AS
+    '運んできたメタデータに、import_sources の送り元の行が足りません。cross_region_import.sql が流れているか、table_name_suffix が合っているか確認してください（そのリージョンの View だけが消えたカードができるのを防いでいます）。';
 END IF;
 
 

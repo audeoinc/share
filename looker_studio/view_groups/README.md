@@ -1093,12 +1093,12 @@ prefix + system_name + '_' + 't_' + 'meta_' + 種類 + suffix
 
 ### 拠点側の配線
 
-`build_table.sql` の `[A]` に 1 つ足す。
+`build_table.sql` の `[A]` に 1 つ足す。**送り元のリージョンと、その
+メタデータが入っているテーブルの suffix の組**を並べる。
 
 ```sql
--- 別リージョンから運んできたメタデータを混ぜるリージョンの一覧。
--- 空なら混ぜない（このリージョンの INFORMATION_SCHEMA だけ。従来どおり）。
-DECLARE import_source_regions ARRAY<STRING> DEFAULT ['asia-southeast1'];
+DECLARE import_sources ARRAY<STRUCT<source_region STRING, table_name_suffix STRING>>
+  DEFAULT [STRUCT('asia-southeast1' AS source_region, '_sgp' AS table_name_suffix)];
 ```
 
 **空なら、いままでとまったく同じ SQL になる。** 並べたときだけ、5 つの読み元が
@@ -1113,26 +1113,45 @@ FROM (SELECT table_schema, table_name, view_definition
       FROM `<project>.region-asia-northeast1.INFORMATION_SCHEMA.VIEWS`
       UNION ALL
       SELECT table_schema, table_name, view_definition
-      FROM `<project>.<work_dataset>.<prefix>viewlgc_t_meta_views<suffix>`
+      FROM `<project>.<work_dataset>.<prefix>viewlgc_t_meta_views_sgp`
       WHERE source_region IN UNNEST(['asia-southeast1']))
 ```
 
-読み元のテーブル名は `table_name_prefix` / `table_name_suffix` を効かせて
-組み立てる（`cross_region_import.sql` とまったく同じ規則）。リテラルで書くと
-prefix が空の環境では動いてしまい、リージョンの略称を入れた環境でだけ
-「そんなテーブルは無い」になるので、`node check_sql.mjs` が変数経由で
-組み立てているかと、命名規則どおりかを見る。
+#### なぜ suffix を送り元ごとに持つのか
+
+取り込んだテーブルの名前は `cross_region_import.sql` の `table_name_suffix` で
+決まる。ここに**送り元を表す値**（`_sgp` など）を付けて、送り元ごとに
+テーブルを分ける運用ができる。
+
+```
+asia-southeast1   viewlgc_t_meta_views_sgp   （送り元にも同名で置く）
+asia-northeast1   viewlgc_t_meta_views_sgp   （運んできたもの）
+                  viewlgc_t_meta_views_syd   （送り元を増やせば増える）
+```
+
+**そのときテーブルは送り元の数だけある。** 一方 `build_table.sql` 自身の
+`table_name_suffix` は `t_diff` などに付く環境 suffix で、別物。だから
+`import_sources` が送り元ごとの suffix を持ち、`SET src_*` は suffix ごとに
+`UNION ALL` の枝を足す。
+
+1 つのテーブルに複数の送り元をまとめている（`cross_region_import.sql` の
+`sources` に 2 つ以上並べた）なら、`import_sources` の複数行に**同じ suffix**を
+書けばよい。枝は 1 本だけ出て、`source_region` で両方を拾う。
+
+> 揃えるのは **`table_name_prefix`** と `system_name` だけ。`suffix` は
+> `build_table.sql` と `cross_region_import.sql` で意味が違うので、
+> `node check_cross_region.mjs` も **prefix しか突き合わせない**。
 
 読み元は `__SRC_SCHEMATA__` / `__SRC_VIEWS__` / `__SRC_COLUMNS__` /
 `__SRC_FIELD_PATHS__` / `__SRC_TABLE_OPTS__` の 5 つの目印で差し替える。
 **テンプレートは読み元の形を知らない**ので、混ぜる／混ぜないでテンプレートは
 変わらない。組み立ては `SET src_*` にある。
 
-`UNION ALL` の両側で**列を明示している**のは、運んできた側に `source_region`
+`UNION ALL` の枝で**列を明示している**のは、運んできた側に `source_region`
 列が余分にあるため（`SELECT *` では列数が合わない）。
 
 運んできた側は必ず `source_region` で絞る。テーブルには過去に運んだ別の
-リージョンの行が残っていることがあり、絞らないと `import_source_regions` から
+リージョンの行が残っていることがあり、絞らないと `import_sources` から
 外したはずのリージョンが解析に入る。**万一 `cross_region_export.sql` を拠点で
 流して自分のメタデータを書き込んでしまっても、この絞り込みがあれば二重計上に
 ならない。**
@@ -1142,19 +1161,22 @@ prefix が空の環境では動いてしまい、リージョンの略称を入�
 
 #### 静かに欠けるのを止める（拠点側）
 
-| | 見るもの | 拾える壊れ方 |
-|---|---|---|
-| `job_region NOT IN import_source_regions` | 拠点自身を並べていないか | 同じ View が 2 回入る |
-| `imported_region_count` | 並べたリージョンの行が実際にあるか | 取り込みが落ちたまま解析が走る |
+| 見るもの | 拾える壊れ方 |
+|---|---|
+| 拠点自身を `import_sources` に入れていないか | 同じ View が 2 回入る |
+| 同じ送り元を 2 回並べていないか | 同じ View が 2 回入る |
+| 並べた送り元の行が実際にあるか | 取り込みが落ちたまま解析が走る／suffix が違う |
 
 2 つ目が要るのは、**`cross_region_import.sql` が落ちても `build_table.sql` は
 動いてしまう**から（別のスケジュールなので）。そのまま通すと、そのリージョンの
 View だけが消えたカードができる。グループ数も差分も辻褄が合ったまま出るので、
 画面から間違いに気づけない。落ちれば前の日のカードが残る。
 
+3 つ目は **suffix の書き間違いも拾う**（そのテーブルには行が無いので）。
+
 `node check_sql.mjs` が、直読みが残っていないか・5 つの読み元が全部使われて
-いるか・2 枝になっているか・`source_region` で絞っているか・上の 2 つの
-`ASSERT` があるか、を静的に見る。
+いるか・2 枝になっているか・**送り元ごとに枝分かれするか**・`source_region` で
+絞っているか・上の `ASSERT` があるか、を静的に見る。
 
 ## 事前生成テーブル（build_table.sql）
 
