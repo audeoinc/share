@@ -209,14 +209,21 @@ for (const [name, src] of [['cross_region_export.sql', exp],
 // 既定値の時点で間違えていないかだけ見る。実行時は ASSERT が見る。
 {
   const hub = imp.match(/^SET @@location = '([^']+)';$/m);
-  const srcs = imp.match(/DECLARE source_regions ARRAY<STRING> DEFAULT \[([^\]]*)\]/);
-  const list = srcs ? [...srcs[1].matchAll(/'([^']+)'/g)].map((m) => m[1]) : [];
-  add('既定の source_regions に拠点自身が入っていない',
+  const srcs = imp.match(/DECLARE sources ARRAY<STRUCT<source_region STRING, gcs_prefix STRING>> DEFAULT \[([\s\S]*?)\n\];/);
+  const list = srcs
+    ? [...srcs[1].matchAll(/STRUCT\('([^']+)' AS source_region/g)].map((m) => m[1])
+    : [];
+  add('既定の sources に拠点自身が入っていない',
     hub !== null && list.length > 0 && !list.includes(hub[1]),
-    `拠点=${hub ? hub[1] : 'なし'} / source_regions=${list.join(',')}`);
+    `拠点=${hub ? hub[1] : 'なし'} / sources=${list.join(',')}`);
   add('書き出し側と読み込み側でリージョンが食い違っていない',
     hub !== null && list.includes((exp.match(/^SET @@location = '([^']+)';$/m) || [])[1]),
-    `export=${(exp.match(/^SET @@location = '([^']+)';$/m) || [])[1]} / import の source_regions=${list.join(',')}`);
+    `export=${(exp.match(/^SET @@location = '([^']+)';$/m) || [])[1]} / import の sources=${list.join(',')}`);
+  // バケットは送り元ごとに引く。1 本の変数に固定すると、送り元のバケットを
+  // 直に読む形（コピーを挟まない形）が書けなくなる。
+  add('読み込み元のバケットを送り元ごとに持てる',
+    /FORMAT\('%s\/%s\/%s-\*\.avro', s\.gcs_prefix, s\.source_region, kind\)/.test(imp) &&
+    !/gcs_import_prefix/.test(imp));
 }
 
 // --- 5. 時刻を文字列で運んでいるか -------------------------------------
@@ -242,13 +249,12 @@ for (const [name, src] of [['cross_region_export.sql', exp],
 // --- 7. バケットの取り違えを実行時に止めているか -----------------------
 // 書き出し側と読み込み側でバケットのロケーションが違う（同じにできない）。
 // 既定値のまま流すと、他人のバケットや存在しないパスに書きに行く。
-for (const [name, src, v] of [
-  ['cross_region_export.sql', exp, 'gcs_export_prefix'],
-  ['cross_region_import.sql', imp, 'gcs_import_prefix']]) {
-  add(`${name}: バケットの既定値のままでは流せない`,
-    new RegExp(`ASSERT NOT STARTS_WITH\\(${v}, 'gs://CHANGE-ME'\\)`).test(src) &&
-    new RegExp(`DECLARE ${v} STRING DEFAULT 'gs://CHANGE-ME`).test(src));
-}
+add('cross_region_export.sql: バケットの既定値のままでは流せない',
+  /ASSERT NOT STARTS_WITH\(gcs_export_prefix, 'gs:\/\/CHANGE-ME'\)/.test(exp) &&
+  /DECLARE gcs_export_prefix STRING DEFAULT 'gs:\/\/CHANGE-ME/.test(exp));
+add('cross_region_import.sql: バケットの既定値のままでは流せない',
+  /WHERE STARTS_WITH\(s\.gcs_prefix, 'gs:\/\/CHANGE-ME'\)/.test(imp) &&
+  /'gs:\/\/CHANGE-ME\/viewlgc' AS gcs_prefix/.test(imp));
 
 // --- 8. テンプレートにバックスラッシュが無いか --------------------------
 // check_sql.mjs と同じ理由。"""…""" は raw な文字列なので、

@@ -916,15 +916,38 @@ Not found: Dataset ... was not found in location asia-northeast1
 運ぶのはメタデータだけで、データそのものは 1 バイトも動かない。
 `view_definition` は 1 本あたり数 KB なので、View が 1000 本でも数 MB。
 
-### バケットは 2 つ要る
+### バケットが 1 つで済むかは、先に試して決める
 
-BigQuery は GCS との間で**同じロケーション**を要求する。書き出す側が
-`asia-southeast1` ならバケットもそこ、読み込む側が `asia-northeast1` なら
-バケットもそこ。そして **`asia-northeast1` と `asia-southeast1` を組にした
-デュアルリージョンは無い**（`ASIA1` は `asia-northeast1` ＋ `asia-northeast2`）。
-1 つのバケットで両方は兼ねられない。
+**書き出す側は必ず同一ロケーション。** `EXPORT DATA` の宛先バケットは、
+書き出すデータセットと同じロケーション（`asia-southeast1`）でなければならない。
+ここは動かせない。
+
+**読み込む側は確かめる価値がある。** BigQuery の資料には
+「読み込むバケットはデータセットと同じロケーションでなければならない」という
+記述と、「同じロケーションでなければ転送料金がかかる」という記述の両方があり、
+**前者なら別リージョンのバケットは読めず、後者なら読めて課金されるだけ**で
+意味がまるで違う。拠点から送り元のバケットを直に読めるなら、**拠点側の
+バケットも転送もまるごと要らなくなる。**
+
+```sql
+-- 拠点（asia-northeast1）で流す。1 分で分かる
+LOAD DATA OVERWRITE `<project>.<dataset>.viewlgc_probe`
+FROM FILES (
+  format = 'AVRO',
+  uris = ['gs://<送り元のバケット>/viewlgc/asia-southeast1/manifest-*.avro']);
+```
+
+| 結果 | 構成 | `sources` の `gcs_prefix` に書くもの |
+|---|---|---|
+| 通る | **(b) 直に読む。** バケット 1 つ、転送なし | **送り元**のバケット |
+| 落ちる | **(a) コピーしてから読む。** バケット 2 つ ＋ 転送 | **拠点**のバケット |
+
+**どちらでも `cross_region_import.sql` は変わらない。** 変わるのは
+`sources` の `gcs_prefix` の値だけ。バケットは送り元ごとに持てるように
+してあるので、リージョンによって (a)(b) が混ざっても書ける。
 
 ```
+(a) コピーしてから読む
 asia-southeast1                        asia-northeast1（拠点）
 ┌────────────────────────┐            ┌────────────────────────┐
 │ INFORMATION_SCHEMA     │            │ INFORMATION_SCHEMA     │
@@ -938,15 +961,22 @@ asia-southeast1                        asia-northeast1（拠点）
                                        │           ↓            │
                                        │ build_table.sql        │
                                        └────────────────────────┘
+
+(b) 直に読む — 真ん中のコピーと拠点側バケットが消える
+│ gs://…-se1/viewlgc/    │ ←─────────  cross_region_import.sql
 ```
 
-真ん中のコピーは SQL では書けない。**Storage Transfer Service** に転送を
-1 本作るのが手間が少ない（コンソールで設定でき、スケジュールも持てる）。
+(a) の場合、1 つのバケットで兼ねられないのは **`asia-northeast1` と
+`asia-southeast1` を組にしたデュアルリージョンが無い**ため
+（`ASIA1` は `asia-northeast1` ＋ `asia-northeast2`）。
+真ん中のコピーは SQL では書けないので、**Storage Transfer Service** に
+転送を 1 本作るのが手間が少ない。
 
-> **「転送元にないオブジェクトを転送先から削除」を有効にすること。**
+> **(a) のとき「転送元にないオブジェクトを転送先から削除」を有効にすること。**
 > `EXPORT DATA` は書き出す側のバケットでは同名ファイルを消してから書くが、
 > 宛先のバケットは掃除しない。前回 2 分割で書かれ今回 1 つで足りたとき、
 > 宛先に前回の 2 つ目が残る。ワイルドカードで読むので古い行が混ざる。
+> (b) なら書き出した側がそのまま読まれるので、この問題自体が起きない。
 
 ### 運ぶもの
 
@@ -973,7 +1003,7 @@ asia-southeast1                        asia-northeast1（拠点）
 
 | | 見るもの | 拾える壊れ方 |
 |---|---|---|
-| (1) | `source_regions` が全部マニフェストにあるか | 書き出しかコピーが丸ごと終わっていない |
+| (1) | `sources` の送り元が全部マニフェストにあるか | 書き出しかコピーが丸ごと終わっていない |
 | (2) | `collected_at_iso` が `max_staleness_hours` 以内か | 送り元が止まっているのに拠点だけ動いている |
 | (3) | 読み込んだ行数がマニフェストの件数と一致するか | ファイルが途中までしか届いていない／古い avro が混ざった |
 
@@ -991,17 +1021,19 @@ asia-southeast1                        asia-northeast1（拠点）
 
 ### 手順
 
-1. **拠点と同じロケーションのバケット**（`asia-northeast1`）と、
-   **送り元と同じロケーションのバケット**（`asia-southeast1`）を用意する
+1. **送り元と同じロケーションのバケット**（`asia-southeast1`）を用意する
 2. `cross_region_export.sql` の `gcs_export_prefix` と
    `analysis_include_dataset_patterns` を書き換え、**送り元のリージョンで**
-   スケジュールドクエリに登録する
-3. Storage Transfer Service で `se1 → ne1` の転送を作る（削除オプションを有効に）
-4. `cross_region_import.sql` の `gcs_import_prefix` / `source_regions` を
-   書き換え、**拠点で** `build_table.sql` より前に流すように登録する
-5. `build_table.sql` を、取り込んだ 5 本を `UNION ALL` する形に直す（下記）
+   スケジュールドクエリに登録する。1 回流して avro ができることを確かめる
+3. **上の probe を拠点で流し、(a) と (b) のどちらになるか決める**
+4. (a) なら、拠点側のバケットと Storage Transfer Service の転送を作る
+   （削除オプションを有効に）。(b) なら何も要らない
+5. `cross_region_import.sql` の `sources` を書き換え、**拠点で**
+   `build_table.sql` より前に流すように登録する
+6. `build_table.sql` を、取り込んだ 5 本を `UNION ALL` する形に直す（下記）
 
-リージョンを増やすときは、2 と 3 をもう 1 組作り、`source_regions` に 1 つ足す。
+リージョンを増やすときは、2（と (a) なら 4）をもう 1 組作り、
+`sources` に 1 行足す。
 
 `node check_cross_region.mjs` が、`FORMAT` の書式指定と引数の数、書き出す
 種類と読み込む種類の一致、書き出す列が拠点側の読む列を満たしているか、を
