@@ -15,22 +15,34 @@
 -- 運ぶのはメタデータだけ。データそのものは 1 バイトも動かない。
 -- view_definition は 1 本あたり数 KB なので、View が 1000 本でも数 MB。
 --
+-- **2 段構えなのは EXPORT DATA が INFORMATION_SCHEMA を読めないため。**
+-- 直に `EXPORT DATA … AS SELECT … FROM INFORMATION_SCHEMA.VIEWS` とは書けない
+-- （メタデータのテーブルは参照できない）。いったん普通のテーブルに落とし、
+-- そのテーブルを書き出す。
+--
+--   INFORMATION_SCHEMA ── CTAS ──→ viewlgc_stg_*（このリージョン）
+--                                        └─ EXPORT DATA ──→ GCS
+--
+-- 落とした viewlgc_stg_* は、拠点側の viewlgc_imp_* と同じ形をしている。
+-- 書き出しが失敗したときに、どこまでできていたかを直に見られる。
+--
 -- **バケットは 1 つ。書き出したものを拠点から直に読む。**
 -- 書き出す側は同一ロケーションが要る（EXPORT DATA の宛先は、書き出す
 -- データセットと同じロケーションでなければならない）ので、バケットは
 -- このリージョン（asia-southeast1）に置く。
--- 読み込む側にその縛りは無く、**拠点（asia-northeast1）の LOAD DATA から
--- このバケットをそのまま読める**（実環境で確認済み。別リージョンなので
--- 転送料金はかかるが、運ぶのは数 MB のメタデータだけ）。
+-- 読み込む側にその縛りは無く、**拠点の LOAD DATA からこのバケットを
+-- そのまま読める**（実環境で確認済み。別リージョンなので転送料金は
+-- かかるが、運ぶのは数 MB のメタデータだけ）。
 -- GCS → GCS のコピーも、拠点側のバケットも要らない。
 --
 --   asia-southeast1                     asia-northeast1（拠点）
 --   ┌──────────────────┐               ┌──────────────────┐
 --   │ INFORMATION_SCHEMA│               │ cross_region_    │
---   │        ↓ このファイル│               │   import.sql     │
---   │ gs://…-se1/…      │ ←─ LOAD DATA ─│        ↓          │
---   └──────────────────┘               │ build_table.sql  │
---                                       └──────────────────┘
+--   │        ↓ CTAS     │               │   import.sql     │
+--   │ viewlgc_stg_*     │               │        ↓          │
+--   │        ↓ EXPORT   │               │ build_table.sql  │
+--   │ gs://…-se1/…      │ ←─ LOAD DATA ─│                  │
+--   └──────────────────┘               └──────────────────┘
 --
 -- 形式は AVRO。列名と型がそのまま往復するので、読み込む側でスキーマを
 -- 書かなくてよい。CSV だと view_definition の改行と引用符が地雷になる。
@@ -56,6 +68,10 @@ BEGIN
 -- 末尾に / は付けない。下でリージョン名とファイル名を足す。
 DECLARE gcs_export_prefix STRING DEFAULT 'gs://CHANGE-ME-se1/viewlgc';
 
+-- 中継のテーブルを置くデータセット。**このリージョンに作ってあること。**
+-- INFORMATION_SCHEMA を直に書き出せないので、一度ここへ落とす。
+DECLARE work_dataset STRING DEFAULT 'ops_meta';
+
 -- 解析対象のデータセット / View。**拠点側（build_table.sql）と同じ値にする。**
 -- 食い違うと、運んだ側と拠点側で対象がずれる。ずれても落ちないので、
 -- 「あるはずの View が出てこない」という分かりにくい形で表に出る。
@@ -64,34 +80,47 @@ DECLARE analysis_exclude_dataset_patterns ARRAY<STRING> DEFAULT [];
 DECLARE analysis_include_object_patterns ARRAY<STRING> DEFAULT [];
 DECLARE analysis_exclude_object_patterns ARRAY<STRING> DEFAULT [];
 
+-- このシステムを表す名前と、テーブルの命名。
+-- **build_table.sql / cross_region_import.sql と同じ値にすること。**
+DECLARE system_name STRING DEFAULT 'viewlgc';
+DECLARE table_name_prefix STRING DEFAULT '';
+DECLARE table_name_suffix STRING DEFAULT '';
+
 -- [C] 導出・内部用。編集しない ----------------------------------------
 DECLARE job_region STRING DEFAULT @@location;
 DECLARE default_project_id STRING;
 DECLARE target_project_id  STRING DEFAULT NULL;  -- 読み取り対象
+DECLARE work_project_id    STRING DEFAULT NULL;  -- 中継テーブルの置き場所
 
--- include / exclude から組み立てる条件文。見る列が違うので 2 本作る。
+-- include / exclude から組み立てる条件文。見る列が違うので 3 本作る。
 DECLARE schema_condition       STRING;  -- SCHEMATA.schema_name
 DECLARE view_dataset_condition STRING;  -- table_schema
 DECLARE view_name_condition    STRING;  -- table_name
 
--- EXPORT 文の型。uri の組み立てを 1 か所にまとめる。
+-- 中継テーブルを作る文と、それを書き出す文。
 -- uri には * がちょうど 1 つ要る（BigQuery が分割して書くため）。
+DECLARE ctas_stmt STRING DEFAULT
+  "CREATE OR REPLACE TABLE `%s` AS %s";
 DECLARE export_stmt STRING DEFAULT
-  "EXPORT DATA OPTIONS(uri = '%s/%s/%s-*.avro', format = 'AVRO', overwrite = true) AS %s";
+  "EXPORT DATA OPTIONS(uri = '%s/%s/%s-*.avro', format = 'AVRO', overwrite = true) AS SELECT * FROM `%s`";
 
 -- 書き出す 5 本の SELECT。下で組み立てる。
-DECLARE sql_schemata     STRING;
-DECLARE sql_views        STRING;
-DECLARE sql_columns      STRING;
-DECLARE sql_field_paths  STRING;
-DECLARE sql_table_opts   STRING;
+DECLARE sql_schemata    STRING;
+DECLARE sql_views       STRING;
+DECLARE sql_columns     STRING;
+DECLARE sql_field_paths STRING;
+DECLARE sql_table_opts  STRING;
 
--- 件数。マニフェストに載せて、拠点側で「全部届いたか」を確かめる材料にする。
-DECLARE n_schemata    INT64;
+-- 種類と中身の組。中継 → 書き出しを 1 つのループで回すためにまとめる。
+DECLARE parts ARRAY<STRUCT<kind STRING, body STRING>>;
+DECLARE counts ARRAY<STRUCT<kind STRING, n INT64>> DEFAULT [];
+DECLARE i INT64 DEFAULT 0;
+DECLARE kind         STRING;
+DECLARE stg_fqn      STRING;
+DECLARE n_rows       INT64;
+DECLARE collected_iso STRING;
+DECLARE manifest_sql  STRING;
 DECLARE n_views       INT64;
-DECLARE n_columns     INT64;
-DECLARE n_field_paths INT64;
-DECLARE n_table_opts  INT64;
 
 
 -- 実行中のプロジェクトを INFORMATION_SCHEMA.SCHEMATA から自動検出する
@@ -105,11 +134,14 @@ EXECUTE IMMEDIATE FORMAT(
 ASSERT default_project_id IS NOT NULL AS
   'プロジェクト ID を自動検出できません（このリージョンにデータセットが無い？）。target_project_id にリテラルを入れて固定してください。';
 SET target_project_id = COALESCE(target_project_id, default_project_id);
+SET work_project_id   = COALESCE(work_project_id,   default_project_id);
 
 ASSERT NOT STARTS_WITH(gcs_export_prefix, 'gs://CHANGE-ME') AS
   'gcs_export_prefix を書き換えてください（このリージョンと同じロケーションのバケットを指すこと）。';
 ASSERT STARTS_WITH(gcs_export_prefix, 'gs://') AND NOT ENDS_WITH(gcs_export_prefix, '/') AS
   'gcs_export_prefix は gs:// で始まり、末尾に / を付けない形にしてください。';
+
+SET collected_iso = FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%SZ', CURRENT_TIMESTAMP());
 
 
 -- 条件文。build_table.sql と同じ組み立て方にそろえてある。
@@ -194,60 +226,76 @@ WHERE option_name IN ('description', 'labels')
 """, job_region, target_project_id, job_region,
      view_dataset_condition, view_name_condition);
 
+-- 種類の文字列は cross_region_import.sql の kinds と 1 対 1。
+SET parts = [
+  STRUCT('schemata'    AS kind, sql_schemata    AS body),
+  STRUCT('views',           sql_views),
+  STRUCT('columns',         sql_columns),
+  STRUCT('field_paths',     sql_field_paths),
+  STRUCT('table_opts',      sql_table_opts)
+];
+
 
 -- ---------------------------------------------------------------------
--- 件数を先に数える
+-- 中継テーブルに落として、それを書き出す
 --
--- **0 件のまま書き出さない。** 設定を間違えていると空の avro が並び、
--- 拠点側は「このリージョンには View が無い」と読んで黙って通してしまう。
--- 落ちるならここで落ちるほうがよい。
+-- CTAS と EXPORT を 1 種類ずつ交互に流す。**CREATE OR REPLACE TABLE は
+-- 1 文で差し替わる**ので、中継テーブルを直接見ている人がいても
+-- 「空のテーブル」が見える瞬間が無い（build_table.sql と同じ考え方）。
 -- ---------------------------------------------------------------------
-EXECUTE IMMEDIATE FORMAT(
-  "SELECT (SELECT COUNT(*) FROM (%s)), (SELECT COUNT(*) FROM (%s)), (SELECT COUNT(*) FROM (%s)), (SELECT COUNT(*) FROM (%s)), (SELECT COUNT(*) FROM (%s))",
-  sql_schemata, sql_views, sql_columns, sql_field_paths, sql_table_opts)
-INTO n_schemata, n_views, n_columns, n_field_paths, n_table_opts;
+WHILE i < ARRAY_LENGTH(parts) DO
+  SET kind = parts[OFFSET(i)].kind;
+  SET stg_fqn = FORMAT('%s.%s.%s', work_project_id, work_dataset,
+    CONCAT(table_name_prefix, system_name, '_stg_', kind, table_name_suffix));
+
+  EXECUTE IMMEDIATE FORMAT(ctas_stmt, stg_fqn, parts[OFFSET(i)].body);
+  EXECUTE IMMEDIATE FORMAT("SELECT COUNT(*) FROM `%s`", stg_fqn) INTO n_rows;
+  SET counts = ARRAY_CONCAT(counts, [STRUCT(kind AS kind, n_rows AS n)]);
+
+  -- **0 件のまま書き出さない。** 設定を間違えていると空の avro が並び、
+  -- 拠点側は「このリージョンには View が無い」と読んで黙って通してしまう。
+  -- 落ちるならここで落ちるほうがよい。View 以外は 0 でもありうる
+  -- （ラベルも description も付いていない、など）ので views だけ見る。
+  IF kind = 'views' THEN SET n_views = n_rows; END IF;
+
+  EXECUTE IMMEDIATE FORMAT(export_stmt,
+    gcs_export_prefix, job_region, kind, stg_fqn);
+  SET i = i + 1;
+END WHILE;
 
 ASSERT n_views > 0 AS
   '対象の View が 0 件です。@@location / analysis_include_dataset_patterns / analysis_include_object_patterns を確認してください。';
 
 
 -- ---------------------------------------------------------------------
--- 書き出し
---
--- パスにリージョン名を挟む（…/viewlgc/asia-southeast1/views-*.avro）。
--- リージョンを増やすときは、このファイルを @@location と gcs_export_prefix
--- だけ変えてもう 1 本作り、拠点側の source_regions に足す。
--- ---------------------------------------------------------------------
-EXECUTE IMMEDIATE FORMAT(export_stmt, gcs_export_prefix, job_region, 'schemata',    sql_schemata);
-EXECUTE IMMEDIATE FORMAT(export_stmt, gcs_export_prefix, job_region, 'views',       sql_views);
-EXECUTE IMMEDIATE FORMAT(export_stmt, gcs_export_prefix, job_region, 'columns',     sql_columns);
-EXECUTE IMMEDIATE FORMAT(export_stmt, gcs_export_prefix, job_region, 'field_paths', sql_field_paths);
-EXECUTE IMMEDIATE FORMAT(export_stmt, gcs_export_prefix, job_region, 'table_opts',  sql_table_opts);
-
 -- マニフェスト。**いちばん最後に書く。**
 --
--- GCS → GCS のコピーは順序を約束しないので、拠点側が「コピーの途中」を
--- 読むことがありうる。そのとき静かに欠けた状態で解析されるのがいちばん困る。
--- 件数と書き出し時刻をここに載せておき、拠点側で
---   ・collected_at が古くないか
+-- 書き出しは 5 本を順に流すので、views は新しいのに table_opts はまだ前回、
+-- という瞬間が実際に存在する。拠点側がその瞬間を読むと、静かに欠けた状態で
+-- 解析されてしまう。件数と書き出し時刻をここに載せておき、拠点側で
+--   ・collected_at_iso が古くないか
 --   ・読み込んだ行数がここの件数と一致するか
--- の 2 つを確かめる。どちらも通れば、少なくとも「同じ 1 回ぶんの avro が
--- 全部届いている」ことは言える。
+-- を確かめる。両方通れば「同じ 1 回ぶんの avro が全部届いている」と言える。
+--
+-- 縦持ち（1 種類 1 行）にしてある。拠点側の突き合わせが kind で JOIN する
+-- だけになり、種類を増やしてもマニフェストの形が変わらない。
 --
 -- **時刻は STRING で載せる。** TIMESTAMP を avro にすると論理型として
 -- 書かれ、読み込み側が use_avro_logical_types を付けないと INT64（マイクロ秒）
 -- として戻る。そうなっても落ちずに「比較が通らない」形で出るだけなので、
 -- 往復の仕方に依存しない ISO 8601 の文字列にしておく。
-EXECUTE IMMEDIATE FORMAT(export_stmt, gcs_export_prefix, job_region, 'manifest',
-  FORMAT("""
-SELECT
-  %T AS source_region,
-  FORMAT_TIMESTAMP('%%Y-%%m-%%dT%%H:%%M:%%SZ', CURRENT_TIMESTAMP()) AS collected_at_iso,
-  %d AS n_schemata,
-  %d AS n_views,
-  %d AS n_columns,
-  %d AS n_field_paths,
-  %d AS n_table_opts
-""", job_region, n_schemata, n_views, n_columns, n_field_paths, n_table_opts));
+-- ---------------------------------------------------------------------
+SET manifest_sql = (
+  SELECT STRING_AGG(
+    FORMAT("SELECT %T AS source_region, %T AS collected_at_iso, %T AS kind, %d AS n_rows",
+           job_region, collected_iso, c.kind, c.n),
+    ' UNION ALL ' ORDER BY c.kind)
+  FROM UNNEST(counts) AS c);
+
+SET stg_fqn = FORMAT('%s.%s.%s', work_project_id, work_dataset,
+  CONCAT(table_name_prefix, system_name, '_stg_manifest', table_name_suffix));
+EXECUTE IMMEDIATE FORMAT(ctas_stmt, stg_fqn, manifest_sql);
+EXECUTE IMMEDIATE FORMAT(export_stmt,
+  gcs_export_prefix, job_region, 'manifest', stg_fqn);
 
 END;

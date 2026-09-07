@@ -165,8 +165,12 @@ for (const [name, src] of [['cross_region_export.sql', exp],
 // 片方だけ足すと、書き出したのに読まれない（静かに欠ける）か、
 // 無いファイルを読もうとして落ちるかのどちらかになる。
 {
-  const exported = [...exp.matchAll(/FORMAT\(export_stmt, gcs_export_prefix, job_region, '([a-z_]+)'/g)]
-    .map((m) => m[1]);
+  // 5 本は parts のループで、マニフェストだけループの後で書き出す。
+  const pm = exp.match(/SET parts = \[([\s\S]*?)\n\];/);
+  const exported = pm
+    ? [...pm[1].matchAll(/STRUCT\('([a-z_]+)'/g)].map((m) => m[1]) : [];
+  const manifestAt = exp.indexOf("job_region, 'manifest'");
+  if (manifestAt > 0) exported.push('manifest');
   const km = imp.match(/DECLARE kinds ARRAY<STRING> DEFAULT\s*\n?\s*\[([^\]]*)\]/);
   const imported = km ? [...km[1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]) : [];
   add('書き出す種類と読み込む種類が一致する',
@@ -175,7 +179,19 @@ for (const [name, src] of [['cross_region_export.sql', exp],
     `export=${exported.join(',')} / import=${imported.join(',')}`);
   // マニフェストは最後に書く。途中まで届いた状態を拾うための順序。
   add('マニフェストは最後に書き出す（欠けた状態を拾えるように）',
-    exported[exported.length - 1] === 'manifest', exported.join(','));
+    manifestAt > exp.indexOf('END WHILE;'), `manifest の位置=${manifestAt}`);
+}
+
+// --- 2b. INFORMATION_SCHEMA を直に書き出していないか --------------------
+// **EXPORT DATA は INFORMATION_SCHEMA を参照できない**（実環境で確認）。
+// いったん普通のテーブルに落としてから書き出す 2 段構えでなければならない。
+// 戻すと「メタデータのテーブルは参照できない」で落ちる。
+{
+  add('EXPORT DATA は中継テーブルを読む（INFORMATION_SCHEMA を直に読まない）',
+    /"EXPORT DATA OPTIONS\([^"]*\) AS SELECT \* FROM `%s`"/.test(exp) &&
+    /"CREATE OR REPLACE TABLE `%s` AS %s"/.test(exp) &&
+    // ループの中で CTAS → EXPORT の順に流す
+    exp.indexOf('FORMAT(ctas_stmt') < exp.indexOf('FORMAT(export_stmt'));
 }
 
 // --- 3. 書き出す列が、拠点側が読む列を満たしているか --------------------
@@ -233,7 +249,7 @@ for (const [name, src] of [['cross_region_export.sql', exp],
 {
   add('マニフェストの時刻を STRING で運ぶ（avro の論理型に依存しない）',
     exp.includes('AS collected_at_iso') &&
-    /FORMAT_TIMESTAMP\('%%Y-%%m-%%dT%%H:%%M:%%SZ'/.test(exp) &&
+    /FORMAT_TIMESTAMP\('%Y-%m-%dT%H:%M:%SZ', CURRENT_TIMESTAMP\(\)\)/.test(exp) &&
     imp.includes("PARSE_TIMESTAMP('%%Y-%%m-%%dT%%H:%%M:%%SZ', collected_at_iso)"));
 }
 
@@ -243,7 +259,7 @@ for (const [name, src] of [['cross_region_export.sql', exp],
 {
   add('件数の突き合わせが FULL OUTER JOIN（丸ごと空を素通りさせない）',
     imp.includes('FULL OUTER JOIN') &&
-    imp.includes('COALESCE(m.expected, 0) != COALESCE(t.actual, 0)'));
+    imp.includes('COALESCE(m.n_rows, 0) != COALESCE(t.actual, 0)'));
 }
 
 // --- 7. バケットの取り違えを実行時に止めているか -----------------------

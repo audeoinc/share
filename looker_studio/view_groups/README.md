@@ -916,6 +916,22 @@ Not found: Dataset ... was not found in location asia-northeast1
 運ぶのはメタデータだけで、データそのものは 1 バイトも動かない。
 `view_definition` は 1 本あたり数 KB なので、View が 1000 本でも数 MB。
 
+### 書き出しは 2 段構え（EXPORT DATA は INFORMATION_SCHEMA を読めない）
+
+`EXPORT DATA … AS SELECT … FROM INFORMATION_SCHEMA.VIEWS` とは**書けない。**
+メタデータのテーブルは `EXPORT DATA` から参照できない。いったん普通の
+テーブルに落とし、そのテーブルを書き出す。
+
+```
+INFORMATION_SCHEMA ── CTAS ──→ viewlgc_stg_*（送り元のリージョン）
+                                     └─ EXPORT DATA ──→ GCS
+```
+
+中継の `viewlgc_stg_*` は、拠点側の `viewlgc_imp_*` と同じ形をしている。
+書き出しが失敗したときに、どこまでできていたかを送り元で直に見られる。
+中継テーブルを置くデータセット（`work_dataset`）は**送り元のリージョンに
+作っておくこと。**
+
 ### バケットは送り元の 1 つだけ
 
 **書き出す側は同一ロケーションが要る。** `EXPORT DATA` の宛先バケットは、
@@ -970,6 +986,7 @@ asia-southeast1                        asia-northeast1（拠点）
 | `table_opts` | `TABLE_OPTIONS` | description とラベル（`view_opts` / `view_labels`） |
 
 加えて **マニフェスト**を最後に 1 本書く。書き出し時刻と 5 本の件数が入る。
+縦持ち（1 種類 1 行）なので、拠点側の突き合わせは `kind` で JOIN するだけ。
 
 全部に `source_region` を持たせてある。運んだ先で拠点のぶんと混ざるので、
 行がどこから来たのかを**行自身が持っていない**と追えなくなる。
@@ -1005,8 +1022,9 @@ asia-southeast1                        asia-northeast1（拠点）
 
 ### 手順
 
-1. **送り元と同じロケーションのバケット**（`asia-southeast1`）を用意する
-2. `cross_region_export.sql` の `gcs_export_prefix` と
+1. **送り元と同じロケーション**（`asia-southeast1`）に、バケットと
+   中継テーブル用のデータセットを用意する
+2. `cross_region_export.sql` の `gcs_export_prefix` / `work_dataset` /
    `analysis_include_dataset_patterns` を書き換え、**送り元のリージョンで**
    スケジュールドクエリに登録する。1 回流して avro ができることを確かめる
 3. `cross_region_import.sql` の `sources` にその送り元とバケットを書き、

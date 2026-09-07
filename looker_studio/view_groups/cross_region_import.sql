@@ -209,7 +209,7 @@ ASSERT ARRAY_LENGTH(missing_regions) = 0 AS
 -- 落ちずに比較だけが狂うので、書き出し側で文字列にしてある。
 EXECUTE IMMEDIATE FORMAT("""
 SELECT ARRAY(
-  SELECT source_region FROM `%s`
+  SELECT DISTINCT source_region FROM `%s`
   WHERE PARSE_TIMESTAMP('%%Y-%%m-%%dT%%H:%%M:%%SZ', collected_at_iso)
         < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL %d HOUR))
 """, manifest_fqn, max_staleness_hours) INTO stale_regions;
@@ -219,9 +219,11 @@ ASSERT ARRAY_LENGTH(stale_regions) = 0 AS
 -- (3) 行数がマニフェストと合うか
 --
 -- 書き出した側が数えた件数と、いま読み込んだ行数を突き合わせる。
--- ファイルが途中までしかコピーされていない、古い世代の avro が混ざって
--- いる、といった壊れ方はここで出る。**完全ではない**（同じ件数で中身だけ
--- 古い、という壊れ方は (2) の側で拾う）が、静かに欠けるのはほぼ防げる。
+-- 書き出しの途中を掴んだ、古い世代の avro が混ざっている、といった壊れ方は
+-- ここで出る。**完全ではない**（同じ件数で中身だけ古い、という壊れ方は
+-- (2) の側で拾う）が、静かに欠けるのはほぼ防げる。
+--
+-- マニフェストは縦持ち（1 種類 1 行）なので、そのまま kind で JOIN できる。
 --
 -- **FULL OUTER JOIN。** 内部結合にすると、ある種類が丸ごと空だったとき
 -- 実測側に行が立たず、突き合わせる相手が消えて**素通りする**。いちばん
@@ -231,14 +233,8 @@ SELECT STRING_AGG(msg, ' / ') FROM (
   SELECT FORMAT('%%s: %%s は %%d 行のはずが %%d 行',
                 COALESCE(m.source_region, t.source_region),
                 COALESCE(m.kind, t.kind),
-                COALESCE(m.expected, 0), COALESCE(t.actual, 0)) AS msg
-  FROM (
-    SELECT source_region, 'schemata'    AS kind, n_schemata    AS expected FROM `%s`
-    UNION ALL SELECT source_region, 'views',       n_views       FROM `%s`
-    UNION ALL SELECT source_region, 'columns',     n_columns     FROM `%s`
-    UNION ALL SELECT source_region, 'field_paths', n_field_paths FROM `%s`
-    UNION ALL SELECT source_region, 'table_opts',  n_table_opts  FROM `%s`
-  ) AS m
+                COALESCE(m.n_rows, 0), COALESCE(t.actual, 0)) AS msg
+  FROM `%s` AS m
   FULL OUTER JOIN (
     SELECT source_region, 'schemata'    AS kind, COUNT(*) AS actual FROM `%s` GROUP BY source_region
     UNION ALL SELECT source_region, 'views',       COUNT(*) FROM `%s` GROUP BY source_region
@@ -247,10 +243,10 @@ SELECT STRING_AGG(msg, ' / ') FROM (
     UNION ALL SELECT source_region, 'table_opts',  COUNT(*) FROM `%s` GROUP BY source_region
   ) AS t
   ON m.source_region = t.source_region AND m.kind = t.kind
-  WHERE COALESCE(m.expected, 0) != COALESCE(t.actual, 0)
+  WHERE COALESCE(m.n_rows, 0) != COALESCE(t.actual, 0)
 )
 """,
-  manifest_fqn, manifest_fqn, manifest_fqn, manifest_fqn, manifest_fqn,
+  manifest_fqn,
   FORMAT('%s.%s.%s', work_project_id, work_dataset, CONCAT(table_name_prefix, system_name, '_imp_schemata',    table_name_suffix)),
   FORMAT('%s.%s.%s', work_project_id, work_dataset, CONCAT(table_name_prefix, system_name, '_imp_views',       table_name_suffix)),
   FORMAT('%s.%s.%s', work_project_id, work_dataset, CONCAT(table_name_prefix, system_name, '_imp_columns',     table_name_suffix)),
