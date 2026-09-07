@@ -213,6 +213,8 @@ SELECT o.amount AS total FROM `p.d.orders_abjp` AS o JOIN d.items_abjp AS i ON o
 | `view_group_html.sql` | `build_udf.mjs` の生成物。JS を最小化して埋めるため。設定は先頭の `DECLARE` |
 | `template_style.html` | `build_udf.mjs` の生成物（CSS） |
 | `note_preview.html` | `build_udf.mjs` の生成物。メモの下書き用。ブラウザで開くだけで使える |
+| `cross_region_export.sql` | 手で編集する。**拠点の外側**のリージョンで流し、メタデータを GCS へ書き出す |
+| `cross_region_import.sql` | 手で編集する。**拠点**で流し、GCS から取り込む |
 
 **両ファイルで必ず同じ値にする `DECLARE`** は `system_name` / `udf_dataset` /
 `udf_name_prefix` / `udf_name_suffix` / `project_token_pattern` の 5 つ。
@@ -888,6 +890,148 @@ JSON オブジェクトの形をしていない場合も、同じく `ASSERT` �
   include / exclude で絞れる
 - `INFORMATION_SCHEMA.VIEWS` はリージョン単位で読むので、**そのリージョンの
   View 定義をすべて読む権限が要る**
+
+## 複数リージョンの View をまとめて解析する
+
+`asia-northeast1` と `asia-southeast1` のように、**同じ base の View が
+リージョンをまたいでいる**ときの構成。拠点は `asia-northeast1`。
+
+### なぜ「運ぶ」必要があるのか
+
+**BigQuery は 1 ジョブ = 1 ロケーション。** `region-asia-southeast1` の
+`INFORMATION_SCHEMA` は、そのリージョンで走っているジョブからしか読めない。
+拠点のジョブから読もうとすると
+
+```
+Not found: Dataset ... was not found in location asia-northeast1
+```
+
+で落ちる。テーブルの `JOIN` も `UNION` も同じ。**`build_table.sql` に
+`UNION ALL` を 1 行足す形の解決は無い。**
+
+> BigQuery には Global queries（1 本のクエリで複数リージョンを扱う機能）が
+> あるが、**リモート リージョンの `INFORMATION_SCHEMA` は読めない。**
+> どの道を選んでも「収集して通常のテーブルに落とす」ステップは避けられない。
+
+運ぶのはメタデータだけで、データそのものは 1 バイトも動かない。
+`view_definition` は 1 本あたり数 KB なので、View が 1000 本でも数 MB。
+
+### バケットは 2 つ要る
+
+BigQuery は GCS との間で**同じロケーション**を要求する。書き出す側が
+`asia-southeast1` ならバケットもそこ、読み込む側が `asia-northeast1` なら
+バケットもそこ。そして **`asia-northeast1` と `asia-southeast1` を組にした
+デュアルリージョンは無い**（`ASIA1` は `asia-northeast1` ＋ `asia-northeast2`）。
+1 つのバケットで両方は兼ねられない。
+
+```
+asia-southeast1                        asia-northeast1（拠点）
+┌────────────────────────┐            ┌────────────────────────┐
+│ INFORMATION_SCHEMA     │            │ INFORMATION_SCHEMA     │
+│   ↓ cross_region_      │            │           ＋            │
+│     export.sql（日次）  │            │                        │
+│ gs://…-se1/viewlgc/    │ ─ コピー ─→ │ gs://…-ne1/viewlgc/    │
+└────────────────────────┘  GCS → GCS  │           ↓            │
+                                       │ cross_region_          │
+                                       │   import.sql（日次）    │
+                                       │ viewlgc_imp_*（5 本）   │
+                                       │           ↓            │
+                                       │ build_table.sql        │
+                                       └────────────────────────┘
+```
+
+真ん中のコピーは SQL では書けない。**Storage Transfer Service** に転送を
+1 本作るのが手間が少ない（コンソールで設定でき、スケジュールも持てる）。
+
+> **「転送元にないオブジェクトを転送先から削除」を有効にすること。**
+> `EXPORT DATA` は書き出す側のバケットでは同名ファイルを消してから書くが、
+> 宛先のバケットは掃除しない。前回 2 分割で書かれ今回 1 つで足りたとき、
+> 宛先に前回の 2 つ目が残る。ワイルドカードで読むので古い行が混ざる。
+
+### 運ぶもの
+
+`build_table.sql` が実際に読む 5 本だけ。列も読むものだけに絞ってある。
+
+| 種類 | 元 | 拠点側で使う場所 |
+|---|---|---|
+| `schemata` | `SCHEMATA` | suffix の抽出（`suffix_base`） |
+| `views` | `VIEWS` | 解析の本体（`src`） |
+| `columns` | `COLUMNS` | カラム定義タブ（`cols_raw`） |
+| `field_paths` | `COLUMN_FIELD_PATHS` | カラムの説明・ネスト（`col_paths`） |
+| `table_opts` | `TABLE_OPTIONS` | description とラベル（`view_opts` / `view_labels`） |
+
+加えて **マニフェスト**を最後に 1 本書く。書き出し時刻と 5 本の件数が入る。
+
+全部に `source_region` を持たせてある。運んだ先で拠点のぶんと混ざるので、
+行がどこから来たのかを**行自身が持っていない**と追えなくなる。
+
+### 静かに欠けるのを止める
+
+いちばん困るのは、**コピーが途中の状態で解析が走り、欠けたカードで
+レポートが上書きされる**こと。`cross_region_import.sql` は取り込んだあと
+3 つ確かめてから通す。
+
+| | 見るもの | 拾える壊れ方 |
+|---|---|---|
+| (1) | `source_regions` が全部マニフェストにあるか | 書き出しかコピーが丸ごと終わっていない |
+| (2) | `collected_at_iso` が `max_staleness_hours` 以内か | 送り元が止まっているのに拠点だけ動いている |
+| (3) | 読み込んだ行数がマニフェストの件数と一致するか | ファイルが途中までしか届いていない／古い avro が混ざった |
+
+落ちれば `build_table.sql` に進まないので、**レポートには前の日のカードが
+残る**（欠けたカードで上書きされない）。
+
+> **時刻は `STRING` で運ぶ。** `TIMESTAMP` のまま avro にすると論理型として
+> 書かれ、読み込み側が `use_avro_logical_types` を付けないと `INT64`
+> （マイクロ秒）で戻る。**落ちずに比較だけが狂う**ので、往復の仕方に
+> 依存しない ISO 8601 の文字列にしてある。
+
+> **(3) は `FULL OUTER JOIN`。** 内部結合にすると、ある種類が丸ごと空
+> だったとき実測側に行が立たず、突き合わせる相手が消えて素通りする。
+> いちばん防ぎたい壊れ方がそれ。
+
+### 手順
+
+1. **拠点と同じロケーションのバケット**（`asia-northeast1`）と、
+   **送り元と同じロケーションのバケット**（`asia-southeast1`）を用意する
+2. `cross_region_export.sql` の `gcs_export_prefix` と
+   `analysis_include_dataset_patterns` を書き換え、**送り元のリージョンで**
+   スケジュールドクエリに登録する
+3. Storage Transfer Service で `se1 → ne1` の転送を作る（削除オプションを有効に）
+4. `cross_region_import.sql` の `gcs_import_prefix` / `source_regions` を
+   書き換え、**拠点で** `build_table.sql` より前に流すように登録する
+5. `build_table.sql` を、取り込んだ 5 本を `UNION ALL` する形に直す（下記）
+
+リージョンを増やすときは、2 と 3 をもう 1 組作り、`source_regions` に 1 つ足す。
+
+`node check_cross_region.mjs` が、`FORMAT` の書式指定と引数の数、書き出す
+種類と読み込む種類の一致、書き出す列が拠点側の読む列を満たしているか、を
+静的に見る。**この 2 本は BigQuery でしか動かせず、間違いのほとんどは
+実行して初めて分かる形で出る**ので、目で数えると必ず間違えるところだけ
+機械に見てもらう。
+
+### まだやっていないこと
+
+**`build_table.sql` の側はまだ差し替えていない。** いまは 5 か所が
+`region-<拠点>.INFORMATION_SCHEMA.*` を直接読んでいる。これを
+「拠点の `INFORMATION_SCHEMA` ＋ 取り込んだ `viewlgc_imp_*`」の `UNION ALL` に
+する必要がある。
+
+```sql
+-- いま
+FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.VIEWS`
+
+-- こうする
+FROM (
+  SELECT table_schema, table_name, view_definition
+  FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.VIEWS`
+  UNION ALL
+  SELECT table_schema, table_name, view_definition
+  FROM `__T_IMP_VIEWS__`
+)
+```
+
+プレースホルダを 5 つ増やし、`DECLARE` / `SET` / `viewlgc_render_dynamic_sql`
+の置換を対で足す（README の「オブジェクトが増えたら」の手順と同じ）。
 
 ## 事前生成テーブル（build_table.sql）
 
