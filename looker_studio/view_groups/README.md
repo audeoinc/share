@@ -1104,6 +1104,13 @@ DECLARE import_sources ARRAY<STRUCT<source_region STRING, table_name_suffix STRI
 **空なら、いままでとまったく同じ SQL になる。** 並べたときだけ、5 つの読み元が
 `UNION ALL` に変わる。
 
+空のときは**取り込みテーブルを 1 か所も参照しない**（読み元は素の
+`INFORMATION_SCHEMA`、確認の `IF` ブロックは実行されない）ので、
+`viewlgc_t_meta_*` が存在しなくても流せる。**UDF と `build_table.sql` の
+貼り替えだけ先に済ませて、混ぜるのは後から**という進め方ができる。
+`node check_sql.mjs` がこの 2 点（空の枝が素の `INFORMATION_SCHEMA` か・
+テーブル参照が空判定の内側だけか）を静的に見る。
+
 ```sql
 -- 空のとき（従来どおり）
 FROM `<project>.region-asia-northeast1.INFORMATION_SCHEMA.VIEWS`

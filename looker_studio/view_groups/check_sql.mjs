@@ -406,6 +406,43 @@ for (const t of ['__T_DIFF_SRC__', '__T_DIFF__']) {
   add('読み元は「空なら従来どおり・並べたら UNION ALL」の 2 枝',
     bad.length === 0, bad.join(','));
 
+  // (3b) 空のときの枝が**リージョン修飾の INFORMATION_SCHEMA そのもの**か。
+  //      ここに余計なものが混ざると、import_sources を空にしても
+  //      「足す前とまったく同じ」ではなくなる。取り込みテーブルを 1 か所も
+  //      参照しないからこそ、テーブルが存在しなくても流せる。
+  const IS = { schemata: 'SCHEMATA', views: 'VIEWS', columns: 'COLUMNS',
+    field_paths: 'COLUMN_FIELD_PATHS', table_opts: 'TABLE_OPTIONS' };
+  const plain = srcs.filter((k) => !new RegExp(
+    `SET src_${k} = IF\\(ARRAY_LENGTH\\(import_sources\\) = 0,\\s*\\n\\s*` +
+    `FORMAT\\('\`%s\\.region-%s\\.INFORMATION_SCHEMA\\.${IS[k]}\`', ` +
+    `target_project_id, job_region\\),`).test(table));
+  add('空のときの読み元が INFORMATION_SCHEMA そのもの（従来と同一）',
+    plain.length === 0, plain.join(','));
+
+  // (3c) 取り込みテーブルの名前を組み立てている箇所が、想定の 2 か所だけか。
+  //      増えると、空判定の外から参照される余地が生まれる（＝空にしても
+  //      「そんなテーブルは無い」で落ちる）。名前の組み立ては
+  //        ・SET src_*        … 'meta_<種類>' || g.sfx（空判定の内側）
+  //        ・取り込みの確認   … 'meta_views'  || s.table_name_suffix
+  //                            （IF ARRAY_LENGTH(import_sources) > 0 の内側）
+  //      の 2 形しかない。ほかの形が出たら、どこから参照されるか確かめる。
+  {
+    const shapes = [...table.matchAll(/'meta_[a-z_]+' \|\| ([A-Za-z_.]+)/g)]
+      .map((m) => m[1]);
+    const unexpected = shapes.filter((v) => v !== 'g.sfx' && v !== 's.table_name_suffix');
+    const bySfx = shapes.filter((v) => v === 'g.sfx').length;
+    const byTail = shapes.filter((v) => v === 's.table_name_suffix').length;
+    // 確認の 1 か所は IF ブロックの内側にあること
+    const at = table.indexOf('IF ARRAY_LENGTH(import_sources) > 0 THEN');
+    const end = table.indexOf('END IF;', at);
+    const tailAt = table.indexOf("'meta_views' || s.table_name_suffix");
+    add('取り込みテーブルの参照が想定の 2 形だけ（空にしても参照されない）',
+      unexpected.length === 0 && bySfx === srcs.length && byTail === 1 &&
+      at > 0 && tailAt > at && tailAt < end,
+      unexpected.length ? `想定外: ${unexpected.join(',')}`
+        : `g.sfx ${bySfx} 個 / s.table_name_suffix ${byTail} 個`);
+  }
+
   // (4) 運んできたテーブルは**送り元ごとに分かれうる**。
   //     cross_region_import.sql の table_name_suffix に送り元を表す値
   //     （'_sgp' など）を付ける運用ができるので、import_sources の suffix
