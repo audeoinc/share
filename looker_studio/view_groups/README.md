@@ -1205,6 +1205,22 @@ View だけが消えたカードができる。グループ数も差分も辻褄
 
 3 つ目は **suffix の書き間違いも拾う**（そのテーブルには行が無いので）。
 
+> **「送り元の行が足りません」で落ちたら。** テーブル名が違えば
+> 「Not found: Table」で落ちるので、この `ASSERT` が出た時点で**テーブルは
+> 見つかっている**。原因は `source_region` の値か、行が入っていないか。
+>
+> ```sql
+> SELECT source_region, COUNT(*) AS n
+> FROM `<work_project>.<work_dataset>.<prefix>viewlgc_t_meta_views<suffix>`
+> GROUP BY source_region;
+> ```
+>
+> | 結果 | 原因 |
+> |---|---|
+> | 別のリージョン名が出る | `import_sources` の `source_region` の書き方違い（リージョン名そのもの。`sgp` などの略称ではない） |
+> | 0 行 | `cross_region_import.sql` が流れていない |
+> | 見ていたのが別のテーブル | `import_sources` の `table_name_suffix` が `cross_region_import.sql` の値と違う |
+
 `node check_sql.mjs` が、直読みが残っていないか・5 つの読み元が全部使われて
 いるか・2 枝になっているか・**送り元ごとに枝分かれするか**・`source_region` で
 絞っているか・上の `ASSERT` があるか、を静的に見る。

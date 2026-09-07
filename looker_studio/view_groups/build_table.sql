@@ -705,8 +705,26 @@ IF ARRAY_LENGTH(import_sources) > 0 THEN
       ' UNION ALL ' ORDER BY s.source_region)
     FROM UNNEST(import_sources) AS s))
   INTO imported_region_count;
+  --
+  -- **ここで落ちたときの調べ方。**
+  -- ASSERT の説明文は文字列リテラルしか書けないので、何を探して見つからな
+  -- かったのかを message に埋め込めない。代わりに手順をここに置いておく。
+  --
+  -- テーブル名が違えば「Not found: Table」で落ちる。この ASSERT が出たと
+  -- いうことは**テーブルは見つかっている**ので、原因は source_region の値か、
+  -- その行が入っていないかのどちらか。まずテーブルの中身を見る:
+  --
+  --   SELECT source_region, COUNT(*) AS n
+  --   FROM `<work_project>.<work_dataset>.<prefix>viewlgc_t_meta_views<suffix>`
+  --   GROUP BY source_region;
+  --
+  --   ・別のリージョン名が出る  → import_sources の source_region の書き方違い
+  --                              （リージョン名そのもの。'sgp' などの略称ではない）
+  --   ・0 行                    → cross_region_import.sql が流れていない
+  --   ・そもそも別のテーブルを  → import_sources の table_name_suffix が
+  --     見ていた                  cross_region_import.sql の値と違う
   ASSERT imported_region_count = ARRAY_LENGTH(import_sources) AS
-    '運んできたメタデータに、import_sources の送り元の行が足りません。cross_region_import.sql が流れているか、table_name_suffix が合っているか確認してください（そのリージョンの View だけが消えたカードができるのを防いでいます）。';
+    '運んできたメタデータに、import_sources の送り元の行が足りません。テーブルは見つかっているので、source_region の値か table_name_suffix を疑ってください（調べ方はこの ASSERT の直前のコメント）。cross_region_import.sql が流れているかも確認を。';
 END IF;
 
 
