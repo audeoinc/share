@@ -521,6 +521,16 @@ for (const t of ['__T_DIFF_SRC__', '__T_DIFF__']) {
     /`__UDF_RENDER__`\(analysis, options_json, CAST\(ref_index AS FLOAT64\)\)/
       .test(table));
 
+  // (3b) メモを繋ぐビューが ref_index / ref_label を落としていないか。
+  //      1 行 = 1 base × 1 基準なので、この 2 列が無いと**どの行がどの基準か
+  //      分からなくなる**。レポートの「基準」コントロールが使う列でもある。
+  //      基準がカードの中のタブだった頃は常に 0 の残骸だったので落として
+  //      いた ―― 行に分けたあとも落としたままだと、t_diff_src にはあるのに
+  //      t_diff に無い、という気づきにくい形で表に出る（実際に出した）。
+  add('メモを繋ぐビューが ref_index / ref_label を落としていない',
+    !/EXCEPT \([^)]*ref_index/.test(table) &&
+    !/EXCEPT \([^)]*ref_label/.test(table));
+
   // (4) 行数の上限があり、**それを描画側にも渡している**か。
   //     渡さないと、打ち切られたことをカードに書けない ―― 選べないだけなのに
   //     「グループが無い」と読めてしまう。

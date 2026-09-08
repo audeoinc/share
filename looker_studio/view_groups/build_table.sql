@@ -1362,8 +1362,14 @@ rendered AS (
     `__UDF_MARKDOWN__`(j.note_md) AS note_html
   FROM joined AS j
 )
+--
+-- **ref_index / ref_label は落とさない。** 1 行 = 1 base × 1 基準なので、
+-- この 2 列が無いと**どの行がどの基準なのか分からなくなる**。レポートの
+-- 「基準」コントロールはこの ref_label を使う。
+-- （基準がカードの中のタブだった頃は常に 0 と先頭ラベルの残骸だったので
+-- ここで落としていた。行に分けた時点で意味が戻っている。）
 SELECT
-  * EXCEPT (diff_html, ref_index, ref_label),
+  * EXCEPT (diff_html),
   -- 作り置きしたカードのメモ タブに、いま読んだメモを差し込む。目印は
   -- chrome.js の NOTE_MARK と同じ文字列（node check_sql.mjs が突き合わせる）。
   REPLACE(diff_html, '<!--VG_NOTE-->', note_html) AS diff_html

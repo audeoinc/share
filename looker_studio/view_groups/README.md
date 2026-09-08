@@ -1238,7 +1238,8 @@ viewlgc_t_diff_src  CLUSTER BY base（素のカード。メモ差し込み前）
   group_labels / group_sizes / suffixes / unmatched_count
   view_desc_md / diff_html
 
-viewlgc_vw_t_diff  上から ref_index / ref_label を除き、次を足したもの
+viewlgc_vw_t_diff  上に次を足したもの（ref_index / ref_label はそのまま残る。
+                   1 行 = 1 base × 1 基準なので、どの行がどの基準かを示す）
   has_note / has_view_desc / note_md / note_html
   note_updated_at / note_updated_by
   diff_html は目印をメモに差し替え済み。**シートの内容がその場で出る**
