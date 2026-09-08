@@ -119,6 +119,9 @@ DECLARE analysis_exclude_object_patterns ARRAY<STRING> DEFAULT [];
 -- 自動抽出した suffix 一覧に**足す**値。データセット名にも、その末尾にも
 -- 現れない suffix を混ぜたいとき（詳しくは下の説明）
 DECLARE suffix_extra_list ARRAY<STRING> DEFAULT [];
+-- base と suffix の間に挟まる語（枝番・版）の一覧。**suffix 側に取り込む。**
+-- 例: ['v2'] と書くと sales_v2_txjp の base が sales になる（詳しくは下の説明）
+DECLARE suffix_middle_list ARRAY<STRING> DEFAULT [];
 -- 別リージョンから運んできたメタデータを混ぜる送り元の一覧。
 --
 -- **空なら混ぜない**（このリージョンの INFORMATION_SCHEMA だけを見る。
@@ -252,8 +255,41 @@ DECLARE note_sheet_range STRING DEFAULT 'notes!A:E';
 --     **[B] の suffix_list とは別物。** あちらは一覧を丸ごと置き換える
 --     （書くと自動抽出が行われなくなる）。足したいだけならこちら。
 --     最終的にどうなったかは 5-4 が全部出す（suffix_origin に出どころが入る）。
---     枝番が増え続けるなら並べきれないので、そのときは View 名から正規表現で
---     取る仕組みが要る（いまは無い）。
+--
+--     **suffix ごとに 1 行ずつ要る。** 枝番が全 suffix に付くなら
+--     suffix_middle_list のほう（下）。あちらは掛け算で増やす。
+--   suffix_middle_list
+--     base と suffix の**間に挟まる語**の一覧。書いた語を suffix 側に取り込む。
+--
+--     View 名は '_' で繋がっているが、base のほうも '_' を含むので、
+--     **どこから suffix なのかは名前だけでは決まらない。**
+--
+--       sales_txjp        → base=sales     suffix=txjp      （迷いようがない）
+--       sales_v2_txjp     → base=sales_v2  suffix=txjp      （既定はこう解釈する）
+--                         → base=sales     suffix=v2_txjp   （こう読みたい）
+--
+--     どちらも名前としては成り立つので、**どちらに読むかは人が決めるしかない。**
+--     v2 を「間に挟まる語」だと宣言するのがこの設定:
+--
+--       suffix_middle_list = ['v2']
+--
+--     すると suffix 一覧に v2_<suffix> が全 suffix ぶん増える（txjp → v2_txjp、
+--     txus → v2_txus、…）。View 名との照合は**最長一致**なので、
+--     sales_v2_txjp は v2_txjp のほうで切れて base=sales になり、
+--     sales_txjp は txjp で切れて base=sales のまま。**両方が同じ base に並ぶ。**
+--
+--     suffix_extra_list との違いは掛け算になること。suffix が 20 個あっても
+--     書くのは 1 語で、20 個の組み合わせが増える。suffix ごとに 1 行ずつ
+--     並べる必要は無い。
+--
+--     2 段挟まるなら '_' で繋いで 1 語として書く（['v2_beta'] → v2_beta_txjp）。
+--     複数の語を並べれば、それぞれが全 suffix と組む（['v2','v3'] なら 2 倍）。
+--
+--     **末尾の導出（suffix_tail_lengths）のあとに掛かる。** つまり
+--     tail で増えた jp / us にも v2_jp / v2_us として組み合わさる。
+--     除外（suffix_exclude_list）は最後なので、要らない組み合わせは消せる。
+--
+--     何が増えたかは 5-4 が出す（suffix_origin = 'suffix_middle_list との組'）。
 --   snapshot_time_zone
 --     snapshot_date（いつ時点の内容かを表す列）をどの日付で刻むか。
 --     このツールはリージョンをまたいで使うので、置き場所によって変える。
@@ -906,8 +942,9 @@ suffix_base AS (
   ) AS suffix
   WHERE suffix IS NOT NULL AND suffix != ''
 ),
--- 実際に使う suffix 一覧。素のものに、その末尾 n 文字を足す。
+-- 導出した suffix 一覧。素のものに、その末尾 n 文字を足す。
 -- データセット名に現れない suffix を拾うため（mart_abjp の中の v_x_jp → 'jp'）。
+-- 中間語（suffix_middle_list）はこの結果と掛け算するので、先に切り出しておく。
 --
 -- **1 つの View 名に 2 つ以上の suffix が当たりうる。** 下の keyed は最長一致で
 -- 選ぶ（ORDER BY LENGTH(s.suffix) DESC）。UDF 側の extractSuffix も最長一致に
@@ -918,7 +955,7 @@ suffix_base AS (
 --
 -- suffix_extra_list はここで足す。**末尾の導出のあと**なので、書いた文字列が
 -- そのまま 1 つ増えるだけになる（'global' から 'al' は増えない）。
-suffixes AS (
+suffix_derived AS (
   SELECT DISTINCT suffix
   FROM (
     SELECT suffix FROM suffix_base
@@ -926,6 +963,24 @@ suffixes AS (
     SELECT SUBSTR(b.suffix, -n) AS suffix
     FROM suffix_base AS b, UNNEST(@suffix_tail_lengths) AS n
     WHERE n > 0 AND LENGTH(b.suffix) > n
+  )
+),
+suffixes AS (
+  SELECT DISTINCT suffix
+  FROM (
+    SELECT suffix FROM suffix_derived
+    UNION ALL
+    -- 中間語つき（suffix_middle_list）。base と suffix の間に挟まる語を
+    -- suffix 側に取り込む。**導出済みの一覧との掛け算**なので、末尾で
+    -- 増えた jp / us にも組み合わさる。
+    --
+    -- これで sales_v2_txjp が v2_txjp のほうで切れ（最長一致）、
+    -- sales_txjp と同じ base=sales に並ぶ。**照合の仕組みは変えていない。**
+    -- 一覧に載せさえすれば下の keyed も UDF 側の extractSuffix も
+    -- 最長一致で拾うので、増やすのはここだけで済む。
+    SELECT CONCAT(m, '_', d.suffix) AS suffix
+    FROM suffix_derived AS d, UNNEST(@suffix_middle_list) AS m
+    WHERE m IS NOT NULL AND m != ''
     UNION ALL
     SELECT x AS suffix
     FROM UNNEST(@suffix_extra_list) AS x
@@ -1289,6 +1344,7 @@ ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
 EXECUTE IMMEDIATE rendered_sql
 USING suffix_list AS suffix_list,
       suffix_extra_list AS suffix_extra_list,
+      suffix_middle_list AS suffix_middle_list,
       suffix_tail_lengths AS suffix_tail_lengths,
       suffix_exclude_list AS suffix_exclude_list,
       include_nested_fields AS include_nested_fields,
@@ -1572,7 +1628,9 @@ chosen AS (
   WHERE ARRAY_LENGTH(@suffix_list) = 0
   GROUP BY suffix
 ),
-listed AS (
+-- 導出まで（素 ＋ 末尾 n 文字）。中間語はこれと掛け算する。
+-- **本体の suffix_derived / suffixes と同じ順番で組み立てること。**
+derived AS (
   SELECT suffix, suffix_origin, detail FROM chosen
   UNION ALL
   SELECT
@@ -1582,6 +1640,17 @@ listed AS (
   FROM chosen AS c, UNNEST(@suffix_tail_lengths) AS n
   WHERE n > 0 AND LENGTH(c.suffix) > n
   GROUP BY suffix, suffix_origin
+),
+listed AS (
+  SELECT suffix, suffix_origin, detail FROM derived
+  UNION ALL
+  -- 中間語つき。導出済みの一覧との掛け算なので、1 語書くと suffix の数だけ増える。
+  SELECT
+    CONCAT(m, '_', d.suffix)                    AS suffix,
+    'suffix_middle_list との組'                  AS suffix_origin,
+    CONCAT(m, ' × ', d.suffix)                  AS detail
+  FROM (SELECT DISTINCT suffix FROM derived) AS d, UNNEST(@suffix_middle_list) AS m
+  WHERE m IS NOT NULL AND m != ''
   UNION ALL
   -- 強制的に足したもの。末尾の導出は掛からないので、書いた文字列がそのまま
   SELECT x, 'suffix_extra_list に明示', '(末尾の導出はしない)'
@@ -1603,6 +1672,7 @@ ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
 EXECUTE IMMEDIATE rendered_sql
 USING suffix_list AS suffix_list,
       suffix_extra_list AS suffix_extra_list,
+      suffix_middle_list AS suffix_middle_list,
       suffix_tail_lengths AS suffix_tail_lengths,
       suffix_exclude_list AS suffix_exclude_list;
 

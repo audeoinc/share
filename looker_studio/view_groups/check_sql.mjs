@@ -569,6 +569,56 @@ for (const base of ['analyze', 'render', 'erd', 'page', 'markdown', 'group_css',
     `chrome.js=${mark || 'なし'} / build_table.sql での使用 ${used} 回`);
 }
 
+// suffix 一覧の組み立てと、それを説明する 5-4 は**同じ材料**でなければ
+// ならない。片方だけ直すと、5-4 が「実際に使う suffix」と言いながら本体と
+// 違う一覧を出す。エラーにはならず、しかも 5-4 は原因を調べるための窓口
+// なので、食い違っていると調査そのものが誤った方向に進む。
+{
+  // 一覧を組み立てている材料（パラメータ）を両方から拾って突き合わせる。
+  // **除外は数えない。** 本体は suffixes の中で落とすが、5-4 はわざと落とさず
+  // excluded の列で「消えた」と見せる（消えた理由を読むための表なので、
+  // 行ごと消してしまうと何も分からない）。ここだけは食い違っていて正しい。
+  const params = (s) => [...new Set(
+    (s.match(/@suffix_[a-z_]+/g) || []))]
+    .filter((p) => p !== '@suffix_exclude_list').sort().join(',');
+  const build = table.match(/^suffixes AS \(([\s\S]*?)^\),$/m);
+  const report = table.match(/^listed AS \(([\s\S]*?)^\)$/m);
+  // 本体は suffix_derived 経由なので、そちらも材料に含める。
+  const derived = table.match(/^suffix_derived AS \(([\s\S]*?)^\),$/m);
+  const reportDerived = table.match(/^derived AS \(([\s\S]*?)^\),$/m);
+  add('suffix 一覧の組み立てと 5-4 が同じ材料を使っている',
+    build !== null && report !== null && derived !== null && reportDerived !== null &&
+    params(derived[1] + build[1]) === params(reportDerived[1] + report[1]),
+    build && report && derived && reportDerived
+      ? `本体=${params(derived[1] + build[1])} / 5-4=${params(reportDerived[1] + report[1])}`
+      : 'CTE を見つけられなかった（名前を変えたらここも直す）');
+  // 上で除外を数えないことにしたぶん、両者の扱いが逆であることは別に確かめる。
+  add('除外は本体では落とし、5-4 では列で見せる',
+    build !== null && report !== null &&
+    build[1].includes('NOT IN UNNEST(@suffix_exclude_list)') &&
+    !report[1].includes('@suffix_exclude_list') &&
+    /suffix IN UNNEST\(@suffix_exclude_list\) *AS excluded/.test(table));
+}
+
+// 中間語（suffix_middle_list）。導出済みの一覧と掛け算して suffix を増やす。
+// 掛け算の相手が suffix_base（末尾の導出より前）だと、jp / us との組が
+// できない。**suffix_derived と掛けること。**
+{
+  const build = table.match(/^suffixes AS \(([\s\S]*?)^\),$/m);
+  add('中間語は導出済みの一覧と掛け算する',
+    build !== null &&
+    /FROM suffix_derived AS d, UNNEST\(@suffix_middle_list\) AS m/.test(build[1]));
+}
+
+// 宣言と受け渡し。DECLARE しても USING に足し忘れると、EXECUTE IMMEDIATE の
+// 中で @suffix_middle_list が未定義になって落ちる。5-4 も同じ値を要る。
+{
+  const usings = (table.match(/^ *suffix_middle_list AS suffix_middle_list,$/gm) || []).length;
+  add('suffix_middle_list を宣言して両方の USING で渡している',
+    /^DECLARE suffix_middle_list ARRAY<STRING> DEFAULT \[\];$/m.test(table) &&
+    usings === 2, `USING に ${usings} 回（2 回であること）`);
+}
+
 // 'viewlgc' を直に書いた組み立てが残っていないか（system_name の付け忘れ）
 for (const [name, src] of [['build_table.sql', table], ['view_group_html.sql', udf]]) {
   add(`${name} に 'viewlgc_' のリテラル連結が残っていない`,

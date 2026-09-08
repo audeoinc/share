@@ -198,13 +198,52 @@ checks.push(['\'_\' を含む suffix でも base が揃う（vw_sample の 2 本
   return a.base === 'vw_sample' && a.suffix === 'abjp' &&
     b.base === 'vw_sample' && b.suffix === 'abjp_xyz123456';
 })()]);
-// 伏せ字に使う語。'_' があればそこが区分の切れ目で、真ん中では割らない
-// （abjp_xy / z123456 のような意味の無い語でリテラルを伏せないため）。
-checks.push(['suffix の語は \'_\' で割る（真ん中では割らない）',
+// 伏せ字に使う語。'_' があればそこが区分の切れ目で、**全体を**真ん中では
+// 割らない（abjp_xy / z123456 のような意味の無い語でリテラルを伏せないため）。
+// 割ったあとの区分それぞれには前後半の分割が掛かる。
+checks.push(['suffix の語は \'_\' で割る（全体を真ん中では割らない）',
   JSON.stringify(A.suffixWords('abjp_xyz123456')) ===
-    JSON.stringify(['abjp_xyz123456', 'abjp', 'xyz123456']) &&
+    JSON.stringify(['abjp_xyz123456', 'abjp', 'ab', 'jp', 'xyz123456']) &&
   // '_' が無い偶数長はこれまでどおり前後半
   JSON.stringify(A.suffixWords('abjp')) === JSON.stringify(['abjp', 'ab', 'jp'])]);
+// 中間語を取り込んだ suffix でも、末尾の区分から出る語は同じでなければ
+// ならない。違うと同じ base に並ぶ 2 本でリテラルの伏せ方が食い違い、
+// 環境差がロジック差として出る。
+checks.push(['中間語つきの suffix でも末尾の区分の語は同じ',
+  ['txjp', 'tx', 'jp'].every((w) => A.suffixWords('v2_txjp').includes(w)) &&
+  A.suffixWords('v2_txjp').includes('v2')]);
+// 2 文字の区分は割らない。割ると 1 文字の語になり、'v' や '2' で
+// リテラルを伏せてしまう。
+checks.push(['2 文字の区分は前後半に割らない',
+  JSON.stringify(A.suffixWords('v2_txjp')) ===
+    JSON.stringify(['v2_txjp', 'v2', 'txjp', 'tx', 'jp'])]);
+// 中間語を suffix 一覧に足せば base がそろう。**一覧に載っていれば最長一致で
+// 勝つ**ので、抽出側の仕組みはこれで足りる（増やすのは SQL 側の役目）。
+checks.push(['中間語つきの suffix を一覧に足すと base がそろう', (() => {
+  const list = ['txjp', 'txus', 'v2_txjp', 'v2_txus'];
+  const r = ['sales_txjp', 'sales_txus', 'sales_v2_txjp', 'sales_v2_txus']
+    .map((n) => A.extractSuffix(n, { suffixList: list }));
+  return r.every((x) => x && x.base === 'sales') &&
+    r.map((x) => x.suffix).join(',') === 'txjp,txus,v2_txjp,v2_txus';
+})()]);
+// 足さなければ v2 は base 側に残る（いまの既定。これが困るという話）。
+checks.push(['中間語を足さなければ base は sales_v2 のまま',
+  A.extractSuffix('sales_v2_txjp', { suffixList: ['txjp', 'txus'] }).base ===
+    'sales_v2']);
+// 中間語つきの suffix でリテラルが伏せられるかを通しで見る。
+// substitutable から 'string' を外すと、リテラルは suffix 由来の語でしか
+// 伏せられない。suffixWords が末尾の区分を割らないと 'jp' / 'us' が残り、
+// **同じロジックなのに v2 の 2 本が別グループに割れる**（1 → 3 グループ）。
+// 語彙の中身ではなくグループ分けで押さえる（壊れ方はこちらに出るため）。
+checks.push(['中間語つきでもリテラルが伏せられ 1 グループになる', (() => {
+  const suffixList = ['txjp', 'txus', 'v2_txjp', 'v2_txus'];
+  const ddl = (n) =>
+    `SELECT o.id FROM t AS o WHERE o.region = '${n.endsWith('jp') ? 'jp' : 'us'}'`;
+  const rows = suffixList.map((s) => ({ view_name: `sales_${s}`, ddl: ddl(s) }));
+  const a = A.analyze(rows, { suffixList, substitutable: ['entity', 'number'] });
+  return a.bases.length === 1 && a.bases[0].base === 'sales' &&
+    a.bases[0].groupCount === 1 && a.bases[0].viewCount === 4;
+})()]);
 checks.push(['suffixList にない末尾は対象外',
   A.extractSuffix('v_daily_sales_efus', listOpts) === null]);
 checks.push(['suffixList でも suffixParts と同じグループ分けになる',

@@ -333,13 +333,26 @@ function suffixWords(suffix, parts) {
   const words = [s];
   if (Array.isArray(parts) && parts.length > 0) {
     for (const p of parts) if (String(p).length >= 2) words.push(String(p));
-  } else if (s.indexOf('_') > 0) {
+  } else {
     // '_' を含む suffix は、そこが区分の切れ目。真ん中で割ると
     // abjp_xyz123456 が abjp_xy / z123456 になり、意味の無い語で
     // リテラルを伏せることになる（実際に足せる形なので防いでおく）。
-    for (const p of s.split('_')) if (p.length >= 2) words.push(p);
-  } else if (s.length % 2 === 0) {
-    words.push(s.slice(0, s.length / 2), s.slice(s.length / 2));
+    //
+    // **切れ目で割ったあと、区分の一つひとつにも前後半の分割を掛ける。**
+    // 掛けないと v2_txjp の語彙が [v2_txjp, v2, txjp] 止まりになり、
+    // txjp 単独の [txjp, tx, jp] と食い違う。同じ base に並ぶ 2 本なのに
+    // リテラルの 'jp' が片方でしか伏せられず、**環境差がロジック差として
+    // 出る**（中間語を suffix に取り込めるようにして初めて起きる形）。
+    //
+    // 前後半に割るのは 4 文字以上のときだけ。2 文字を割ると 1 文字の語に
+    // なり、'v' や '2' でリテラルを伏せてしまう。
+    for (const p of (s.indexOf('_') > 0 ? s.split('_') : [s])) {
+      if (p.length < 2) continue;
+      if (p !== s) words.push(p);
+      if (p.length >= 4 && p.length % 2 === 0) {
+        words.push(p.slice(0, p.length / 2), p.slice(p.length / 2));
+      }
+    }
   }
   const seen = {};
   const out = [];

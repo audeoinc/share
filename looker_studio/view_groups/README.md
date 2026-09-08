@@ -665,6 +665,7 @@ DECLARE analysis_exclude_dataset_patterns ARRAY<STRING> DEFAULT [];
 DECLARE analysis_include_object_patterns  ARRAY<STRING> DEFAULT [];
 DECLARE analysis_exclude_object_patterns  ARRAY<STRING> DEFAULT [];
 DECLARE suffix_extra_list ARRAY<STRING> DEFAULT [];       -- 自動抽出に足す suffix
+DECLARE suffix_middle_list ARRAY<STRING> DEFAULT [];      -- base と suffix の間の語
 DECLARE snapshot_time_zone STRING DEFAULT 'Asia/Tokyo';   -- snapshot_date の基準
 
 -- [B] 既定のままで動くもの
@@ -757,6 +758,7 @@ DECLARE target_project_id STRING DEFAULT NULL;
 | `suffix_pattern` | データセット名から suffix を切り出す正規表現（1 つ目のキャプチャ） |
 | `suffix_list` | suffix 一覧を丸ごと自分で決める。**書くと自動抽出は行われない（足すのではなく置き換える）** |
 | `suffix_extra_list` | 一覧に**足す** suffix。自動抽出はそのまま残り、末尾の導出は掛からない。1 つだけ強制的に足したいときはこちら（[A]） |
+| `suffix_middle_list` | base と suffix の間に挟まる語（枝番・版）。**導出済みの suffix 全部と掛け算**して一覧に足す。`['v2']` で `sales_v2_txjp` の base が `sales` になる（[A]） |
 | `suffix_tail_lengths` | 取り出した suffix の末尾 n 文字も suffix として扱う。既定の `[2]` で `abjp` → `jp` |
 | `suffix_exclude_list` | suffix 一覧から落とす値（正規表現ではなく完全一致） |
 | `include_nested_fields` | カラム定義に STRUCT の中身を行として出すか（既定 `TRUE`） |
@@ -1681,25 +1683,62 @@ DECLARE suffix_extra_list ARRAY<STRING> DEFAULT ['abjp_xyz123456'];
 終わらないので、自動抽出の値とは競合しない。末尾の導出は extra には掛からない
 ので `56` のようなゴミも増えない。
 
-> **suffix に `_` が入るのはこの書き方だけ。** 1 つの View 名に 2 つの suffix が
-> 当たりうるようになるので（`zz_abjp` と `abjp`）、**base を決める 2 か所は
-> どちらも最長一致**にしてある — SQL の `keyed`（`ORDER BY LENGTH(s.suffix) DESC`）
-> と UDF の `extractSuffix`。片方だけ変えると、行の `base` 列とカードの中身が
-> 食い違う（エラーは出ない）。`node test.mjs` がこの一致を見ている。
+> **`_` を含む suffix は最長一致で決まる。** `suffix_extra_list` と
+> `suffix_middle_list`（次の節）はどちらも `_` を含む値を一覧に載せるので、
+> 1 つの View 名に 2 つの suffix が当たりうる（`zz_abjp` と `abjp`）。
+> **base を決める 2 か所はどちらも最長一致**にしてある — SQL の `keyed`
+> （`ORDER BY LENGTH(s.suffix) DESC`）と UDF の `extractSuffix`。片方だけ
+> 変えると、行の `base` 列とカードの中身が食い違う（エラーは出ない）。
+> `node test.mjs` がこの一致を見ている。
 
-枝番が数個で固定ならこの書き方でよい。**増え続けるなら**、View 名から正規表現で
-suffix を取る仕組みが要る（いまは無い。データセット名に対する `suffix_pattern` と
-対になるもの）。逆に枝番付きを比べたくないなら、
-`analysis_exclude_object_patterns` で対象から外すほうが軽い。
+枝番が数個で固定ならこの書き方でよい。**全 suffix に同じ枝番が付くなら**
+次の `suffix_middle_list` のほう（掛け算で増やすので 1 語で済む）。逆に枝番付きを
+比べたくないなら、`analysis_exclude_object_patterns` で対象から外すほうが軽い。
 
 導出し忘れ（新しい地域が増えたなど）は**静かには壊れない**。その suffix を持つ
 View は「suffix 未認識」として単独で並び、確認クエリ 5-3 に出る。実際に使われて
 いる一覧と、それがどこから来たかは 5-4 で確かめられる。
 
-> **長さの違う suffix を混ぜても取り違えは起きない。** suffix に `_` は入らない
-> ので、`v_x_abjp` が `_jp` で終わることはない。1 つの View 名に 2 つの suffix が
-> 同時に当たることは原理的に無いので、`abjp` と `jp` を並べて安全。
-> （SQL 側は最長一致、UDF 側は一覧順で選ぶが、候補が 1 つしか無いので一致する。）
+#### base と suffix の境目を決める（`suffix_middle_list`）
+
+View 名は `_` で繋がっているが、**base のほうも `_` を含む。**だから
+「どこから suffix なのか」は名前だけでは決まらない。
+
+```
+sales_txjp      → base=sales     suffix=txjp      迷いようがない
+sales_v2_txjp   → base=sales_v2  suffix=txjp      既定はこう読む
+                → base=sales     suffix=v2_txjp   こう読みたい
+```
+
+どちらも名前としては成り立つので、**どちらに読むかは人が決めるしかない。**
+`v2` を「base と suffix の間に挟まる語」だと宣言するのがこの設定。
+
+```sql
+-- [A] 環境ごとに必ず見るもの
+DECLARE suffix_middle_list ARRAY<STRING> DEFAULT ['v2'];
+```
+
+これで suffix 一覧に `v2_<suffix>` が**全 suffix ぶん**増える。照合は最長一致
+なので `sales_v2_txjp` は `v2_txjp` で切れ、`sales_txjp` は `txjp` で切れて、
+**両方が同じ base = `sales`** に並ぶ。
+
+| | 書く量 | 増え方 |
+|---|---|---|
+| `suffix_extra_list` | suffix ごとに 1 行 | 書いた文字列がそのまま 1 つ |
+| `suffix_middle_list` | 語ごとに 1 行 | **導出済みの suffix 全部との掛け算** |
+
+suffix が 20 個あっても書くのは `['v2']` の 1 語で、20 通りが増える。
+2 段挟まるなら `['v2_beta']` のように `_` で繋いで 1 語として書く。
+
+**末尾の導出（`suffix_tail_lengths`）のあとに掛かる**ので、`jp` / `us` にも
+`v2_jp` / `v2_us` として組む。要らない組み合わせは `suffix_exclude_list` で消せる
+（除外は最後に 1 回だけ効く）。何が増えたかは 5-4 が
+`suffix_origin = 'suffix_middle_list との組'` で出す。
+
+> **照合の仕組みは変えていない。** 一覧に載せさえすれば `keyed` も
+> `extractSuffix` も最長一致で拾う。だから増やすのは SQL の `suffixes` CTE
+> だけで、UDF 側は 1 行も変えていない（一覧は `options_json` で渡している）。
+> SQL と JS が食い違いようがないので、この形を選んである。
 
 ##### 短い suffix を足す前に、View 名の重複を確かめる
 
