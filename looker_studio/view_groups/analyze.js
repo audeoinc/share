@@ -527,20 +527,22 @@ function alphaMap(a, b, opts) {
  * 同じ「値の並び」を持つ位置には同じパラメータ名を割り当てるので、
  * 参照テーブルの suffix のように複数箇所に出るものは 1 つのパラメータにまとまる。
  */
-function parameterize(members) {
-  const n = members[0].tokens.length;
+function parameterize(members, rep) {
+  const n = rep.tokens.length;
   const byTuple = new Map();
   const params = [];
   const out = [];
+  // メンバは代表との差分（diff）だけを持つ。無い添字は代表と同じ文字。
+  const textAt = (m, i) => (m.diff.has(i) ? m.diff.get(i) : rep.raw[i].text);
   for (let i = 0; i < n; i++) {
     // 表示は raw（元の空白・改行）を使う。tokens は比較用に空白を潰してあるので、
     // そのまま出すと 1 行に潰れて差分ペインに出せなくなる。
-    // 空白は整形の差であってロジックの差ではないため、先頭メンバのものを採用する。
-    if (members[0].tokens[i].kind === 'space') {
-      out.push(members[0].raw[i].text);
+    // 空白は整形の差であってロジックの差ではないため、代表のものを採用する。
+    if (rep.tokens[i].kind === 'space') {
+      out.push(rep.raw[i].text);
       continue;
     }
-    const texts = members.map((m) => m.raw[i].text);
+    const texts = members.map((m) => textAt(m, i));
     let allSame = true;
     for (let j = 1; j < texts.length; j++) if (texts[j] !== texts[0]) { allSame = false; break; }
     if (allSame) { out.push(texts[0]); continue; }
@@ -550,7 +552,9 @@ function parameterize(members) {
       byTuple.set(key, name);
       const values = {};
       members.forEach((m, j) => { values[m.suffix] = texts[j]; });
-      params.push({ name, kind: members[0].raw[i].kind, values });
+      // 種類は代表から採る。α 等価なら同じ添字の種類は一致する
+      // （食い違えば別グループになっているので、ここには来ない）。
+      params.push({ name, kind: rep.raw[i].kind, values });
     }
     out.push('{{' + byTuple.get(key) + '}}');
   }
@@ -567,7 +571,25 @@ function parameterize(members) {
 function groupByLogic(views, opts) {
   const stripOpts = !(opts && opts.stripOptions === false);
   const suffixAware = !(opts && opts.suffixAware === false);
-  const prepared = views.map((v) => {
+  // **トークン列はグループの代表ぶんしか残さない。**
+  //
+  // 以前は全 View を先に prepared に展開していた。raw は
+  // { kind, text } の配列で、3 KB の SQL が 560 トークン ≒ 37 KB になる
+  // （オブジェクトの分だけ 12 倍に膨らむ）。View が 120 本あれば 4.5 MB で、
+  // リージョンを足すたびに増える。**これが UDF のメモリを使い切っていた**
+  // （Resources exceeded during execution: UDF out of memory）。
+  //
+  // ところが同じグループのメンバは α 等価、つまり**実体名と値しか違わない。**
+  // だから代表の raw と「違う添字だけ」を持てば元に戻せる。保持量は
+  //   従来  View 数 × SQL の大きさ
+  //   いま  グループ数 × SQL の大きさ ＋ 差分
+  // になる。リージョンを足しても増えるのはメンバ数であってグループ数では
+  // ないので、**リージョンの本数がメモリから外れる**のが効く。
+  //
+  // 添字が揃うことは normalizeSpace が 1 対 1（空白の文字だけ差し替える）
+  // であることと、α 等価が長さと種類の一致を要求することから言える。
+  const groups = [];
+  for (const v of views) {
     let raw = tokenizeSql(v.ddl);
     // OPTIONS はメタデータ。既定で落とす（stripOptions: false で無効化）
     if (stripOpts) raw = stripOptionsClause(raw);
@@ -575,23 +597,27 @@ function groupByLogic(views, opts) {
     raw = markEntities(raw);
     // raw は表示用（元の整形を保つ）、tokens は比較用
     //   空白を潰し、さらに自分の suffix を伏せ字にする
-    const tokens = normalizeSpace(raw);
-    return {
-      ...v,
-      raw,
-      tokens: maskTokens(tokens, suffixAware ? v.suffix : null, v.parts, opts),
-    };
-  });
-
-  const groups = [];
-  for (const v of prepared) {
+    const tokens = maskTokens(normalizeSpace(raw), suffixAware ? v.suffix : null,
+      v.parts, opts);
+    // ddl は入力の文字列をそのまま指すだけ（複製ではない）ので持っていてよい。
+    // 重かったのはトークンの配列のほうで、文字列の参照は 1 本 8 バイト。
+    const meta = { viewName: v.viewName, suffix: v.suffix, parts: v.parts, ddl: v.ddl };
     // α 等価は推移的（全単射の合成）なので、代表 1 本と比べれば足りる
     let hit = null;
     for (const g of groups) {
-      if (alphaMapDetail(g.members[0].tokens, v.tokens, opts).ok) { hit = g; break; }
+      if (alphaMapDetail(g.rep.tokens, tokens, opts).ok) { hit = g; break; }
     }
-    if (hit) hit.members.push(v);
-    else groups.push({ members: [v] });
+    if (hit) {
+      // 代表と違う添字だけ控えて、この View の raw / tokens は手放す。
+      const diff = new Map();
+      for (let i = 0; i < raw.length; i++) {
+        if (raw[i].text !== hit.rep.raw[i].text) diff.set(i, raw[i].text);
+      }
+      hit.members.push({ ...meta, diff });
+    } else {
+      const rep = { ...meta, raw, tokens };
+      groups.push({ rep, members: [{ ...meta, diff: new Map() }] });
+    }
   }
 
   // 大きいグループを先頭に（比較の基準に使う）
@@ -602,21 +628,27 @@ function groupByLogic(views, opts) {
   // 基準ごとに要る。全順序対の「最初の差」を持っておく。
   // グループ数はせいぜい数個なので、G² でも走査は実質ゼロ。
   // 向きで理由が変わりうる（inconsistent / not-injective）ため対称にはしない。
-  const reps = groups.map((g) => g.members[0]);
+  const reps = groups.map((g) => g.rep);
 
   return groups.map((g, i) => {
     const members = g.members
       .slice()
       .sort((x, y) => String(x.suffix).localeCompare(String(y.suffix)));
-    const p = parameterize(members);
+    // 並べ替えた先頭ではなく**代表**を渡す。トークン列を持っているのは
+    // 代表だけで、メンバは代表との差分しか持たない。
+    const p = parameterize(members, g.rep);
     // missBy[k] = 「グループ k を基準にしたとき、この群がなぜ別扱いか」
     const missBy = reps.map((r, k) => (k === i ? null : {
       vs: r.suffix,
-      detail: alphaMapDetail(r.tokens, g.members[0].tokens, opts),
+      detail: alphaMapDetail(r.tokens, g.rep.tokens, opts),
     }));
     return {
       suffixes: members.map((m) => m.suffix),
-      members,
+      // 差分は復元に使い終わったので落とす（ここから先は誰も見ない）。
+      // ddl は残す。suffix を認識できなかった View はこれが唯一のソースで、
+      // 落とすと画面から消える。文字列の参照なので大きさは変わらない。
+      members: members.map((m) =>
+        ({ viewName: m.viewName, suffix: m.suffix, parts: m.parts, ddl: m.ddl })),
       sql: p.sql,
       params: p.params,
       missBy,

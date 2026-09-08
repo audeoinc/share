@@ -769,6 +769,33 @@ checks.push(['予約語と識別子を区別する',
 
 log('\n=== 検証 ===');
 let failed = 0;
+// --- 解析中に抱えるトークン列の量 --------------------------------------
+// グループのメンバはトークン列を持たない（代表だけが持つ）。持たせると
+// 保持量が「View 数 × SQL の大きさ」に戻り、リージョンを足すたびに増えて
+// UDF のメモリを使い切る（Resources exceeded: UDF out of memory）。
+// 実測では 1920 View で 190MB → 16MB。**戻すと静かに落ちるようになる**ので、
+// 結果の形で押さえておく。
+{
+  const rows = S.sampleRows().map((r) => ({ view_name: r.view_name, ddl: r.ddl }));
+  const a = A.analyze(rows, { suffixParts: S.SUFFIX_PARTS });
+  const members = a.bases.flatMap((b) => b.groups.flatMap((g) => g.members));
+  checks.push(['メンバはトークン列を持たない',
+    members.length > 0 && members.every((m) => !m.raw && !m.tokens && !m.diff)]);
+  // 復元に使う情報は残っている（suffix を認識できない View の唯一のソース）。
+  checks.push(['メンバは名前と SQL は持つ',
+    members.every((m) => typeof m.viewName === 'string' && typeof m.ddl === 'string')]);
+}
+// 代表との差分から元の文字を復元しているので、メンバの並び順に依存しない。
+// 並べ替えは suffix 順で、代表（＝最初に現れた View）とは限らないため。
+{
+  const rows = S.sampleRows().map((r) => ({ view_name: r.view_name, ddl: r.ddl }));
+  const key = (r) => JSON.stringify(r.bases.map((b) => b.groups.map(
+    (g) => ({ s: g.suffixes, sql: g.sql, p: g.params }))));
+  const asIs = A.analyze(rows, { suffixParts: S.SUFFIX_PARTS });
+  const flipped = A.analyze(rows.slice().reverse(), { suffixParts: S.SUFFIX_PARTS });
+  checks.push(['View の並び順を変えても sql と params は同じ', key(asIs) === key(flipped)]);
+}
+
 for (const [name, ok] of checks) {
   if (!ok) failed++;
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`);
