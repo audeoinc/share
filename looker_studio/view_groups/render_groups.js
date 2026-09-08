@@ -316,10 +316,8 @@ function chromeCss() {
     `.vg-r{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}`,
     `.vg-tablist{display:flex;flex-wrap:wrap;gap:4px;border-bottom:1px solid #D0D7DE;margin-bottom:-1px}`,
     // **未選択にも地の色を入れる。** 入れないと未選択が透明＝白地になり、
-    // 選択中（白）と見分けが付かない。手掛かりが 1px の枠線と文字の濃さだけに
+    // 選択中と見分けが付かない。手掛かりが 1px の枠線と文字の濃さだけに
     // なるので、実際に「選択しているタブの色が変わらない」と読まれた。
-    // 選択中はパネルと同じ白で、下辺を持たないぶんパネルと繋がって見える
-    // （フォルダのつまみ）。この対比は未選択が白でないことで初めて成立する。
     `.vg-tab{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;` +
       `border:1px solid #D0D7DE;background:#F6F8FA;` +
       `border-bottom:none;border-radius:6px 6px 0 0;color:#57606A;cursor:pointer;user-select:none;font-weight:600}`,
@@ -478,14 +476,24 @@ function chromeCss() {
     rules.push(TAB_PATHS.map((path) => `.vg-or${i}:checked ~ ${path}.vg-ot${i}`).join(',') +
       `{background:#24292F;border-color:#24292F;color:#fff}`);
   }
-  // 基準グループのタブ本体。選択中は基準ペインと同じ薄い赤にする
-  // （左ペインに出っぱなしになる側の色と結び付ける）。
   // 内側のタブ本体。ID ではなくクラスで書くので、CSS を静的に保てる。
+  //
+  // **選択中は比較ペインと同じ薄い緑にする。** このタブが選ぶのは「右ペインに
+  // 出る側」なので、その色を持たせる。左の基準タブが基準ペインの薄い赤
+  // （.vg-tbase）を持っているのと同じ理屈で、タブの色がそのまま
+  // 「どちらのペインの話か」を指す。
+  //   基準ペイン #E17B7B → 地 #fbeded / 枠 #efb6b6 / 印 #f6d7d7・#87494a
+  //   比較ペイン #93AE68 → 地 #f0f4ea / 枠 #c4d2ac / 印 #dfe7d2・#58683e
+  // どちらも render.js の paneColors から出た薄い色。既定値を焼き込んで
+  // いるので、opts.colors.afterColor を変えたらここも直す。
+  //
+  // 以前は白（＝パネルと同じ）だった。未選択も白地だったので**白 → 白**に
+  // なり、切り替えは効いているのに「色が変わらない」と読まれた。
   for (let i = 1; i <= MAX_TABS; i++) {
     rules.push(`.vg-r${i}:checked ~ .vg-panels > .vg-p${i}{display:block}`);
     rules.push(`.vg-r${i}:checked ~ .vg-tablist > .vg-t${i}` +
-      `{background:#fff;border-color:#D0D7DE;color:#24292F}`);
-    rules.push(`.vg-r${i}:checked ~ .vg-tablist > .vg-t${i} .vg-tabn{background:#DDF4FF;color:#0969DA}`);
+      `{background:#f0f4ea;border-color:#c4d2ac;color:#24292F}`);
+    rules.push(`.vg-r${i}:checked ~ .vg-tablist > .vg-t${i} .vg-tabn{background:#dfe7d2;color:#58683e}`);
   }
   return rules.join('\n');
 }
