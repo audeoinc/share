@@ -315,7 +315,13 @@ function chromeCss() {
     // タブ
     `.vg-r{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}`,
     `.vg-tablist{display:flex;flex-wrap:wrap;gap:4px;border-bottom:1px solid #D0D7DE;margin-bottom:-1px}`,
-    `.vg-tab{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border:1px solid transparent;` +
+    // **未選択にも地の色を入れる。** 入れないと未選択が透明＝白地になり、
+    // 選択中（白）と見分けが付かない。手掛かりが 1px の枠線と文字の濃さだけに
+    // なるので、実際に「選択しているタブの色が変わらない」と読まれた。
+    // 選択中はパネルと同じ白で、下辺を持たないぶんパネルと繋がって見える
+    // （フォルダのつまみ）。この対比は未選択が白でないことで初めて成立する。
+    `.vg-tab{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;` +
+      `border:1px solid #D0D7DE;background:#F6F8FA;` +
       `border-bottom:none;border-radius:6px 6px 0 0;color:#57606A;cursor:pointer;user-select:none;font-weight:600}`,
     `.vg-tab:hover{background:#EAEEF2;color:#24292F}`,
     // 基準タブ。左ペインに出っぱなしなので選択状態で固定する（押しても切り替わらない）。
