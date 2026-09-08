@@ -8,11 +8,6 @@
  */
 
 const MAX_TABS = 12; // 静的 CSS が面倒を見るタブ数の上限
-// 基準タブ（ロジック差分の中）も静的 CSS で面倒を見る。実際に載せる枚数は
-// 下の予算で決めるので、これは CSS を用意しておく上限。
-const MAX_REF_TABS = 12;
-// SQL タブ（View ごとの素の SQL）のタブ数の上限。ここだけグループではなく
-// View 単位なので、同じ base でも枚数が桁ひとつ多くなりうる。多めに取ってある。
 const MAX_SQL_TABS = 24;
 // note タブの上段（View の description）のタブ数の上限。description が
 // 何種類に割れているかで決まる。全 View が別々の説明を持てば View 数まで
@@ -22,24 +17,6 @@ const MAX_DESC_TABS = 16;
 // 中でラベルが割れているときだけで、そのときも「揃っている多数派 ＋ 外れた
 // 数本」の形になる。description ほど散らばらないので少なめでよい。
 const MAX_LABEL_TABS = 8;
-// 1 レコードに載せる差分の上限。
-//
-// **これは「重くしない」ための値ではなく、「行が壊れない」ための値。**
-// 基準を 1 つ増やすたびに比較ペインがグループ数ぶん増える（全部で G×(G−1) 枚）
-// ので、グループが極端に多い base が 1 つ紛れ込むと 1 行が BigQuery の上限
-// （クエリ結果の 1 行 100 MB）を超え、**日次の INSERT ごと落ちる**。カードが
-// 欠けるよりパイプラインが止まるほうが困るので、そこだけは止める。
-//
-// 40 MB にしてあるのは、100 MB に対して余裕を取りつつ、実データでは絶対に
-// 当たらない位置に置くため。実測（あるプロジェクトの全 base）で、基準 1 つ
-// ぶんの最大が 690 KB・大半は 490 KB 以下だった。G=6 でも 4 MB 程度で、
-// 40 MB には 1 桁足りない。
-//
-// 以前は 600 KB にしていて、3 グループ × 500 行の SQL で通常の運用のまま
-// 当たっていた。「基準タブが 1 枚しか出ない」という、故障と見分けの付かない
-// 形で表に出る。見積もりで決めた値がこうなるので、実測に合わせてある。
-const REF_BUDGET = 40 * 1024 * 1024;
-
 /**
  * 外側のタブ。左から並ぶ順で、先頭が既定の表示。
  * 数と順序は chromeCss() の規則と対で決まるので、ここだけを直せば両方動く。
@@ -89,14 +66,16 @@ const NOTE_MARK = '<!--VG_NOTE-->';
  * note タブ）。原因が「CSS を貼っていない」であることは画面から読み取れない。
  *
  * そこでカード側に世代の印を埋め、**その世代の CSS だけが消せる**ようにする。
- *   カード  <div class="vg-cssgen4" style="…">CSS が古い</div>
- *   CSS     .vg-cssgen4{display:none}
+ *   カード  <div class="vg-cssgen5" style="…">CSS が古い</div>
+ *   CSS     .vg-cssgen5{display:none}
  * 古い CSS にはこの規則が無いので、案内がそのまま出る。style 属性で直に
  * 飾ってあるので、CSS が 1 行も効いていなくても読める形で出る。
  *
- * 世代 4 ＝ note タブのラベル（.vg-lb*）。また頭ごと増えたので上げてある。
+ * 世代 4 ＝ note タブのラベル（.vg-lb*）。
+ * 世代 5 ＝ 基準の見出し（.vg-refhead / .vg-refname / .vg-refnote）。基準を
+ *          選ぶタブ（.vg-b*）を廃して行に分けたので、規則ごと入れ替わった。
  */
-const CSS_GEN = 4;
+const CSS_GEN = 5;
 
 /**
  * CSS が古いときだけ出る案内。上の CSS_GEN を参照。
@@ -231,9 +210,8 @@ function wrapPage(diffHtml, erdHtml, colsHtml, sqlHtml, noteHtml, base, labelSpl
 }
 
 module.exports = {
-  MAX_TABS, MAX_REF_TABS, MAX_SQL_TABS, MAX_DESC_TABS, MAX_LABEL_TABS,
-  MAX_OUTER_TABS,
-  REF_BUDGET, OUTER_TABS,
+  MAX_TABS, MAX_SQL_TABS, MAX_DESC_TABS, MAX_LABEL_TABS,
+  MAX_OUTER_TABS, OUTER_TABS,
   NOTE_MARK, CSS_GEN, cssGuard,
   esc, hashId, label, badge, header, notice, KIND_TEXT, kindText, wrapPage,
 };

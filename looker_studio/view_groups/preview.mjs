@@ -377,14 +377,14 @@ const checks = [
   ['グループ数バッジが出る', h3.includes('3 グループ')],
   ['ペイン見出しに suffix が列記される', h3.replace(/<[^>]*>/g, '').includes('abjp, abuk, abus')],
   ['3 グループは既定でタブ', h3.includes('vg-tablist')],
-  // 基準はカードの中で選ぶ（レコードは base ごとに 1 行）。基準ごとに
-  // 比較タブがグループ数ぶんできるので、比較タブは G×G 枚になる。
-  ['基準タブがグループ数ぶん出る',
-    (h3.match(/class="vg-btab /g) || []).length === base3.groupCount &&
-    (h3.match(/class="vg-bpanel /g) || []).length === base3.groupCount],
-  ['基準ごとの比較タブがグループ数と一致する',
-    (h3.match(/class="vg-tab /g) || []).length === base3.groupCount ** 2 &&
-    (hMany.match(/class="vg-tab /g) || []).length === baseMany.groupCount ** 2],
+  // **基準は行が持つ**（レコードは base × 基準）。カードに載る基準は 1 つで、
+  // 選ぶタブは無い。比較タブはその基準ぶんの G 枚（基準自身 ＋ 相手 G−1）。
+  ['基準は 1 つで、見出しに出る',
+    h3.includes('vg-refhead') && h3.includes('基準グループ') &&
+    !h3.includes('vg-btab') && !h3.includes('vg-bpanel')],
+  ['比較タブがグループ数と一致する（G×G ではなく G）',
+    (h3.match(/class="vg-tab /g) || []).length === base3.groupCount &&
+    (hMany.match(/class="vg-tab /g) || []).length === baseMany.groupCount],
   ['タブ見出しに suffix が列記される',
     ['cdjp, cduk, cdus', 'efjp, efuk, efus']
       .every((s) => h3.replace(/<[^>]*>/g, '').includes(s))],
@@ -398,9 +398,8 @@ const checks = [
   ['1 グループはペインが 1 枚', (h1.match(/<th colspan=/g) || []).length === 1],
   ['1 グループでも基準タブが 1 枚出る',
     (h1.match(/class="vg-tab /g) || []).length === 1 && h1.includes('vg-tbase')],
-  ['3 グループは基準ごとに 2 ペイン（全部で G×(G-1) 組）',
-    (h3.match(/<th colspan=/g) || []).length ===
-      2 * base3.groupCount * (base3.groupCount - 1)],
+  ['3 グループで比較は 2 組（G×(G-1) ではなく G-1）',
+    (h3.match(/<th colspan=/g) || []).length === 2 * (base3.groupCount - 1)],
   ['1 グループでも SQL は出る', h1.replace(/<[^>]*>/g, '').includes('SELECT')],
   ['1 グループに差分マーカーが出ない', !/[+−]<\/td>/.test(h1)],
   ['パラメータ一覧が出る', h3.includes('パラメータ化した箇所')],
@@ -419,9 +418,9 @@ const checks = [
   ['誤解を招く副題 (after)/(reference) が残っていない',
     !/\((?:before|after|base|reference)\)/.test(parts.map((p) => p.html).join(''))],
   ['副題が View 数になっている', h3.includes('基準 / 3 View')],
-  ['2 グループもタブ（基準 2 枚 × 比較 2 枚）',
-    (parts[1].html.match(/class="vg-btab /g) || []).length === 2 &&
-    (parts[1].html.match(/class="vg-tab /g) || []).length === 4],
+  ['2 グループは比較タブ 2 枚（基準 ＋ 相手 1 枚）',
+    !parts[1].html.includes('vg-btab') &&
+    (parts[1].html.match(/class="vg-tab /g) || []).length === 2],
   ['なぜ別グループになったかを出す', h3.includes('なぜ別グループになったか')],
   ['未認識の View はタイトルが View 名', hOdd.includes('v_legacy_report')],
   ['未認識の View にバッジが付く', hOdd.includes('suffix 未認識')],
@@ -449,9 +448,9 @@ const checks = [
   ['複雑な SQL も描ける',
     parts[5].html.includes('vg-root') &&
     parts[5].html.replace(/<[^>]*>/g, '').includes('QUALIFY')],
-  ['複雑な SQL は 2 グループで比較タブが 4 枚（2 基準 × 2）',
+  ['複雑な SQL は 2 グループで比較タブが 2 枚',
     baseComplex.groupCount === 2 &&
-    (parts[5].html.match(/class="vg-tab /g) || []).length === 4],
+    (parts[5].html.match(/class="vg-tab /g) || []).length === 2],
   ['複雑な SQL のパラメータに実体名の種別が出る',
     parts[5].html.includes('実体名')],
   // --- パラメータの tooltip ---------------------------------------------
@@ -484,10 +483,10 @@ const checks = [
       { view_name: 'v_y_cdjp', ddl: "SELECT 'Z' AS k, b FROM t_cdjp" },
       { view_name: 'v_y_cdus', ddl: "SELECT 'Z' AS k, b FROM t_cdus" },
     ], { suffixParts: [['ab', 'cd'], ['jp', 'us']] }).bases[0];
-    // 基準ごとに同じ比較がもう一度出るので、目印の数はグループ数ぶん増える
+    // 基準は 1 つなので、目印は 1 基準ぶん
     const h = R.renderBase(b, {});
     const marks = h.match(/\{(?:<[^>]+>)*\{(?:<[^>]+>)*P\d+(?:<[^>]+>)*\}(?:<[^>]+>)*\}/g) || [];
-    return marks.length === 3 * b.groups.length && marks.some((m) => m.includes('<')) &&
+    return marks.length === 3 && marks.some((m) => m.includes('<')) &&
       (h.match(/class="vg-ph/g) || []).length === marks.length;
   })()],
   ['左右のペインで別の対応表を使う', (() => {
@@ -496,59 +495,60 @@ const checks = [
     return new Set(tips).size > 1;
   })()],
   // --- 基準の切り替え -----------------------------------------------
-  // 打ち切りが通常の運用で当たると「基準を選べない」という、故障と見分けの
-  // 付かない形で表に出る。歯止めは 1 行が BigQuery の上限を超えるのを防ぐ
-  // ためのものなので、実データより十分大きいところまで当たらないこと。
-  // 長い SQL（500 行）× 6 グループ = 15 MB でもそろう。実測は基準 1 つぶんの
-  // 最大が 690 KB なので、ここまで来ることはない。
-  ['実データより大きい入力でも基準タブが全部そろう', (() => {
+  // 基準は行が持つ。1 行 1 基準にすることで、比較ペインが G×(G−1) から
+  // G−1 に落ちる（**グループ数の二乗が線形になる**）。リージョンをまたいで
+  // G が伸びたときに UDF のメモリを使い切ったのがこの二乗。
+  ['大きい入力でも 1 行は基準 1 つぶんに収まる', (() => {
     const long = (suf, extra) =>
       'SELECT\n' + Array.from({ length: 500 },
         (_, i) => `  col_${i} + ${extra} AS c_${i},`).join('\n') +
       `\n  1 AS tail\nFROM t_${suf}`;
-    const parts = [['ab', 1], ['cd', 2], ['ef', 3], ['gh', 4], ['ij', 5], ['kl', 6]];
+    const ps = [['ab', 1], ['cd', 2], ['ef', 3], ['gh', 4], ['ij', 5], ['kl', 6]];
     const rows = [];
-    for (const [p, extra] of parts) {
+    for (const [p, extra] of ps) {
       for (const r of ['jp', 'us']) rows.push({ view_name: `v_l_${p}${r}`, ddl: long(p + r, extra) });
     }
-    const b = A.analyze(rows, { suffixParts: [parts.map((p) => p[0]), ['jp', 'us']],
+    const b = A.analyze(rows, { suffixParts: [ps.map((p) => p[0]), ['jp', 'us']],
       substitutable: ['entity'] }).bases[0];
-    const h = R.renderBase(b, {});
+    const one = R.renderBase(b, { refIndex: 0 });
     return b.groups.length === 6 &&
-      (h.match(/class="vg-btab /g) || []).length === 6 &&
-      !h.includes('基準にできるのは先頭') &&
-      // 15 MB 前後。BigQuery の 1 行 100 MB には遠い
-      Buffer.byteLength(h) > 10 * 1024 * 1024;
+      // 比較は G−1 組。基準を選ぶタブは無い
+      (one.match(/<th colspan=/g) || []).length === 2 * (b.groups.length - 1) &&
+      !one.includes('vg-btab') &&
+      // 全基準を 1 枚に載せていた頃は 15 MB 前後だった。1 基準なら数 MB
+      Buffer.byteLength(one) < 5 * 1024 * 1024;
   })()],
-  ['基準タブの見出しがグループの並びどおり', (() => {
-    const names = [...h3.matchAll(/class="vg-btab vg-bt\d+"[^>]*>([^<]*)/g)].map((m) => m[1]);
-    return names.join(' | ') === base3.groups.map(Ch.label).join(' | ');
+  ['基準ごとに左ペインが入れ替わる', (() => {
+    // refIndex を変えると、その基準が左ペインに出る
+    return base3.groups.every((g, i) =>
+      R.renderBase(base3, { refIndex: i })
+        .indexOf(`基準</span>${Ch.label(g)}`) > 0);
   })()],
-  ['基準パネルごとに左ペインが入れ替わる', (() => {
-    // 各基準パネルの先頭の「基準」タブが、その基準のグループになっている
-    const panels = h3.split('<div class="vg-bpanel ').slice(1);
-    return panels.length === base3.groupCount && panels.every((p, i) =>
-      p.indexOf(`基準</span>${Ch.label(base3.groups[i])}`) > 0);
-  })()],
-  ['基準パネルはどれも同じ枚数の比較を持つ', (() => {
-    const panels = h3.split('<div class="vg-bpanel ').slice(1);
-    const panes = (p) => (p.match(/<th colspan=/g) || []).length;
-    return panels.every((p) => panes(p) === 2 * (base3.groupCount - 1));
-  })()],
-  ['「なぜ別グループになったか」が基準パネルごとの向きになる', (() => {
-    const panels = h3.split('<div class="vg-bpanel ').slice(1);
-    return panels.every((p, i) => {
+  ['基準ごとに「なぜ別グループになったか」の向きが変わる', (() => {
+    return base3.groups.every((g, i) => {
+      const p = R.renderBase(base3, { refIndex: i });
       const vs = [...p.matchAll(/class="vg-mvs">vs ([^<]*)</g)].map((m) => m[1]);
       // 全部その基準に対する差で、基準そのものは並ばない
       return vs.length === base3.groupCount - 1 &&
-        vs.every((v) => v === Ch.label(base3.groups[i]));
+        vs.every((v) => v === Ch.label(g));
     });
   })()],
-  ['基準パネルごとにラジオの名前を分ける（他の基準の比較タブが開かなくなる）', (() => {
-    const names = [...h3.matchAll(/class="vg-r vg-r1" type="radio" name="([^"]+)"/g)]
-      .map((m) => m[1]);
-    return names.length === base3.groupCount && new Set(names).size === names.length;
+  ['基準の見出しに、その基準の suffix と View 数が出る', (() => {
+    const h = R.renderBase(base3, { refIndex: 1 });
+    const m = h.match(/class="vg-refname">([^<]*)<span class="vg-tabn">(\d+)</);
+    return m !== null && m[1] === Ch.label(base3.groups[1]) &&
+      Number(m[2]) === base3.groups[1].members.length;
   })()],
+  ['基準を載せきれないときは、選べないだけだと書く', (() => {
+    const capped = R.renderBase(base3, { refIndex: 0, maxRefRows: 2 });
+    return base3.groupCount > 2 &&
+      capped.includes('基準にできるのは先頭 2 グループまで') &&
+      capped.includes(`全 ${base3.groupCount} 件`) &&
+      !R.renderBase(base3, { refIndex: 0, maxRefRows: 99 }).includes('基準にできるのは');
+  })()],
+  ['基準を選ぶタブの機構が残っていない',
+    !R.chromeCss().includes('.vg-btab') && !R.chromeCss().includes('.vg-bpanel') &&
+    !parts.map((p) => p.html).join('').includes('vg-btab')],
   ['解析は全順序対の差を持つ（基準ごとに出し分けられる）',
     base3.groups.every((g, i) => g.missBy.length === base3.groupCount &&
       g.missBy[i] === null &&
@@ -711,7 +711,7 @@ const checks = [
     return at(1) < at(2) && at(2) < at(3) && at(3) < at(4) && at(4) < at(5) &&
       h.indexOf('vg-ctable') > at(2) && h.indexOf('vg-ctable') < at(3) &&
       h.indexOf('<svg ') > at(3) && h.indexOf('<svg ') < at(4) &&
-      h.indexOf('vg-btablist') > at(4) && h.indexOf('vg-btablist') < at(5) &&
+      h.indexOf('vg-refhead') > at(4) && h.indexOf('vg-refhead') < at(5) &&
       h.indexOf('vg-stablist') > at(5);
   })()],
   // CSS は手で貼り、カードは日次で作り直す。順序はいつも「カードが先・CSS が

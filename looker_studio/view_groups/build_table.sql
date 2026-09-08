@@ -148,6 +148,17 @@ DECLARE suffix_extra_list ARRAY<STRING> DEFAULT [];
 -- だけを確かめる。
 DECLARE import_sources ARRAY<STRUCT<source_region STRING, table_name_suffix STRING>>
   DEFAULT [];
+-- 1 つの base につき作る「基準」の数の上限。
+--
+-- **カードは基準ごとに 1 行。** 比較ペインは基準 1 つにつき G−1 枚なので、
+-- 行を分ければ 1 行は G に対して線形に収まる。全基準を 1 枚に載せていた頃は
+-- G×(G−1) 枚（二乗）で、リージョンをまたいで G が伸びたときに UDF の
+-- メモリを使い切って生成ごと落ちた。
+--
+-- ここで止めるのは行数のほう。G が極端に大きい base では、基準を全部
+-- 用意しても読む人が選びきれないし、行数と生成時間だけが伸びる。
+-- 打ち切ったことはカードに書く（選べないだけで、グループが無いのではない）。
+DECLARE max_ref_rows INT64 DEFAULT 24;
 -- snapshot_date の基準タイムゾーン
 DECLARE snapshot_time_zone STRING DEFAULT 'Asia/Tokyo';
 -- base ごとのメモ（Markdown）を置くスプレッドシート。空ならメモ機能を使わない
@@ -859,8 +870,8 @@ CREATE OR REPLACE TABLE `__T_DIFF_SRC__`
 (
   snapshot_date   DATE           OPTIONS (description = '生成日。履歴は持たないので、常に最後に実行した日'),
   base            STRING         OPTIONS (description = 'suffix を除いた View 名。Looker のキー。suffix を認識できなかった View は View 名そのもの'),
-  ref_index       INT64          OPTIONS (description = '常に 0。基準はカードの中のタブで選ぶようになったため、列としてのみ残っている'),
-  ref_label       STRING         OPTIONS (description = '先頭グループの見出し。ref_index と同じく残骸で、絞り込みには使わない'),
+  ref_index       INT64          OPTIONS (description = '基準グループの番号（0 起点）。base ごとに 0..グループ数-1 の行ができる'),
+  ref_label       STRING         OPTIONS (description = '基準グループの見出し（suffix の列記）。レポートの「基準」コントロールはこれを使う'),
   view_count      INT64          OPTIONS (description = 'この base に属する View 数'),
   group_count     INT64          OPTIONS (description = 'ロジックのグループ数。1 なら全部同一'),
   has_multiple    BOOL           OPTIONS (description = 'group_count > 1。ロジック逸脱の検知用'),
@@ -928,6 +939,10 @@ opts AS (
   SELECT CONCAT(
     '{"suffixList":',
     TO_JSON_STRING(ARRAY(SELECT suffix FROM suffixes ORDER BY suffix)),
+    -- 描画側が「基準を載せきれなかった」と書けるように、上限も渡す。
+    -- 行を打ち切るのは下の refs だが、打ち切られたことを知っているのは
+    -- SQL 側だけなので、カードに書かせるには渡すしかない。
+    ',"maxRefRows":', CAST(@max_ref_rows AS STRING),
     ',',
     SUBSTR(TRIM(@analyze_options), 2)
   ) AS options_json
@@ -1186,13 +1201,21 @@ analyzed AS (
   CROSS JOIN opts AS o
   GROUP BY base, o.options_json
 ),
--- 基準はカードの中のタブで選ぶので、行は base ごとに 1 本。
--- 以前は基準ごとに行を作っていたが、基準が意味を持つのはロジック差分だけで、
--- カラム定義にも参照関係にも基準は無い。差分の側に基準ごとのタブを持たせた
--- ことで、レポートのコントロールも 1 レコードに絞る仕掛けも要らなくなった。
+-- **1 行 = 1 base × 1 基準。** どの基準を見るかはレポートのコントロール
+-- （ref_label）で選ぶ。
 --
--- ref_index / ref_label は列としては残してある。消すとテーブルを作り直す
--- ことになり、積んだ履歴まで消えるため。常に 0 と先頭グループのラベルが入る。
+-- 全基準を 1 枚のカードに載せていた時期があり、そのとき比較ペインは
+-- G×(G−1) 枚 ―― **グループ数の二乗**だった。リージョンをまたいで View を
+-- 集めると G が伸び、UDF のメモリを使い切って生成ごと落ちた
+-- （Resources exceeded during execution: UDF out of memory）。
+--
+-- 二乗の係数 G は「どのグループも基準にできる」ことから来ている。比較そのもの
+-- は基準 1 つにつき G−1 枚で線形なので、基準を行に分けると 1 行が線形に戻る。
+-- BigQuery に置く総量は変わらないが、**1 行が小さくなることと、UDF が 1 回に
+-- 組み立てる量が小さくなること**が効く。
+--
+-- ref_index（0 起点）と ref_label（基準グループの見出し）は、この用途の
+-- ために残してあった列。レポートのコントロールは ref_label を使う。
 refs AS (
   SELECT
     a.base,
@@ -1206,12 +1229,24 @@ refs AS (
     COALESCE(bd.descs_json, '[]') AS descs_json,
     -- ラベルを 1 つも使っていない環境もある。描画側は空なら何も出さない。
     COALESCE(bl.labels_json, '[]') AS labels_json,
-    0 AS ref_index,
-    JSON_VALUE_ARRAY(a.analysis, '$.groupLabels')[SAFE_OFFSET(0)] AS ref_label
+    g.off AS ref_index,
+    g.lbl AS ref_label
   FROM analyzed AS a
   LEFT JOIN base_cols AS bc ON bc.base = a.base
   LEFT JOIN base_descs AS bd ON bd.base = a.base
   LEFT JOIN base_labels AS bl ON bl.base = a.base
+  -- **基準ごとに 1 行。** グループが 0 件の base（解析できなかった等）でも
+  -- 行が消えないよう、そのときは NULL の 1 行を立てる。CROSS JOIN で
+  -- 空の配列を展開すると base ごと落ちてしまい、**カードが黙って消える。**
+  CROSS JOIN UNNEST(
+    IF(ARRAY_LENGTH(JSON_VALUE_ARRAY(a.analysis, '$.groupLabels')) = 0,
+       [CAST(NULL AS STRING)],
+       JSON_VALUE_ARRAY(a.analysis, '$.groupLabels'))
+  ) AS lbl WITH OFFSET AS off
+  -- 上限を超えたぶんは行にしない。打ち切ったことは描画側が
+  -- maxRefRows を見てカードに書く。
+  CROSS JOIN UNNEST([STRUCT(off AS off, lbl AS lbl)]) AS g
+  WHERE g.off < @max_ref_rows
 )
 SELECT
   CURRENT_DATE('__TZ__') AS snapshot_date,
@@ -1238,7 +1273,7 @@ SELECT
   -- （図の解析にはトークナイザが要り、それだけで最小化後 9 KB ある）。
   `__UDF_PAGE__`(
     analysis,
-    `__UDF_RENDER__`(analysis, options_json),
+    `__UDF_RENDER__`(analysis, options_json, CAST(ref_index AS FLOAT64)),
     `__UDF_ERD__`(analysis, options_json),
     columns_json,
     sql_json,
@@ -1257,7 +1292,8 @@ USING suffix_list AS suffix_list,
       suffix_tail_lengths AS suffix_tail_lengths,
       suffix_exclude_list AS suffix_exclude_list,
       include_nested_fields AS include_nested_fields,
-      analyze_options AS analyze_options;
+      analyze_options AS analyze_options,
+      max_ref_rows AS max_ref_rows;
 
 
 -- ---------------------------------------------------------------------

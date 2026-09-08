@@ -315,11 +315,17 @@ return __run(views, options_json);
 // --- render のドライバ -------------------------------------------------
 // analyze の JSON を受け取って HTML にする。解析はしない。
 const renderDriver = `
-function __run(analysis_json, options_json) {
+function __run(analysis_json, options_json, ref_index) {
   var opts = __opts(options_json);
   var a;
   try { a = JSON.parse(analysis_json); } catch (e) { a = null; }
   if (!a) return __notice('解析結果を読み取れませんでした。');
+
+  // 基準は行で決まる。NULL なら従来どおり全基準をタブで載せる。
+  // **INT64 は JS UDF が扱えない**ので FLOAT64 で受けて丸める。
+  if (ref_index !== null && ref_index !== undefined) {
+    opts.refIndex = Math.floor(Number(ref_index));
+  }
 
   var html = a.lead ? __notice(a.lead) : '';
   var bases = a.bases || [];
@@ -328,7 +334,7 @@ function __run(analysis_json, options_json) {
   return __applyMode(html, opts.mode || 'inline');
 }
 
-return __run(analysis_json, options_json);
+return __run(analysis_json, options_json, ref_index);
 `.trim();
 
 // --- erd のドライバ -----------------------------------------------------
@@ -503,7 +509,8 @@ const markdownPack = pack(markdownDriver, 'viewlgc_markdown', markdownLib);
 // --- 検証: 最小化した本体をそのまま実行する -----------------------------
 const S = require(join(here, 'sample_views.js'));
 const VIEWLGC_ANALYZE = new Function('views', 'options_json', analyzePack.code);
-const VIEWLGC_RENDER = new Function('analysis_json', 'options_json', renderPack.code);
+const VIEWLGC_RENDER = new Function('analysis_json', 'options_json', 'ref_index',
+  renderPack.code);
 const VIEWLGC_ERD = new Function('analysis_json', 'options_json', erdPack.code);
 const VIEWLGC_PAGE = new Function('analysis_json', 'diff_html', 'erd_html',
   'columns_json', 'sql_json', 'descs_json', 'labels_json', 'options_json',
@@ -576,11 +583,11 @@ function VIEW_GROUP_INFO(views, options_json) {
     group_sizes: j.groupSizes,
     suffixes: j.suffixes,
     unmatched_count: j.unmatchedCount,
-    html: VIEWLGC_RENDER(a, options_json),
+    html: VIEWLGC_RENDER(a, options_json, null),
     // build_table.sql は render の結果をさらに page へ渡す。ここも同じ順で通し、
     // 最小化した page 本体が実際に動くことを確かめる。
     erd: VIEWLGC_ERD(a, options_json),
-    page: VIEWLGC_PAGE(a, VIEWLGC_RENDER(a, options_json),
+    page: VIEWLGC_PAGE(a, VIEWLGC_RENDER(a, options_json, null),
       VIEWLGC_ERD(a, options_json),
       fakeColumns(views), fakeSql(views), fakeDescs(views), fakeLabels(views),
       options_json),
@@ -639,17 +646,52 @@ const checks = [
     /<div class="vg-otablist"><div class="vg-header">.*?<label class="vg-otab vg-ot1"/s
       .test(info.page) &&
     info.page.indexOf('vg-otablist') < info.page.indexOf('<!--VG_NOTE-->')],
-  ['差分タブで基準グループをタブで選べる（G×(G-1) 枚ぶん載る）', (() => {
-    const h = VIEWLGC_RENDER(VIEWLGC_ANALYZE(views, OPTS), OPTS);
+  // **基準を行に分ける道。** 全基準を 1 枚に載せると比較ペインは G×(G−1) 枚で
+  // グループ数の二乗になり、リージョンをまたぐと UDF のメモリを使い切る。
+  // ref_index を渡した行は、その基準ぶん（G−1 枚）だけを作る。
+  ['カードに載る基準は 1 つだけ（比較は G−1 枚・線形）', (() => {
+    const a = VIEWLGC_ANALYZE(views, OPTS);
     const G = info.group_count;
-    return (h.match(/class="vg-btab /g) || []).length === G &&
-      (h.match(/class="vg-bpanel /g) || []).length === G &&
-      (h.match(/<th colspan=/g) || []).length / 2 === G * (G - 1) &&
-      // 基準ごとにラジオの名前を分ける。分けないと選ばれていない基準の
-      // 比較タブがどれも開かなくなる。
-      new Set([...h.matchAll(/class="vg-r vg-r1" type="radio" name="([^"]+)"/g)]
-        .map((m) => m[1])).size === G;
+    const one = VIEWLGC_RENDER(a, OPTS, 1);
+    const paneCount = (h) => (h.match(/<th colspan=/g) || []).length / 2;
+    return G > 1 &&
+      // 基準を選ぶタブは無い。いま何を基準にしているかは文字で出す
+      !one.includes('vg-btab') && !one.includes('vg-bpanel') &&
+      one.includes('vg-refhead') && one.includes('基準グループ') &&
+      // 枚数は G×(G−1) ではなく G−1
+      paneCount(one) === G - 1 &&
+      // 基準が違えば中身も違う
+      one !== VIEWLGC_RENDER(a, OPTS, 0);
   })()],
+  ['ref_index を省いても落ちない（先頭の基準になる）', (() => {
+    const a = VIEWLGC_ANALYZE(views, OPTS);
+    return VIEWLGC_RENDER(a, OPTS, null) === VIEWLGC_RENDER(a, OPTS, 0);
+  })()],
+  ['ref_index が範囲外でも落ちない（端に丸める）', (() => {
+    const a = VIEWLGC_ANALYZE(views, OPTS);
+    const G = info.group_count;
+    return VIEWLGC_RENDER(a, OPTS, 99) === VIEWLGC_RENDER(a, OPTS, G - 1) &&
+      VIEWLGC_RENDER(a, OPTS, -5) === VIEWLGC_RENDER(a, OPTS, 0);
+  })()],
+  ['基準を載せきれないときは、選べないだけだと書く', (() => {
+    const a = VIEWLGC_ANALYZE(views, OPTS);
+    const capped = VIEWLGC_RENDER(a,
+      JSON.stringify({ suffixParts: S.SUFFIX_PARTS, maxRefRows: 2 }), 0);
+    // 3 グループあるので上限 2 は超える
+    return info.group_count > 2 &&
+      capped.includes('基準にできるのは先頭 2 グループまで') &&
+      capped.includes(`全 ${info.group_count} 件`) &&
+      // 上限に達していなければ出さない
+      !VIEWLGC_RENDER(a,
+        JSON.stringify({ suffixParts: S.SUFFIX_PARTS, maxRefRows: 99 }), 0)
+        .includes('基準にできるのは');
+  })()],
+  // 基準を選ぶタブの機構は**残していない。** 残すと G×(G−1) の二乗が
+  // いつでも戻せてしまい、UDF のメモリを使い切った経路が生き続ける。
+  ['基準を選ぶタブの機構が残っていない',
+    !css.includes('.vg-btab') && !css.includes('.vg-bpanel') &&
+    !classed.includes('vg-btab') && !info.page.includes('vg-btab') &&
+    typeof require(join(here, 'chrome.js')).REF_BUDGET === 'undefined'],
   ['参照関係とカラム定義には基準を出さない（差分でだけ意味を持つ）', (() => {
     // パネルは note / カラム定義 / 参照関係 / ロジック差分 / SQL の順
     const at = (n) => info.page.indexOf(`<div class="vg-opanel vg-op${n}">`);
@@ -908,7 +950,7 @@ const checks = [
   ['解析結果に tokens / ddl を積んでいない',
     !/"tokens"|"ddl"|"raw"/.test(VIEWLGC_ANALYZE(views, OPTS))],
   ['render は壊れた JSON でも落ちない',
-    typeof VIEWLGC_RENDER('{ broken', OPTS) === 'string'],
+    typeof VIEWLGC_RENDER('{ broken', OPTS, null) === 'string'],
   // 複雑な SQL（多段 CTE / ウィンドウ / UNION / UNNEST / 相関サブクエリ）が
   // 最小化した本体でも通ること。単純な SELECT だけだと実体名の検出が素通りする。
   ['複雑な SQL でもコピー展開なら 1 グループ', COMPLEX.group_count === 1],
@@ -1274,11 +1316,24 @@ LANGUAGE js AS %s
 --
 -- 解析はしない。options_json は analyze に渡したものと同じものを渡すこと
 -- （mode / layout / 色の指定はこちらで効く）。
+--
+-- ref_index は「どのグループを基準にするか」。
+--   NULL      … 全基準をカードの中のタブで選べる形（従来）
+--   0, 1, 2 … … その基準ぶんだけを作る。**行を基準ごとに分けるための道。**
+--
+-- **全基準を 1 枚に載せると比較ペインは G×(G−1) 枚で、グループ数の二乗**に
+-- なる。リージョンをまたいで View を集めると G が伸び、UDF のメモリを
+-- 使い切って日次の生成ごと落ちる（実際に落ちた）。二乗の係数 G は
+-- 「どのグループも基準にできる」ことから来ているので、基準を行に分けると
+-- 1 行 G−1 枚の線形に戻る。どの基準を見るかはレポートのコントロールで選ぶ。
+--
+-- **INT64 ではなく FLOAT64。** JS UDF は INT64 を扱えない。
 -- ---------------------------------------------------------------------
 EXECUTE IMMEDIATE FORMAT('''
 CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
   analysis_json STRING,
-  options_json STRING
+  options_json STRING,
+  ref_index FLOAT64
 )
 RETURNS STRING
 LANGUAGE js AS %s

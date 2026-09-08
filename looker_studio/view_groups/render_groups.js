@@ -25,7 +25,7 @@
 const { splitLines, build2Way } = require('../ddl_diff_viz/src/lib/diff');
 const { renderFragment1, renderFragment2 } = require('../ddl_diff_viz/src/lib/render');
 const {
-  MAX_TABS, MAX_REF_TABS, REF_BUDGET, OUTER_TABS, MAX_OUTER_TABS, CSS_GEN,
+  MAX_TABS, OUTER_TABS, MAX_OUTER_TABS, CSS_GEN,
   esc, hashId, label, header, notice, kindText,
 } = require('./chrome.js');
 
@@ -219,57 +219,32 @@ function refPanel(b, refIndex, opts) {
 }
 
 /**
- * 基準グループを選ぶタブ。
+ * 基準を 1 つに絞ったときの見出し。**タブが無くなるぶん、いま何を基準に
+ * 見ているのかを文字で出す。**
  *
- * 基準は「どれを左ペインに出しっぱなしにするか」で、差分を読むときにだけ
- * 意味を持つ（カラム定義も参照関係も基準を持たない）。だからこの選択は
- * レポートのコントロールではなくカードの中に置く。
+ * 基準ごとに行を分けると、カードの中に基準を選ぶ手立てが無くなる（選ぶのは
+ * レポートのコントロール）。見出しが無いと、左ペインに出ているのがどの
+ * グループなのかを読む人が知る術がない ―― 差分は基準からの差なので、
+ * それが分からないと差分の意味が決まらない。
  *
- * **基準を 1 つ増やすと比較ペインがグループ数ぶん増える。** 全部載せると
- * 枚数は G×(G−1) で効くので、大きくなりすぎたら途中で打ち切って断る。
- * 1 枚も出さないより、載せられるところまで載せたほうが役に立つ。
- *
- * 内側の比較タブ・外側のタブとはクラスを分けてある。同じクラスだと
- * 一方のラジオがもう一方の :checked ~ に引っかかる。
+ * 上限で載せきれなかった基準があるなら、そこも書く。**選べないだけなのに
+ * 「無い」と読めてしまう**のがいちばん困る。
  */
-function refTabs(b, opts, idPrefix) {
+function refCaption(b, refIndex, opts) {
   const groups = b.groups;
-  const shown = [];
-  let size = 0;
-  for (let i = 0; i < groups.length && i < MAX_REF_TABS; i++) {
-    const html = refPanel(b, i, opts);
-    // 1 枚目は予算を超えても必ず載せる。空のカードを出しても仕方がない。
-    if (shown.length && size + html.length > REF_BUDGET) break;
-    shown.push(html);
-    size += html.length;
-  }
-
-  const radios = shown.map((_, i) =>
-    `<input class="vg-br vg-br${i + 1}" type="radio" name="${idPrefix}b"` +
-    ` id="${idPrefix}b-${i + 1}"${i === 0 ? ' checked' : ''}>`).join('');
-  const tablist = shown.map((_, i) =>
-    `<label class="vg-btab vg-bt${i + 1}" for="${idPrefix}b-${i + 1}">` +
-    `${esc(label(groups[i]))}<span class="vg-tabn">${groups[i].members.length}</span></label>`)
-    .join('');
-  const panels = shown.map((html, i) =>
-    `<div class="vg-bpanel vg-bp${i + 1}">${html}</div>`).join('');
-
-  // 打ち切ったときは、なぜ選べないのかと今どれくらいの大きさなのかを出す。
-  // 「基準タブが 1 枚しかない」だけだと、故障なのか設計なのか読み取れない。
-  // ここに来るのは、1 行が BigQuery の上限を超えそうなときだけ。
-  const over = shown.length < groups.length
-    ? notice(`基準にできるのは先頭 ${shown.length} グループまでにしています` +
-      `（全 ${groups.length} 件）。基準を 1 つ増やすと比較の枚数がグループ数ぶん` +
-      `増え、このままでは 1 行が BigQuery の上限（100 MB）に達して日次の生成ごと` +
-      `失敗するため、${Math.round(REF_BUDGET / 1024 / 1024)} MB で止めています` +
-      `（ここまでで ${(size / 1024 / 1024).toFixed(1)} MB）。` +
-      `この base はグループが多すぎないか確認してください。`)
+  const cap = Number((opts || {}).maxRefRows) || 0;
+  const over = cap > 0 && groups.length > cap
+    ? notice(`基準にできるのは先頭 ${cap} グループまでにしています` +
+      `（全 ${groups.length} 件）。この base はグループが多すぎないか確認して` +
+      `ください。`)
     : '';
-
-  return `<div class="vg-btabs">${radios}` +
-    `<div class="vg-btablist"><span class="vg-blabel">基準グループ</span>${tablist}</div>` +
-    `<div class="vg-bpanels">${panels}</div></div>` + over;
+  return `<div class="vg-refhead">` +
+    `<span class="vg-blabel">基準グループ</span>` +
+    `<span class="vg-refname">${esc(label(groups[refIndex]))}` +
+    `<span class="vg-tabn">${groups[refIndex].members.length}</span></span>` +
+    `<span class="vg-refnote">（レポートの「基準」で切り替え）</span></div>` + over;
 }
+
 
 /**
  * base 1 件分の HTML を返す。
@@ -279,7 +254,22 @@ function renderBase(b, opts) {
   const o = opts || {};
   const groups = b.groups;
   const n = groups.length;
-  const idPrefix = 'vgt' + hashId(b.base + '|' + groups.map(label).join('|'));
+  // **1 枚のカードに載せる基準は 1 つだけ。** どれを基準にするかは行が持つ
+  // （opts.refIndex）。指定が無ければ先頭。
+  //
+  // 以前は全基準をカードの中のタブで選べるようにしていたが、比較ペインが
+  // G×(G−1) 枚 ―― **グループ数の二乗**になる。リージョンをまたいで View を
+  // 集めると G が伸び、UDF のメモリを使い切って日次の生成ごと落ちた。
+  //
+  // 二乗の係数 G は「どのグループも基準にできる」ことから来ている。比較そのもの
+  // は基準 1 つにつき G−1 枚で線形なので、**基準を行に分けて 1 行 1 基準**に
+  // すれば線形に戻る。どの基準を見るかはレポートのコントロールで選ぶ。
+  // 行が増えるだけで 1 行は小さいまま、という取り引き。
+  //
+  // タブで選ぶ道は**残していない。** 残すと、容量（この UDF は 32 KB 制限に
+  // 対して余裕が無い）を食ううえ、落ちた原因そのものをいつでも呼び戻せて
+  // しまう。行に分けるのが唯一の形。
+  const ref = Math.max(0, Math.min(n - 1, Math.floor(Number(o.refIndex) || 0)));
 
   let body;
   if (n === 0) {
@@ -292,7 +282,7 @@ function renderBase(b, opts) {
       : `${b.viewCount} View すべてが同一ロジックです。比較の必要がないので SQL だけ出しています。`) +
       refPanel(b, 0, o);
   } else {
-    body = refTabs(b, o, idPrefix);
+    body = refCaption(b, ref, o) + refPanel(b, ref, o);
   }
 
   return `<div class="vg-root">` +
@@ -381,15 +371,17 @@ function chromeCss() {
     `.vg-ph:hover::after{display:block}`,
     // 右端では左に出さないと枠の外へ出てしまう。最後の 2 ペインぶんだけ寄せる。
     `.vg-ph.vg-phr::after{left:auto;right:0}`,
-    // 基準グループのタブ（ロジック差分の中）。外側・内側とはまたクラスを分ける。
-    `.vg-br{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}`,
-    `.vg-btablist{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 10px}`,
+    // いま何を基準にしているかの見出し（ロジック差分の先頭）。
+    // **基準を選ぶタブは無い。** 基準は行が持ち、選ぶのはレポートの
+    // コントロール（renderBase の説明を参照）。押せるものではないので、
+    // タブのような枠は付けない。
+    `.vg-refhead{display:flex;flex-wrap:wrap;align-items:center;gap:8px;` +
+      `margin:0 0 10px;padding:0 0 8px;border-bottom:1px solid #D0D7DE}`,
     `.vg-blabel{color:#57606A;font-size:12px;font-weight:600;margin-right:2px}`,
-    `.vg-btab{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;` +
-      `border:1px solid #D0D7DE;border-radius:14px;color:#57606A;` +
-      `cursor:pointer;user-select:none;font-weight:600;font-size:12px}`,
-    `.vg-btab:hover{background:#EAEEF2;color:#24292F}`,
-    `.vg-bpanel{display:none}`,
+    `.vg-refname{display:inline-flex;align-items:center;gap:6px;` +
+      `font-weight:600;font-size:13px;color:#24292F;` +
+      `font-family:ui-monospace,SFMono-Regular,Consolas,monospace}`,
+    `.vg-refnote{color:#57606A;font-size:11px}`,
     // 外側タブ（note / カラム定義 / ロジック差分 / 参照関係）。内側と同じ仕組みだが、
     // クラスを分けてある。同じクラスだと内側のラジオが外側の :checked ~ に
     // 引っかかり、片方を押すともう片方も切り替わる。
@@ -482,11 +474,6 @@ function chromeCss() {
   }
   // 基準グループのタブ本体。選択中は基準ペインと同じ薄い赤にする
   // （左ペインに出っぱなしになる側の色と結び付ける）。
-  for (let i = 1; i <= MAX_REF_TABS; i++) {
-    rules.push(`.vg-br${i}:checked ~ .vg-bpanels > .vg-bp${i}{display:block}`);
-    rules.push(`.vg-br${i}:checked ~ .vg-btablist > .vg-bt${i}` +
-      `{background:#fbeded;border-color:#efb6b6;color:#24292F}`);
-  }
   // 内側のタブ本体。ID ではなくクラスで書くので、CSS を静的に保てる。
   for (let i = 1; i <= MAX_TABS; i++) {
     rules.push(`.vg-r${i}:checked ~ .vg-panels > .vg-p${i}{display:block}`);

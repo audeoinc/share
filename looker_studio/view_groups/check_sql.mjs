@@ -496,6 +496,40 @@ for (const t of ['__T_DIFF_SRC__', '__T_DIFF__']) {
     /STRING_AGG\(DISTINCT source_region/.test(table));
 }
 
+// --- 5h. 基準を行に分ける ------------------------------------------------
+// 全基準を 1 枚のカードに載せると比較ペインは G×(G−1) 枚 ―― **グループ数の
+// 二乗**になる。リージョンをまたいで G が伸びたとき、UDF のメモリを使い切って
+// 日次の生成ごと落ちた。基準を行に分けると 1 行 G−1 枚の線形に戻る。
+// ここが戻ると同じ落ち方をするので、形を固定する。
+{
+  // (1) 基準ごとに行を立てているか。
+  add('基準ごとに行を立てている（1 行 1 基準）',
+    /CROSS JOIN UNNEST\(\s*\n\s*IF\(ARRAY_LENGTH\(JSON_VALUE_ARRAY\(a\.analysis, '\$\.groupLabels'\)\) = 0,/
+      .test(table) &&
+    /\) AS lbl WITH OFFSET AS off/.test(table) &&
+    /g\.off AS ref_index/.test(table) && /g\.lbl AS ref_label/.test(table));
+
+  // (2) グループが 0 件の base でも行が消えないか。
+  //     空の配列を CROSS JOIN で展開すると base ごと落ちて、**カードが黙って
+  //     消える**（解析できなかった base ほど見たいのに）。
+  add('グループが 0 件でも base の行が消えない',
+    /\[CAST\(NULL AS STRING\)\],/.test(table));
+
+  // (3) 描画に基準を渡しているか。渡さないと全部が先頭基準のカードになる
+  //     （落ちないので気づけない）。
+  add('描画に基準の番号を渡している',
+    /`__UDF_RENDER__`\(analysis, options_json, CAST\(ref_index AS FLOAT64\)\)/
+      .test(table));
+
+  // (4) 行数の上限があり、**それを描画側にも渡している**か。
+  //     渡さないと、打ち切られたことをカードに書けない ―― 選べないだけなのに
+  //     「グループが無い」と読めてしまう。
+  add('基準の行数に上限があり、描画側にも渡している',
+    /WHERE g\.off < @max_ref_rows/.test(table) &&
+    /'.?"maxRefRows":', CAST\(@max_ref_rows AS STRING\)/.test(table) &&
+    /^DECLARE max_ref_rows INT64 DEFAULT \d+;$/m.test(table));
+}
+
 // --- 6. 両ファイルで一致させる必要がある値 -----------------------------
 for (const base of ['analyze', 'render', 'erd', 'page', 'markdown', 'group_css',
   'render_dynamic_sql']) {
