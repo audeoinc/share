@@ -535,10 +535,11 @@ function toSvg(lay) {
 
   for (const n of lay.nodes) {
     const k = kindOf(n.kind);
-    const tip = n.label + (n.params.length
-      ? '\n' + n.params.map((p) => p.name + ': ' +
-        Object.keys(p.values).map((k) => k + ' = ' + p.values[k]).join(' / ')).join('\n')
-      : '');
+    // 注記は groupSvg が組み立てる（まとめたグループぶんを並べる）。
+    // 単独で layout/toSvg を呼ぶ経路のために、無ければここで作る。
+    const lines = n.tipLines || n.params.map((p) => p.name + ': ' +
+      Object.keys(p.values).map((k) => k + ' = ' + p.values[k]).join(' / '));
+    const tip = n.label + (lines.length ? '\n' + lines.join('\n') : '');
     out.push(`<g><title>${esc(tip)}</title>`);
     out.push(`<rect x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h}" rx="5" ` +
       `fill="${k.fill}" stroke="${k.stroke}" stroke-width="1"/>`);
@@ -553,9 +554,118 @@ function toSvg(lay) {
   return out.join('');
 }
 
-/** グループ 1 つ分の図。 */
-function groupSvg(group) {
-  return toSvg(layout(buildGraph(group.sql, group.params)));
+/**
+ * 参照名の「base 部分」。実体名から suffix を落としたもの。
+ *
+ *   `PRJ.mart_abjp.orders_abjp` + suffix abjp → orders
+ *
+ * データセット側は見ない。リージョンなどの環境名がそこに入ることがあり
+ * （sample_src_apac / _emea）、含めると同じ系統が環境ごとに割れる。
+ * suffix は View 自身のものを使う（参照名の末尾に付いている前提）。
+ * 末尾が一致しなければ実体名をそのまま返す。
+ */
+function refBase(name, suffix) {
+  const short = shortName(name);
+  if (!suffix) return short;
+  const tail = '_' + suffix;
+  return short.length > tail.length && short.slice(-tail.length) === tail
+    ? short.slice(0, -tail.length) : short;
+}
+
+/** 図の形を表す署名。実体名は base 部分に均してから比べる。 */
+function erdSignature(g) {
+  const suffix = (g.suffixes || [])[0] || null;
+  const graph = buildGraph(g.sql, g.params);
+  const key = new Map(graph.nodes.map((n) =>
+    [n.id, refBase(n.name, suffix) + '/' + n.kind]));
+  return JSON.stringify({
+    n: graph.nodes.map((n) => key.get(n.id)).sort(),
+    e: graph.edges.map((e) => key.get(e.from) + '>' + key.get(e.to) +
+      ':' + (e.joinType || '') + ':' + (e.keys || []).join('&')).sort(),
+  });
+}
+
+/**
+ * 参照関係のグループ。**ロジック差分のグループとは別に括り直す。**
+ *
+ * ロジックが割れていても参照先は同じことが多い（SELECT する列や WHERE だけ
+ * 違う版など）。そのとき同じ図が何枚も積まれるので、**参照名の base 部分**が
+ * 一致するものは 1 枚にまとめる。カラム定義が列の構成で括り直すのと同じ考え方。
+ *
+ * base 部分で比べるのが要点。
+ *   ・実際の名前で比べる  … View ごとに割れる（各 View が自分の suffix の表を読む）
+ *   ・形だけで比べる      … orders_* と customers_* まで同じ図になる
+ *   ・base 部分で比べる   … orders_ab* と orders_ef* はまとまり、customers_* は別
+ */
+function erdGroups(b) {
+  const index = new Map();
+  const out = [];
+  for (const g of (b.groups || [])) {
+    const sig = erdSignature(g);
+    let e = index.get(sig);
+    if (!e) {
+      e = { groups: [], suffixes: [], members: [] };
+      index.set(sig, e);
+      out.push(e);
+    }
+    e.groups.push(g);
+    // label() が suffixes と members を添字で対応付けるので、順番を崩さない。
+    for (let i = 0; i < (g.suffixes || []).length; i++) {
+      e.suffixes.push(g.suffixes[i]);
+      e.members.push((g.members || [])[i]);
+    }
+  }
+  return out;
+}
+
+/** 並んだ名前の共通部分。違う箇所は '*' にする（orders_abjp… → orders_*）。 */
+function commonStem(names) {
+  const list = names.filter((s) => s != null).map(String);
+  if (!list.length) return '';
+  if (list.every((s) => s === list[0])) return list[0];
+  let p = 0;
+  while (p < list[0].length && list.every((s) => s[p] === list[0][p])) p++;
+  return list[0].slice(0, p) + '*';
+}
+
+/**
+ * まとめたグループ 1 つ分の図。
+ *
+ * 箱の名前は、**まとめた全ロジックグループの値をならしたもの**にする。
+ * 1 本目の View の値をそのまま出すと、まとめた相手には当てはまらない名前が
+ * 出てしまう（orders_ab* と orders_ef* をまとめた図に orders_abjp と出る）。
+ */
+function groupSvg(entry) {
+  // 後方互換。1 グループをそのまま渡された場合も描ける。
+  const gs = entry.groups || [entry];
+  const graph = buildGraph(gs[0].sql, gs[0].params);
+  const sfx0 = (gs[0].suffixes || [])[0] || null;
+
+  for (const n of graph.nodes) {
+    const base = refBase(n.name, sfx0);
+    const names = [];
+    const tips = [];
+    const hits = [];
+    for (const g of gs) {
+      // このノードに当たるパラメータを **base 部分の一致**で引き直す。
+      // グループごとに番号（P1 / P2）がずれていても対応が取れる。
+      for (const p of (g.params || [])) {
+        const keys = Object.keys(p.values);
+        if (!keys.some((k) => refBase(p.values[k], k) === base)) continue;
+        hits.push(p);
+        for (const k of keys) names.push(shortName(p.values[k]));
+        tips.push((gs.length > 1 ? label(g) + ' / ' : '') + p.name + ': ' +
+          keys.map((k) => k + ' = ' + p.values[k]).join(' / '));
+      }
+    }
+    // パラメータでないノード（CTE・最終 SELECT・全 View で同じ名前の表）は
+    // まとめても名前が変わらないので、そのままにする。
+    if (!hits.length) { n.params = []; n.tipLines = []; continue; }
+    n.label = commonStem(names);
+    n.params = hits;
+    n.tipLines = tips;
+  }
+  return toSvg(layout(graph));
 }
 
 /**
@@ -593,12 +703,21 @@ function erdLegend() {
 
 function renderErd(b) {
   if (!b.groups.length) return notice('View が見つかりません。');
+  const entries = erdGroups(b);
+  const merged = entries.length < b.groups.length;
   return notice(
     'FROM / JOIN から起こした参照関係です。矢印は「読んで作る」向き、' +
     '注記は JOIN の種別と結合キー。カーディナリティと主キーは SQL からは' +
     '分からないので描いていません。' +
-    'パラメータ化した名前は、そのグループの先頭の View の値で表示しています。'
-  ) + erdLegend() + erdStack(b.groups);
+    'ここでの括りはロジック差分とは別です。参照名の base 部分（suffix を' +
+    '除いた実体名）が同じものは 1 枚にまとめています。' +
+    (merged
+      ? `ロジックは ${b.groups.length} グループに割れていますが、` +
+        `参照関係は ${entries.length} 通りです。`
+      : '') +
+    '名前が View ごとに違う箇所は共通部分を出して残りを * にしています' +
+    '（実際の対応は箱にカーソルを乗せると出ます）。'
+  ) + erdLegend() + erdStack(entries);
 }
 
 /** base 1 件分の ERD カード。 */
@@ -613,4 +732,5 @@ module.exports = {
   prepare, cteRanges, scanScope, buildGraph, layout, toSvg, groupSvg,
   renderErdBase, erdStack, erdLegend, edgeLines, linesWidth,
   shortName, edgeLabel, boxWidth, BOX_W_MIN, BOX_H,
+  erdGroups, erdSignature, refBase, commonStem,
 };

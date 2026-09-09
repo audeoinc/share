@@ -625,8 +625,11 @@ const checks = [
   ['外側と内側でラジオのクラスを分けている（片方を押しても連動しない）',
     /class="vg-or vg-or1"/.test(pageCases[0].html) &&
     !/class="vg-r vg-or/.test(pageCases[0].html)],
-  ['参照関係が SVG で描かれる（グループの数だけ）',
-    (pageCases[0].html.match(/<svg /g) || []).length === baseComplex.groupCount],
+  // **参照関係のグループはロジック差分とは別。**参照名の base 部分が同じなら
+  // ロジックが割れていても 1 枚にまとまるので、枚数は groupCount ではない。
+  ['参照関係が SVG で描かれる（参照関係のグループの数だけ）',
+    (pageCases[0].html.match(/<svg /g) || []).length ===
+      E.erdGroups(baseComplex).length],
   ['SVG は style 属性を使わない（class モードでクラスが増えない）',
     !/<(svg|rect|path|text|g|marker)[^>]*\sstyle=/.test(pageCases[0].html)],
   ['実テーブルも CTE も節になる', (() => {
@@ -677,16 +680,68 @@ const checks = [
       g.nodes.some((n) => n.params.length > 0);
   })()],
   ['ERD は全グループを縦に積む（切り替え操作が要らない）', (() => {
+    const n = E.erdGroups(base3).length;
     const blocks = (pageCases[1].html.match(/class="vg-erdblock"/g) || []).length;
     const svgs = (pageCases[1].html.match(/<svg /g) || []).length;
-    return blocks === base3.groupCount && svgs === base3.groupCount;
+    return blocks === n && svgs === n;
   })()],
   ['ERD の並びは解析結果の順（基準という考え方を持たない）', (() => {
     const names = [...pageCases[1].html.matchAll(/class="vg-erdname">([^<]*)</g)]
       .map((m) => m[1]);
-    return names.join(' | ') === base3.groups.map(Ch.label).join(' | ') &&
+    return names.join(' | ') === E.erdGroups(base3).map(Ch.label).join(' | ') &&
       !/vg-erdhead"><span class="vg-tbadge"/.test(pageCases[1].html);
   })()],
+  // 参照名の base 部分（suffix を除いた実体名）が同じなら、ロジックが割れて
+  // いても 1 枚にまとまる。サンプルは ab と ef がどちらも orders_* 1 本なので
+  // まとまり、cd は customers_* も読むので別のまま。
+  ['ロジックが割れていても参照先が同じならまとまる', (() => {
+    const en = E.erdGroups(base3);
+    return base3.groupCount === 3 && en.length === 2 &&
+      en[0].suffixes.join(',') === 'abjp,abuk,abus,efjp,efuk,efus' &&
+      en[1].suffixes.join(',') === 'cdjp,cduk,cdus';
+  })()],
+  // 読む先が違えば別の図のまま。base 部分で比べるのが要点で、形だけで比べると
+  // orders_* と customers_* まで同じ図になってしまう。
+  ['読む先が違えば別の図のまま', (() => {
+    const en = E.erdGroups(base3);
+    const sig = (g) => E.erdSignature(g);
+    return sig(base3.groups[0]) !== sig(base3.groups[1]) &&
+      en.length === 2;
+  })()],
+  // まとめた図の箱は、全グループの値をならした名前にする。1 本目の値をそのまま
+  // 出すと、まとめた相手には当てはまらない名前が出る。
+  ['まとめた図の箱は共通部分 + * で出す', (() => {
+    const en = E.erdGroups(base3);
+    const svg = E.groupSvg(en[0]);
+    const boxes = [...svg.matchAll(/font-weight="600" fill="#24292F">([^<]*)</g)]
+      .map((m) => m[1]);
+    // orders_abjp でも orders_efjp でもなく、両方をならした形
+    return boxes.includes('orders_*') &&
+      !boxes.some((t) => /abjp|efjp/.test(t));
+  })()],
+  // 実際の対応は注記（tooltip）に全グループぶん出す。ならした名前だけだと
+  // どの View が何を読んでいるか辿れなくなる。
+  ['まとめた図の注記に全グループの対応が出る', (() => {
+    const svg = E.groupSvg(E.erdGroups(base3)[0]);
+    const tips = [...svg.matchAll(/<title>([\s\S]*?)<\/title>/g)].map((m) => m[1]);
+    const t = tips.join('\n');
+    return t.includes('abjp = `PROJECT.sample_src_apac.orders_abjp`') &&
+      t.includes('efus = `PROJECT.sample_src_amer.orders_efus`') &&
+      t.includes('abjp, abuk, abus /') && t.includes('efjp, efuk, efus /');
+  })()],
+  // まとまらなかった図では、これまでどおりグループ名を出さない注記でよい。
+  ['まとまっていない図の注記にはグループ名を付けない', (() => {
+    const svg = E.groupSvg(E.erdGroups(base3)[1]);
+    const tips = [...svg.matchAll(/<title>([\s\S]*?)<\/title>/g)].map((m) => m[1]);
+    return tips.some((t) => /^P\d+: cdjp = /m.test(t)) &&
+      !tips.some((t) => t.includes('cdjp, cduk, cdus /'));
+  })()],
+  ['参照名の base 部分は suffix を落としたもの',
+    E.refBase('`PRJ.mart_abjp.orders_abjp`', 'abjp') === 'orders' &&
+    // 末尾が suffix でなければそのまま
+    E.refBase('`PRJ.common.calendar`', 'abjp') === 'calendar' &&
+    // suffix が無い（未認識の View）ときもそのまま
+    E.refBase('`PRJ.d.orders`', null) === 'orders'],
   // 注記は辺の中点に置き、行数ぶん上下に広がる。結合キーが多いと箱の並びの
   // 外へはみ出すので、図の高さはそれも含めて決める。
   ['結合キーが多い注記が図からはみ出さない', (() => {
