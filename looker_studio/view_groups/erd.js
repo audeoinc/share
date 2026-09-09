@@ -377,7 +377,7 @@ function layout(graph) {
   for (const e of edges) {
     const ci = (colOf.get(e.to) || 0) - 1;
     if (ci < 0 || ci >= gaps.length) continue;
-    gaps[ci] = Math.max(gaps[ci], linesWidth(edgeLines(e)) + 22);
+    gaps[ci] = Math.max(gaps[ci], linesWidth(edgeLinesShown(e)) + 22);
   }
   const colX = [];
   let x = PAD;
@@ -408,7 +408,7 @@ function layout(graph) {
     const a = pos.get(e.from);
     const b2 = pos.get(e.to);
     if (!a || !b2) continue;
-    const lines = edgeLines(e);
+    const lines = edgeLinesShown(e);
     if (!lines.length) continue;
     const cy = (a.y + a.h / 2 + b2.y + b2.h / 2) / 2;
     const h = lines.length * LINE_H;
@@ -474,6 +474,29 @@ function edgeLines(e) {
   return out;
 }
 
+/**
+ * 図に**出す**注記の行数の上限。JOIN 種別 ＋ 結合キー 3 本。
+ *
+ * 結合キーが多いと注記が縦に伸び、辺どうしの注記が重なる。重なると
+ * 後ろの注記の下敷き（白い矩形）が前の注記の**下端を削り**、
+ * `customer_account_id` の下線が消えて `customer account id` に見える
+ * ——「文字列が途中で切れる」と読まれた形がこれ。
+ *
+ * 溝の幅と図の高さもこの行数から決まるので、詰めると図全体が小さくなる。
+ * 溢れたぶんは「ほか N 件」にまとめ、**全文は注記に乗せた tooltip で出す**
+ * （辺の線にも同じ tooltip がある。線は細くて狙いにくいので両方に付ける）。
+ */
+const MAX_EDGE_LINES = 4;
+
+/** 図に出す行。溢れたら最後の 1 行を「ほか N 件」に置き換える。 */
+function edgeLinesShown(e) {
+  const all = edgeLines(e);
+  if (all.length <= MAX_EDGE_LINES) return all;
+  const keep = all.slice(0, MAX_EDGE_LINES - 1);
+  keep.push(`ほか ${all.length - keep.length} 件`);
+  return keep;
+}
+
 /** 注記のいちばん長い行の幅。 */
 function linesWidth(ls) {
   let w = 0;
@@ -513,24 +536,31 @@ function toSvg(lay) {
     const gap = (lay.gaps && lay.gaps[(lay.colOf.get(e.to) || 0) - 1]) || GAP_MIN;
     const mid = x2 > x1 ? x2 - gap / 2 : x1 + gap / 2;
     const d = `M${x1},${y1} H${mid} V${y2} H${x2}`;
-    const lines = edgeLines(e);
+    const lines = edgeLinesShown(e);
     out.push(`<path d="${d}" fill="none" stroke="#8C96A0" stroke-width="1.2" ` +
       `${e.nested ? 'stroke-dasharray="4 3" ' : ''}marker-end="url(#vgarrow)">` +
       (lines.length ? `<title>${esc(edgeLabel(e))}</title>` : '') + '</path>');
-    if (lines.length) labels.push({ x: mid, y: (y1 + y2) / 2, lines });
+    if (lines.length) labels.push({ x: mid, y: (y1 + y2) / 2, lines, full: edgeLabel(e) });
   }
+  // **下敷きを全部描いてから、文字を全部描く。** 注記ごとに
+  // 「下敷き → 文字」と積むと、隣の注記の下敷きが前の注記の**下端を削る**
+  // （下線付きの列名が customer account id に見えた）。辺が多いと注記は
+  // どうしても近づくので、重なっても文字が生き残る順序にしておく。
   for (const l of labels) {
-    // 溝は注記が収まる幅にしてあるので、詰めない。全部そのまま出す。
     const w = linesWidth(l.lines) + 12;
     const h = l.lines.length * LINE_H;
-    const top = l.y - h / 2;
-    out.push(`<rect x="${(l.x - w / 2).toFixed(1)}" y="${top.toFixed(1)}" ` +
+    out.push(`<rect x="${(l.x - w / 2).toFixed(1)}" y="${(l.y - h / 2).toFixed(1)}" ` +
       `width="${w.toFixed(1)}" height="${h}" rx="2" fill="#FFFFFF" opacity="0.92"/>`);
+  }
+  for (const l of labels) {
+    const top = l.y - (l.lines.length * LINE_H) / 2;
     const tspans = l.lines.map((t, i) =>
       `<tspan x="${l.x}" y="${(top + LINE_H * i + 11).toFixed(1)}">${esc(t)}</tspan>`).join('');
+    // 全文は tooltip に出す（図には MAX_EDGE_LINES 行までしか出さない）。
+    // 辺の線にも同じものが付いているが、線は細くて狙いにくい。
     out.push(`<text text-anchor="middle" ` +
       `font-family="ui-monospace,SFMono-Regular,Consolas,monospace" font-size="11" ` +
-      `fill="#57606A">${tspans}</text>`);
+      `fill="#57606A"><title>${esc(l.full)}</title>${tspans}</text>`);
   }
 
   for (const n of lay.nodes) {
@@ -730,7 +760,8 @@ function renderErdBase(b) {
 
 module.exports = {
   prepare, cteRanges, scanScope, buildGraph, layout, toSvg, groupSvg,
-  renderErdBase, erdStack, erdLegend, edgeLines, linesWidth,
+  renderErdBase, erdStack, erdLegend, edgeLines, edgeLinesShown, linesWidth,
+  MAX_EDGE_LINES,
   shortName, edgeLabel, boxWidth, BOX_W_MIN, BOX_H,
   erdGroups, erdSignature, refBase, commonStem,
 };

@@ -764,6 +764,40 @@ const checks = [
     E.refBase('`PRJ.d.orders`', null) === 'orders'],
   // 注記は辺の中点に置き、行数ぶん上下に広がる。結合キーが多いと箱の並びの
   // 外へはみ出すので、図の高さはそれも含めて決める。
+  // 結合キーが多いと注記が縦に伸び、辺どうしの注記が重なる。重なったとき
+  // 「下敷き → 文字」を注記ごとに積むと、隣の下敷きが前の注記の下端を削り、
+  // customer_account_id の下線が消えて customer account id に見える
+  // （「文字列が途中で切れる」と読まれた形）。下敷きを全部描いてから
+  // 文字を全部描けば、重なっても文字は生き残る。
+  ['注記の下敷きを全部描いてから文字を描く', (() => {
+    let sql = 'SELECT 1 FROM f';
+    for (let i = 0; i < 6; i++) {
+      sql += ` LEFT JOIN d${i} ON f.key_col_${i} = d${i}.other_key_${i}`;
+    }
+    const svg = E.toSvg(E.layout(E.buildGraph(sql, [])));
+    // 注記の下敷き（rx="2" の矩形）と注記の文字の出現位置を比べる。
+    const lastRect = svg.lastIndexOf('rx="2" fill="#FFFFFF"');
+    const firstText = svg.indexOf('<text text-anchor="middle"');
+    return lastRect > 0 && firstText > 0 && lastRect < firstText;
+  })()],
+  // 溢れたぶんは「ほか N 件」にまとめ、全文は tooltip に出す。
+  ['結合キーが多いと図では丸めて、全文は tooltip に出す', (() => {
+    const keys = [];
+    for (let i = 0; i < 6; i++) keys.push(`a.k${i} = b.k${i}`);
+    const sql = 'SELECT 1 FROM a LEFT JOIN b ON ' + keys.join(' AND ');
+    const g = E.buildGraph(sql, []);
+    const e = g.edges.find((x) => x.keys && x.keys.length === 6);
+    const shown = E.edgeLinesShown(e);
+    const svg = E.toSvg(E.layout(g));
+    return E.edgeLines(e).length === 7 &&
+      shown.length === E.MAX_EDGE_LINES &&
+      shown[shown.length - 1] === 'ほか 4 件' &&
+      // 図に出るのは丸めたほう
+      svg.includes('ほか 4 件') &&
+      // 全文は注記の tooltip に入る（線は細くて狙いにくいので注記にも付ける）。
+      // 左右で列名が同じ ON は 1 つに畳まれるので、キーは k5 の形で出る。
+      /<text text-anchor="middle"[^>]*><title>[^<]*, k5<\/title>/.test(svg);
+  })()],
   ['結合キーが多い注記が図からはみ出さない', (() => {
     const sql = 'SELECT 1 FROM a LEFT JOIN b ON a.k1=b.k1 AND a.k2=b.k2 AND a.k3=b.k3' +
       ' AND a.k4=b.k4 AND a.k5=b.k5 AND a.k6=b.k6';
@@ -772,7 +806,7 @@ const checks = [
     const ys = [...svg.matchAll(/<tspan x="[^"]*" y="([-0-9.]+)"/g)].map((m) => Number(m[1]));
     const top = lay.y0 || 0;
     // 注記の 1 行目の上端（y から 11px 上）と最終行の下端が viewBox に入る
-    return ys.length === 7 &&
+    return ys.length === E.MAX_EDGE_LINES &&
       Math.min(...ys) - 11 >= top &&
       Math.max(...ys) + 3 <= top + lay.height &&
       // 箱だけで決めていた頃の高さでは入りきらない形であること
