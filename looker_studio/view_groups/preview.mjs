@@ -1521,6 +1521,45 @@ const checks = [
     return Sq.sqlViews(b).map((v) => v.suffix).join(',') ===
       'txjp,txuk,txus,v2_txjp,v2_txus';
   })()],
+  // **SQL タブもリージョンごとの行に分ける。** 128 枚が 1 本に流れると、
+  // どれがどこの View なのか読み取れない（note の見出しで同じことが起きた）。
+  ['SQL タブはリージョンごとの行に分ける', (() => {
+    const h = Sq.renderSql(base3, fakeSql(base3), REGION_SPLIT(base3));
+    const rows = [...h.matchAll(/<div class="vg-sregname">([^<]*)<\/div><div class="vg-sreg">([\s\S]*?)<\/div>/g)]
+      .map((m) => [m[1], [...m[2].matchAll(/vg-st\d+"[^>]*>([^<]*)</g)].map((x) => x[1])]);
+    return rows.length === 2 &&
+      rows[0][0] === 'asia-northeast1' &&
+      rows[0][1].join(',') === 'abjp,abuk,abus,cdjp,cduk,cdus' &&
+      rows[1][0] === 'asia-southeast1' &&
+      rows[1][1].join(',') === 'efjp,efuk,efus' &&
+      // 行の切れ目は両列にまたがる 1 本（片側ずつだと段違いになる）
+      (h.match(/vg-srule/g) || []).length === 1;
+  })()],
+  // **タブとパネルの添字はそろっていること。** 並べ替えるとここがずれる。
+  ['リージョン順に並べてもタブとパネルが対応する', (() => {
+    const h = Sq.renderSql(base3, fakeSql(base3), REGION_SPLIT(base3));
+    const tabs = [...h.matchAll(/class="vg-stab vg-st(\d+)"[^>]*>([^<]*)</g)]
+      .map((m) => [Number(m[1]), m[2]]);
+    const panels = [...h.matchAll(/class="vg-spanel vg-sp(\d+)"[\s\S]*?vg-sqlname">([^<]*)</g)]
+      .map((m) => [Number(m[1]), m[2]]);
+    // 添字は 1..N で連番、かつ同じ添字のタブとパネルが同じ View を指す
+    return tabs.length === base3.viewCount && panels.length === tabs.length &&
+      tabs.every(([n], i) => n === i + 1) &&
+      tabs.every(([n, sfx]) => {
+        const p = panels.find((x) => x[0] === n);
+        return p && p[1].endsWith('_' + sfx);
+      });
+  })()],
+  // リージョンが取れていない環境では 1 行にまとめ、見出しは 'View'。
+  // markup の形は変えない（変えると規則を 2 通り用意することになる）。
+  ['リージョンが無ければ 1 行にまとめて View と出す', (() => {
+    const h = Sq.renderSql(base3, fakeSql(base3));
+    const rows = [...h.matchAll(/<div class="vg-sregname">([^<]*)</g)].map((m) => m[1]);
+    return rows.length === 1 && rows[0] === 'View' &&
+      !h.includes('vg-srule') &&
+      // タブは従来どおり .vg-sreg の中（規則が 1 通りで済む）
+      /<div class="vg-sreg"><label class="vg-stab vg-st1"/.test(h);
+  })()],
   // SQL タブは base の View を 1 本残らず出す（打ち切りの上限は上げてある）。
   ['SQL タブは base の View を全部出す', (() => {
     const h = sqlCases[0].html;
@@ -1568,7 +1607,8 @@ const checks = [
       !/class="vg-r vg-sr/.test(h) && !/class="vg-br vg-sr/.test(h) &&
       // 形は「兄弟 > 子」から動かさない（この viz で動くと確認できている形）
       hasRule(css, '.vg-sr1:checked ~ .vg-spanels > .vg-sp1', 'display:block') &&
-      css.includes('.vg-sr1:checked ~ .vg-stablist > .vg-st1') &&
+      // タブはリージョンの束（.vg-sreg）の中なので 1 段深い
+      css.includes('.vg-sr1:checked ~ .vg-stablist > .vg-sreg > .vg-st1') &&
       // 結合子は ~ と > だけ。子孫結合子や * を使うと実機で効かなくなる。
       // 束ねた規則はセレクタ 1 本ずつに掛ける。
       eachSelector(css).filter((r) => r.includes(':checked')).every((r) =>

@@ -400,7 +400,7 @@ function __run(analysis_json, diff_html, erd_html, columns_json, sql_json, descs
   var bases = a.bases || [];
   for (var i = 0; i < bases.length; i++) {
     col += renderColumnsBase(bases[i], byView);
-    sql += renderSqlBase(bases[i], sqlByView);
+    sql += renderSqlBase(bases[i], sqlByView, regions);
   }
   if (!col) col = __notice('カラム定義を出せる View がありません。');
   if (!sql) sql = __notice('SQL を出せる View がありません。');

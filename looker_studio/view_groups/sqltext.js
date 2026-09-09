@@ -23,14 +23,17 @@
  * もう片方も切り替わる。
  */
 
-const { esc, hashId, label, notice, MAX_SQL_TABS, groupRule } = require('./chrome.js');
+const {
+  esc, hashId, label, notice, MAX_SQL_TABS, groupRule, regionByView,
+} = require('./chrome.js');
 
 /**
  * base の全 View を 1 列に並べる。これがそのままタブの並びになる。
  * suffix 順にするのは、探すときの手掛かりが suffix だから
  * （グループ順に並べると、同じ suffix を探すのにタブを目で追うことになる）。
  */
-function sqlViews(b) {
+function sqlViews(b, regions) {
+  const reg = regionByView(regions);
   const out = [];
   const groups = b.groups || [];
   for (let i = 0; i < groups.length; i++) {
@@ -40,17 +43,25 @@ function sqlViews(b) {
       out.push({
         suffix: (g.suffixes && g.suffixes[j]) || members[j].viewName || '(suffix なし)',
         viewName: members[j].viewName,
+        region: reg[members[j].viewName] || '',
         group: label(g),
         groupSize: members.length,
       });
     }
   }
-  // **suffix の文字数 → アルファベット順。** 単純な辞書順だと中間語つきの
-  // suffix（v2_txjp）が素のもの（txjp）に混ざって並ぶ。文字数を先に見ると
+  // **リージョン → suffix の文字数 → アルファベット順。**
+  //
+  // リージョンを先に見るのは、タブをリージョンごとの行に分けるため。並びが
+  // そのまま行の切れ目になるので、ここで固めておけば描画側は切れ目を入れる
+  // だけで済む（パネルの並びもタブと同じ順になり、添字がずれない）。
+  //
+  // 文字数を suffix より先に見るのは、単純な辞書順だと中間語つきの suffix
+  // （v2_txjp）が素のもの（txjp）に混ざって並ぶため。文字数を先に見ると
   // 素のものが先に固まり、枝番や版はその後ろにまとまる。
   out.sort((x, y) => {
     const a = String(x.suffix), b = String(y.suffix);
-    return a.length - b.length || a.localeCompare(b);
+    return String(x.region).localeCompare(String(y.region)) ||
+      a.length - b.length || a.localeCompare(b);
   });
   return out;
 }
@@ -101,8 +112,8 @@ function sqlPanel(v, text) {
  * @param {object} b      解析結果の base 1 件分
  * @param {object} byView { View 名: SQL 本文 }
  */
-function renderSql(b, byView) {
-  const views = sqlViews(b);
+function renderSql(b, byView, regions) {
+  const views = sqlViews(b, regions);
   if (!views.length) return notice('View が見つかりません。');
   const src = byView || {};
   if (!views.some((v) => src[v.viewName])) {
@@ -115,9 +126,41 @@ function renderSql(b, byView) {
   const radios = shown.map((_, i) =>
     `<input class="vg-sr vg-sr${i + 1}" type="radio" name="${idPrefix}"` +
     ` id="${idPrefix}-${i + 1}"${i === 0 ? ' checked' : ''}>`).join('');
-  const tablist = shown.map((v, i) =>
-    `<label class="vg-stab vg-st${i + 1}" for="${idPrefix}-${i + 1}">` +
-    `${esc(v.suffix)}</label>`).join('');
+
+  // **リージョンごとに行を分ける。** 128 枚が 1 本に流れると、どれがどこの
+  // View なのか読み取れない（note の見出しで同じことが起きた）。並びは
+  // sqlViews がリージョン順にしてあるので、ここでは切れ目を入れるだけ。
+  //
+  // 形は `.vg-sregname`（左の見出し）と `.vg-sreg`（右のタブの束）の 2 つを
+  // .vg-stablist の直接の子として交互に並べ、grid で 2 列にそろえる。
+  // **タブは .vg-sreg の直接の子**にしておくこと。選択中を塗る規則が
+  //   .vg-srN:checked ~ .vg-stablist > .vg-sreg > .vg-stN
+  // の形（兄弟 ~ 子 > 子）で、子孫結合子に変えるとこの viz では効かない。
+  // 外側タブが .vg-ohead > .vg-otablist > .vg-otN の 2 段で動いているので、
+  // 段を 1 つ増やすこと自体は確かめが取れている。
+  //
+  // リージョンが取れていない環境では見出しを 'View' にして 1 行にまとめる。
+  // markup の形は変えない（変えると規則を 2 通り用意することになる）。
+  const rows = [];
+  let cur = null;
+  shown.forEach((v, i) => {
+    const key = v.region || '';
+    if (cur === null || cur.key !== key) {
+      cur = { key, tabs: [] };
+      rows.push(cur);
+    }
+    cur.tabs.push(
+      `<label class="vg-stab vg-st${i + 1}" for="${idPrefix}-${i + 1}">` +
+      `${esc(v.suffix)}</label>`);
+  });
+  // 行の切れ目は**両列にまたがる 1 本の要素**で引く。左右のセルそれぞれに
+  // border-top を付ける手も試したが、align-items:baseline だとセルの上端が
+  // そろわず、線が段違いになった（見出しの下だけ線が無いように見える）。
+  const tablist = rows.map((r, i) =>
+    (i > 0 ? `<div class="vg-srule"></div>` : '') +
+    `<div class="vg-sregname">${esc(r.key || 'View')}</div>` +
+    `<div class="vg-sreg">${r.tabs.join('')}</div>`).join('');
+
   const panels = shown.map((v, i) =>
     `<div class="vg-spanel vg-sp${i + 1}">${sqlPanel(v, src[v.viewName])}</div>`).join('');
 
@@ -130,13 +173,12 @@ function renderSql(b, byView) {
 
   return over +
     `<div class="vg-stabs">${radios}` +
-    `<div class="vg-stablist"><span class="vg-slabel">View</span>${tablist}</div>` +
+    `<div class="vg-stablist">${tablist}</div>` +
     `<div class="vg-spanels">${panels}</div></div>`;
 }
-
 /** base 1 件分。見出しは外枠（wrapPage）が出すので、ここでは中身だけ。 */
-function renderSqlBase(b, byView) {
-  return `<div class="vg-root">${renderSql(b, byView)}</div>`;
+function renderSqlBase(b, byView, regions) {
+  return `<div class="vg-root">${renderSql(b, byView, regions)}</div>`;
 }
 
 /**
@@ -149,8 +191,17 @@ function sqlCss() {
     // タブ。ラジオは画面から隠すが、display:none にはしない（キーボードで
     // 辿れなくなるうえ、ブラウザによっては :checked が働かない）。
     `.vg-sr{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}`,
-    `.vg-stablist{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 10px}`,
-    `.vg-slabel{color:#57606A;font-size:12px;font-weight:600;margin-right:2px}`,
+    // タブの並びはリージョンごとの行。左に見出し、右にタブの束を置いて
+    // 2 列にそろえる。128 枚が 1 本に流れると読み取れないので、行に割る。
+    `.vg-stablist{display:grid;grid-template-columns:max-content minmax(0,1fr);` +
+      `align-items:baseline;column-gap:12px;margin:0 0 10px}`,
+    // 罫線は行の間だけ。両列にまたがらせる（片側ずつ引くと、baseline 揃えの
+    // せいで上端がそろわず段違いになる）。note のリージョンの表と同じ濃さ。
+    `.vg-srule{grid-column:1/-1;border-top:1px solid #EAEEF2;margin:5px 0}`,
+    `.vg-sregname{color:#57606A;font-size:11px;font-weight:600;` +
+      `white-space:nowrap;line-height:1.9;` +
+      `font-family:ui-monospace,SFMono-Regular,Consolas,monospace}`,
+    `.vg-sreg{display:flex;flex-wrap:wrap;gap:6px}`,
     `.vg-stab{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;` +
       `border:1px solid #D0D7DE;border-radius:14px;color:#57606A;` +
       `cursor:pointer;user-select:none;font-weight:600;font-size:12px;` +
@@ -180,8 +231,12 @@ function sqlCss() {
   // 選択中は青系にして、外側（黒）・基準（薄い赤）と見分けられるようにする。
   rules.push(groupRule(MAX_SQL_TABS,
     (i) => `.vg-sr${i}:checked ~ .vg-spanels > .vg-sp${i}`, 'display:block'));
+  // タブは .vg-sreg の中に入ったので 1 段深い。**子結合子のまま**にすること
+  // （子孫に変えるとこの viz では効かない）。外側タブが
+  // .vg-ohead > .vg-otablist > .vg-otN の 2 段で動いているので、段を増やす
+  // こと自体は確かめが取れている。
   rules.push(groupRule(MAX_SQL_TABS,
-    (i) => `.vg-sr${i}:checked ~ .vg-stablist > .vg-st${i}`,
+    (i) => `.vg-sr${i}:checked ~ .vg-stablist > .vg-sreg > .vg-st${i}`,
     'background:#DDF4FF;border-color:#54AEFF;color:#0969DA'));
   return rules.join('\n');
 }

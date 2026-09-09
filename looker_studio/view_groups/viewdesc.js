@@ -55,7 +55,9 @@
  * :checked の規則さえ別なら、塗りを分ける理由が無いため。
  */
 
-const { esc, hashId, notice, MAX_DESC_TABS, MAX_LABEL_TABS, groupRule } = require('./chrome.js');
+const {
+  esc, hashId, notice, MAX_DESC_TABS, MAX_LABEL_TABS, groupRule, regionByView,
+} = require('./chrome.js');
 
 /**
  * 選択中のタブの塗り。**無彩色にしてある。**
@@ -100,18 +102,6 @@ const cmp = (x, y) => (x < y ? -1 : x > y ? 1 : 0);
  *
  * @param {function} fill 組 1 件に中身を詰める。empty を必ず立てること
  */
-/** View 名 → リージョン。regions は [{r: リージョン, v: [View 名...]}]。 */
-function regionByView(regions) {
-  const out = {};
-  const src = Array.isArray(regions) ? regions : [];
-  for (let i = 0; i < src.length; i++) {
-    const e = src[i] || {};
-    const names = Array.isArray(e.v) ? e.v : [];
-    for (let j = 0; j < names.length; j++) out[names[j]] = String(e.r == null ? '' : e.r);
-  }
-  return out;
-}
-
 function tabGroups(b, list, fill) {
   const suf = suffixByView(b);
   const src = Array.isArray(list) ? list : [];

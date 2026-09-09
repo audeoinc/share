@@ -113,8 +113,12 @@ const NOTE_MARK = '<!--VG_NOTE-->';
  *          べた書きに見えて**対応が読めない**（表にした意味が消える）。
  * 世代 10 ＝ リージョンの表に行間の罫線。見た目だけの変更だが、9 を貼った
  *          あとに出たので、**どちらを貼ったか**が画面から分かる必要がある。
+ * 世代 11 ＝ SQL タブをリージョンごとの行に分ける（.vg-sreg / .vg-sregname）。
+ *          タブが 1 段深くなり、選択中を塗る規則が
+ *          .vg-stablist > .vg-sreg > .vg-stN に変わった。**古い CSS では
+ *          どのタブも反転しない**（切り替えは効くのに選択が分からない）。
  */
-const CSS_GEN = 10;
+const CSS_GEN = 11;
 
 /**
  * CSS が古いときだけ出る案内。上の CSS_GEN を参照。
@@ -161,6 +165,21 @@ function groupRule(n, selector, decl) {
     else sels.push(s);
   }
   return sels.join(',') + '{' + decl + '}';
+}
+
+/**
+ * View 名 → リージョン。regions は [{r: リージョン, v: [View 名...]}]。
+ * note（viewdesc.js）と SQL タブ（sqltext.js）の両方が使うのでここに置く。
+ */
+function regionByView(regions) {
+  const out = {};
+  const src = Array.isArray(regions) ? regions : [];
+  for (let i = 0; i < src.length; i++) {
+    const e = src[i] || {};
+    const names = Array.isArray(e.v) ? e.v : [];
+    for (let j = 0; j < names.length; j++) out[names[j]] = String(e.r == null ? '' : e.r);
+  }
+  return out;
 }
 
 function esc(s) {
@@ -284,6 +303,6 @@ function wrapPage(diffHtml, erdHtml, colsHtml, sqlHtml, noteHtml, base, labelSpl
 module.exports = {
   MAX_TABS, MAX_SQL_TABS, MAX_DESC_TABS, MAX_LABEL_TABS,
   MAX_OUTER_TABS, OUTER_TABS,
-  NOTE_MARK, CSS_GEN, cssGuard, groupRule,
+  NOTE_MARK, CSS_GEN, cssGuard, groupRule, regionByView,
   esc, hashId, label, badge, header, notice, KIND_TEXT, kindText, wrapPage,
 };
