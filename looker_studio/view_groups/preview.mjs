@@ -720,6 +720,33 @@ const checks = [
       en[0].suffixes.join(',') === 'abjp,abuk,abus,efjp,efuk,efus' &&
       en[1].suffixes.join(',') === 'cdjp,cduk,cdus';
   })()],
+  // **View の suffix と参照先の suffix は一致するとは限らない。** 中間語を
+  // 使うと sales_v2_txjp（suffix = v2_txjp）が orders_txjp を読む形になり、
+  // View の suffix を落とすやり方では 1 文字も落ちない。同じ orders を読んで
+  // いる 2 つのグループが別の図になっていた（実際に表に出た）。
+  // パラメータの値どうしの共通部分から base を出せば、対応が取れる。
+  ['View と参照先の suffix が違ってもまとまる', (() => {
+    const ddl = (tbl, extra) =>
+      `SELECT o.id${extra} FROM \`p.d.orders_${tbl}\` AS o`;
+    const rows = [
+      { view_name: 'sales_txjp', ddl: ddl('txjp', '') },
+      { view_name: 'sales_txus', ddl: ddl('txus', '') },
+      { view_name: 'sales_v2_txjp', ddl: ddl('txjp', ', o.amount') },
+      { view_name: 'sales_v2_txus', ddl: ddl('txus', ', o.amount') },
+    ];
+    const b = A.analyze(rows,
+      { suffixList: ['txjp', 'txus', 'v2_txjp', 'v2_txus'] }).bases[0];
+    const en = E.erdGroups(b);
+    return b.groupCount === 2 && en.length === 1 &&
+      en[0].suffixes.join(',') === 'txjp,txus,v2_txjp,v2_txus';
+  })()],
+  // パラメータでない節（全 View で同じ名前）は落とさない。落とす手掛かりが
+  // 無いうえ、落とすと無関係な表どうしが同じ base になりうる。
+  ['共通の参照先は名前をそのまま base にする', (() => {
+    const g = { suffixes: ['abjp'], params: [] };
+    const n = { name: '`prj.common.calendar_master`', kind: 'table' };
+    return E.nodeBase(n, g) === 'calendar_master';
+  })()],
   // 読む先が違えば別の図のまま。base 部分で比べるのが要点で、形だけで比べると
   // orders_* と customers_* まで同じ図になってしまう。
   ['読む先が違えば別の図のまま', (() => {

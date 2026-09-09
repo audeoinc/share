@@ -640,12 +640,60 @@ function refBase(name, suffix) {
     ? short.slice(0, -tail.length) : short;
 }
 
+/**
+ * パラメータ 1 つが指す参照の base。**値どうしの共通部分から出す。**
+ *
+ * View の suffix を落とす（refBase）だけでは足りない。中間語を使うと
+ * **View の suffix と参照先の suffix が違う**からで、
+ *   View sales_v2_txjp（suffix = v2_txjp） → FROM orders_txjp
+ * のとき orders_txjp は _v2_txjp で終わらないので 1 文字も落ちない。
+ * 結果、同じ orders を読んでいる 2 つのグループが別の図になっていた。
+ *
+ * パラメータの値は「環境ごとに何が違うか」そのものなので、値どうしの
+ * 共通部分を取り、直前の '_' まで戻せば base が出る。
+ *   {abjp: orders_abjp, abuk: orders_abuk} → 共通 orders_ab → orders
+ *   {v2_txjp: orders_txjp, v2_txus: orders_txus} → 共通 orders_tx → orders
+ * suffix 一覧も、View 名との対応も要らない。
+ */
+function paramBase(p, viewSuffix) {
+  const names = [];
+  for (const k of Object.keys(p.values)) {
+    const n = shortName(p.values[k]);
+    if (names.indexOf(n) < 0) names.push(n);
+  }
+  if (names.length >= 2) {
+    let i = 0;
+    while (i < names[0].length && names.every((n) => n[i] === names[0][i])) i++;
+    const cut = names[0].slice(0, i).lastIndexOf('_');
+    if (cut > 0) return names[0].slice(0, cut);
+  }
+  // 値が 1 つしか無い（差が出ていない）ときは View の suffix で落とす。
+  return refBase(names[0], viewSuffix);
+}
+
+/**
+ * 節 1 つの base。パラメータ由来ならその値から、そうでなければ名前そのまま。
+ *
+ * **パラメータでない節は落とさない。** 全 View で同じ名前ということなので、
+ * 落とす手掛かりが無いうえ、落とすと無関係な表どうしが同じ base になりうる。
+ */
+function nodeBase(n, g) {
+  const short = shortName(n.name);
+  for (const p of (g.params || [])) {
+    for (const k of Object.keys(p.values)) {
+      if (shortName(p.values[k]) === short) {
+        return paramBase(p, (g.suffixes || [])[0] || null);
+      }
+    }
+  }
+  return short;
+}
+
 /** 図の形を表す署名。実体名は base 部分に均してから比べる。 */
 function erdSignature(g) {
-  const suffix = (g.suffixes || [])[0] || null;
   const graph = buildGraph(g.sql, g.params);
   const key = new Map(graph.nodes.map((n) =>
-    [n.id, refBase(n.name, suffix) + '/' + n.kind]));
+    [n.id, nodeBase(n, g) + '/' + n.kind]));
   return JSON.stringify({
     n: graph.nodes.map((n) => key.get(n.id)).sort(),
     e: graph.edges.map((e) => key.get(e.from) + '>' + key.get(e.to) +
@@ -707,19 +755,19 @@ function groupSvg(entry) {
   // 後方互換。1 グループをそのまま渡された場合も描ける。
   const gs = entry.groups || [entry];
   const graph = buildGraph(gs[0].sql, gs[0].params);
-  const sfx0 = (gs[0].suffixes || [])[0] || null;
 
   for (const n of graph.nodes) {
-    const base = refBase(n.name, sfx0);
+    const base = nodeBase(n, gs[0]);
     const names = [];
     const tips = [];
     const hits = [];
     for (const g of gs) {
       // このノードに当たるパラメータを **base 部分の一致**で引き直す。
       // グループごとに番号（P1 / P2）がずれていても対応が取れる。
+      const sfx = (g.suffixes || [])[0] || null;
       for (const p of (g.params || [])) {
         const keys = Object.keys(p.values);
-        if (!keys.some((k) => refBase(p.values[k], k) === base)) continue;
+        if (paramBase(p, sfx) !== base) continue;
         hits.push(p);
         for (const k of keys) names.push(shortName(p.values[k]));
         tips.push((gs.length > 1 ? label(g) + ' / ' : '') + p.name + ': ' +
@@ -800,5 +848,5 @@ module.exports = {
   prepare, cteRanges, scanScope, buildGraph, layout, toSvg, groupSvg,
   renderErdBase, erdStack, erdLegend, edgeLines, linesWidth,
   shortName, edgeLabel, boxWidth, BOX_W_MIN, BOX_H, fit,
-  erdGroups, erdSignature, refBase, commonStem,
+  erdGroups, erdSignature, refBase, paramBase, nodeBase, commonStem,
 };
