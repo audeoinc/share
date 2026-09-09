@@ -290,8 +290,8 @@ BEGIN
   -- --------------------------------------------------------------------------
   -- STEP 3: bqc_t_job_cost -- job 粒度のコスト実績
   -- --------------------------------------------------------------------------
-  -- 1 行 = 1 ジョブ（SCRIPT 親は除外し、子 job だけを持つ）。02 が MERGE で
-  -- (job_region, project_id, job_id) 一意に投入する。
+  -- 1 行 = 1 ジョブ。親 SCRIPT と子文の両方が入る（親子の切り分けは STEP 4 の
+  -- 解決ビューが担当）。02 が MERGE で (job_region, project_id, job_id) 一意に投入する。
   -- CREATE OR REPLACE なので、ここを流すと既存の取り込み結果は消える。
   EXECUTE IMMEDIATE FORMAT(r"""
     CREATE OR REPLACE TABLE `%s` (
@@ -309,7 +309,7 @@ BEGIN
       executor_id             STRING    OPTIONS(description = '実行者の識別子。subsystem_id、無ければ user_email'),
       executor_source         STRING    OPTIONS(description = 'executor_id の出所: LABEL / USER_EMAIL。LABEL 比率がラベル付与のカバレッジになる'),
       job_type                STRING    OPTIONS(description = 'ジョブ種別 (QUERY 等)'),
-      statement_type          STRING    OPTIONS(description = 'SELECT / CREATE_TABLE_AS_SELECT 等。SCRIPT は投入されない'),
+      statement_type          STRING    OPTIONS(description = 'SELECT / CREATE_TABLE_AS_SELECT / SCRIPT 等。SCRIPT は子文の集計行なので、集計時は解決ビューの is_cost_countable で除く'),
       cache_hit               BOOL      OPTIONS(description = 'キャッシュヒット。TRUE なら total_bytes_billed は 0 で課金なし'),
       is_error                BOOL      OPTIONS(description = 'error_result が入っていたか。リトライ嵐の検出に使う'),
       error_reason            STRING    OPTIONS(description = 'error_result.reason'),
@@ -363,17 +363,31 @@ BEGIN
       FROM `%s`
       WHERE parent_job_id IS NOT NULL
     ),
+    existing_jobs AS (
+      -- 親の行がこの表に実在するかを見るための ID 一覧。
+      -- 親と子は数秒差で作られるが、取り込み窓の先頭や保持期間の刈り取りは
+      -- 時刻の途中で切れるため、親だけが落ちて子が残る「孤児」が必ず端に生じる。
+      SELECT DISTINCT job_region, project_id, job_id
+      FROM `%s`
+    ),
     flagged AS (
       SELECT
         j.*,
         j.parent_job_id IS NOT NULL AS is_child,
         p.job_id IS NOT NULL        AS has_child_jobs,
-        IFNULL(j.parent_job_id, j.job_id) AS root_job_id
+        e.job_id IS NOT NULL        AS has_parent_row,
+        -- 孤児は自分自身を作業単位の代表にする。親IDのまま置くと、代表行が
+        -- 存在しない作業単位ができて root 系の合計から丸ごと抜け落ちる。
+        IF(e.job_id IS NOT NULL, j.parent_job_id, j.job_id) AS root_job_id
       FROM `%s` AS j
       LEFT JOIN parent_ids AS p
         ON  p.job_region = j.job_region
         AND p.project_id = j.project_id
         AND p.job_id     = j.job_id
+      LEFT JOIN existing_jobs AS e
+        ON  e.job_region = j.job_region
+        AND e.project_id = j.project_id
+        AND e.job_id     = j.parent_job_id
     ),
     classified AS (
       SELECT
@@ -388,19 +402,23 @@ BEGIN
         -- 一時的に「子が見えない親」が生じても安全側に倒すため。
         NOT has_child_jobs AND IFNULL(statement_type, '') != 'SCRIPT'
           AS is_cost_countable,
-        -- 作業単位の代表行か。親を持たない行＝PARENT と STANDALONE。
-        parent_job_id IS NULL AS is_root_job,
+        -- 作業単位の代表行か。「親の行がこの表に実在しない」で判定する。
+        -- parent_job_id IS NULL だけで判定すると、孤児（親が刈り取られた子）が
+        -- どの作業単位の代表にもならず、root 系の合計が静かに減る。
+        NOT has_parent_row AS is_root_job,
         -- 親の中での実行順。スクリプトのどの文が重いかを見るための軸。
-        -- 親自身と単独ジョブは NULL。
+        -- 親自身・単独ジョブ・孤児は NULL（孤児は兄弟も欠けている可能性があり、
+        -- 番号を振っても信用できないため）。
         CASE
-          WHEN parent_job_id IS NULL THEN NULL
+          WHEN NOT has_parent_row THEN NULL
           ELSE ROW_NUMBER() OVER (
             PARTITION BY job_region, project_id, parent_job_id
             ORDER BY creation_time, start_time, job_id
           )
         END AS statement_index,
         -- この作業単位に属する子の本数（親行にも子行にも同じ値が入る）。
-        SUM(IF(parent_job_id IS NOT NULL, 1, 0)) OVER (
+        -- has_parent_row で数えるので、孤児は自分を子として数えない。
+        SUM(IF(has_parent_row, 1, 0)) OVER (
           PARTITION BY job_region, project_id, root_job_id
         ) AS root_statement_count
       FROM flagged AS f
@@ -427,7 +445,7 @@ BEGIN
       IF(is_cost_countable, total_bytes_billed, NULL) AS statement_total_bytes_billed,
       IF(is_cost_countable, tib_billed,         NULL) AS statement_tib_billed
     FROM classified
-  """, job_cost_resolved_fqn, job_cost_fqn, job_cost_fqn);
+  """, job_cost_resolved_fqn, job_cost_fqn, job_cost_fqn, job_cost_fqn);
 
   -- --------------------------------------------------------------------------
   -- STEP 5: bqc_t_daily_cost -- 日 x fingerprint x 実行者 の集約

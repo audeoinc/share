@@ -8,9 +8,11 @@
 --   STEP 3: 保持期間 (retention_days) を超えた行を 3 表から刈り取る
 --   STEP 4: レポートビューを静的テーブル bqc_t_daily_cost_report に焼き直す
 --
--- 初回（集約表が空）は job_cost の全期間を作り直し、以降は
--- refresh_lookback_days だけを作り直す。02 の incremental_lookback_days より
--- 必ず広く取ること。狭いと、02 が遅れて取り込んだ古い日付の行が集約に反映されない。
+-- 作り直す起点日は自己修復型で決める。基本は直近 refresh_lookback_days 日ぶんだが、
+-- job_cost にあって daily_cost に無い日があればその最古日まで遡る。初回は daily_cost が
+-- 空なので自動的に全期間が対象になる。refresh_lookback_days は 02 の
+-- incremental_lookback_days より広く取ること（狭くても遡りで埋まるが、毎回の
+-- スキャン量が無駄に増える）。
 --
 -- first_seen_date は保持期間の中では LEAST() で後退させない。これが
 -- 「新しくコストを発生させた SQL」の判定基準になる。
@@ -372,6 +374,10 @@ BEGIN
   --
   -- fingerprint 次元は last_seen_date で判定する。保持期間内に一度でも実行された
   -- SQL は、first_seen が古くても残す（新規判定の基準を保つため）。
+  --
+  -- job_cost は creation_date で切るため、境界をまたぐスクリプトでは親だけが消えて
+  -- 子が残る「孤児」が生じる。解決ビューは親行の実在で root を判定するので、
+  -- 孤児は自分自身が作業単位の代表になり、root 系の合計から抜け落ちることはない。
   IF enable_retention_pruning THEN
     SET retention_cutoff_date = DATE_SUB(CURRENT_DATE(), INTERVAL retention_days DAY);
 

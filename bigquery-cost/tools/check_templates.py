@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""pipeline/*.sql の中に埋め込まれた動的SQLテンプレートを取り出し、
+"""pipeline/*.sql と adhoc/*.sql を静的に検査する。
+
+動的SQLテンプレートを取り出し、
 FORMAT の %s を埋めたうえで sqlglot(bigquery) にパースさせる静的チェック。
 
 BigQuery のスクリプト構文（BEGIN / DECLARE / EXECUTE IMMEDIATE）は sqlglot が
@@ -48,7 +50,7 @@ def main() -> int:
     failures = 0
     checked = 0
 
-    for path in sorted(glob.glob("pipeline/*.sql")):
+    for path in sorted(glob.glob("pipeline/*.sql") + glob.glob("adhoc/*.sql")):
         source = open(path, encoding="utf-8").read()
 
         declare_problems = _check_declare_order(path, source)

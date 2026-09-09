@@ -187,7 +187,13 @@ GA プロパティID（`analytics_123456789`）は桁数が違うので影響を
 SUM(root_slot_hours) = SUM(statement_slot_hours) = 総量
 ```
 
-**どちらの列を合計しても総量は一致し、変わるのは粒度だけです。** フィルタの掛け忘れで
+**どちらの列を合計しても総量は一致し、変わるのは粒度だけです。**
+取り込み窓の先頭や保持期間の刈り取りは時刻の途中で切れるため、親だけが落ちて子が
+残る「孤児」が端に必ず生じます。root 系は `parent_job_id IS NULL` ではなく
+**親の行がこの表に実在するか**で判定しているので、孤児は自分自身が作業単位の代表に
+なり、合計から抜け落ちません（`tools/verify_hierarchy_logic.py` で検証しています）。
+逆に子が全部消えて親だけ残った場合は root 側にのみ計上されます — 消費自体は実在する
+ので、そちらが正しい扱いです。 フィルタの掛け忘れで
 壊れないので、フィルタが個々のチャートに散らばる BI ツールから使うときに効きます。
 **誤りになるのは 2 つを足したときだけ**です。値の入らない側は 0 ではなく NULL に
 してあります（`SUM` は同じ結果になり、`AVG` は構造的なゼロで薄まらないため）。
@@ -196,7 +202,8 @@ SUM(root_slot_hours) = SUM(statement_slot_hours) = 総量
 |---|---|
 | `job_role` | `PARENT`（子を持つ）/ `CHILD`（親を持つ）/ `STANDALONE` |
 | `is_cost_countable` | 葉の行か（＝statement 系に値が入る行）。`NOT has_child_jobs AND statement_type != 'SCRIPT'` |
-| `is_root_job` | 作業単位の代表行か（＝root 系に値が入る行）。`parent_job_id IS NULL` |
+| `is_root_job` | 作業単位の代表行か（＝root 系に値が入る行）。`NOT has_parent_row` |
+| `has_parent_row` | 親の行がこの表に実在するか。孤児の検出に使う |
 | `root_job_id` | 作業単位のキー。子なら `parent_job_id`、それ以外は自分の `job_id` |
 | `statement_index` | 親の中での実行順。スクリプトのどの文が重いかを見る軸（親・単独は NULL） |
 | `root_statement_count` | その作業単位に属する子の本数 |
@@ -265,7 +272,8 @@ SUM(root_slot_hours) = SUM(statement_slot_hours) = 総量
 | 対象 | 状況 |
 |---|---|
 | 正規化ロジック | **RE2 実機で 29/29 パス**（`tools/normalize_reference.py`） |
-| 埋め込み動的SQLの構文 + DECLARE の位置 | **17/17 パス**（`tools/check_templates.py`、sqlglot bigquery） |
+| 埋め込み動的SQLの構文 + DECLARE の位置 | **26/26 パス**（`tools/check_templates.py`、sqlglot bigquery。pipeline と adhoc の両方） |
+| 親子分類の不変条件 | **6/6 パス**（`tools/verify_hierarchy_logic.py`、`SUM(root)=SUM(statement)` を孤児込みで検証） |
 | BigQuery 実機での実行 | **未実施。** 本セッションに `bq` / `gcloud` と GCP 認証が無いため |
 
 `pipeline/*.sql` は BigQuery スクリプト構文（`BEGIN` / `DECLARE` / `EXECUTE IMMEDIATE`）を
