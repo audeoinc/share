@@ -1045,16 +1045,23 @@ const checks = [
   })()],
   // 1 つも設定されていなくても段は出す。消すと、未設定なのか取り込みに
   // 失敗しているのか画面から読めず、ただ何も出ない状態になる。
-  ['description が 1 つも無くても段を出して「未設定」と書く', (() => {
+  // **どの View にも description が無いなら段ごと出さない。** 「未設定」と
+  // 書いていたが、設定していない base では毎回それが出るだけで手掛かりに
+  // ならない（ラベルの段を空のとき引っ込めるのと同じ）。
+  ['description が 1 つも無ければ段ごと出さない', (() => {
     const h = noteCases[3].html;
-    const m = h.match(/<span class="vg-dtab vg-dstatic">([^<]*)<span class="vg-tabn">(\d+)</);
-    return h.includes('vg-nhead">View の description') &&
-      h.includes('description が設定されていません') &&
-      // どの View のことかは見出しに出る（範囲が分かる）
-      m !== null && Number(m[2]) === base3.viewCount &&
-      m[1] === base3.groups.flatMap((g) => g.suffixes).sort().join(', ') &&
+    return !h.includes('View の description') &&
+      !h.includes('description が設定されていません') &&
+      !h.includes('vg-dstatic') &&
       // メモの段はそのまま出る
       h.includes('vg-nhead">メモ') && h.includes('v_daily_sales について');
+  })()],
+  // 一部の View にしか無い場合は出す（何が付いていて何が付いていないかは
+  // 読みたい情報）。
+  ['一部にしか無いときは段を出す', (() => {
+    const h = noteCases[2].html;
+    return h.includes('View の description') &&
+      h.includes('description が設定されていません');
   })()],
   ['組がひとつも作れなければ「取得できなかった」と書く（未設定と区別）', (() => {
     const h = V.renderNote(base3, [], '(メモ)');

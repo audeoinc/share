@@ -111,8 +111,10 @@ const NOTE_MARK = '<!--VG_NOTE-->';
  * 世代 9 ＝ note にリージョンの表（.vg-loctable / .vg-lock / .vg-locn /
  *          .vg-locv）。貼り直さないと列がそろわず、location と suffix が
  *          べた書きに見えて**対応が読めない**（表にした意味が消える）。
+ * 世代 10 ＝ リージョンの表に行間の罫線。見た目だけの変更だが、9 を貼った
+ *          あとに出たので、**どちらを貼ったか**が画面から分かる必要がある。
  */
-const CSS_GEN = 9;
+const CSS_GEN = 10;
 
 /**
  * CSS が古いときだけ出る案内。上の CSS_GEN を参照。

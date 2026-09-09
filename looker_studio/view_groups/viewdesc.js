@@ -205,6 +205,13 @@ function renderDesc(b, descs) {
       `</div>`;
   }
 
+  // **どの View にも description が無いなら段ごと出さない。**
+  // 「未設定」と 1 行書いていたが、設定していない base ではそれが毎回出るだけで
+  // 読む手掛かりにならない（ラベルの段を空のとき引っ込めるのと同じ）。
+  // 取れなかった場合（上の gs.length === 0）とは分けている。あちらは
+  // INFORMATION_SCHEMA が読めていないという別の話で、黙って消してはいけない。
+  if (gs.every((g) => g.empty)) return '';
+
   // 1 種類のときも見出しは出す。**あれは飾りではなく caption。**
   // 「この description がどの View のものか」は description そのものと同じくらい
   // 大事な情報で、隠すと 9 本全部に付いているのか 1 本だけなのかが読めない。
@@ -398,12 +405,16 @@ function descCss() {
     `.vg-nsec:last-child{margin-bottom:0}`,
     // リージョンの表。location と suffix を縦にそろえて 1 対 1 で読ませる。
     `.vg-loctable{border-collapse:collapse}`,
-    `.vg-lock{text-align:left;vertical-align:top;padding:3px 12px 3px 0;` +
+    // 罫線は**行の間だけ**。囲うと表が主役になってしまうが、note の主役は
+    // メモのほう。段の見出しに使っている色（#EAEEF2）と同じ濃さにそろえて、
+    // 行が目で追えるぶんだけ引く。
+    `.vg-loctable tr+tr th,.vg-loctable tr+tr td{border-top:1px solid #EAEEF2}`,
+    `.vg-lock{text-align:left;vertical-align:top;padding:5px 12px 5px 0;` +
       `white-space:nowrap;font-weight:600;font-size:12px;line-height:1.8;color:#24292F;` +
       `font-family:ui-monospace,SFMono-Regular,Consolas,monospace}`,
-    `.vg-locn{text-align:right;vertical-align:top;padding:3px 10px 3px 0;` +
+    `.vg-locn{text-align:right;vertical-align:top;padding:5px 10px 5px 0;` +
       `white-space:nowrap;color:#57606A;font-size:11px;line-height:1.9}`,
-    `.vg-locv{padding:3px 0;font-size:12px;line-height:1.8;color:#57606A;` +
+    `.vg-locv{padding:5px 0;font-size:12px;line-height:1.8;color:#57606A;` +
       `overflow-wrap:anywhere;` +
       `font-family:ui-monospace,SFMono-Regular,Consolas,monospace}`,
     // 段の見出し。本文より弱く、しかし出どころの違いが分かる程度には目立たせる。

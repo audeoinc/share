@@ -22,6 +22,7 @@
 //   esbuild で最小化してから埋め込む。生成時に閾値を超えたら失敗させて、
 //   BigQuery に弾かれるものを出荷しないようにしている。
 import { readFile, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -629,7 +630,7 @@ function VIEW_GROUP_INFO(views, options_json) {
     page: VIEWLGC_PAGE(a, VIEWLGC_RENDER(a, options_json, null),
       VIEWLGC_ERD(a, options_json),
       fakeColumns(views), fakeSql(views), fakeDescs(views), fakeLabels(views),
-      options_json),
+      '[]', options_json),
   };
 }
 
@@ -707,7 +708,7 @@ const checks = [
     // page はそれをそのまま持っている
     info.page.includes(info.erd)],
   ['page は図が渡されなくても落ちない',
-    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]', '[]', '[]', OPTS)
+    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]', '[]', '[]', '[]', OPTS)
       .includes('参照関係を取得できませんでした')],
   // メモだけは作り置きしない。カードには目印だけを置き、ビューが
   // REPLACE で note_html に差し替える。焼き込むと、シートを直しても
@@ -787,7 +788,7 @@ const checks = [
   })()],
   ['page は SQL が渡されなくても落ちない',
     VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '{ broken', '[]', '[]',
-      OPTS)
+      '[]', OPTS)
       .includes('SQL を取得できませんでした')],
   ['page はカラム定義の表を出す（定義ごとの列と並び順の ⚠）', (() => {
     const at = (n) => info.page.indexOf(`<div class="vg-opanel vg-op${n}">`);
@@ -805,9 +806,9 @@ const checks = [
   })()],
   ['page はカラム定義が空でも落ちない',
     typeof VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '{ broken', '[]', '[]', '[]',
-      OPTS)
+      '[]', OPTS)
       === 'string' &&
-    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', null, '[]', '[]', '[]', OPTS)
+    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', null, '[]', '[]', '[]', '[]', OPTS)
       .includes('カラム定義を取得できませんでした')],
   ['page はメモの目印を 1 つだけ置く（本体は焼き込まない）', (() => {
     const MARK = require(join(here, 'chrome.js')).NOTE_MARK;
@@ -844,7 +845,7 @@ const checks = [
   ['description が 1 種類でも suffix の見出しを出す（押せない <span>）', (() => {
     const names = views.map((v) => v.view_name);
     const one = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
-      JSON.stringify([{ v: names, h: '<p>ひとつ</p>' }]), '[]', OPTS);
+      JSON.stringify([{ v: names, h: '<p>ひとつ</p>' }]), '[]', '[]', OPTS);
     const m = one.match(/<span class="vg-dtab vg-dstatic">([^<]*)<span class="vg-tabn">(\d+)</);
     return m !== null && one.includes('ひとつ') &&
       // 全 View ぶんの suffix が並ぶ
@@ -853,25 +854,61 @@ const checks = [
       // ラジオも <label> も出さない
       !one.includes('vg-dr') && !one.includes('<label class="vg-dtab');
   })()],
-  // 1 つも設定されていなくても段は出す。消すと、未設定なのか取り込みに
-  // 失敗しているのか画面から読めず、ただ何も出ない状態になる。
-  ['description が 1 つも無くても段を出す（未設定と取得失敗を書き分ける）', (() => {
+  // 1 つも設定されていないなら段ごと出さない。ただし**取れなかった場合とは
+  // 書き分ける**（あちらは INFORMATION_SCHEMA が読めていないという別の話で、
+  // 黙って消すと気づけない）。
+  ['description が 1 つも無ければ段ごと出さない（取得失敗とは書き分ける）', (() => {
     const names = views.map((v) => v.view_name);
     const unset = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
-      JSON.stringify([{ v: names, h: '' }]), '[]', OPTS);
+      JSON.stringify([{ v: names, h: '' }]), '[]', '[]', OPTS);
     // descs_json が空 = 組が作れない。これは未設定ではなく取れなかったほう
     const gone = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
-      '[]', '[]', OPTS);
-    return unset.includes('description が設定されていません') &&
-      unset.includes('vg-dstatic') &&
+      '[]', '[]', '[]', OPTS);
+    return !unset.includes('description が設定されていません') &&
+      !unset.includes('View の description') &&
       gone.includes('description を取得できませんでした') &&
       !gone.includes('設定されていません') &&
       // どちらでもメモの段は出る
       [unset, gone].every((h) => h.includes('vg-nhead">メモ'));
   })()],
+  // **引数の並びがずれても落ちない。** regions_json を足したとき、呼び出し側を
+  // 直さないまま OPTS が regions の位置に入り、options_json が undefined に
+  // なっていた（それでも全部通っていた）。page は options をほとんど見ないので
+  // 出力の違いでは捕まえられない。呼び出しの引数の数そのものを見る。
+  ['page の呼び出しが全部そろっている（引数の並びのずれ）', (() => {
+    const src = readFileSync(join(here, 'build_udf.mjs'), 'utf8');
+    const want = (src.match(
+      /const VIEWLGC_PAGE = new Function\(([\s\S]*?)pagePack\.code\)/) || [, ''])[1]
+      .split(',').filter((x) => /'/.test(x)).length;
+    const bad = [];
+    let i = 0;
+    for (;;) {
+      const at = src.indexOf('VIEWLGC_PAGE(', i);
+      if (at < 0) break;
+      const st = at + 'VIEWLGC_PAGE('.length;
+      // この検査自身が持つ文字列リテラルは呼び出しではない
+      if (/['"`]/.test(src[at - 1] || '')) { i = st; continue; }
+      let d = 1, j = st;
+      while (j < src.length && d > 0) {
+        const c = src[j];
+        if (c === '(') d++;
+        else if (c === ')') d--;
+        j++;
+      }
+      let dep = 0, n = 1;
+      for (const c of src.slice(st, j - 1)) {
+        if ('(['.includes(c)) dep++;
+        else if (')]'.includes(c)) dep--;
+        else if (c === ',' && dep === 0) n++;
+      }
+      if (n !== want) bad.push(`${src.slice(0, at).split('\n').length} 行目 ${n} 個`);
+      i = j;
+    }
+    return want > 0 && bad.length === 0;
+  })()],
   ['page は description が壊れていても落ちない',
     typeof VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
-      '{ broken', '{ broken', OPTS) === 'string'],
+      '{ broken', '{ broken', '[]', OPTS) === 'string'],
   // ラベルは内容の量に合わせて重さを変える。揃っているのが普通なので、
   // そのときは見出しも罫線もタブも出さず、チップ 1 列だけにする。
   ['ラベルが揃っているときは見出しもタブも出さない（チップだけ）', (() => {
@@ -891,7 +928,7 @@ const checks = [
       '[]', JSON.stringify([
         { v: names.slice(0, 8), l: [{ k: 'domain', v: 'sales' }] },
         { v: names.slice(8), l: [{ k: 'domain', v: 'finance' }] },
-      ]), OPTS);
+      ]), '[]', OPTS);
     const tabs = [...split.matchAll(/class="vg-lbtab vg-lbt\d+"[^>]*>([^<]*)</g)]
       .map((m) => m[1]);
     return split.includes('vg-nhead">ラベル') &&
@@ -909,7 +946,7 @@ const checks = [
       '[]', JSON.stringify([
         { v: names.slice(0, 8), l: [{ k: 'domain', v: 'sales' }] },
         { v: names.slice(8), l: [] },
-      ]), OPTS);
+      ]), '[]', OPTS);
     return half.includes('ラベル不一致') &&
       half.includes('ラベルが設定されていません') &&
       // 中身のある側が先頭（既定で開くタブ）
@@ -918,11 +955,11 @@ const checks = [
   ['ラベルが 1 つも無ければ何も出さない', (() => {
     const names = views.map((v) => v.view_name);
     const none = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
-      '[]', JSON.stringify([{ v: names, l: [] }]), OPTS);
+      '[]', JSON.stringify([{ v: names, l: [] }]), '[]', OPTS);
     // 取り込めなかったときも同じ（付いていないのが正常でありうるので、
     // description のように「未設定」と書いて全カードに 1 行増やさない）
     const gone = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
-      '[]', '[]', OPTS);
+      '[]', '[]', '[]', OPTS);
     return [none, gone].every((h) =>
       !h.includes('vg-lb') && !h.includes('ラベル不一致') &&
       // note の段そのものは出る
@@ -930,7 +967,7 @@ const checks = [
   })()],
   ['page はラベルが壊れていても落ちない',
     typeof VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]', '[]',
-      '{ broken', OPTS) === 'string'],
+      '{ broken', '[]', OPTS) === 'string'],
   ['タイトルが base 名', text.includes('v_daily_sales')],
   ['3 グループでタブになる', html.includes('vg-tablist')],
   ['ペイン見出しに suffix が列記される', text.includes('abjp, abuk, abus')],
