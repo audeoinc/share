@@ -6,6 +6,7 @@
 --   STEP 1: 日次集約 bqc_t_daily_cost を対象期間だけ作り直す（MERGE で原子的に）
 --   STEP 2: fingerprint 次元 bqc_m_query_fingerprint を更新する
 --   STEP 3: 保持期間 (retention_days) を超えた行を 3 表から刈り取る
+--   STEP 4: レポートビューを静的テーブル bqc_t_daily_cost_report に焼き直す
 --
 -- 初回（集約表が空）は job_cost の全期間を作り直し、以降は
 -- refresh_lookback_days だけを作り直す。02 の incremental_lookback_days より
@@ -58,6 +59,8 @@ BEGIN
   DECLARE job_cost_fqn STRING;
   DECLARE daily_cost_fqn STRING;
   DECLARE query_dim_fqn STRING;
+  DECLARE report_view_fqn STRING;
+  DECLARE report_table_fqn STRING;
   DECLARE refresh_from_date DATE;
   DECLARE retention_cutoff_date DATE;
   -- 診断用。どこで止まったのかを最後の SELECT で見えるようにするためだけの変数。
@@ -66,6 +69,7 @@ BEGIN
   DECLARE query_dim_merged_rows INT64 DEFAULT 0;
   DECLARE daily_cost_rows_after INT64 DEFAULT 0;
   DECLARE query_dim_rows_after INT64 DEFAULT 0;
+  DECLARE report_table_rows INT64 DEFAULT 0;
 
   EXECUTE IMMEDIATE FORMAT(
     "SELECT DISTINCT catalog_name FROM `region-%s`.INFORMATION_SCHEMA.SCHEMATA LIMIT 1",
@@ -100,6 +104,15 @@ BEGIN
   SET query_dim_fqn = FORMAT(
     '%s.%s.%s', repository_project_id, repository_dataset,
     table_name_prefix || 'bqc_' || 'm_' || 'query_fingerprint' || table_name_suffix
+  );
+  -- 定義の正本はビュー、Looker が読むのは静的テーブル。名前は vw_ を落としただけの対。
+  SET report_view_fqn = FORMAT(
+    '%s.%s.%s', repository_project_id, repository_dataset,
+    table_name_prefix || 'bqc_' || 'vw_t_' || 'daily_cost_report' || table_name_suffix
+  );
+  SET report_table_fqn = FORMAT(
+    '%s.%s.%s', repository_project_id, repository_dataset,
+    table_name_prefix || 'bqc_' || 't_' || 'daily_cost_report' || table_name_suffix
   );
 
   -- --------------------------------------------------------------------------
@@ -354,6 +367,34 @@ BEGIN
   END IF;
 
   -- --------------------------------------------------------------------------
+  -- STEP 4: レポートビューの静的テーブル化
+  -- --------------------------------------------------------------------------
+  -- ビューのままだと Looker Studio が開くたびに集約と JOIN が走り、フィルタが
+  -- 計算列に当たるためクラスタプルーニングも効かない。中身は日次でしか変わらないので
+  -- テーブルへ焼いておく。
+  --
+  -- 定義の正本はあくまでビュー側（01 の CREATE OR REPLACE VIEW）。列を足したいときは
+  -- ビューを直せば、次回の 03 でテーブルのスキーマも追従する。
+  --
+  -- 刈り取り（STEP 3）の後に実行するので、テーブルは常に刈り取り後の状態を映す。
+  -- CREATE OR REPLACE なので 01 側での作成は不要。
+  EXECUTE IMMEDIATE FORMAT(r"""
+    CREATE OR REPLACE TABLE `%s`
+    PARTITION BY usage_date
+    CLUSTER BY normalized_fingerprint, executor_id
+    OPTIONS(description = 'bqc_vw_t_daily_cost_report のスナップショット。Looker Studio はこちらを読む。03 の実行ごとに全置換される。')
+    AS
+    SELECT
+      *,
+      -- ダッシュボード上でデータの鮮度を出せるように焼いた時刻を持たせる。
+      CURRENT_TIMESTAMP() AS snapshot_at
+    FROM `%s`
+  """, report_table_fqn, report_view_fqn);
+
+  EXECUTE IMMEDIATE FORMAT('SELECT COUNT(*) FROM `%s`', report_table_fqn)
+    INTO report_table_rows;
+
+  -- --------------------------------------------------------------------------
   -- 再構築結果（切り分け用の診断値を含む）
   -- --------------------------------------------------------------------------
   -- daily_cost に行が入らなかったときは、この出力だけで原因を絞り込めるようにしてある。
@@ -371,11 +412,13 @@ BEGIN
     job_cost_fqn             AS job_cost_table,
     daily_cost_fqn           AS daily_cost_table,
     query_dim_fqn            AS query_fingerprint_table,
+    report_table_fqn         AS looker_studio_table,
     refresh_from_date        AS rebuilt_from_date,
     job_cost_rows_in_window  AS job_cost_rows_in_window,
     daily_cost_merged_rows   AS daily_cost_rows_affected,
     query_dim_merged_rows    AS query_fingerprint_rows_affected,
     daily_cost_rows_after    AS daily_cost_total_rows,
     query_dim_rows_after     AS query_fingerprint_total_rows,
+    report_table_rows        AS looker_studio_table_rows,
     retention_cutoff_date    AS pruned_before;
 END;

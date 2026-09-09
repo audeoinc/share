@@ -10,7 +10,8 @@ bigquery-cost/
 ├── pipeline/                       ← 本体。日次で回す3本
 │   ├── 01_setup_cost_environment.sql   データセット・UDF・3テーブル・ビューを作成（初回のみ）
 │   ├── 02_load_job_cost.sql            JOBS → bqc_t_job_cost の増分取り込み（日次）
-│   └── 03_refresh_reports.sql          集約と fingerprint 次元の再構築（日次、02の後）
+│   └── 03_refresh_reports.sql          集約・fingerprint次元の再構築、刈り取り、
+│                                       レポートテーブルの焼き直し（日次、02の後）
 ├── looker/README.md                Looker Studio の接続手順とレポート構成
 ├── tools/
 │   ├── normalize_reference.py      正規化ロジックの RE2 リファレンス実装＋自己テスト
@@ -51,11 +52,20 @@ INFORMATION_SCHEMA.JOBS  （履歴 180 日）
 bqc_t_job_cost           job 粒度。正規化SQL・fingerprint・参照テーブルを付与
    │  03 が集約し、保持期間を超えた行を刈り取る
    ▼
-bqc_t_daily_cost         日 × fingerprint × 実行者。Looker が読む実体
+bqc_t_daily_cost         日 × fingerprint × 実行者
    │                     ＋ bqc_m_query_fingerprint（first_seen / プレビュー）
    ▼
-bqc_vw_t_daily_cost_report   ← Looker Studio のデータソースはこれ 1 本
+bqc_vw_t_daily_cost_report   レポート定義の正本（ビュー）
+   │  03 が毎回 CREATE OR REPLACE TABLE で焼き直す
+   ▼
+bqc_t_daily_cost_report      ← Looker Studio のデータソースはこれ 1 本
 ```
+
+レポートをビューのまま読ませると、開くたびに集約と JOIN が走り、フィルタが計算列
+（`is_first_seen_date` など）に当たるためクラスタプルーニングも効きません。中身は
+日次でしか変わらないので、`03` が静的テーブルへ焼いています。**列を足したいときは
+ビューを直してください。** 次回の `03` でテーブルのスキーマも追従します。
+テーブルには `snapshot_at`（焼いた時刻）が付くので、ダッシュボードの鮮度表示に使えます。
 
 ### データセットの指定
 

@@ -1,8 +1,14 @@
 # Looker Studio レポートの作り方
 
-`pipeline/01〜03` を流したあとの手順です。**データソースは
-`bqc_vw_t_daily_cost_report` の 1 本だけ**にしてください。日次集約と fingerprint 次元は
-このビューの中で結合済みなので、Looker Studio 側でブレンドを組む必要はありません。
+`pipeline/01〜03` を流したあとの手順です。**データソースは静的テーブル
+`bqc_t_daily_cost_report` の 1 本だけ**にしてください。日次集約と fingerprint 次元は
+この中で結合済みなので、Looker Studio 側でブレンドを組む必要はありません。
+
+同名のビュー `bqc_vw_t_daily_cost_report` もありますが、そちらは**定義の正本**です。
+ビューを直接データソースにすると開くたびに集約と JOIN が走り、フィルタが計算列に
+当たるためクラスタプルーニングも効きません。`03` が毎回ビューをテーブルへ焼き直すので、
+**接続先はテーブルのほう**にしてください（列を足したいときはビューを直せば、
+次回の `03` でテーブルにも反映されます）。
 
 `INFORMATION_SCHEMA.JOBS` を直接データソースにするのは避けてください。メタデータ
 クエリはキャッシュされず、参照テーブルあたり最低 10MB が課金対象になるため、
@@ -12,11 +18,13 @@
 
 1. Looker Studio → データソースを作成 → BigQuery
 2. プロジェクト `audeodb` → データセット `bq_cost_repository`
-   → **ビュー `bqc_vw_t_daily_cost_report`**
+   → **テーブル `bqc_t_daily_cost_report`**
 3. 接続後、フィールドの型を確認する
    - `usage_date` / `usage_month` / `first_seen_date` / `last_seen_date` … 日付
    - `is_first_seen_date` … 真偽値
    - `tib_billed` / `slot_hours` … 数値（集計は合計）
+   - `snapshot_at` … 日時。このテーブルを最後に焼いた時刻なので、
+     スコアカードに最大値を置くとダッシュボードの鮮度表示になる
 
 ## 2. 計算フィールド
 
@@ -89,5 +97,8 @@
 ## 4. 更新のタイミング
 
 `pipeline/02` → `03` の順にスケジュールドクエリで日次実行してください。
+`bqc_t_daily_cost_report` は `03` の実行ごとに全置換されます。
+
 Looker Studio のデータ更新頻度は 12 時間程度で十分です（元データが日次のため、
-それより短くしても新しい数字は出てきません）。
+それより短くしても新しい数字は出てきません）。実際にいつのデータを見ているかは
+`snapshot_at` で確認できます。

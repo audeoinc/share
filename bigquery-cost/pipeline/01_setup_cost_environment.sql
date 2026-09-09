@@ -9,7 +9,11 @@
 --   表    bqc_t_job_cost             … job 粒度のコスト実績（子job のみ）
 --   表    bqc_t_daily_cost           … 日 × fingerprint × 実行者 の集約（Looker が読む実体）
 --   表    bqc_m_query_fingerprint    … fingerprint 次元（first_seen / プレビュー）
---   VIEW  bqc_vw_t_daily_cost_report … Looker Studio が参照する唯一のデータソース
+--   VIEW  bqc_vw_t_daily_cost_report … レポート定義の正本
+--
+-- Looker Studio が読むのはこのビューではなく、03 が毎回焼き直す静的テーブル
+-- bqc_t_daily_cost_report です（ビューのままだと開くたびに集約と JOIN が走るため）。
+-- そちらは 03 の CREATE OR REPLACE TABLE が作るので、01 では作成しません。
 --
 -- 対象期間は INFORMATION_SCHEMA.JOBS が持っている範囲（最大 180 日）だけ。
 -- それより古い履歴を積み増して保持することは目的にしていないので、03 が保持期間を
@@ -340,13 +344,16 @@ BEGIN
   -- --------------------------------------------------------------------------
   -- STEP 6: bqc_vw_t_daily_cost_report -- Looker Studio 用ビュー
   -- --------------------------------------------------------------------------
-  -- Looker Studio のデータソースはこれ 1 本にする。ブレンドを使わずに済むよう、
-  -- 集約 (bqc_t_daily_cost) と次元 (bqc_m_query_fingerprint) をここで結合する。
+  -- レポート定義の正本。ブレンドを使わずに済むよう、集約 (bqc_t_daily_cost) と
+  -- 次元 (bqc_m_query_fingerprint) をここで結合する。
+  -- Looker Studio が実際に読むのは、03 がこれを焼き直した静的テーブル
+  -- bqc_t_daily_cost_report のほう。列を足したいときはこのビューを直せば、
+  -- 次回の 03 でテーブルのスキーマも追従する。
   -- 金額は単価がリージョン・エディションで変わるため、あえて格納も計算もしない。
   -- Looker Studio 側の計算フィールドで tib_billed に単価を掛けること（README 参照）。
   EXECUTE IMMEDIATE FORMAT(r"""
     CREATE OR REPLACE VIEW `%s`
-    OPTIONS(description = 'Looker Studio 用のレポートビュー。日次集約に fingerprint 次元を結合し、新規SQL判定フラグを付与したもの。')
+    OPTIONS(description = 'レポート定義の正本。日次集約に fingerprint 次元を結合し、新規SQL判定フラグを付与したもの。Looker Studio は 03 が焼き直す bqc_t_daily_cost_report を読む。')
     AS
     SELECT
       d.usage_date,
@@ -394,7 +401,7 @@ BEGIN
     job_cost_fqn          AS job_cost_table,
     daily_cost_fqn        AS daily_cost_table,
     query_dim_fqn         AS query_fingerprint_table,
-    report_view_fqn       AS looker_studio_view,
+    report_view_fqn       AS report_definition_view,
     normalizer_version    AS normalizer_version,
     mask_backtick_identifiers AS mask_backtick_identifiers,
     smoke_test_result     AS udf_smoke_test_output;
