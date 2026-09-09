@@ -507,6 +507,40 @@ function pack(driver, label, lib, extra) {
 const analyzePack = pack(analyzeDriver, 'viewlgc_analyze', analyzeLib);
 const renderPack = pack(renderDriver, 'viewlgc_render', renderLib, sharedRender);
 const cssPack = pack(cssDriver, 'viewlgc_group_css', cssLib, sharedRender);
+
+// 配る CSS を載せる関数の数。**本文の 32 KB は関数ごとの上限**なので、
+// 分ければ天井が上がる（1 本に載せていた頃は 43,771 B で CREATE が落ちた）。
+//
+// 数を固定にしてあるのは、増減させると使われない関数がデータセットに残る
+// ため。4 本なら余裕を見ても 100 KB 以上を載せられ、いまの 3 倍以上ある。
+const CSS_PARTS = 4;
+
+/**
+ * CSS を行の切れ目で n 個に分ける。**連結すると元に戻る**
+ * （chunks.join('') === css）。行の途中で切らないのは、生成物を読むときに
+ * 規則が真っ二つになっていると追えないため。
+ */
+function splitCss(text, n) {
+  const lines = String(text).split('\n');
+  const pieces = lines.map((l, i) => (i < lines.length - 1 ? l + '\n' : l));
+  // 残りの長さを残りの本数で割り直しながら詰める。最後にまとめて余りを
+  // 押し込む形にすると、**最後の部品だけが伸びて**そこが先に上限へ当たる。
+  let rest = String(text).length;
+  const out = [];
+  let cur = '';
+  for (const p of pieces) {
+    const target = Math.ceil(rest / (n - out.length));
+    if (out.length < n - 1 && cur.length > 0 && cur.length + p.length > target) {
+      out.push(cur);
+      rest -= cur.length;
+      cur = '';
+    }
+    cur += p;
+  }
+  out.push(cur);
+  while (out.length < n) out.push('');
+  return out;
+}
 const erdPack = pack(erdDriver, 'viewlgc_erd', erdLib);
 const pagePack = pack(pageDriver, 'viewlgc_page', pageLib);
 const markdownPack = pack(markdownDriver, 'viewlgc_markdown', markdownLib);
@@ -606,6 +640,37 @@ const html = info.html;
 const classed = VIEW_GROUP_INFO(views, JSON.stringify({ suffixParts: S.SUFFIX_PARTS, mode: 'class' })).html;
 const embed = VIEW_GROUP_INFO(views, JSON.stringify({ suffixParts: S.SUFFIX_PARTS, mode: 'embed' })).html;
 const css = VIEW_GROUP_CSS(JSON.stringify({ suffixParts: S.SUFFIX_PARTS }));
+// 生成する SQL の断片。CSS は 1 本の関数に載らないので分けて載せ、
+// まとめ役の関数がそれを連結して返す（外から呼ぶ名前は従来どおり 1 つ）。
+const cssChunks = splitCss(css, CSS_PARTS);
+const cssPartVar = (i) => `css_part_${i + 1}`;
+const cssPartNameVar = (i) => `udf_css_p${i + 1}_function_name`;
+const Q3 = '"'.repeat(3);
+const cssPartDecls = cssChunks.map((c, i) =>
+  `DECLARE ${cssPartVar(i)} STRING DEFAULT r${Q3}${c}${Q3};`).join('\n\n');
+const cssPartNameDecls = cssChunks.map((_, i) =>
+  `DECLARE ${cssPartNameVar(i)} STRING;`).join('\n');
+const cssPartNameSets = cssChunks.map((_, i) =>
+  `SET ${cssPartNameVar(i)} =\n` +
+  `  udf_name_prefix || system_name || '_' || 'group_css_p${i + 1}' || udf_name_suffix;`
+).join('\n');
+const cssPartNameAsserts = cssChunks.map((_, i) =>
+  `ASSERT REGEXP_CONTAINS(${cssPartNameVar(i)}, r'^[A-Za-z0-9_]+$') AS\n` +
+  `  '${cssPartNameVar(i)} が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';`
+).join('\n');
+const cssPartCreates = cssChunks.map((_, i) => [
+  `EXECUTE IMMEDIATE FORMAT('''`,
+  'CREATE OR REPLACE FUNCTION `%s.%s.%s`()',
+  'RETURNS STRING',
+  'AS (%s)',
+  `''',`,
+  `  udf_project_id, udf_dataset, ${cssPartNameVar(i)},`,
+  `  TO_JSON_STRING(${cssPartVar(i)}));`,
+].join('\n')).join('\n\n');
+const cssConcatExpr = cssChunks.map(() => '`%s.%s.%s`()').join(' || ');
+const cssConcatArgs = cssChunks.map((_, i) =>
+  `  udf_project_id, udf_dataset, ${cssPartNameVar(i)}`).join(',\n');
+
 
 const text = html.replace(/<[^>]*>/g, '');
 
@@ -1058,12 +1123,15 @@ for (const p of [analyzePack, renderPack, erdPack, pagePack, markdownPack]) {
 // 出したくなったら、CSS を分割して複数の関数に載せ、group_css が連結する形に
 // する（本文の上限は関数ごとなので、分ければ天井が上がる）。
 const CSS_BODY_LIMIT = 32 * 1024;
-const cssBodyBytes = Buffer.byteLength(JSON.stringify(css)) + 2;
+// **上限は関数ごと**なので、見るのは部品 1 つぶん。まとめ役の本体は部品を
+// 連結する式だけなので数百バイトにしかならない。
+const cssPartBytes = cssChunks.map((c) => Buffer.byteLength(JSON.stringify(c)) + 2);
+const cssWorst = Math.max(...cssPartBytes);
 checks.push([
-  `焼き込んだ CSS が ${(CSS_BODY_LIMIT / 1024).toFixed(0)} KB 以内` +
-  `（viewlgc_group_css の定義本文。いま ${cssBodyBytes} B / 残り ` +
-  `${CSS_BODY_LIMIT - cssBodyBytes} B。超えたら MAX_SQL_TABS を下げる）`,
-  cssBodyBytes <= CSS_BODY_LIMIT]);
+  `CSS の部品が ${(CSS_BODY_LIMIT / 1024).toFixed(0)} KB 以内` +
+  `（${CSS_PARTS} 分割。いちばん大きい部品で ${cssWorst} B / 残り ` +
+  `${CSS_BODY_LIMIT - cssWorst} B。足りなくなったら CSS_PARTS を増やす）`,
+  cssWorst <= CSS_BODY_LIMIT]);
 
 let failed = 0;
 for (const [name, ok] of checks) {
@@ -1174,6 +1242,7 @@ DECLARE udf_erd_function_name      STRING;
 DECLARE udf_page_function_name     STRING;
 DECLARE udf_markdown_function_name STRING;
 DECLARE udf_css_function_name      STRING;
+${cssPartNameDecls}
 DECLARE udf_sql_function_name      STRING;
 
 -- [C] 導出・内部用。編集しない ----------------------------------------
@@ -1209,9 +1278,9 @@ ${markdownPack.code}
 
 -- CSS は本文そのもの（JavaScript ではない）。生成時に組み立ててここに焼き込む。
 -- 中身は template_style.html と 1 バイトも違わない。
-DECLARE css_text STRING DEFAULT r"""
-${css}
-""";
+-- 配る CSS。**関数の定義本文は 32 KB まで**（JavaScript でも SQL でも同じ）
+-- なので、1 本には載らない。分けて載せ、まとめ役が連結して返す。
+${cssPartDecls}
 
 -- 実行中のプロジェクトを INFORMATION_SCHEMA.SCHEMATA から自動検出する
 -- （catalog_name = ジョブが動いているプロジェクト）。リージョン修飾の
@@ -1243,6 +1312,7 @@ SET udf_render_function_name =
   udf_name_prefix || system_name || '_' || 'render' || udf_name_suffix;
 SET udf_css_function_name =
   udf_name_prefix || system_name || '_' || 'group_css' || udf_name_suffix;
+${cssPartNameSets}
 SET udf_erd_function_name =
   udf_name_prefix || system_name || '_' || 'erd' || udf_name_suffix;
 SET udf_page_function_name =
@@ -1261,6 +1331,7 @@ ASSERT REGEXP_CONTAINS(udf_page_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_page_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_css_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_css_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+${cssPartNameAsserts}
 ASSERT REGEXP_CONTAINS(udf_markdown_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_markdown_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_sql_function_name, r'^[A-Za-z0-9_]+$') AS
@@ -1488,13 +1559,21 @@ LANGUAGE js AS %s
 -- options_json は受け取るが見ない。色やフォントを変えたときは
 -- node build_udf.mjs で作り直し、この SQL ごと流し直すこと。
 -- ---------------------------------------------------------------------
+-- 部品。**関数の定義本文は 32 KB まで**なので、CSS はここに分けて載せる
+-- （1 本に載せていた頃は 43,771 B になって CREATE が落ちた）。
+-- 引数は取らない。呼ぶのは下のまとめ役だけで、直に呼ぶ用途は無い。
+${cssPartCreates}
+
+-- まとめ役。**外から呼ぶのはこの名前**（build_table.sql の __UDF_CSS__）。
+-- 部品を連結して返すだけなので、本体は数百バイトにしかならない。
+-- 足りなくなったら CSS_PARTS を増やす（build_udf.mjs）。
 EXECUTE IMMEDIATE FORMAT('''
 CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(options_json STRING)
 RETURNS STRING
-AS (%s)
+AS (${cssConcatExpr})
 ''',
   udf_project_id, udf_dataset, udf_css_function_name,
-  TO_JSON_STRING(css_text));
+${cssConcatArgs});
 
 
 -- ---------------------------------------------------------------------
@@ -1691,20 +1770,49 @@ END;
 
   // CSS は JS ではないので別に見る。焼き込んだ本文が template_style.html と
   // 食い違うと、貼った CSS と UDF が返す CSS が別物になる。
-  const cssBlob = sql.match(
-    new RegExp('DECLARE css_text STRING DEFAULT r' + '"'.repeat(3) +
-      '\\n([\\s\\S]*?)\\n' + '"'.repeat(3)));
-  if (!cssBlob || cssBlob[1] !== css) {
-    console.log('  FAIL  焼き込んだ CSS が組み立てた CSS と一致しません');
+  // **分けて載せているので、連結して突き合わせる。** 部品の切り方を変えても
+  // 連結結果が変わらないことをここで担保する（splitCss は行の切れ目で割り、
+  // join('') で元に戻る前提）。
+  const Q = '"'.repeat(3);
+  const cssBlobs = [...sql.matchAll(
+    new RegExp('DECLARE css_part_\\d+ STRING DEFAULT r' + Q + '([\\s\\S]*?)' + Q + ';', 'g'))]
+    .map((m) => m[1]);
+  if (cssBlobs.length !== CSS_PARTS || cssBlobs.join('') !== css) {
+    console.log(`  FAIL  焼き込んだ CSS が組み立てた CSS と一致しません` +
+      `（部品 ${cssBlobs.length} 個 / 期待 ${CSS_PARTS} 個、` +
+      `連結 ${cssBlobs.join('').length} 文字 / 期待 ${css.length} 文字）`);
     process.exit(1);
   }
-  console.log('  PASS  焼き込んだ CSS が template_style.html と同じ');
+  // まとめ役が部品を全部つないでいるか。1 つ落とすと CSS が黙って欠ける。
+  // **組み立てに使った変数とは突き合わせない**（同じものを見比べても、
+  // 組み立て側を間違えたときに一緒に動いてしまい何も検出できない）。
+  // 生成物だけを読み、部品の数と名前がそろっているかで見る。
+  const agg = sql.match(
+    /CREATE OR REPLACE FUNCTION `%s\.%s\.%s`\(options_json STRING\)\nRETURNS STRING\nAS \(([^\n]*)\)\n''',\n([\s\S]*?)\);\n/);
+  if (!agg) {
+    console.log('  FAIL  CSS のまとめ役が見つかりません');
+    process.exit(1);
+  }
+  const aggCalls = (agg[1].match(/`%s\.%s\.%s`\(\)/g) || []).length;
+  const missingParts = cssChunks
+    .map((_, i) => `udf_css_p${i + 1}_function_name`)
+    .filter((n) => !agg[2].includes(n));
+  if (aggCalls !== CSS_PARTS || missingParts.length) {
+    console.log(`  FAIL  まとめ役が部品を全部つないでいません` +
+      `（呼び出し ${aggCalls} 個 / 期待 ${CSS_PARTS} 個` +
+      (missingParts.length ? `、渡していない名前: ${missingParts.join(' ')}` : '') + '）');
+    process.exit(1);
+  }
+  console.log(`  PASS  焼き込んだ CSS が template_style.html と同じ（${CSS_PARTS} 分割）`);
 
   // FORMAT のテンプレートに素の % があると書式指定と解釈される。
   // 引数側（JS 本体）の % は無関係なので、''' … ''' の中だけを見る。
   const templates = [...sql.matchAll(/FORMAT\('''([\s\S]*?)'''/g)].map((m) => m[1]);
-  if (templates.length !== 7) {
-    console.log(`  FAIL  FORMAT のテンプレートが 7 つ見つかりません（${templates.length} 個）`);
+  // 関数 7 本（analyze / render / erd / page / markdown / group_css / dynamic_sql）
+  // ＋ CSS の部品ぶん。部品を増やすとここも増える。
+  const WANT_TEMPLATES = 7 + CSS_PARTS;
+  if (templates.length !== WANT_TEMPLATES) {
+    console.log(`  FAIL  FORMAT のテンプレートが ${WANT_TEMPLATES} つ見つかりません（${templates.length} 個）`);
     process.exit(1);
   }
   for (const t of templates) {
