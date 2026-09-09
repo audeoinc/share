@@ -2118,6 +2118,35 @@ amount_breakdown      RECORD REPEATED
 > 使えるかは環境によるので、疑わしいときは
 > `SELECT COUNT(*) FROM \`region-<location>.INFORMATION_SCHEMA.COLUMNS\`` で確かめる。
 
+#### note の見出しはリージョンごとに束ねる
+
+note の見出し（description / ラベルのタブ）は suffix の羅列。リージョンを足す
+たびに伸びて、**どれがどこの View なのか読み取れなくなる**。そこで
+**リージョンをまたいでいるときだけ**束ねる。
+
+```
+まとめない  abjp, abuk, abus, cdjp, cduk, cdus, efjp, efuk, efus
+まとめる    asia-northeast1 abjp, abuk, abus, cdjp, cduk, cdus │ asia-southeast1 efjp, efuk, efus
+```
+
+**1 つのリージョンに収まっているなら従来どおりの羅列。** 大半の base はそうで、
+そこに毎回リージョン名を出しても手掛かりにならない（ラベルのバッジを
+「割れているときだけ」出すのと同じ考え方）。
+
+この値は **`INFORMATION_SCHEMA` からは取れない**。ローカル側の `VIEWS` に
+リージョンの列が無いので、`src_views` の組み立てで**ジョブのリージョンを定数
+として足している**（運んできたテーブルには `source_region` 列がある）。
+
+```
+base_regions → regions_json  [{"r":"asia-northeast1","v":["v_x_abjp", …]}, …]
+             → viewlgc_page(… labels_json, regions_json, options_json)
+             → renderNote(b, descs, mark, labels, regions)
+```
+
+> **page の引数は順番で効く。** SQL 側の並びと UDF 側の宣言が食い違うと、
+> `labels` に `regions` が入るような形で**静かに壊れる**。`node check_sql.mjs`
+> が引数の数と並びを突き合わせる。
+
 ### View の SQL そのもの（SQL タブ）
 
 `INFORMATION_SCHEMA.VIEWS.view_definition` を**そのまま**出す。差分も等価判定も

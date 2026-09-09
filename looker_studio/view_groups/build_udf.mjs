@@ -357,7 +357,7 @@ return __run(analysis_json, options_json);
 // カラム定義の表と View ごとの素の SQL を作り、渡された差分 HTML・参照関係の図と
 // 合わせて外側タブで束ねる。差分も図も作らない（どちらも別の UDF）。
 const pageDriver = `
-function __run(analysis_json, diff_html, erd_html, columns_json, sql_json, descs_json, labels_json, options_json) {
+function __run(analysis_json, diff_html, erd_html, columns_json, sql_json, descs_json, labels_json, regions_json, options_json) {
   var opts = __opts(options_json);
   var a;
   try { a = JSON.parse(analysis_json); } catch (e) { a = null; }
@@ -389,6 +389,11 @@ function __run(analysis_json, diff_html, erd_html, columns_json, sql_json, descs
   var labels = [];
   try { labels = JSON.parse(labels_json) || []; } catch (e) { labels = []; }
 
+  // View がどのリージョンに居るか。[{r: リージョン, v: [View 名...]}] で来る。
+  // note の見出しを suffix の羅列からリージョンごとの束に変えるのに使う。
+  var regions = [];
+  try { regions = JSON.parse(regions_json) || []; } catch (e) { regions = []; }
+
   var col = '';
   var sql = '';
   var bases = a.bases || [];
@@ -401,10 +406,10 @@ function __run(analysis_json, diff_html, erd_html, columns_json, sql_json, descs
   var b0 = a.bases && a.bases.length ? a.bases[0] : null;
   return wrapPage(String(diff_html || ''),
     String(erd_html || __notice('参照関係を取得できませんでした。')), col, sql,
-    renderNote(b0, descs, NOTE_MARK, labels), b0, labelsSplit(b0, labels));
+    renderNote(b0, descs, NOTE_MARK, labels, regions), b0, labelsSplit(b0, labels));
 }
 
-return __run(analysis_json, diff_html, erd_html, columns_json, sql_json, descs_json, labels_json, options_json);
+return __run(analysis_json, diff_html, erd_html, columns_json, sql_json, descs_json, labels_json, regions_json, options_json);
 `.trim();
 
 // --- markdown のドライバ -----------------------------------------------
@@ -513,7 +518,7 @@ const VIEWLGC_RENDER = new Function('analysis_json', 'options_json', 'ref_index'
   renderPack.code);
 const VIEWLGC_ERD = new Function('analysis_json', 'options_json', erdPack.code);
 const VIEWLGC_PAGE = new Function('analysis_json', 'diff_html', 'erd_html',
-  'columns_json', 'sql_json', 'descs_json', 'labels_json', 'options_json',
+  'columns_json', 'sql_json', 'descs_json', 'labels_json', 'regions_json', 'options_json',
   pagePack.code);
 const VIEWLGC_MARKDOWN = new Function('md', markdownPack.code);
 const VIEW_GROUP_CSS = new Function('options_json', cssPack.code);
@@ -1431,6 +1436,7 @@ CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
   sql_json STRING,
   descs_json STRING,
   labels_json STRING,
+  regions_json STRING,
   options_json STRING
 )
 RETURNS STRING

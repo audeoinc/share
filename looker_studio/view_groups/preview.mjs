@@ -392,6 +392,18 @@ const hasRule = (css, selector, decl) => css.split('\n').some((line) => {
   return line.slice(0, open).split(',').indexOf(selector) >= 0 &&
     (decl == null || line.slice(open + 1, close) === decl);
 });
+const REGION_SPLIT = (b) => {
+  const all = b.groups.flatMap((g) => g.members.map((m) => m.viewName));
+  return [
+    { r: 'asia-northeast1', v: all.filter((n) => /_(ab|cd)/.test(n)) },
+    { r: 'asia-southeast1', v: all.filter((n) => /_ef/.test(n)) },
+  ];
+};
+const ONE_REGION = (b) => [{
+  r: 'asia-northeast1',
+  v: b.groups.flatMap((g) => g.members.map((m) => m.viewName)),
+}];
+
 const checks = [
   ['タイトルが base 名', h3.includes('v_daily_sales')],
   ['グループ数バッジが出る', h3.includes('3 グループ')],
@@ -583,6 +595,29 @@ const checks = [
     return /class="vg-or vg-or1" type="radio" name="[^"]*" id="[^"]*-1" checked>/.test(h) &&
       !/vg-or(2|3)" type="radio"[^>]*checked/.test(h) &&
       hasRule(R.chromeCss(), '.vg-or1:checked ~ .vg-opanels > .vg-op1', 'display:block');
+  })()],
+  // note の見出しは suffix の羅列。リージョンを足すたびに伸びて、どれがどこの
+  // View なのか読めなくなるので、**リージョンをまたいでいるときだけ**束ねる。
+  ['note の見出しはリージョンごとに束ねる', (() => {
+    const h = V.renderNote(base3, fakeDescs(base3, () => 'x'), '(メモ)', [],
+      REGION_SPLIT(base3));
+    return h.includes('<span class="vg-nregname">asia-northeast1</span>') &&
+      h.includes('<span class="vg-nregname">asia-southeast1</span>') &&
+      // 束の中は suffix の羅列のまま
+      /asia-northeast1<\/span>abjp, abuk, abus, cdjp, cduk, cdus/.test(h);
+  })()],
+  // 1 つのリージョンに収まっているなら従来どおり。大半の base はそうで、
+  // そこに毎回リージョン名を出しても手掛かりにならない。
+  ['1 リージョンなら見出しは従来どおりの羅列', (() => {
+    const h = V.renderNote(base3, fakeDescs(base3, () => 'x'), '(メモ)', [],
+      ONE_REGION(base3));
+    return !h.includes('vg-nregname') &&
+      h.includes('abjp, abuk, abus, cdjp, cduk, cdus, efjp, efuk, efus');
+  })()],
+  // リージョンが渡ってこない環境（取れなかった・古いカード）でも落ちない。
+  ['リージョンが無くても note は出る', (() => {
+    const h = V.renderNote(base3, fakeDescs(base3, () => 'x'), '(メモ)', []);
+    return !h.includes('vg-nregname') && h.includes('abjp, abuk, abus');
   })()],
   ['メモは作り置きせずビューが差し込む（目印が残っている）', (() => {
     const raw = Ch.wrapPage('<i>D</i>', '<i>E</i>', 'x', 'y');

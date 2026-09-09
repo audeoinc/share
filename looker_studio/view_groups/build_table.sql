@@ -610,13 +610,18 @@ SET src_schemata = IF(ARRAY_LENGTH(import_sources) = 0,
      FROM UNNEST(import_sources) GROUP BY table_name_suffix
    ) AS g));
 
+-- View だけは **source_region も一緒に持ち出す**（note が View をリージョン
+-- ごとにまとめるのに要る）。ローカルの INFORMATION_SCHEMA にはその列が無い
+-- ので、ジョブのリージョンを定数で置く。運んできたテーブルには列がある。
 SET src_views = IF(ARRAY_LENGTH(import_sources) = 0,
-  FORMAT('`%s.region-%s.INFORMATION_SCHEMA.VIEWS`', target_project_id, job_region),
-  (SELECT FORMAT('(SELECT %s FROM `%s.region-%s.INFORMATION_SCHEMA.VIEWS`%s)',
-     'table_schema, table_name, view_definition', target_project_id, job_region,
+  FORMAT('(SELECT table_schema, table_name, view_definition, %T AS source_region'
+         ' FROM `%s.region-%s.INFORMATION_SCHEMA.VIEWS`)',
+         job_region, target_project_id, job_region),
+  (SELECT FORMAT('(SELECT %s, %T AS source_region FROM `%s.region-%s.INFORMATION_SCHEMA.VIEWS`%s)',
+     'table_schema, table_name, view_definition', job_region, target_project_id, job_region,
      STRING_AGG(
        FORMAT(' UNION ALL SELECT %s FROM `%s.%s.%s` WHERE source_region IN UNNEST(%T)',
-         'table_schema, table_name, view_definition', work_project_id, work_dataset,
+         'table_schema, table_name, view_definition, source_region', work_project_id, work_dataset,
          table_name_prefix || system_name || '_' || 't_' || 'meta_views' || g.sfx,
          g.regions),
        '' ORDER BY g.sfx))
@@ -1014,7 +1019,7 @@ opts AS (
 -- view_definition はクエリ本体だけなので、ヘッダも OPTIONS も付いてこない。
 -- View 自身の名前も入らないため、パラメータには参照先の差だけが残る。
 src AS (
-  SELECT table_name AS view_name, view_definition AS ddl
+  SELECT table_name AS view_name, view_definition AS ddl, source_region
   FROM __SRC_VIEWS__
   WHERE (__VIEW_DATASET_COND__) AND (__VIEW_NAME_COND__)
 ),
@@ -1026,6 +1031,7 @@ keyed AS (
   SELECT
     src.view_name,
     src.ddl,
+    src.source_region,
     -- suffix を認識できない View は自分の名前を base にする。
     -- 束ねる相手がいないので 1 View / 1 グループとして単独で表示される。
     COALESCE(
@@ -1257,6 +1263,26 @@ analyzed AS (
   CROSS JOIN opts AS o
   GROUP BY base, o.options_json
 ),
+-- base ごとの「どの View がどのリージョンに居るか」。
+-- note が suffix をリージョンごとにまとめるのに使う。形は labels_json と同じで
+--   [{"r": "asia-northeast1", "v": ["v_x_abjp", ...]}, ...]
+-- 並びはリージョン名の昇順。実行のたびに順が変わると、同じ内容でも昨日と違う
+-- ものが出たように読める。
+base_regions AS (
+  SELECT
+    base,
+    CONCAT('[', STRING_AGG(
+      CONCAT('{"r":', TO_JSON_STRING(source_region), ',"v":', TO_JSON_STRING(view_names), '}'),
+      ',' ORDER BY source_region
+    ), ']') AS regions_json
+  FROM (
+    SELECT base, source_region, ARRAY_AGG(view_name ORDER BY view_name) AS view_names
+    FROM keyed
+    GROUP BY base, source_region
+  )
+  GROUP BY base
+),
+
 -- **1 行 = 1 base × 1 基準。** どの基準を見るかはレポートのコントロール
 -- （ref_label）で選ぶ。
 --
@@ -1285,12 +1311,15 @@ refs AS (
     COALESCE(bd.descs_json, '[]') AS descs_json,
     -- ラベルを 1 つも使っていない環境もある。描画側は空なら何も出さない。
     COALESCE(bl.labels_json, '[]') AS labels_json,
+    -- View がどのリージョンに居るか。取れなくても描画側は落ちない。
+    COALESCE(br.regions_json, '[]') AS regions_json,
     g.off AS ref_index,
     g.lbl AS ref_label
   FROM analyzed AS a
   LEFT JOIN base_cols AS bc ON bc.base = a.base
   LEFT JOIN base_descs AS bd ON bd.base = a.base
   LEFT JOIN base_labels AS bl ON bl.base = a.base
+  LEFT JOIN base_regions AS br ON br.base = a.base
   -- **基準ごとに 1 行。** グループが 0 件の base（解析できなかった等）でも
   -- 行が消えないよう、そのときは NULL の 1 行を立てる。CROSS JOIN で
   -- 空の配列を展開すると base ごと落ちてしまい、**カードが黙って消える。**
@@ -1344,6 +1373,7 @@ SELECT
     sql_json,
     descs_json,
     labels_json,
+    regions_json,
     options_json
   ) AS diff_html
 FROM refs

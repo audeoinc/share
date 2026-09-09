@@ -410,14 +410,30 @@ for (const t of ['__T_DIFF_SRC__', '__T_DIFF__']) {
   //      ここに余計なものが混ざると、import_sources を空にしても
   //      「足す前とまったく同じ」ではなくなる。取り込みテーブルを 1 か所も
   //      参照しないからこそ、テーブルが存在しなくても流せる。
+  //      **形ではなく「何を参照しているか」で見る。** views だけは
+  //      source_region を定数で足すため副問い合わせの形になっており、
+  //      書き方を固定すると直せなくなる。守りたいのは「取り込みテーブルを
+  //      参照しない」ことのほう。
   const IS = { schemata: 'SCHEMATA', views: 'VIEWS', columns: 'COLUMNS',
     field_paths: 'COLUMN_FIELD_PATHS', table_opts: 'TABLE_OPTIONS' };
-  const plain = srcs.filter((k) => !new RegExp(
-    `SET src_${k} = IF\\(ARRAY_LENGTH\\(import_sources\\) = 0,\\s*\\n\\s*` +
-    `FORMAT\\('\`%s\\.region-%s\\.INFORMATION_SCHEMA\\.${IS[k]}\`', ` +
-    `target_project_id, job_region\\),`).test(table));
-  add('空のときの読み元が INFORMATION_SCHEMA そのもの（従来と同一）',
+  const emptyBranch = (k) => {
+    const m = table.match(new RegExp(
+      `SET src_${k} = IF\\(ARRAY_LENGTH\\(import_sources\\) = 0,([\\s\\S]*?)\\n  \\(SELECT `));
+    return m ? m[1] : null;
+  };
+  const plain = srcs.filter((k) => {
+    const b = emptyBranch(k);
+    return b === null ||
+      !b.includes(`INFORMATION_SCHEMA.${IS[k]}`) ||
+      // 取り込みテーブルも作業データセットも参照しない
+      /meta_|work_dataset|work_project_id|table_name_prefix/.test(b);
+  });
+  add('空のときの読み元が INFORMATION_SCHEMA だけ（取り込みを参照しない）',
     plain.length === 0, plain.join(','));
+  // views だけはリージョンを定数で足す（ローカルの INFORMATION_SCHEMA に
+  // その列が無いため）。足し忘れると keyed の組み立てで落ちる。
+  add('空のときでも views はリージョンを足している',
+    /AS source_region/.test(emptyBranch('views') || ''));
 
   // (3c) 取り込みテーブルの名前を組み立てている箇所が、想定の 2 か所だけか。
   //      増えると、空判定の外から参照される余地が生まれる（＝空にしても
@@ -578,6 +594,64 @@ for (const base of ['analyze', 'render', 'erd', 'page', 'markdown', 'group_css',
   const used = mark ? table.split(`REPLACE(diff_html, '${mark}'`).length - 1 : 0;
   add('メモの目印が chrome.js とビューで同じ', mark !== null && used === 1,
     `chrome.js=${mark || 'なし'} / build_table.sql での使用 ${used} 回`);
+}
+
+// View がどのリージョンに居るか。note の見出しをリージョンごとに束ねるのに
+// 使う。**この値は INFORMATION_SCHEMA からは取れない**（ローカル側にその列が
+// 無い）ので、src_views の組み立てでジョブのリージョンを定数として足している。
+// 足し忘れると列が無いまま keyed を作ろうとしてクエリごと落ちる。
+{
+  add('View の取得元にリージョンを持たせている',
+    /AS source_region/.test(table) &&
+    // ローカル側（import_sources が空）でも定数で足す
+    /INFORMATION_SCHEMA\.VIEWS`\)'/.test(table) &&
+    // 運んできた側は列をそのまま選ぶ
+    /'table_schema, table_name, view_definition, source_region'/.test(table));
+
+  // base ごとにまとめて描画側へ渡す。labels_json と同じ形。
+  const cte = table.match(/^base_regions AS \(([\s\S]*?)^\),$/m);
+  add('base ごとのリージョンを組み立てて渡している',
+    cte !== null &&
+    /'\{"r":'/.test(cte ? cte[1] : '') &&
+    /GROUP BY base, source_region/.test(cte ? cte[1] : '') &&
+    /COALESCE\(br\.regions_json, '\[\]'\) AS regions_json/.test(table) &&
+    /LEFT JOIN base_regions AS br ON br\.base = a\.base/.test(table));
+
+  // page の引数は順番で効く。SQL 側の並びと UDF 側の宣言が食い違うと、
+  // labels に regions が入るような形で**静かに壊れる**。
+  // 呼び出し側は入れ子の __UDF_RENDER__(…) を跨ぐので、深さ 0 のカンマで割る。
+  const callArgs = (() => {
+    const m = table.match(/`__UDF_PAGE__`\(([\s\S]*?)\n  \) AS diff_html/);
+    if (!m) return null;
+    const out = [];
+    let depth = 0, cur = '';
+    for (const ch of m[1]) {
+      if (ch === '(') depth++;
+      else if (ch === ')') depth--;
+      if (ch === ',' && depth === 0) { out.push(cur); cur = ''; continue; }
+      cur += ch;
+    }
+    out.push(cur);
+    return out.map((x) => x.trim()).filter(Boolean);
+  })();
+  // 定義側は **page の塊**を名前ではなく regions_json の有無で選ぶ
+  // （render にも analysis_json があるので、頭から探すとそちらに当たる）。
+  const declArgs = (() => {
+    const chunk = udf.split('CREATE OR REPLACE FUNCTION')
+      .find((c) => /\n  regions_json STRING,/.test(c));
+    if (!chunk) return null;
+    const m = chunk.match(/\(\n([\s\S]*?)\n\)\nRETURNS STRING\nLANGUAGE js/);
+    return m ? m[1].split(',').map((x) => x.trim().split(/\s+/)[0]).filter(Boolean) : null;
+  })();
+  // 先頭 3 つ（解析結果・差分 HTML・図 HTML）は呼び出し側では式なので名前が
+  // 無い。数がそろっていることと、4 つ目から先の名前がそろっていることを見る。
+  const tail = (a) => (a || []).slice(3).join(',');
+  add('page の引数の数と並びが SQL と UDF で同じ',
+    callArgs !== null && declArgs !== null &&
+    callArgs.length === declArgs.length &&
+    tail(callArgs) === tail(declArgs),
+    `SQL(${(callArgs || []).length})=${tail(callArgs)} / ` +
+    `UDF(${(declArgs || []).length})=${tail(declArgs)}`);
 }
 
 // suffix 一覧の組み立てと、それを説明する 5-4 は**同じ材料**でなければ
