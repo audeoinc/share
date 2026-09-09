@@ -790,13 +790,43 @@ const checks = [
     return b.groupCount === 2 && en.length === 1 &&
       en[0].suffixes.join(',') === 'txjp,txus,v2_txjp,v2_txus';
   })()],
-  // パラメータでない節（全 View で同じ名前）は落とさない。落とす手掛かりが
-  // 無いうえ、落とすと無関係な表どうしが同じ base になりうる。
+  // 共通の表（View の suffix と関係が無い名前）は落とさない。
   ['共通の参照先は名前をそのまま base にする', (() => {
     const g = { suffixes: ['abjp'], params: [] };
     const n = { name: '`prj.common.calendar_master`', kind: 'table' };
     return E.nodeBase(n, g) === 'calendar_master';
   })()],
+  // **メンバが 1 本のグループ。** 差が出ないので実体名がパラメータ化されず、
+  // literal の orders_jp のまま base になっていた。同じ表を読む 2 本以上の
+  // グループ（base は orders）と一致せず、図の中身は同じなのに別グループとして
+  // 並んだ（「参照だけ見ると同じなのに別になる」と読まれた形）。
+  ['メンバが 1 本のグループも参照が同じならまとまる', (() => {
+    const t = (r) => `SELECT o.id FROM \`p.d.orders_${r}\` AS o`;
+    const rows = [
+      { view_name: 's_jp', ddl: t('jp') },
+      { view_name: 's_us', ddl: t('us') },
+      { view_name: 's_v2_jp', ddl: 'SELECT o.id, o.amt FROM `p.d.orders_jp` AS o' },
+    ];
+    const b = A.analyze(rows, { suffixList: ['jp', 'us', 'v2_jp'] }).bases[0];
+    const en = E.erdGroups(b);
+    if (b.groupCount !== 2 || en.length !== 1) return false;
+    // まとめた図の注記に、1 本しかないグループの表も出る（パラメータが無い
+    // ので値の一覧からは引けない。そのグループの図から引いている）。
+    const svg = E.groupSvg(en[0]);
+    const tips = [...svg.matchAll(/<title>([\s\S]*?)<\/title>/g)].map((m) => m[1]).join('\n');
+    return tips.includes('v2_jp / orders_jp') &&
+      tips.includes('jp = `p.d.orders_jp`');
+  })()],
+  // View の suffix と参照先の suffix がずれる形をまとめて押さえる。
+  ['参照名の base は View の suffix の末尾でも落とせる',
+    // 丸ごと一致
+    E.refBase('`PRJ.mart_abjp.orders_abjp`', 'abjp') === 'orders' &&
+    // View は中間語つき、参照先は短い
+    E.refBase('`p.d.orders_txjp`', 'v2_txjp') === 'orders' &&
+    // データセットだけ 4 文字で、表は地域だけ
+    E.refBase('`p.d.orders_jp`', 'abjp') === 'orders' &&
+    // 関係の無い名前は落とさない
+    E.refBase('`PRJ.common.calendar_master`', 'abjp') === 'calendar_master'],
   // 読む先が違えば別の図のまま。base 部分で比べるのが要点で、形だけで比べると
   // orders_* と customers_* まで同じ図になってしまう。
   ['読む先が違えば別の図のまま', (() => {

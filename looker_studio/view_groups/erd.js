@@ -635,9 +635,27 @@ function toSvg(lay) {
 function refBase(name, suffix) {
   const short = shortName(name);
   if (!suffix) return short;
-  const tail = '_' + suffix;
-  return short.length > tail.length && short.slice(-tail.length) === tail
-    ? short.slice(0, -tail.length) : short;
+  const suf = String(suffix);
+  // 末尾から '_' 区切りで切っていき、**View の suffix の末尾に一致する
+  // いちばん長いもの**を落とす（左から探すので最初に当たったものが最長）。
+  //
+  // 「View の suffix と丸ごと一致」だけでは足りない。参照先が View より短い
+  // suffix を持つことがあるため。
+  //   View sales_v2_txjp（suffix v2_txjp） → orders_txjp  … '_txjp' で一致
+  //   View v_x_abjp     （suffix abjp）    → orders_jp    … 'jp' で一致
+  // 後者はデータセット名だけが 4 文字で、表は地域だけ、という並びのとき
+  // （suffix_tail_lengths がある理由と同じ事情）。
+  //
+  // 逆に、共通の表（calendar_master など）は View の suffix と関係が無いので
+  // 落ちない。
+  for (let i = 0; i < short.length; i++) {
+    if (short[i] !== '_') continue;
+    const tail = short.slice(i + 1);
+    if (suf === tail || suf.endsWith('_' + tail) || suf.endsWith(tail)) {
+      return short.slice(0, i);
+    }
+  }
+  return short;
 }
 
 /**
@@ -672,10 +690,17 @@ function paramBase(p, viewSuffix) {
 }
 
 /**
- * 節 1 つの base。パラメータ由来ならその値から、そうでなければ名前そのまま。
+ * 節 1 つの base。パラメータ由来ならその値から、そうでなければ View の
+ * suffix を落とす。
  *
- * **パラメータでない節は落とさない。** 全 View で同じ名前ということなので、
- * 落とす手掛かりが無いうえ、落とすと無関係な表どうしが同じ base になりうる。
+ * **パラメータでない節にも suffix の落としを掛ける。** ここを「落とさない」に
+ * していたら、**メンバが 1 本しかないグループ**が別の図として残った。1 本だと
+ * 差が出ないので実体名はパラメータ化されず、literal の `orders_jp` のまま
+ * base になる。同じ表を読んでいる 2 本以上のグループ（base は `orders`）と
+ * 一致せず、図の中身は同じなのに別グループとして並ぶ。
+ *
+ * 落とすのは View の suffix の末尾に一致する部分だけなので、共通の表
+ * （calendar_master など）は落ちない。
  */
 function nodeBase(n, g) {
   const short = shortName(n.name);
@@ -686,7 +711,7 @@ function nodeBase(n, g) {
       }
     }
   }
-  return short;
+  return refBase(short, (g.suffixes || [])[0] || null);
 }
 
 /** 図の形を表す署名。実体名は base 部分に均してから比べる。 */
@@ -755,25 +780,39 @@ function groupSvg(entry) {
   // 後方互換。1 グループをそのまま渡された場合も描ける。
   const gs = entry.groups || [entry];
   const graph = buildGraph(gs[0].sql, gs[0].params);
+  // 構成する各グループのグラフ。**パラメータを持たないグループ**（メンバが
+  // 1 本など）は値の一覧から名前を引けないので、そのグループの図から引く。
+  // これが無いと、まとめた図の箱にも注記にもそのグループの表が出てこない。
+  const graphs = gs.map((g, i) => (i === 0 ? graph : buildGraph(g.sql, g.params)));
 
   for (const n of graph.nodes) {
     const base = nodeBase(n, gs[0]);
     const names = [];
     const tips = [];
     const hits = [];
-    for (const g of gs) {
+    gs.forEach((g, gi) => {
       // このノードに当たるパラメータを **base 部分の一致**で引き直す。
       // グループごとに番号（P1 / P2）がずれていても対応が取れる。
       const sfx = (g.suffixes || [])[0] || null;
+      let found = 0;
       for (const p of (g.params || [])) {
         const keys = Object.keys(p.values);
         if (paramBase(p, sfx) !== base) continue;
+        found++;
         hits.push(p);
         for (const k of keys) names.push(shortName(p.values[k]));
         tips.push((gs.length > 1 ? label(g) + ' / ' : '') + p.name + ': ' +
           keys.map((k) => k + ' = ' + p.values[k]).join(' / '));
       }
-    }
+      if (found) return;
+      // パラメータが無い＝そのグループでは全 View で同じ名前。図から引く。
+      const own = graphs[gi].nodes.filter((x) => nodeBase(x, g) === base);
+      for (const x of own) {
+        const nm = shortName(x.name);
+        if (names.indexOf(nm) < 0) names.push(nm);
+        if (gs.length > 1) tips.push(label(g) + ' / ' + nm);
+      }
+    });
     // パラメータでないノード（CTE・最終 SELECT・全 View で同じ名前の表）は
     // まとめても名前が変わらないので、そのままにする。
     if (!hits.length) { n.params = []; n.tipLines = []; continue; }
