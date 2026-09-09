@@ -31,8 +31,9 @@ BEGIN
   -- GCP project: 実行時に自動取得する（DECLARE は [B]）。
   -- Project-token substitution
   DECLARE project_token_pattern STRING DEFAULT r'^([^-]+)';
-  -- Datasets (repository)
+  -- Datasets (repository / UDF)
   DECLARE repository_dataset STRING DEFAULT 'bq_cost_repository';
+  DECLARE udf_dataset STRING DEFAULT 'bq_cost_repository';
   -- Table naming
   DECLARE table_name_prefix STRING DEFAULT '';
   DECLARE table_name_suffix STRING DEFAULT '';
@@ -45,6 +46,9 @@ BEGIN
   -- Variable notes (keyed by name):
   --   project_token_pattern / repository_dataset / table_name_* / udf_name_*
   --     01 と必ず同じ値にすること。名前が食い違うと別の表を作りに行く。
+  --   udf_dataset
+  --     01 が UDF を作ったデータセット。表と別の場所に置いた場合はここも変える。
+  --     食い違うと Not found: Function になる。
   --   executor_label_key
   --     実行者を識別するジョブラベルのキー。BigQuery のラベルキーは小文字のみ
   --     なので 'subsystemid'（'subsystemId' ではない）。この値が付いていない
@@ -71,6 +75,8 @@ BEGIN
   -- [C] DERIVED / INTERNAL -- from [A]; DO NOT edit
   -- --------------------------------------------------------------------------
   DECLARE repository_project_id STRING DEFAULT NULL;
+  -- UDF の置き場所。01 と揃えること。別プロジェクトのときだけリテラルを入れる。
+  DECLARE udf_project_id STRING DEFAULT NULL;
   DECLARE source_project_id STRING DEFAULT NULL;
   DECLARE project_token STRING;
   DECLARE job_cost_fqn STRING;
@@ -92,11 +98,13 @@ BEGIN
   ASSERT default_project_id IS NOT NULL AS
     'Could not auto-detect the project id from INFORMATION_SCHEMA.SCHEMATA; set default_project_id to a literal.';
   SET repository_project_id = COALESCE(repository_project_id, default_project_id);
+  SET udf_project_id = COALESCE(udf_project_id, default_project_id);
   SET source_project_id = COALESCE(source_project_id, default_project_id);
 
   SET project_token =
     COALESCE(REGEXP_EXTRACT(default_project_id, project_token_pattern), '');
   SET repository_dataset = REPLACE(repository_dataset, '{project_token}', project_token);
+  SET udf_dataset = REPLACE(udf_dataset, '{project_token}', project_token);
   SET table_name_prefix = REPLACE(table_name_prefix, '{project_token}', project_token);
   SET table_name_suffix = REPLACE(table_name_suffix, '{project_token}', project_token);
   SET udf_name_prefix = REPLACE(udf_name_prefix, '{project_token}', project_token);
@@ -104,6 +112,8 @@ BEGIN
 
   ASSERT REGEXP_CONTAINS(repository_dataset, r'^[A-Za-z0-9_]+$')
   AS 'repository_dataset must be letters/digits/underscore only (check for an unsubstituted {project_token}).';
+  ASSERT REGEXP_CONTAINS(udf_dataset, r'^[A-Za-z0-9_]+$')
+  AS 'udf_dataset must be letters/digits/underscore only (check for an unsubstituted {project_token}).';
   ASSERT initial_lookback_days BETWEEN 1 AND 180
   AS 'initial_lookback_days must be between 1 and 180 (INFORMATION_SCHEMA.JOBS keeps 180 days of history).';
   ASSERT incremental_lookback_days BETWEEN 1 AND 180
@@ -119,8 +129,8 @@ BEGIN
   );
   SET normalize_udf_fqn = FORMAT(
     '%s.%s.%s',
-    repository_project_id,
-    repository_dataset,
+    udf_project_id,
+    udf_dataset,
     udf_name_prefix || 'bqc_' || 'normalize_sql' || udf_name_suffix
   );
   -- region 修飾識別子のバッククォート内側だけを組み立てる。
@@ -302,6 +312,8 @@ BEGIN
   EXECUTE IMMEDIATE FORMAT(r"""
     SELECT
       'bqc load completed' AS status,
+      @job_cost_fqn               AS job_cost_table,
+      @normalize_udf_fqn          AS normalize_udf,
       COUNT(*)                    AS total_rows,
       MIN(creation_date)          AS min_creation_date,
       MAX(creation_date)          AS max_creation_date,
@@ -310,5 +322,6 @@ BEGIN
       COUNTIF(executor_source = 'USER_EMAIL') AS rows_fallen_back_to_user_email,
       SAFE_DIVIDE(COUNTIF(executor_source = 'LABEL'), COUNT(*)) AS label_coverage
     FROM `%s`
-  """, job_cost_fqn);
+  """, job_cost_fqn)
+  USING job_cost_fqn AS job_cost_fqn, normalize_udf_fqn AS normalize_udf_fqn;
 END;

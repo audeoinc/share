@@ -26,12 +26,40 @@ def _fill_placeholders(sql: str) -> str:
     return sql.replace("%s", "dummy_project.dummy_dataset.dummy_object")
 
 
+def _check_declare_order(path: str, source: str) -> list:
+    """BigQuery スクリプトの DECLARE は、そのブロックの最初の実行文より前に
+    まとめて置かなければならない。あとから変数を足したときに壊しやすいので機械的に見る。"""
+    problems = []
+    seen_statement = None
+    for number, raw in enumerate(source.split("\n"), start=1):
+        line = raw.strip()
+        if not line or line.startswith("--"):
+            continue
+        if line.startswith("DECLARE ") and seen_statement is not None:
+            problems.append(
+                f"{path}:{number}: DECLARE が実行文 ({path}:{seen_statement}) より後ろにある"
+            )
+        elif seen_statement is None and not line.startswith(("DECLARE ", "BEGIN", "SET @@")):
+            seen_statement = number
+    return problems
+
+
 def main() -> int:
     failures = 0
     checked = 0
 
     for path in sorted(glob.glob("pipeline/*.sql")):
         source = open(path, encoding="utf-8").read()
+
+        declare_problems = _check_declare_order(path, source)
+        for problem in declare_problems:
+            failures += 1
+            checked += 1
+            print(f"FAIL  {problem}")
+        if not declare_problems:
+            checked += 1
+            print(f"ok    {path}: DECLARE の位置")
+
         templates = TEMPLATE.findall(source)
         if not templates:
             print(f"--    {path}: FORMAT(r\"\"\"...\"\"\") テンプレートなし")
@@ -49,7 +77,7 @@ def main() -> int:
                 failures += 1
                 print(f"FAIL  {label}: {str(error)[:300]}")
 
-    print(f"\n{checked - failures}/{checked} templates parsed")
+    print(f"\n{checked - failures}/{checked} checks passed")
     return 1 if failures else 0
 
 

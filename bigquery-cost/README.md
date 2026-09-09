@@ -29,6 +29,7 @@ bigquery-cost/
 
 ```bash
 # 1. 環境構築（初回のみ）。冒頭の SET @@location と [A] ブロックだけ確認する
+#    表と UDF を別データセットに置く場合は [A] の udf_dataset を 01/02 の両方で揃える
 bq query --project_id=audeodb --use_legacy_sql=false < pipeline/01_setup_cost_environment.sql
 
 # 2. 取り込み。表が空なので初回は自動で 120 日バックフィルされる
@@ -55,6 +56,16 @@ bqc_t_daily_cost         日 × fingerprint × 実行者。Looker が読む実�
    ▼
 bqc_vw_t_daily_cost_report   ← Looker Studio のデータソースはこれ 1 本
 ```
+
+### データセットの指定
+
+表・ビューを置く `repository_dataset` と、UDF を置く `udf_dataset` は
+**別々に指定できます**（既定は同じ値）。UDF だけ共有データセットに集約している
+運用に合わせるためです。別にする場合は **`01` と `02` の両方**で同じ値に揃えてください。
+食い違うと `02` が `Not found: Function` で落ちます。
+
+`01` と `02` の実行結果には解決後の完全修飾名（`normalize_udf` / `job_cost_table`）が
+出力されるので、意図した場所を見ているかはそこで確認できます。
 
 ### 対象期間と保持期間
 
@@ -161,7 +172,7 @@ GA プロパティID（`analytics_123456789`）は桁数が違うので影響を
 | 対象 | 状況 |
 |---|---|
 | 正規化ロジック | **RE2 実機で 29/29 パス**（`tools/normalize_reference.py`） |
-| 埋め込み動的SQLの構文 | **11/11 パース成功**（`tools/check_templates.py`、sqlglot bigquery） |
+| 埋め込み動的SQLの構文 + DECLARE の位置 | **14/14 パス**（`tools/check_templates.py`、sqlglot bigquery） |
 | BigQuery 実機での実行 | **未実施。** 本セッションに `bq` / `gcloud` と GCP 認証が無いため |
 
 `pipeline/*.sql` は BigQuery スクリプト構文（`BEGIN` / `DECLARE` / `EXECUTE IMMEDIATE`）を

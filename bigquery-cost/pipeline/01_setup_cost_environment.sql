@@ -30,8 +30,9 @@ BEGIN
   -- （別プロジェクトに作る場合のみ [C] の SET をリテラルに置き換える）。
   -- Project-token substitution
   DECLARE project_token_pattern STRING DEFAULT r'^([^-]+)';
-  -- Datasets (repository)
+  -- Datasets (repository / UDF)
   DECLARE repository_dataset STRING DEFAULT 'bq_cost_repository';
+  DECLARE udf_dataset STRING DEFAULT 'bq_cost_repository';
   -- Table / view naming
   DECLARE table_name_prefix STRING DEFAULT '';
   DECLARE table_name_suffix STRING DEFAULT '';
@@ -44,7 +45,12 @@ BEGIN
   --     自動取得した project id から token を抜く正規表現（group 1）。データセット名と
   --     prefix/suffix 中の '{project_token}' を実行時に置換する。既定は先頭ハイフン区切り。
   --   repository_dataset
-  --     このリポジトリを置くデータセット。存在しなければ作成する。
+  --     表・ビューを置くデータセット。存在しなければ作成する。
+  --   udf_dataset
+  --     UDF を置くデータセット。既定は repository_dataset と同じだが、UDF だけ
+  --     共有データセットに集約している運用もあるため独立したノブにしてある。
+  --     別データセットにする場合は 02 の udf_dataset も同じ値に揃えること
+  --     （02 はここで作った UDF を名前で呼ぶだけなので、食い違うと Not found になる）。
   --   table_name_prefix / table_name_suffix
   --     表・ビュー名の可変部。02/03 と必ず同じ値にすること。
   --   udf_name_prefix / udf_name_suffix
@@ -73,8 +79,11 @@ BEGIN
   -- [C] DERIVED / INTERNAL -- from [A]; DO NOT edit
   -- --------------------------------------------------------------------------
   DECLARE repository_project_id STRING DEFAULT NULL;
+  -- UDF の置き場所。別プロジェクトに置く場合だけリテラルを入れる。
+  DECLARE udf_project_id STRING DEFAULT NULL;
   DECLARE project_token STRING;
   DECLARE dataset_fqn STRING;
+  DECLARE udf_dataset_fqn STRING;
   DECLARE normalize_udf_fqn STRING;
   DECLARE job_cost_fqn STRING;
   DECLARE daily_cost_fqn STRING;
@@ -97,11 +106,13 @@ BEGIN
   ASSERT default_project_id IS NOT NULL AS
     'Could not auto-detect the project id from INFORMATION_SCHEMA.SCHEMATA; set default_project_id to a literal.';
   SET repository_project_id = COALESCE(repository_project_id, default_project_id);
+  SET udf_project_id = COALESCE(udf_project_id, default_project_id);
 
   -- project token 置換（名前の組み立て・ASSERT より前に行う）
   SET project_token =
     COALESCE(REGEXP_EXTRACT(default_project_id, project_token_pattern), '');
   SET repository_dataset = REPLACE(repository_dataset, '{project_token}', project_token);
+  SET udf_dataset = REPLACE(udf_dataset, '{project_token}', project_token);
   SET table_name_prefix = REPLACE(table_name_prefix, '{project_token}', project_token);
   SET table_name_suffix = REPLACE(table_name_suffix, '{project_token}', project_token);
   SET udf_name_prefix = REPLACE(udf_name_prefix, '{project_token}', project_token);
@@ -110,6 +121,8 @@ BEGIN
   -- 早期 ASSERT: 残留 '{project_token}' や不正文字を DDL 実行前に検出する
   ASSERT REGEXP_CONTAINS(repository_dataset, r'^[A-Za-z0-9_]+$')
   AS 'repository_dataset must be letters/digits/underscore only (check for an unsubstituted {project_token}).';
+  ASSERT REGEXP_CONTAINS(udf_dataset, r'^[A-Za-z0-9_]+$')
+  AS 'udf_dataset must be letters/digits/underscore only (check for an unsubstituted {project_token}).';
 
   SET normalize_udf_name = udf_name_prefix || 'bqc_' || 'normalize_sql' || udf_name_suffix;
   SET job_cost_name  = table_name_prefix || 'bqc_' || 't_'  || 'job_cost'          || table_name_suffix;
@@ -122,19 +135,28 @@ BEGIN
   AS 'Invalid normalize_udf_name (routine names cannot contain hyphens).';
 
   SET dataset_fqn       = FORMAT('%s.%s', repository_project_id, repository_dataset);
-  SET normalize_udf_fqn = FORMAT('%s.%s', dataset_fqn, normalize_udf_name);
+  SET udf_dataset_fqn   = FORMAT('%s.%s', udf_project_id, udf_dataset);
+  SET normalize_udf_fqn = FORMAT('%s.%s', udf_dataset_fqn, normalize_udf_name);
   SET job_cost_fqn      = FORMAT('%s.%s', dataset_fqn, job_cost_name);
   SET daily_cost_fqn    = FORMAT('%s.%s', dataset_fqn, daily_cost_name);
   SET query_dim_fqn     = FORMAT('%s.%s', dataset_fqn, query_dim_name);
   SET report_view_fqn   = FORMAT('%s.%s', dataset_fqn, report_view_name);
 
   -- --------------------------------------------------------------------------
-  -- STEP 1: dataset
+  -- STEP 1: datasets
   -- --------------------------------------------------------------------------
   EXECUTE IMMEDIATE FORMAT(
     "CREATE SCHEMA IF NOT EXISTS `%s` OPTIONS(location = '%s')",
     dataset_fqn, @@location
   );
+
+  -- UDF を別データセットに置く設定なら、そちらも作る（同じなら上で作成済み）。
+  IF udf_dataset_fqn != dataset_fqn THEN
+    EXECUTE IMMEDIATE FORMAT(
+      "CREATE SCHEMA IF NOT EXISTS `%s` OPTIONS(location = '%s')",
+      udf_dataset_fqn, @@location
+    );
+  END IF;
 
   -- --------------------------------------------------------------------------
   -- STEP 2: normalization UDF
@@ -367,6 +389,7 @@ BEGIN
     'bqc setup completed' AS status,
     @@location            AS job_region,
     dataset_fqn           AS dataset,
+    udf_dataset_fqn       AS udf_dataset,
     normalize_udf_fqn     AS normalize_udf,
     job_cost_fqn          AS job_cost_table,
     daily_cost_fqn        AS daily_cost_table,

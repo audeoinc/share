@@ -58,9 +58,14 @@ BEGIN
   DECLARE job_cost_fqn STRING;
   DECLARE daily_cost_fqn STRING;
   DECLARE query_dim_fqn STRING;
-  DECLARE daily_cost_row_count INT64;
   DECLARE refresh_from_date DATE;
   DECLARE retention_cutoff_date DATE;
+  -- 診断用。どこで止まったのかを最後の SELECT で見えるようにするためだけの変数。
+  DECLARE job_cost_rows_in_window INT64 DEFAULT 0;
+  DECLARE daily_cost_merged_rows INT64 DEFAULT 0;
+  DECLARE query_dim_merged_rows INT64 DEFAULT 0;
+  DECLARE daily_cost_rows_after INT64 DEFAULT 0;
+  DECLARE query_dim_rows_after INT64 DEFAULT 0;
 
   EXECUTE IMMEDIATE FORMAT(
     "SELECT DISTINCT catalog_name FROM `region-%s`.INFORMATION_SCHEMA.SCHEMATA LIMIT 1",
@@ -97,17 +102,52 @@ BEGIN
     table_name_prefix || 'bqc_' || 'm_' || 'query_fingerprint' || table_name_suffix
   );
 
-  -- 集約表が空なら全期間、そうでなければ直近だけを作り直す。
-  EXECUTE IMMEDIATE FORMAT('SELECT COUNT(*) FROM `%s`', daily_cost_fqn)
-    INTO daily_cost_row_count;
+  -- --------------------------------------------------------------------------
+  -- 作り直す起点日の決定（自己修復型）
+  -- --------------------------------------------------------------------------
+  -- 基本は「直近 refresh_lookback_days 日」。ただし job_cost に在るのに daily_cost に
+  -- 出ていない日があれば、その最古日まで遡る。
+  --
+  -- 「集約表が空なら全期間、そうでなければ直近」という分岐にしていたが、それだと
+  -- 一度でも取りこぼした日が二度と埋まらない（集約が空でなくなった時点で直近しか
+  -- 見なくなる）。取りこぼしの原因が何であれ、次の実行で自動的に埋まるようにする。
+  -- 初回は daily_cost が空なので job_cost の最古日＝全期間が対象になる。
+  EXECUTE IMMEDIATE FORMAT(r"""
+    SELECT LEAST(
+      DATE_SUB(CURRENT_DATE(), INTERVAL @refresh_lookback_days DAY),
+      IFNULL(
+        (
+          SELECT MIN(j.creation_date)
+          FROM (SELECT DISTINCT creation_date FROM `%s`) AS j
+          LEFT JOIN (SELECT DISTINCT usage_date FROM `%s`) AS d
+            ON d.usage_date = j.creation_date
+          WHERE d.usage_date IS NULL
+        ),
+        DATE_SUB(CURRENT_DATE(), INTERVAL @refresh_lookback_days DAY)
+      )
+    )
+  """, job_cost_fqn, daily_cost_fqn)
+  INTO refresh_from_date
+  USING refresh_lookback_days AS refresh_lookback_days;
 
-  IF daily_cost_row_count = 0 THEN
-    EXECUTE IMMEDIATE FORMAT(
-      'SELECT IFNULL(MIN(creation_date), CURRENT_DATE()) FROM `%s`', job_cost_fqn
-    ) INTO refresh_from_date;
-  ELSE
-    SET refresh_from_date = DATE_SUB(CURRENT_DATE(), INTERVAL refresh_lookback_days DAY);
+  ASSERT refresh_from_date IS NOT NULL
+  AS 'refresh_from_date resolved to NULL; the daily aggregate would silently rebuild nothing.';
+
+  -- 保持期間より古い日はこの実行の STEP 3 でどのみち消えるので、作り直さない。
+  IF enable_retention_pruning THEN
+    SET refresh_from_date = GREATEST(
+      refresh_from_date,
+      DATE_SUB(CURRENT_DATE(), INTERVAL retention_days DAY)
+    );
   END IF;
+
+  -- 集約対象の母数。これが 0 なら原因は 03 ではなく 02（あるいは参照先データセットの
+  -- 食い違い）にある、と最後のサマリだけで切り分けられるようにしておく。
+  EXECUTE IMMEDIATE FORMAT(
+    'SELECT COUNT(*) FROM `%s` WHERE creation_date >= @refresh_from_date', job_cost_fqn
+  )
+  INTO job_cost_rows_in_window
+  USING refresh_from_date AS refresh_from_date;
 
   -- --------------------------------------------------------------------------
   -- STEP 1: bqc_t_daily_cost の再構築
@@ -161,11 +201,26 @@ BEGIN
       slot_hours          = source.slot_hours,
       updated_at          = source.updated_at
     WHEN NOT MATCHED BY TARGET THEN
-      INSERT ROW
+      -- INSERT ROW（列名省略）は target の列順に完全依存するので、列を明示する。
+      INSERT (
+        usage_date, job_region, normalized_fingerprint, executor_id,
+        executor_source, pricing_model, reservation_id, job_count,
+        cache_hit_count, error_count, distinct_user_count, total_bytes_billed,
+        tib_billed, total_slot_ms, slot_hours, updated_at
+      ) VALUES (
+        source.usage_date, source.job_region, source.normalized_fingerprint,
+        source.executor_id, source.executor_source, source.pricing_model,
+        source.reservation_id, source.job_count, source.cache_hit_count,
+        source.error_count, source.distinct_user_count, source.total_bytes_billed,
+        source.tib_billed, source.total_slot_ms, source.slot_hours,
+        source.updated_at
+      )
     WHEN NOT MATCHED BY SOURCE AND target.usage_date >= @refresh_from_date THEN
       DELETE
   """, daily_cost_fqn, job_cost_fqn)
   USING refresh_from_date AS refresh_from_date;
+
+  SET daily_cost_merged_rows = @@row_count;
 
   -- --------------------------------------------------------------------------
   -- STEP 2: bqc_m_query_fingerprint の更新
@@ -271,6 +326,8 @@ BEGIN
     )
   """, query_dim_fqn, daily_cost_fqn, job_cost_fqn);
 
+  SET query_dim_merged_rows = @@row_count;
+
   -- --------------------------------------------------------------------------
   -- STEP 3: 保持期間を超えた行の刈り取り
   -- --------------------------------------------------------------------------
@@ -297,18 +354,28 @@ BEGIN
   END IF;
 
   -- --------------------------------------------------------------------------
-  -- 再構築結果
+  -- 再構築結果（切り分け用の診断値を含む）
   -- --------------------------------------------------------------------------
-  EXECUTE IMMEDIATE FORMAT(r"""
-    SELECT
-      'bqc refresh completed' AS status,
-      (SELECT COUNT(*) FROM `%s`)                      AS daily_cost_rows,
-      (SELECT COUNT(*) FROM `%s`)                      AS fingerprint_rows,
-      (SELECT MIN(usage_date) FROM `%s`)               AS min_usage_date,
-      (SELECT MAX(usage_date) FROM `%s`)               AS max_usage_date,
-      (SELECT COUNTIF(first_seen_date = CURRENT_DATE()) FROM `%s`)
-        AS fingerprints_first_seen_today,
-      @retention_cutoff_date AS pruned_before
-  """, daily_cost_fqn, query_dim_fqn, daily_cost_fqn, daily_cost_fqn, query_dim_fqn)
-  USING retention_cutoff_date AS retention_cutoff_date;
+  -- daily_cost に行が入らなかったときは、この出力だけで原因を絞り込めるようにしてある。
+  --   job_cost_rows_in_window = 0 → 集約する母数が無い。02 が入れていないか、
+  --                                 参照している job_cost が別データセットのもの。
+  --   job_cost_rows_in_window > 0 かつ daily_cost_merged_rows = 0
+  --                               → 集約側の問題。refresh_from_date を確認する。
+  EXECUTE IMMEDIATE FORMAT('SELECT COUNT(*) FROM `%s`', daily_cost_fqn)
+    INTO daily_cost_rows_after;
+  EXECUTE IMMEDIATE FORMAT('SELECT COUNT(*) FROM `%s`', query_dim_fqn)
+    INTO query_dim_rows_after;
+
+  SELECT
+    'bqc refresh completed'  AS status,
+    job_cost_fqn             AS job_cost_table,
+    daily_cost_fqn           AS daily_cost_table,
+    query_dim_fqn            AS query_fingerprint_table,
+    refresh_from_date        AS rebuilt_from_date,
+    job_cost_rows_in_window  AS job_cost_rows_in_window,
+    daily_cost_merged_rows   AS daily_cost_rows_affected,
+    query_dim_merged_rows    AS query_fingerprint_rows_affected,
+    daily_cost_rows_after    AS daily_cost_total_rows,
+    query_dim_rows_after     AS query_fingerprint_total_rows,
+    retention_cutoff_date    AS pruned_before;
 END;
