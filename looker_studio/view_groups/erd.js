@@ -377,7 +377,7 @@ function layout(graph) {
   for (const e of edges) {
     const ci = (colOf.get(e.to) || 0) - 1;
     if (ci < 0 || ci >= gaps.length) continue;
-    gaps[ci] = Math.max(gaps[ci], linesWidth(edgeLinesShown(e)) + 22);
+    gaps[ci] = Math.max(gaps[ci], linesWidth(edgeLines(e)) + 22);
   }
   const colX = [];
   let x = PAD;
@@ -386,31 +386,61 @@ function layout(graph) {
     x += boxW + (gaps[ci] || 0);
   }
 
+  // **行の高さは注記で決める。** 注記を元の箱と同じ高さに置き、その行を
+  // 注記が収まる高さにすれば、辺が何本あっても注記どうしが重ならない。
+  // 重ならなければ省略も tooltip も要らず、結合キーを全部出せる。
+  //
+  // 1 つの元から同じ溝へ複数の辺が出ることがある（同じ段の 2 つの CTE を
+  // 作る、など）。そのときは縦に積むので、要る高さは**合計**。
+  const stackH = new Map();
+  for (const e of edges) {
+    const lines = edgeLines(e);
+    if (!lines.length) continue;
+    const key = e.from + '\u0000' + ((colOf.get(e.to) || 0) - 1);
+    stackH.set(key, (stackH.get(key) || 0) + lines.length * LINE_H);
+  }
+  const needH = new Map();
+  for (const [key, h] of stackH) {
+    const id = key.slice(0, key.indexOf('\u0000'));
+    needH.set(id, Math.max(needH.get(id) || 0, h));
+  }
+
+  const rows = Math.max(1, ...cols.map((c) => (c || []).length));
+  const rowH = new Array(rows).fill(BOX_H);
+  cols.forEach((col) => (col || []).forEach((n, ri) => {
+    rowH[ri] = Math.max(rowH[ri], needH.get(n.id) || 0);
+  }));
+  const rowY = [];
+  let ry = PAD;
+  for (let ri = 0; ri < rows; ri++) { rowY[ri] = ry; ry += rowH[ri] + GAP_Y; }
+
   const placed = [];
   cols.forEach((col, ci) => {
     (col || []).forEach((n, ri) => {
       placed.push({ ...n,
         x: colX[ci],
-        y: PAD + ri * (BOX_H + GAP_Y),
+        // 箱は帯の中央。注記も箱の中心にそろえるので、帯の中で釣り合う。
+        y: rowY[ri] + (rowH[ri] - BOX_H) / 2,
         w: boxW, h: BOX_H });
     });
   });
   const pos = new Map(placed.map((n) => [n.id, n]));
-  const rows = Math.max(1, ...cols.map((c) => (c || []).length));
 
   // 高さは箱の並びだけでは決まらない。注記は辺の中点に置き、行数ぶん上下へ
   // 広がるので、結合キーが多い辺があると箱の外まではみ出す。同じ段どうしを
   // つなぐ辺だと中点が箱の中心と同じ高さになり、上へもはみ出す。
   // 箱と注記の両方を含む範囲を測って、それを図の大きさにする。
   let top = 0;
-  let bottom = PAD * 2 + rows * BOX_H + Math.max(0, rows - 1) * GAP_Y + 6;
+  let bottom = ry - GAP_Y + PAD + 6;
   for (const e of edges) {
     const a = pos.get(e.from);
     const b2 = pos.get(e.to);
     if (!a || !b2) continue;
-    const lines = edgeLinesShown(e);
+    const lines = edgeLines(e);
     if (!lines.length) continue;
-    const cy = (a.y + a.h / 2 + b2.y + b2.h / 2) / 2;
+    // 注記は元の箱と同じ高さ。行がその高さぶん取ってあるので普通は
+    // はみ出さないが、見積もり違いで外へ出ても切れないよう範囲に入れておく。
+    const cy = a.y + a.h / 2;
     const h = lines.length * LINE_H;
     top = Math.min(top, cy - h / 2 - PAD);
     bottom = Math.max(bottom, cy + h / 2 + PAD);
@@ -474,29 +504,6 @@ function edgeLines(e) {
   return out;
 }
 
-/**
- * 図に**出す**注記の行数の上限。JOIN 種別 ＋ 結合キー 3 本。
- *
- * 結合キーが多いと注記が縦に伸び、辺どうしの注記が重なる。重なると
- * 後ろの注記の下敷き（白い矩形）が前の注記の**下端を削り**、
- * `customer_account_id` の下線が消えて `customer account id` に見える
- * ——「文字列が途中で切れる」と読まれた形がこれ。
- *
- * 溝の幅と図の高さもこの行数から決まるので、詰めると図全体が小さくなる。
- * 溢れたぶんは「ほか N 件」にまとめ、**全文は注記に乗せた tooltip で出す**
- * （辺の線にも同じ tooltip がある。線は細くて狙いにくいので両方に付ける）。
- */
-const MAX_EDGE_LINES = 4;
-
-/** 図に出す行。溢れたら最後の 1 行を「ほか N 件」に置き換える。 */
-function edgeLinesShown(e) {
-  const all = edgeLines(e);
-  if (all.length <= MAX_EDGE_LINES) return all;
-  const keep = all.slice(0, MAX_EDGE_LINES - 1);
-  keep.push(`ほか ${all.length - keep.length} 件`);
-  return keep;
-}
-
 /** 注記のいちばん長い行の幅。 */
 function linesWidth(ls) {
   let w = 0;
@@ -527,20 +534,40 @@ function toSvg(lay) {
 
   // 線 → 注記 → 箱 の順に描く。注記を線より先に描くと、あとから引いた
   // 別の辺が上に乗って読めなくなる。箱は最後なので必ず手前に来る。
+  // **注記は元の箱と同じ高さに置く。** 中点に置くと、同じ相手へ向かう辺が
+  // 多いときに注記が中央へ寄って固まり、どの JOIN の条件なのか読めなくなる。
+  // 元にそろえれば行がそのまま手掛かりになる。行の高さは layout が注記に
+  // 合わせて広げてあるので、重ならず**全文を出せる**（省略も tooltip も要らない）。
   const labels = [];
+  const stacked = new Map();
   for (const e of lay.edges) {
     const x1 = e.a.x + e.a.w, y1 = e.a.y + e.a.h / 2;
     const x2 = e.b.x, y2 = e.b.y + e.b.h / 2;
     // 縦に折れる位置は相手の直前の溝の真ん中。段をまたぐ辺でも箱の上を
     // 横切らない。溝の幅は注記に合わせて段ごとに違うので、そこから取る。
-    const gap = (lay.gaps && lay.gaps[(lay.colOf.get(e.to) || 0) - 1]) || GAP_MIN;
+    const gapCol = (lay.colOf.get(e.to) || 0) - 1;
+    const gap = (lay.gaps && lay.gaps[gapCol]) || GAP_MIN;
     const mid = x2 > x1 ? x2 - gap / 2 : x1 + gap / 2;
     const d = `M${x1},${y1} H${mid} V${y2} H${x2}`;
-    const lines = edgeLinesShown(e);
+    const lines = edgeLines(e);
     out.push(`<path d="${d}" fill="none" stroke="#8C96A0" stroke-width="1.2" ` +
       `${e.nested ? 'stroke-dasharray="4 3" ' : ''}marker-end="url(#vgarrow)">` +
       (lines.length ? `<title>${esc(edgeLabel(e))}</title>` : '') + '</path>');
-    if (lines.length) labels.push({ x: mid, y: (y1 + y2) / 2, lines, full: edgeLabel(e) });
+    if (!lines.length) continue;
+    // 1 つの元から同じ溝へ複数の辺が出るときは縦に積む。layout もこの合計で
+    // 行の高さを取ってあるので、積んでも行からはみ出さない。
+    const key = e.from + '\u0000' + gapCol;
+    const seen = stacked.get(key) || { total: 0, used: 0 };
+    seen.total += lines.length * LINE_H;
+    stacked.set(key, seen);
+    labels.push({ x: mid, y: y1, lines, full: edgeLabel(e), key });
+  }
+  for (const l of labels) {
+    const st = stacked.get(l.key);
+    const h = l.lines.length * LINE_H;
+    // 積み上げの全体を元の箱の中心にそろえ、その中で順に置く
+    l.y = l.y - st.total / 2 + st.used + h / 2;
+    st.used += h;
   }
   // **下敷きを全部描いてから、文字を全部描く。** 注記ごとに
   // 「下敷き → 文字」と積むと、隣の注記の下敷きが前の注記の**下端を削る**
@@ -556,8 +583,8 @@ function toSvg(lay) {
     const top = l.y - (l.lines.length * LINE_H) / 2;
     const tspans = l.lines.map((t, i) =>
       `<tspan x="${l.x}" y="${(top + LINE_H * i + 11).toFixed(1)}">${esc(t)}</tspan>`).join('');
-    // 全文は tooltip に出す（図には MAX_EDGE_LINES 行までしか出さない）。
-    // 辺の線にも同じものが付いているが、線は細くて狙いにくい。
+    // 図には全文が出るので tooltip は要らないが、注記が線に重なって
+    // 読みにくいときの保険として残す（辺の線にも同じものが付いている）。
     out.push(`<text text-anchor="middle" ` +
       `font-family="ui-monospace,SFMono-Regular,Consolas,monospace" font-size="11" ` +
       `fill="#57606A"><title>${esc(l.full)}</title>${tspans}</text>`);
@@ -760,8 +787,7 @@ function renderErdBase(b) {
 
 module.exports = {
   prepare, cteRanges, scanScope, buildGraph, layout, toSvg, groupSvg,
-  renderErdBase, erdStack, erdLegend, edgeLines, edgeLinesShown, linesWidth,
-  MAX_EDGE_LINES,
+  renderErdBase, erdStack, erdLegend, edgeLines, linesWidth,
   shortName, edgeLabel, boxWidth, BOX_W_MIN, BOX_H,
   erdGroups, erdSignature, refBase, commonStem,
 };

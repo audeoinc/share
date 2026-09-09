@@ -780,23 +780,44 @@ const checks = [
     const firstText = svg.indexOf('<text text-anchor="middle"');
     return lastRect > 0 && firstText > 0 && lastRect < firstText;
   })()],
-  // 溢れたぶんは「ほか N 件」にまとめ、全文は tooltip に出す。
-  ['結合キーが多いと図では丸めて、全文は tooltip に出す', (() => {
+  // **結合キーは省略せず全部出す。** 行の高さを注記に合わせて広げてあるので、
+  // 重ならずに収まる（tooltip も「ほか N 件」も要らない）。
+  ['結合キーは省略せず全部出す', (() => {
     const keys = [];
     for (let i = 0; i < 6; i++) keys.push(`a.k${i} = b.k${i}`);
     const sql = 'SELECT 1 FROM a LEFT JOIN b ON ' + keys.join(' AND ');
     const g = E.buildGraph(sql, []);
     const e = g.edges.find((x) => x.keys && x.keys.length === 6);
-    const shown = E.edgeLinesShown(e);
     const svg = E.toSvg(E.layout(g));
+    const shown = [...svg.matchAll(/<tspan [^>]*>([^<]*)</g)].map((m) => m[1]);
     return E.edgeLines(e).length === 7 &&
-      shown.length === E.MAX_EDGE_LINES &&
-      shown[shown.length - 1] === 'ほか 4 件' &&
-      // 図に出るのは丸めたほう
-      svg.includes('ほか 4 件') &&
-      // 全文は注記の tooltip に入る（線は細くて狙いにくいので注記にも付ける）。
-      // 左右で列名が同じ ON は 1 つに畳まれるので、キーは k5 の形で出る。
-      /<text text-anchor="middle"[^>]*><title>[^<]*, k5<\/title>/.test(svg);
+      // JOIN 種別 ＋ キー 6 本が 1 行ずつ出る
+      shown.length === 7 && shown[0] === 'LEFT JOIN' &&
+      // 左右で列名が同じ ON は 1 つに畳まれるので、キーは k5 の形で出る
+      shown[6] === 'k5' &&
+      !svg.includes('ほか ');
+  })()],
+  // 注記は元の箱と同じ高さに置く。中点に置くと、同じ相手へ向かう辺が多い
+  // ときに注記が中央へ寄って固まり、どの JOIN の条件か読めなくなる。
+  ['注記は元の箱と同じ高さに置く', (() => {
+    let sql = 'SELECT 1 FROM f';
+    for (let i = 0; i < 4; i++) sql += ` LEFT JOIN d${i} ON f.k${i} = d${i}.j${i}`;
+    const lay = E.layout(E.buildGraph(sql, []));
+    const svg = E.toSvg(lay);
+    // 注記 1 行目の y から、その注記の中心を割り出す
+    const texts = [...svg.matchAll(/<text text-anchor="middle"[\s\S]*?<\/text>/g)]
+      .map((m) => m[0]);
+    return texts.every((t) => {
+      const ys = [...t.matchAll(/<tspan [^>]*y="([-0-9.]+)"/g)].map((m) => Number(m[1]));
+      const key = (t.match(/>(k\d) = (j\d)</) || t.match(/>(k\d)</) || [])[1];
+      if (!key || !ys.length) return true;
+      const cy = (Math.min(...ys) - 11 + Math.max(...ys) + 3) / 2;
+      const src = lay.nodes.find((n) => n.name === 'f');
+      const dim = lay.nodes.find((n) => n.name === 'd' + key.slice(1));
+      // 元は f 側ではなく dim 側（dim → 最終 SELECT の辺）
+      const from = dim || src;
+      return Math.abs(cy - (from.y + from.h / 2)) < 2;
+    });
   })()],
   ['結合キーが多い注記が図からはみ出さない', (() => {
     const sql = 'SELECT 1 FROM a LEFT JOIN b ON a.k1=b.k1 AND a.k2=b.k2 AND a.k3=b.k3' +
@@ -806,7 +827,7 @@ const checks = [
     const ys = [...svg.matchAll(/<tspan x="[^"]*" y="([-0-9.]+)"/g)].map((m) => Number(m[1]));
     const top = lay.y0 || 0;
     // 注記の 1 行目の上端（y から 11px 上）と最終行の下端が viewBox に入る
-    return ys.length === E.MAX_EDGE_LINES &&
+    return ys.length === 7 &&
       Math.min(...ys) - 11 >= top &&
       Math.max(...ys) + 3 <= top + lay.height &&
       // 箱だけで決めていた頃の高さでは入りきらない形であること
