@@ -2118,20 +2118,33 @@ amount_breakdown      RECORD REPEATED
 > 使えるかは環境によるので、疑わしいときは
 > `SELECT COUNT(*) FROM \`region-<location>.INFORMATION_SCHEMA.COLUMNS\`` で確かめる。
 
-#### note の見出しはリージョンごとに束ねる
+#### note に「View のリージョン」の表を出す
 
-note の見出し（description / ラベルのタブ）は suffix の羅列。リージョンを足す
-たびに伸びて、**どれがどこの View なのか読み取れなくなる**。そこで
-**リージョンをまたいでいるときだけ**束ねる。
+どの View がどのリージョンに居るかを、location と suffix の表で出す。
 
 ```
-まとめない  abjp, abuk, abus, cdjp, cduk, cdus, efjp, efuk, efus
-まとめる    asia-northeast1 abjp, abuk, abus, cdjp, cduk, cdus │ asia-southeast1 efjp, efuk, efus
+View のリージョン
+  asia-northeast1  6  abjp, abuk, abus, cdjp, cduk, cdus
+  asia-southeast1  3  efjp, efuk, efus
 ```
 
-**1 つのリージョンに収まっているなら従来どおりの羅列。** 大半の base はそうで、
-そこに毎回リージョン名を出しても手掛かりにならない（ラベルのバッジを
-「割れているときだけ」出すのと同じ考え方）。
+**見出し（description / ラベルのタブ）にリージョン名を混ぜる形を先に試したが、
+対応が読み取れなかった。**
+
+```
+asia-northeast1 abjp, abuk, abus, cdjp, cduk, cdus │ asia-southeast1 efjp, efuk, efus
+```
+
+1 行に流れると、どこで切れていてどの suffix がどちらなのかが目で追えない。
+行に割って表にすれば location と suffix が縦にそろい、1 対 1 で読める。
+見出しのほうは suffix の羅列に戻してある（対応は表が持つ）。
+
+**リージョンが 1 つでも出す。** 「どこに置いてあるか」は base を見るときに毎回
+知りたいことで、割れているときだけの警告ではない（ラベルのバッジが
+「割れているときだけ」なのとは性質が違う）。
+
+リージョンが取れていない環境（古いカード・取得に失敗）では**段ごと出さない**。
+空の表を出しても読む人には何も分からない。
 
 この値は **`INFORMATION_SCHEMA` からは取れない**。ローカル側の `VIEWS` に
 リージョンの列が無いので、`src_views` の組み立てで**ジョブのリージョンを定数

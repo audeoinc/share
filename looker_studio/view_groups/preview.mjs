@@ -596,28 +596,43 @@ const checks = [
       !/vg-or(2|3)" type="radio"[^>]*checked/.test(h) &&
       hasRule(R.chromeCss(), '.vg-or1:checked ~ .vg-opanels > .vg-op1', 'display:block');
   })()],
-  // note の見出しは suffix の羅列。リージョンを足すたびに伸びて、どれがどこの
-  // View なのか読めなくなるので、**リージョンをまたいでいるときだけ**束ねる。
-  ['note の見出しはリージョンごとに束ねる', (() => {
+  // location と suffix の対応は**表**で出す。見出しに混ぜる形も試したが、
+  // どれがどこの View なのか読み取れなかった。行に割れば縦にそろう。
+  ['リージョンは location と suffix の表で出す', (() => {
     const h = V.renderNote(base3, fakeDescs(base3, () => 'x'), '(メモ)', [],
       REGION_SPLIT(base3));
-    return h.includes('<span class="vg-nregname">asia-northeast1</span>') &&
-      h.includes('<span class="vg-nregname">asia-southeast1</span>') &&
-      // 束の中は suffix の羅列のまま
-      /asia-northeast1<\/span>abjp, abuk, abus, cdjp, cduk, cdus/.test(h);
+    const rows = [...h.matchAll(
+      /<th class="vg-lock">([^<]*)<\/th><td class="vg-locn">(\d+)<\/td><td class="vg-locv">([^<]*)</g)]
+      .map((m) => [m[1], m[2], m[3]]);
+    return h.includes('View のリージョン') && rows.length === 2 &&
+      // リージョン名の昇順
+      rows[0][0] === 'asia-northeast1' && rows[1][0] === 'asia-southeast1' &&
+      rows[0][1] === '6' && rows[0][2] === 'abjp, abuk, abus, cdjp, cduk, cdus' &&
+      rows[1][1] === '3' && rows[1][2] === 'efjp, efuk, efus';
   })()],
-  // 1 つのリージョンに収まっているなら従来どおり。大半の base はそうで、
-  // そこに毎回リージョン名を出しても手掛かりにならない。
-  ['1 リージョンなら見出しは従来どおりの羅列', (() => {
+  // **リージョンが 1 つでも出す。** どこに置いてあるかは base を見るときに
+  // 毎回知りたいことで、割れているときだけの警告ではない。
+  ['リージョンが 1 つでも表を出す', (() => {
     const h = V.renderNote(base3, fakeDescs(base3, () => 'x'), '(メモ)', [],
       ONE_REGION(base3));
-    return !h.includes('vg-nregname') &&
+    const rows = [...h.matchAll(/<th class="vg-lock">([^<]*)</g)].map((m) => m[1]);
+    return rows.length === 1 && rows[0] === 'asia-northeast1' &&
       h.includes('abjp, abuk, abus, cdjp, cduk, cdus, efjp, efuk, efus');
   })()],
-  // リージョンが渡ってこない環境（取れなかった・古いカード）でも落ちない。
-  ['リージョンが無くても note は出る', (() => {
+  // リージョンが渡ってこない環境（取れなかった・古いカード）では段ごと出さない。
+  // 空の表を出しても読む人には何も分からない。
+  ['リージョンが無ければ段ごと出さない', (() => {
     const h = V.renderNote(base3, fakeDescs(base3, () => 'x'), '(メモ)', []);
-    return !h.includes('vg-nregname') && h.includes('abjp, abuk, abus');
+    return !h.includes('vg-loctable') && !h.includes('View のリージョン') &&
+      // note のほかの段は従来どおり出る
+      h.includes('abjp, abuk, abus');
+  })()],
+  // 見出しは羅列に戻してある（対応は表が持つ）。
+  ['見出しは suffix の羅列のまま', (() => {
+    const h = V.renderNote(base3, fakeDescs(base3, () => 'x'), '(メモ)', [],
+      REGION_SPLIT(base3));
+    return !h.includes('vg-nregname') &&
+      /class="vg-dtab[^"]*"[^>]*>abjp, abuk, abus, cdjp, cduk, cdus, efjp, efuk, efus/.test(h);
   })()],
   ['メモは作り置きせずビューが差し込む（目印が残っている）', (() => {
     const raw = Ch.wrapPage('<i>D</i>', '<i>E</i>', 'x', 'y');

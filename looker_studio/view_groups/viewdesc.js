@@ -112,49 +112,15 @@ function regionByView(regions) {
   return out;
 }
 
-/**
- * 見出しの文字列。suffix を並べるが、**リージョンをまたいでいるときは
- * リージョンごとに束ねる。**
- *
- * リージョンを足すたびに suffix が増え、1 本の羅列だとどれがどこの View なのか
- * 読み取れなくなる。束ねれば「どのリージョンに何があるか」がそのまま出る。
- *
- * **1 つのリージョンに収まっているときは従来どおり羅列のまま。** 大半の base は
- * そうで、そこに毎回リージョン名を出しても手掛かりにならない
- * （ラベルのバッジを「割れているときだけ」出すのと同じ考え方）。
- *
- * @returns {{label: string, labelHtml: string}} label は並べ替えと id 用の素の文字列
- */
-function groupLabel(names, suf, reg) {
-  const sfx = (n) => suf[n] || n;
-  const byReg = new Map();
-  for (let i = 0; i < names.length; i++) {
-    const r = reg[names[i]] || '';
-    if (!byReg.has(r)) byReg.set(r, []);
-    byReg.get(r).push(sfx(names[i]));
-  }
-  const plain = names.map(sfx).sort(cmp).join(', ') || '(View なし)';
-  if (byReg.size <= 1) return { label: plain, labelHtml: esc(plain) };
-  const regs = [...byReg.keys()].sort(cmp);
-  const text = (r) => byReg.get(r).slice().sort(cmp).join(', ');
-  return {
-    label: regs.map((r) => (r || '(不明)') + ': ' + text(r)).join(' / '),
-    labelHtml: regs.map((r) =>
-      `<span class="vg-nreg"><span class="vg-nregname">${esc(r || '(不明)')}</span>` +
-      `${esc(text(r))}</span>`).join(''),
-  };
-}
-
-function tabGroups(b, list, fill, regions) {
+function tabGroups(b, list, fill) {
   const suf = suffixByView(b);
-  const reg = regionByView(regions);
   const src = Array.isArray(list) ? list : [];
   const out = [];
   for (let i = 0; i < src.length; i++) {
     const d = src[i] || {};
     const names = Array.isArray(d.v) ? d.v : (d.v == null || d.v === '' ? [] : [d.v]);
     const g = {
-      ...groupLabel(names, suf, reg),
+      label: names.map((n) => suf[n] || n).sort(cmp).join(', ') || '(View なし)',
       count: names.length,
     };
     fill(g, d);
@@ -172,11 +138,11 @@ function tabGroups(b, list, fill, regions) {
  * 別の UDF は呼べないので、ここへは変換済みのものが来る。同じ文面の View は
  * SQL の GROUP BY で 1 組に畳まれている。
  */
-function descGroups(b, descs, regions) {
+function descGroups(b, descs) {
   return tabGroups(b, descs, (g, d) => {
     g.html = String(d.h == null ? '' : d.h);
     g.empty = g.html.trim() === '';
-  }, regions);
+  });
 }
 
 /**
@@ -187,7 +153,7 @@ function descGroups(b, descs, regions) {
  * 実行のたびに変わると、値が同じでも別の組に見えたり、昨日と違うものが
  * 出たように読めたりする。順序を決めるのは安いので両方でやる。
  */
-function labelGroups(b, labels, regions) {
+function labelGroups(b, labels) {
   return tabGroups(b, labels, (g, d) => {
     const src = Array.isArray(d.l) ? d.l : [];
     const pairs = [];
@@ -201,7 +167,7 @@ function labelGroups(b, labels, regions) {
     pairs.sort((x, y) => cmp(x.k, y.k));
     g.pairs = pairs;
     g.empty = pairs.length === 0;
-  }, regions);
+  });
 }
 
 /**
@@ -214,8 +180,7 @@ function descPanel(g) {
 }
 
 /** タブ 1 枚の見出し。中身は選べても選べなくても同じ形にそろえる。 */
-// 見出しは HTML（リージョンごとに束ねると span が入る）。esc 済みのものが来る。
-const tabText = (g) => `${g.labelHtml}<span class="vg-tabn">${g.count}</span>`;
+const tabText = (g) => `${esc(g.label)}<span class="vg-tabn">${g.count}</span>`;
 
 /**
  * description の段。**1 つも設定されていなくても段は出す。**
@@ -228,8 +193,8 @@ const tabText = (g) => `${g.labelHtml}<span class="vg-tabn">${g.count}</span>`;
  * のどれなのか分からず、**ただ何も出ない**。未設定は未設定と書くほうがよい。
  * 見出しにはどの View のことかも出るので、範囲まで分かる。
  */
-function renderDesc(b, descs, regions) {
-  const gs = descGroups(b, descs, regions);
+function renderDesc(b, descs) {
+  const gs = descGroups(b, descs);
   const head = `<div class="vg-nhead">View の description</div>`;
   // 組がひとつも作れないのは「未設定」ではなく「取れなかった」。区別して書く
   // （SQL 側は LEFT JOIN なので、正常なら View の数だけ必ず組ができる）。
@@ -323,8 +288,8 @@ function labelsSplit(b, labels) {
  *
  * 何も出さない判断をするのはここだけ。呼び出し側は結果を繋ぐだけにしてある。
  */
-function renderLabels(b, labels, regions) {
-  const gs = labelGroups(b, labels, regions);
+function renderLabels(b, labels) {
+  const gs = labelGroups(b, labels);
   // 1 つも付いていない base では黙って引っ込む。description と違い、
   // labels は付いていないほうが普通なので、「未設定」と書くと使っていない
   // base 全部にその 1 行が並ぶ。取り込みに失敗しても同じ見え方になるが、
@@ -377,9 +342,47 @@ function renderLabels(b, labels, regions) {
  * ラベルだけは付いていないほうが普通なので、そのときは出さない
  * （renderLabels を参照）。
  */
+/**
+ * どの View がどのリージョンに居るかの表。
+ *
+ * suffix の羅列にリージョン名を混ぜる形も試したが、**どれがどこの View なのか
+ * 対応が読み取れなかった**。行に割って表にすれば、location と suffix が縦に
+ * そろって 1 対 1 で読める。
+ *
+ * **リージョンが 1 つでも出す。** 「どこに置いてあるか」は base を見るときに
+ * 毎回知りたいことで、割れているときだけの警告ではない
+ * （ラベルの「割れているときだけ」とは性質が違う）。
+ *
+ * リージョンが取れていない環境（古いカード・取得に失敗）では段ごと出さない。
+ * 空の表を出しても読む人には何も分からない。
+ */
+function renderRegions(b, regions) {
+  const reg = regionByView(regions);
+  const suf = suffixByView(b);
+  const byReg = new Map();
+  const groups = (b && b.groups) || [];
+  for (let i = 0; i < groups.length; i++) {
+    const members = groups[i].members || [];
+    for (let j = 0; j < members.length; j++) {
+      const n = members[j].viewName;
+      const r = reg[n];
+      if (r == null || r === '') continue;
+      if (!byReg.has(r)) byReg.set(r, []);
+      byReg.get(r).push(suf[n] || n);
+    }
+  }
+  if (!byReg.size) return '';
+  const rows = [...byReg.keys()].sort(cmp).map((r) =>
+    `<tr><th class="vg-lock">${esc(r)}</th>` +
+    `<td class="vg-locn">${byReg.get(r).length}</td>` +
+    `<td class="vg-locv">${esc(byReg.get(r).slice().sort(cmp).join(', '))}</td></tr>`).join('');
+  return `<div class="vg-nsec"><div class="vg-nhead">View のリージョン</div>` +
+    `<table class="vg-loctable">${rows}</table></div>`;
+}
+
 function renderNote(b, descs, mark, labels, regions) {
   const memo = String(mark == null ? '' : mark);
-  return renderLabels(b, labels, regions) + renderDesc(b, descs, regions) +
+  return renderLabels(b, labels) + renderRegions(b, regions) + renderDesc(b, descs) +
     `<div class="vg-nsec"><div class="vg-nhead">メモ</div>${memo}</div>`;
 }
 
@@ -393,11 +396,16 @@ function descCss() {
     // 段。2 つ並んだときに境目が読めればよいので、囲まずに間だけ空ける。
     `.vg-nsec{margin:0 0 18px}`,
     `.vg-nsec:last-child{margin-bottom:0}`,
-    // 見出しの中でリージョンごとに束ねたときの 1 かたまり。リージョンをまたぐ
-    // base でしか出ない。名前は弱く、suffix の並びを主にする。
-    `.vg-nreg{display:inline-flex;align-items:baseline;gap:5px}`,
-    `.vg-nreg+.vg-nreg{margin-left:10px;padding-left:10px;border-left:1px solid #D0D7DE}`,
-    `.vg-nregname{color:#8C959F;font-size:10px;font-weight:600;letter-spacing:.02em}`,
+    // リージョンの表。location と suffix を縦にそろえて 1 対 1 で読ませる。
+    `.vg-loctable{border-collapse:collapse}`,
+    `.vg-lock{text-align:left;vertical-align:top;padding:3px 12px 3px 0;` +
+      `white-space:nowrap;font-weight:600;font-size:12px;line-height:1.8;color:#24292F;` +
+      `font-family:ui-monospace,SFMono-Regular,Consolas,monospace}`,
+    `.vg-locn{text-align:right;vertical-align:top;padding:3px 10px 3px 0;` +
+      `white-space:nowrap;color:#57606A;font-size:11px;line-height:1.9}`,
+    `.vg-locv{padding:3px 0;font-size:12px;line-height:1.8;color:#57606A;` +
+      `overflow-wrap:anywhere;` +
+      `font-family:ui-monospace,SFMono-Regular,Consolas,monospace}`,
     // 段の見出し。本文より弱く、しかし出どころの違いが分かる程度には目立たせる。
     `.vg-nhead{margin:0 0 6px;padding:0 0 4px;border-bottom:1px solid #EAEEF2;` +
       `font:11px/1.6 'Roboto','Segoe UI',system-ui,sans-serif;` +
@@ -455,6 +463,6 @@ function descCss() {
 }
 
 module.exports = {
-  renderNote, renderDesc, descCss, descGroups, descPanel, suffixByView,
+  renderNote, renderDesc, renderRegions, descCss, descGroups, descPanel, suffixByView,
   renderLabels, labelGroups, labelChips, labelsSplit, tabGroups,
 };
