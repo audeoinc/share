@@ -151,8 +151,18 @@ echo "SELECT 1 FROM t WHERE x = 'a'" | python3 tools/normalize_reference.py -
 
 | 列 | 内容 |
 |---|---|
-| `sample_raw_fingerprint` | 代表1件。`job_cost.raw_fingerprint` で実ジョブに辿る手がかり |
+| `sample_query` | 代表1件の**原文SQL**。正規化前と後を並べて見るための開発用 |
+| `sample_raw_fingerprint` | その代表1件の MD5。`job_cost.raw_fingerprint` で実ジョブに辿る手がかり |
 | `distinct_raw_fingerprint_count` | 畳み込まれた原文の異なり数。**大きいほど正規化が効いている指標** |
+
+`sample_query` と `sample_raw_fingerprint` は**必ず同じ行から**取っています。列ごとに
+`ANY_VALUE()` を書くと別々の行が選ばれて対応しなくなるため、`ARRAY_AGG(STRUCT(...)
+ORDER BY creation_time DESC LIMIT 1)` で代表行を1つに固定してから展開しています。
+
+**`sample_query` はレポートビューに流していません。** 原文SQLは PII を含みうるので、
+Looker Studio 側（`bqc_t_daily_cost_report`）には載せない判断です。必要なら `01` の
+レポートビューに `d.sample_query` を1行足すだけですが、BI の閲覧者全員に原文が
+見えるようになる点は意識してください。
 
 ロジックを変更したら `normalizer_version` を必ず上げてください。正規化結果が変われば
 同じ SQL でも別 fingerprint になるため、この列が無いと履歴の断絶を説明できません。

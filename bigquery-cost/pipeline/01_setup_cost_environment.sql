@@ -469,7 +469,8 @@ BEGIN
       total_slot_ms           INT64     OPTIONS(description = '消費スロット(ms)の合計'),
       slot_hours              FLOAT64   OPTIONS(description = 'スロット時間の合計'),
       normalized_query        STRING    OPTIONS(description = '正規化SQLの全文。normalized_fingerprint から一意に決まるので値は冗長だが、開発中に正規化の結果をこの表だけで確かめられるように持たせている。不要になったらこの列と 03 STEP 1 の該当行を落とす'),
-      sample_raw_fingerprint  STRING    OPTIONS(description = 'この行に含まれる原文SQLのうち代表1件の MD5。job_cost.raw_fingerprint で実ジョブに辿るための手がかり'),
+      sample_query            STRING    OPTIONS(description = '代表1件の原文SQL。正規化前と後を並べて見るための開発用。PII を含みうるのでレポートビューには流していない。不要になったらこの列と 03 STEP 1 の該当行を落とす'),
+      sample_raw_fingerprint  STRING    OPTIONS(description = 'sample_query の MD5。job_cost.raw_fingerprint で実ジョブに辿るための手がかり。sample_query と必ず同じ行から取っている'),
       distinct_raw_fingerprint_count INT64 OPTIONS(description = 'この行に畳み込まれた原文SQLの異なり数。大きいほどリテラルの違いを多く吸収できている＝正規化が効いている指標'),
       updated_at              TIMESTAMP OPTIONS(description = 'この行を最後に再構築した時刻')
     )

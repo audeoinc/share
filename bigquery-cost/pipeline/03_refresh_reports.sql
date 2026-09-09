@@ -190,6 +190,15 @@ BEGIN
     MERGE `%s` AS target
     USING (
       SELECT
+        * EXCEPT(sample),
+        -- 代表行から取り出す3列。個別に ANY_VALUE を書くと列ごとに別の行が
+        -- 選ばれうるので、sample_query と sample_raw_fingerprint が対応しなく
+        -- なる。STRUCT でまとめて1行ぶんだけ選ぶことで必ず揃う。
+        sample.normalized_query AS normalized_query,
+        sample.query            AS sample_query,
+        sample.raw_fingerprint  AS sample_raw_fingerprint
+      FROM (
+      SELECT
         creation_date AS usage_date,
         job_region,
         normalized_fingerprint,
@@ -208,14 +217,17 @@ BEGIN
         SUM(IFNULL(statement_tib_billed, 0))         AS tib_billed,
         SUM(IFNULL(statement_total_slot_ms, 0))      AS total_slot_ms,
         SUM(IFNULL(statement_slot_hours, 0))         AS slot_hours,
-        -- 正規化SQL全文は normalized_fingerprint から一意に決まるので ANY_VALUE で足りる
-        -- （GROUP BY に足すとキーが広がったように見えるので、あえて集計関数で取る）。
-        ANY_VALUE(normalized_query)                  AS normalized_query,
+        -- 表示用の代表行。直近の実行を1件だけ選び、正規化SQL・原文SQL・原文の
+        -- fingerprint をまとめて取り出す（上の外側 SELECT で展開する）。
+        ARRAY_AGG(
+          STRUCT(normalized_query, query, raw_fingerprint)
+          ORDER BY creation_time DESC
+          LIMIT 1
+        )[SAFE_OFFSET(0)]                            AS sample,
         -- 原文の fingerprint は 1 つの normalized_fingerprint に対して複数ありうる
         -- （リテラルが違うぶんだけ別物になる）。だから粒度キーには入れず、
         -- 代表1件と異なり数として持つ。キーに入れると日 × リテラル違いで
         -- 行が膨らみ、正規化した意味が無くなる。
-        ANY_VALUE(raw_fingerprint)                   AS sample_raw_fingerprint,
         COUNT(DISTINCT raw_fingerprint)              AS distinct_raw_fingerprint_count,
         CURRENT_TIMESTAMP()             AS updated_at
       FROM `%s`
@@ -225,6 +237,7 @@ BEGIN
       GROUP BY
         usage_date, job_region, normalized_fingerprint,
         executor_id, executor_source, pricing_model, reservation_id
+      )
     ) AS source
     ON  target.usage_date             = source.usage_date
     AND target.job_region             = source.job_region
@@ -245,6 +258,7 @@ BEGIN
       total_slot_ms       = source.total_slot_ms,
       slot_hours          = source.slot_hours,
       normalized_query    = source.normalized_query,
+      sample_query        = source.sample_query,
       sample_raw_fingerprint = source.sample_raw_fingerprint,
       distinct_raw_fingerprint_count = source.distinct_raw_fingerprint_count,
       updated_at          = source.updated_at
@@ -255,15 +269,17 @@ BEGIN
         executor_source, pricing_model, reservation_id, job_count,
         cache_hit_count, error_count, distinct_user_count, total_bytes_billed,
         tib_billed, total_slot_ms, slot_hours, normalized_query,
-        sample_raw_fingerprint, distinct_raw_fingerprint_count, updated_at
+        sample_query, sample_raw_fingerprint, distinct_raw_fingerprint_count,
+        updated_at
       ) VALUES (
         source.usage_date, source.job_region, source.normalized_fingerprint,
         source.executor_id, source.executor_source, source.pricing_model,
         source.reservation_id, source.job_count, source.cache_hit_count,
         source.error_count, source.distinct_user_count, source.total_bytes_billed,
         source.tib_billed, source.total_slot_ms, source.slot_hours,
-        source.normalized_query, source.sample_raw_fingerprint,
-        source.distinct_raw_fingerprint_count, source.updated_at
+        source.normalized_query, source.sample_query,
+        source.sample_raw_fingerprint, source.distinct_raw_fingerprint_count,
+        source.updated_at
       )
     WHEN NOT MATCHED BY SOURCE AND target.usage_date >= @refresh_from_date THEN
       DELETE
