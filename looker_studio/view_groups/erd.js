@@ -25,7 +25,6 @@ const { tokenizeSql, markEntities } = require('./analyze.js');
 const { esc, label, header, notice } = require('./chrome.js');
 
 const BOX_W_MIN = 130;
-const BOX_W_MAX = 380;   // これを超える名前だけは詰める（<title> で全体を出す）
 const NAME_CHAR_W = 6.65; // 11px の等幅 1 文字ぶん
 const BOX_H = 40;
 // 段の間隔は固定ではなく、その溝に置く注記の幅から決める（layout が計算する）。
@@ -477,13 +476,25 @@ function shortName(s) {
 // 箱の幅は、図の中でいちばん長い名前に合わせて決める。SVG のテキストは
 // 箱からはみ出しても切られないので、合わせないと隣に重なる。
 // 全部の箱を同じ幅にするのは、段がそろっていないと図が読みにくいため。
+/**
+ * 箱の幅。**いちばん長い名前に合わせ、上限は設けない。**
+ *
+ * 以前は 380px で頭打ちにして、超える名前は末尾を '…' で詰めていた。
+ * 実体名は「何を読んでいるか」そのものなので、詰めると図の用が足りない
+ * （fact_order_transaction_line_item_daily_snapshot_v2_final のような名前は
+ * 実際にある）。横に伸びても .vg-erdbox がスクロールするので読める。
+ *
+ * 幅は全部の箱で揃える。1 つ長い名前があると全部が広がるが、段ごとに
+ * 幅が違うと段の境目が読み取りにくくなるので、揃えるほうを採る。
+ */
 function boxWidth(nodes) {
   let w = BOX_W_MIN;
   for (const n of nodes) w = Math.max(w, shortName(n.label).length * NAME_CHAR_W + 24);
-  return Math.min(w, BOX_W_MAX);
+  return w;
 }
 
-// 上限を超える名前だけ詰める。全体は <title> で読める。
+// 箱の幅はいちばん長い名前に合わせてあるので、ここで詰まることは無い。
+// 幅の決め方を変えたときに名前が溢れるのを防ぐための歯止めとして残す。
 function fit(s, w) {
   const t = String(s);
   const max = Math.floor((w - 24) / NAME_CHAR_W);
@@ -788,6 +799,6 @@ function renderErdBase(b) {
 module.exports = {
   prepare, cteRanges, scanScope, buildGraph, layout, toSvg, groupSvg,
   renderErdBase, erdStack, erdLegend, edgeLines, linesWidth,
-  shortName, edgeLabel, boxWidth, BOX_W_MIN, BOX_H,
+  shortName, edgeLabel, boxWidth, BOX_W_MIN, BOX_H, fit,
   erdGroups, erdSignature, refBase, commonStem,
 };

@@ -764,6 +764,20 @@ const checks = [
     E.refBase('`PRJ.d.orders`', null) === 'orders'],
   // 注記は辺の中点に置き、行数ぶん上下に広がる。結合キーが多いと箱の並びの
   // 外へはみ出すので、図の高さはそれも含めて決める。
+  // 実体名も詰めない。名前は「何を読んでいるか」そのものなので、'…' で
+  // 切ると図の用が足りない。箱はいちばん長い名前に合わせて広げる。
+  ['長い実体名も詰めずに全部出す', (() => {
+    const long = 'fact_order_transaction_line_item_daily_snapshot_v2_final';
+    const sql = `SELECT 1 FROM \`prj.ds.${long}\` AS f ` +
+      'JOIN `prj.ds.dim_x` AS d ON f.id = d.id';
+    const lay = E.layout(E.buildGraph(sql, []));
+    const svg = E.toSvg(lay);
+    const boxes = [...svg.matchAll(/font-weight="600" fill="#24292F">([^<]*)</g)]
+      .map((m) => m[1]);
+    return boxes.includes(long) && !svg.includes('…') &&
+      // 箱は名前が収まる幅まで広がる
+      lay.nodes[0].w >= long.length * 6.65;
+  })()],
   // 結合キーが多いと注記が縦に伸び、辺どうしの注記が重なる。重なったとき
   // 「下敷き → 文字」を注記ごとに積むと、隣の下敷きが前の注記の下端を削り、
   // customer_account_id の下線が消えて customer account id に見える
