@@ -3,7 +3,16 @@
 -- BigQuery Query Cost Repository - environment setup (idempotent)
 -- ============================================================================
 -- 実行 SQL のコストを Looker Studio で確認するためのリポジトリを作成する。
--- 作成物（すべて CREATE ... IF NOT EXISTS / OR REPLACE で再実行可能）:
+--
+-- ★ このスクリプトは破壊的です。表は CREATE OR REPLACE で作り直すため、
+--    流し直すと bqc_t_job_cost / bqc_t_daily_cost / bqc_m_query_fingerprint の
+--    中身は消えます。スキーマ変更を確実に反映させるための意図的な挙動です。
+--    流したあとは必ず 02 → 03 の順で流し直してください（02 は表が空なら
+--    initial_lookback_days 分を自動でバックフィルするので、元の状態に戻せます）。
+--    データの正本は INFORMATION_SCHEMA.JOBS 側なので、保持期間内であれば
+--    ここを消しても失われるものはありません。
+--
+-- 作成物:
 --
 --   UDF   bqc_normalize_sql          … SQL からリテラル/コメントを除去した正規化文字列
 --   表    bqc_t_job_cost             … job 粒度のコスト実績（子job のみ）
@@ -149,6 +158,9 @@ BEGIN
   -- --------------------------------------------------------------------------
   -- STEP 1: datasets
   -- --------------------------------------------------------------------------
+  -- 表とは違い、データセットは CREATE OR REPLACE にしない。
+  -- CREATE OR REPLACE SCHEMA はデータセットごと作り直すため、同じデータセットに
+  -- 同居している無関係なテーブルまで巻き込んで消してしまう。
   EXECUTE IMMEDIATE FORMAT(
     "CREATE SCHEMA IF NOT EXISTS `%s` OPTIONS(location = '%s')",
     dataset_fqn, @@location
@@ -244,8 +256,9 @@ BEGIN
   -- --------------------------------------------------------------------------
   -- 1 行 = 1 ジョブ（SCRIPT 親は除外し、子 job だけを持つ）。02 が MERGE で
   -- (job_region, project_id, job_id) 一意に投入する。
+  -- CREATE OR REPLACE なので、ここを流すと既存の取り込み結果は消える。
   EXECUTE IMMEDIATE FORMAT(r"""
-    CREATE TABLE IF NOT EXISTS `%s` (
+    CREATE OR REPLACE TABLE `%s` (
       job_region              STRING    OPTIONS(description = 'JOBS を読んだリージョン (例: asia-northeast1)'),
       project_id              STRING    OPTIONS(description = 'ジョブを実行したプロジェクト'),
       job_id                  STRING    OPTIONS(description = 'ジョブID。(job_region, project_id, job_id) で一意'),
@@ -293,7 +306,7 @@ BEGIN
   -- --------------------------------------------------------------------------
   -- Looker Studio が実際に読むのはこちら。job 粒度より数桁小さいので速い。
   EXECUTE IMMEDIATE FORMAT(r"""
-    CREATE TABLE IF NOT EXISTS `%s` (
+    CREATE OR REPLACE TABLE `%s` (
       usage_date              DATE      OPTIONS(description = '対象日 (UTC)。パーティションキー'),
       job_region              STRING    OPTIONS(description = 'リージョン'),
       normalized_fingerprint  STRING    OPTIONS(description = '正規化SQLの fingerprint'),
@@ -323,7 +336,7 @@ BEGIN
   -- first_seen_date と、レポート表示用のプレビューを持つ。
   -- 03 が MERGE で更新し、first_seen_date は保持期間の中では LEAST() で後退させない。
   EXECUTE IMMEDIATE FORMAT(r"""
-    CREATE TABLE IF NOT EXISTS `%s` (
+    CREATE OR REPLACE TABLE `%s` (
       normalized_fingerprint  STRING    OPTIONS(description = '正規化SQLの fingerprint。主キー'),
       normalizer_version      STRING    OPTIONS(description = 'この fingerprint を作った正規化ロジックのバージョン'),
       first_seen_date         DATE      OPTIONS(description = '保持期間内でこの SQL が最初に観測された日。新規コスト源の判定基準'),

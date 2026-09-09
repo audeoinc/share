@@ -28,6 +28,15 @@ bigquery-cost/
 
 ## クイックスタート
 
+> **`01` は破壊的です。** 表を `CREATE OR REPLACE` で作り直すので、流し直すと
+> `bqc_t_job_cost` / `bqc_t_daily_cost` / `bqc_m_query_fingerprint` の中身は消えます。
+> スキーマ変更を確実に反映させるための意図的な挙動です。流したあとは必ず
+> `02` → `03` の順で流し直してください。`02` は表が空なら `initial_lookback_days`
+> 分を自動でバックフィルするので元の状態に戻せます（正本は JOBS 側なので、
+> 保持期間内であれば失われるものはありません）。
+> データセットだけは `CREATE SCHEMA IF NOT EXISTS` のままです。
+> `CREATE OR REPLACE SCHEMA` は同居している無関係なテーブルまで消してしまうためです。
+
 ```bash
 # 1. 環境構築（初回のみ）。冒頭の SET @@location と [A] ブロックだけ確認する
 #    表と UDF を別データセットに置く場合は [A] の udf_dataset を 01/02 の両方で揃える
