@@ -159,8 +159,13 @@ BEGIN
       ON pc.parent_fingerprint = c.parent_fingerprint AND pc.usage_month = this_month
     LEFT JOIN parent_monthly AS pp
       ON pp.parent_fingerprint = c.parent_fingerprint AND pp.usage_month = prev_month
-    ORDER BY ABS(c.slot_hours_delta) DESC
-    LIMIT detail_limit
+    -- BigQuery の LIMIT は定数リテラルしか受け付けず、スクリプト変数を書くと
+    -- 「LIMIT expects an INT64 literal」で落ちる。件数を変数で持ちたいので
+    -- QUALIFY で絞る（こちらは通常の式なので変数を使える）。
+    -- QUALIFY は WHERE / GROUP BY / HAVING のいずれかと併用する必要があるため
+    -- WHERE TRUE を置いている。
+    WHERE TRUE
+    QUALIFY ROW_NUMBER() OVER (ORDER BY ABS(c.slot_hours_delta) DESC) <= detail_limit
   )
   SELECT * FROM summary
   UNION ALL

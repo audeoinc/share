@@ -272,7 +272,7 @@ SUM(root_slot_hours) = SUM(statement_slot_hours) = 総量
 | 対象 | 状況 |
 |---|---|
 | 正規化ロジック | **RE2 実機で 29/29 パス**（`tools/normalize_reference.py`） |
-| 埋め込み動的SQLの構文 + DECLARE の位置 | **26/26 パス**（`tools/check_templates.py`、sqlglot bigquery。pipeline と adhoc の両方） |
+| 埋め込み動的SQLの構文 / DECLARE の位置 / LIMIT が定数か | **38/38 パス**（`tools/check_templates.py`、sqlglot bigquery。pipeline と adhoc の両方） |
 | 親子分類の不変条件 | **6/6 パス**（`tools/verify_hierarchy_logic.py`、`SUM(root)=SUM(statement)` を孤児込みで検証） |
 | BigQuery 実機での実行 | **未実施。** 本セッションに `bq` / `gcloud` と GCP 認証が無いため |
 

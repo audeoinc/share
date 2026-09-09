@@ -77,6 +77,9 @@ BEGIN
   WHERE c.creation_date = target_date
     -- 親 SCRIPT 行は子の合計を持つ集計行なので、ランキングからは外す。
     AND c.is_cost_countable
-  ORDER BY c.statement_slot_hours DESC
-  LIMIT top_n;
+  -- BigQuery の LIMIT は定数リテラルしか受け付けず、スクリプト変数を書くと
+  -- 「LIMIT expects an INT64 literal」で落ちる。件数を変数で持ちたいので
+  -- QUALIFY で絞る（こちらは通常の式なので変数を使える）。
+  QUALIFY ROW_NUMBER() OVER (ORDER BY c.statement_slot_hours DESC) <= top_n
+  ORDER BY c.statement_slot_hours DESC;
 END;

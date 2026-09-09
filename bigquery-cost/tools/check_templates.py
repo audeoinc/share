@@ -46,6 +46,29 @@ def _check_declare_order(path: str, source: str) -> list:
     return problems
 
 
+# BigQuery の LIMIT は定数リテラルしか受け付けない。スクリプト変数や
+# クエリパラメータを書くと実行時に「LIMIT expects an INT64 literal」で落ちる。
+# sqlglot は構文としては通してしまうので、専用に見る。
+# 文字列リテラルの終端やカンマを引数として拾わないよう、区切り文字は除外する。
+LIMIT_ARG = re.compile(r"""\bLIMIT\s+([^\s;),'"`]+)""")
+
+
+def _check_limit_literals(path: str, source: str) -> list:
+    problems = []
+    for number, raw in enumerate(source.split("\n"), start=1):
+        line = raw.strip()
+        if line.startswith("--"):
+            continue
+        for match in LIMIT_ARG.finditer(line):
+            argument = match.group(1)
+            if not argument.isdigit():
+                problems.append(
+                    f"{path}:{number}: LIMIT に定数以外 ({argument}) を渡している。"
+                    "BigQuery はリテラルしか受け付けない（QUALIFY ROW_NUMBER() で代替する）"
+                )
+    return problems
+
+
 def main() -> int:
     failures = 0
     checked = 0
@@ -61,6 +84,15 @@ def main() -> int:
         if not declare_problems:
             checked += 1
             print(f"ok    {path}: DECLARE の位置")
+
+        limit_problems = _check_limit_literals(path, source)
+        for problem in limit_problems:
+            failures += 1
+            checked += 1
+            print(f"FAIL  {problem}")
+        if not limit_problems:
+            checked += 1
+            print(f"ok    {path}: LIMIT が定数")
 
         templates = TEMPLATE.findall(source)
         if not templates:
