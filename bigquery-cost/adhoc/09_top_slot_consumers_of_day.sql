@@ -14,9 +14,10 @@
 --                                    parent_query_head でどのスクリプトかが分かる。
 --   statement_index / root_statement_count
 --                                  … そのスクリプトの何文目か / 全部で何文か
---   parent_slot_hours              … スクリプト全体のスロット消費（子の合計）。
---                                    この行の slot_hours と比べれば、そのスクリプトの
---                                    中でこの 1 文がどれだけ支配的かが分かる。
+--   parent_slot_hours              … スクリプト全体のスロット消費（root_slot_hours）。
+--                                    この行の slot_hours（statement_slot_hours）と
+--                                    比べれば、そのスクリプトの中でこの 1 文が
+--                                    どれだけ支配的かが分かる。両者を足さないこと。
 --
 -- 注意:
 --   * 時刻は UTC。creation_date も UTC 基準の日付。
@@ -42,16 +43,16 @@ BEGIN
       job_region,
       project_id,
       job_id,
-      slot_hours AS parent_slot_hours,
-      tib_billed AS parent_tib_billed,
+      root_slot_hours AS parent_slot_hours,
+      root_tib_billed AS parent_tib_billed,
       root_statement_count,
       SUBSTR(REGEXP_REPLACE(query, r'\s+', ' '), 1, 300) AS parent_query_head
     FROM resolved
     WHERE job_role = 'PARENT'
   )
   SELECT
-    c.slot_hours,
-    c.tib_billed,
+    c.statement_slot_hours AS slot_hours,
+    c.statement_tib_billed AS tib_billed,
     c.executor_id,
     c.executor_source,
     c.user_email,
@@ -62,7 +63,7 @@ BEGIN
     c.statement_index,
     p.root_statement_count,
     p.parent_slot_hours,
-    SAFE_DIVIDE(c.slot_hours, p.parent_slot_hours) AS share_of_parent,
+    SAFE_DIVIDE(c.statement_slot_hours, p.parent_slot_hours) AS share_of_parent,
     p.parent_query_head,
     -- 原文の SQL。1日を切り出した調査なので正規化しない。
     c.query,
@@ -76,6 +77,6 @@ BEGIN
   WHERE c.creation_date = target_date
     -- 親 SCRIPT 行は子の合計を持つ集計行なので、ランキングからは外す。
     AND c.is_cost_countable
-  ORDER BY c.slot_hours DESC
+  ORDER BY c.statement_slot_hours DESC
   LIMIT top_n;
 END;

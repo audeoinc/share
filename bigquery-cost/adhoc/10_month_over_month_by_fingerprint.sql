@@ -22,7 +22,8 @@
 --   parent_fingerprint / parent_preview     どのスクリプトに属する処理か
 --   parent_this_month_slot_hours            そのスクリプト全体の今月のスロット消費
 --   parent_prev_month_slot_hours            同じく先月
---   ※ 親の値は子の合計。子の行の slot_hours と足さないこと（二重計上になる）。
+--   ※ 親の値（root 系）は子の合計。子の値（statement 系）と足さないこと。
+--     どちらか一方だけを合計すれば総量は一致する。
 --
 -- 注意:
 --   * 集計は bqc_t_daily_cost ではなく bqc_vw_t_job_cost_resolved から行っている。
@@ -52,8 +53,10 @@ BEGIN
     is_cost_countable,
     normalized_fingerprint,
     normalized_preview,
-    slot_hours,
-    tib_billed
+    root_slot_hours,
+    root_tib_billed,
+    statement_slot_hours,
+    statement_tib_billed
   FROM `audeodb.bq_cost_repository.bqc_vw_t_job_cost_resolved`
   WHERE creation_date >= prev_month
     AND creation_date < DATE_ADD(this_month, INTERVAL 1 MONTH);
@@ -64,7 +67,7 @@ BEGIN
     usage_month,
     normalized_fingerprint AS parent_fingerprint,
     ANY_VALUE(normalized_preview) AS parent_preview,
-    SUM(slot_hours) AS parent_slot_hours
+    SUM(root_slot_hours) AS parent_slot_hours
   FROM scoped
   WHERE job_role = 'PARENT'
   GROUP BY usage_month, normalized_fingerprint;
@@ -89,11 +92,11 @@ BEGIN
     usage_month,
     normalized_fingerprint,
     ANY_VALUE(normalized_preview) AS preview,
-    COUNT(*)        AS job_count,
-    SUM(slot_hours) AS slot_hours,
-    SUM(tib_billed) AS tib_billed,
+    COUNT(*)                  AS job_count,
+    SUM(statement_slot_hours) AS slot_hours,
+    SUM(statement_tib_billed) AS tib_billed,
     -- 同じ文が複数のスクリプトから呼ばれている場合は、いちばん食っている親を代表にする。
-    ARRAY_AGG(parent_fingerprint IGNORE NULLS ORDER BY slot_hours DESC LIMIT 1)[SAFE_OFFSET(0)]
+    ARRAY_AGG(parent_fingerprint IGNORE NULLS ORDER BY statement_slot_hours DESC LIMIT 1)[SAFE_OFFSET(0)]
       AS parent_fingerprint
   FROM with_parent
   GROUP BY usage_month, normalized_fingerprint;

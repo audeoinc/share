@@ -354,7 +354,7 @@ BEGIN
   --     つまり親は子の集計行であり、両方を足すと二重計上になる。
   EXECUTE IMMEDIATE FORMAT(r"""
     CREATE OR REPLACE VIEW `%s`
-    OPTIONS(description = 'bqc_t_job_cost に親子関係の解決列を足したビュー。コストを集計するときは必ず is_cost_countable = TRUE で絞ること。')
+    OPTIONS(description = 'bqc_t_job_cost に親子関係の解決列を足したビュー。コストは root_* (作業単位) と statement_* (文単位) の2系統で持つ。どちらを合計しても総量は一致し、粒度だけが変わる。2つを足さないこと。')
     AS
     WITH parent_ids AS (
       -- 「子を持つか」は相関サブクエリではなく親IDの一覧との LEFT JOIN で判定する
@@ -374,33 +374,59 @@ BEGIN
         ON  p.job_region = j.job_region
         AND p.project_id = j.project_id
         AND p.job_id     = j.job_id
+    ),
+    classified AS (
+      SELECT
+        f.*,
+        CASE
+          WHEN has_child_jobs THEN 'PARENT'
+          WHEN is_child       THEN 'CHILD'
+          ELSE 'STANDALONE'
+        END AS job_role,
+        -- 子を持つ行は自分では計算していない集計行なので、コスト合計から外す。
+        -- statement_type でも重ねて弾いているのは、子が保持期間の外に出るなどして
+        -- 一時的に「子が見えない親」が生じても安全側に倒すため。
+        NOT has_child_jobs AND IFNULL(statement_type, '') != 'SCRIPT'
+          AS is_cost_countable,
+        -- 作業単位の代表行か。親を持たない行＝PARENT と STANDALONE。
+        parent_job_id IS NULL AS is_root_job,
+        -- 親の中での実行順。スクリプトのどの文が重いかを見るための軸。
+        -- 親自身と単独ジョブは NULL。
+        CASE
+          WHEN parent_job_id IS NULL THEN NULL
+          ELSE ROW_NUMBER() OVER (
+            PARTITION BY job_region, project_id, parent_job_id
+            ORDER BY creation_time, start_time, job_id
+          )
+        END AS statement_index,
+        -- この作業単位に属する子の本数（親行にも子行にも同じ値が入る）。
+        SUM(IF(parent_job_id IS NOT NULL, 1, 0)) OVER (
+          PARTITION BY job_region, project_id, root_job_id
+        ) AS root_statement_count
+      FROM flagged AS f
     )
     SELECT
-      * EXCEPT(is_child),
-      CASE
-        WHEN has_child_jobs THEN 'PARENT'
-        WHEN is_child       THEN 'CHILD'
-        ELSE 'STANDALONE'
-      END AS job_role,
-      -- 子を持つ行は自分では計算していない集計行なので、コスト合計から外す。
-      -- statement_type でも重ねて弾いているのは、子が保持期間の外に出るなどして
-      -- 一時的に「子が見えない親」が生じても安全側に倒すため。
-      NOT has_child_jobs AND IFNULL(statement_type, '') != 'SCRIPT'
-        AS is_cost_countable,
-      -- 親の中での実行順。スクリプトのどの文が重いかを見るための軸。
-      -- 親自身と単独ジョブは NULL。
-      CASE
-        WHEN parent_job_id IS NULL THEN NULL
-        ELSE ROW_NUMBER() OVER (
-          PARTITION BY job_region, project_id, parent_job_id
-          ORDER BY creation_time, start_time, job_id
-        )
-      END AS statement_index,
-      -- この作業単位に属する子の本数（親行にも子行にも同じ値が入る）。
-      SUM(IF(parent_job_id IS NOT NULL, 1, 0)) OVER (
-        PARTITION BY job_region, project_id, root_job_id
-      ) AS root_statement_count
-    FROM flagged
+      -- 素のコスト列は意図的に外している。1 つの列で持つと、親と子を混ぜて
+      -- 合計したときに黙って二重計上になるため。代わりに下の 2 系統を使う。
+      -- 原本の値が要るときは bqc_t_job_cost を直接見ること。
+      * EXCEPT(
+        is_child,
+        total_slot_ms, slot_hours,
+        total_bytes_billed, tib_billed
+      ),
+      -- root 系: 作業単位（スクリプト1本／単独クエリ1本）としての消費。
+      -- 値が入るのは PARENT と STANDALONE。CHILD は NULL。
+      IF(is_root_job, total_slot_ms,      NULL) AS root_total_slot_ms,
+      IF(is_root_job, slot_hours,         NULL) AS root_slot_hours,
+      IF(is_root_job, total_bytes_billed, NULL) AS root_total_bytes_billed,
+      IF(is_root_job, tib_billed,         NULL) AS root_tib_billed,
+      -- statement 系: 実際に計算した文としての消費。
+      -- 値が入るのは CHILD と STANDALONE。PARENT は NULL。
+      IF(is_cost_countable, total_slot_ms,      NULL) AS statement_total_slot_ms,
+      IF(is_cost_countable, slot_hours,         NULL) AS statement_slot_hours,
+      IF(is_cost_countable, total_bytes_billed, NULL) AS statement_total_bytes_billed,
+      IF(is_cost_countable, tib_billed,         NULL) AS statement_tib_billed
+    FROM classified
   """, job_cost_resolved_fqn, job_cost_fqn, job_cost_fqn);
 
   -- --------------------------------------------------------------------------

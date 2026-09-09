@@ -199,10 +199,13 @@ BEGIN
         COUNTIF(cache_hit)              AS cache_hit_count,
         COUNTIF(is_error)               AS error_count,
         COUNT(DISTINCT user_email)      AS distinct_user_count,
-        SUM(IFNULL(total_bytes_billed, 0)) AS total_bytes_billed,
-        SUM(IFNULL(tib_billed, 0))         AS tib_billed,
-        SUM(IFNULL(total_slot_ms, 0))      AS total_slot_ms,
-        SUM(IFNULL(slot_hours, 0))         AS slot_hours,
+        -- 解決ビューのコスト列は root 系（作業単位）と statement 系（文単位）に
+        -- 分かれている。daily_cost は葉だけを集める表なので statement 系を使う。
+        -- WHERE is_cost_countable と組み合わせれば、statement 系は必ず非 NULL。
+        SUM(IFNULL(statement_total_bytes_billed, 0)) AS total_bytes_billed,
+        SUM(IFNULL(statement_tib_billed, 0))         AS tib_billed,
+        SUM(IFNULL(statement_total_slot_ms, 0))      AS total_slot_ms,
+        SUM(IFNULL(statement_slot_hours, 0))         AS slot_hours,
         CURRENT_TIMESTAMP()             AS updated_at
       FROM `%s`
       WHERE creation_date >= @refresh_from_date

@@ -170,13 +170,33 @@ GA プロパティID（`analytics_123456789`）は桁数が違うので影響を
 単位を出すのに要るためです。
 
 ただし実測の結果、**親 SCRIPT の `total_bytes_billed` / `total_slot_ms` は子の合計と
-一致します**（親は集計行）。そのまま両方を足すと二重計上になるので、集計は必ず
-`bqc_vw_t_job_cost_resolved` を経由し、`is_cost_countable = TRUE` で絞ってください。
+一致します**（親は集計行）。そのまま両方を足すと二重計上になります。
+
+そこで `bqc_vw_t_job_cost_resolved` では、**コスト列を 1 本で持たず 2 系統に分けて**
+います。素の `slot_hours` / `tib_billed` などはビューから意図的に外してあります
+（原本の値が要るときは `bqc_t_job_cost` を直接見てください）。
+
+| 系統 | 列 | 値が入る行 | 意味 |
+|---|---|---|---|
+| root | `root_slot_hours` `root_tib_billed` `root_total_slot_ms` `root_total_bytes_billed` | `PARENT` と `STANDALONE` | 作業単位（スクリプト1本／単独クエリ1本）としての消費 |
+| statement | `statement_slot_hours` `statement_tib_billed` `statement_total_slot_ms` `statement_total_bytes_billed` | `CHILD` と `STANDALONE` | 実際に計算した文としての消費 |
+
+単独ジョブは両方に同じ値が入るので、次が常に成り立ちます。
+
+```
+SUM(root_slot_hours) = SUM(statement_slot_hours) = 総量
+```
+
+**どちらの列を合計しても総量は一致し、変わるのは粒度だけです。** フィルタの掛け忘れで
+壊れないので、フィルタが個々のチャートに散らばる BI ツールから使うときに効きます。
+**誤りになるのは 2 つを足したときだけ**です。値の入らない側は 0 ではなく NULL に
+してあります（`SUM` は同じ結果になり、`AVG` は構造的なゼロで薄まらないため）。
 
 | 列 | 内容 |
 |---|---|
 | `job_role` | `PARENT`（子を持つ）/ `CHILD`（親を持つ）/ `STANDALONE` |
-| `is_cost_countable` | 集計してよい行か。`NOT has_child_jobs AND statement_type != 'SCRIPT'` |
+| `is_cost_countable` | 葉の行か（＝statement 系に値が入る行）。`NOT has_child_jobs AND statement_type != 'SCRIPT'` |
+| `is_root_job` | 作業単位の代表行か（＝root 系に値が入る行）。`parent_job_id IS NULL` |
 | `root_job_id` | 作業単位のキー。子なら `parent_job_id`、それ以外は自分の `job_id` |
 | `statement_index` | 親の中での実行順。スクリプトのどの文が重いかを見る軸（親・単独は NULL） |
 | `root_statement_count` | その作業単位に属する子の本数 |
@@ -189,6 +209,10 @@ GA プロパティID（`analytics_123456789`）は桁数が違うので影響を
 `is_cost_countable` を「**葉であること**」で定義しているのも意図的です。
 `statement_type != 'SCRIPT'` だけだと、子を持つ別種のジョブ（`CALL` など）が
 将来現れたときに素通りします。両方で挟んで安全側に倒しています。
+
+`bqc_t_daily_cost` は葉だけを集める表なので、`statement_*` 系だけを集約しています。
+そのため daily_cost 以降のコスト列は 1 本のままで、分ける必要がありません
+（親行がそもそも入らないので、二重計上の余地がない）。
 
 **`bqc_t_daily_cost` 以降には集計対象の行しか入りません。** つまり Looker Studio の
 利用者は親行に触れないので、二重計上のしようがありません。親を見るのは BigQuery 側で
