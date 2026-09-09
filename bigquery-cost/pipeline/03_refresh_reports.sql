@@ -208,6 +208,15 @@ BEGIN
         SUM(IFNULL(statement_tib_billed, 0))         AS tib_billed,
         SUM(IFNULL(statement_total_slot_ms, 0))      AS total_slot_ms,
         SUM(IFNULL(statement_slot_hours, 0))         AS slot_hours,
+        -- 正規化SQL全文は normalized_fingerprint から一意に決まるので ANY_VALUE で足りる
+        -- （GROUP BY に足すとキーが広がったように見えるので、あえて集計関数で取る）。
+        ANY_VALUE(normalized_query)                  AS normalized_query,
+        -- 原文の fingerprint は 1 つの normalized_fingerprint に対して複数ありうる
+        -- （リテラルが違うぶんだけ別物になる）。だから粒度キーには入れず、
+        -- 代表1件と異なり数として持つ。キーに入れると日 × リテラル違いで
+        -- 行が膨らみ、正規化した意味が無くなる。
+        ANY_VALUE(raw_fingerprint)                   AS sample_raw_fingerprint,
+        COUNT(DISTINCT raw_fingerprint)              AS distinct_raw_fingerprint_count,
         CURRENT_TIMESTAMP()             AS updated_at
       FROM `%s`
       WHERE creation_date >= @refresh_from_date
@@ -235,6 +244,9 @@ BEGIN
       tib_billed          = source.tib_billed,
       total_slot_ms       = source.total_slot_ms,
       slot_hours          = source.slot_hours,
+      normalized_query    = source.normalized_query,
+      sample_raw_fingerprint = source.sample_raw_fingerprint,
+      distinct_raw_fingerprint_count = source.distinct_raw_fingerprint_count,
       updated_at          = source.updated_at
     WHEN NOT MATCHED BY TARGET THEN
       -- INSERT ROW（列名省略）は target の列順に完全依存するので、列を明示する。
@@ -242,14 +254,16 @@ BEGIN
         usage_date, job_region, normalized_fingerprint, executor_id,
         executor_source, pricing_model, reservation_id, job_count,
         cache_hit_count, error_count, distinct_user_count, total_bytes_billed,
-        tib_billed, total_slot_ms, slot_hours, updated_at
+        tib_billed, total_slot_ms, slot_hours, normalized_query,
+        sample_raw_fingerprint, distinct_raw_fingerprint_count, updated_at
       ) VALUES (
         source.usage_date, source.job_region, source.normalized_fingerprint,
         source.executor_id, source.executor_source, source.pricing_model,
         source.reservation_id, source.job_count, source.cache_hit_count,
         source.error_count, source.distinct_user_count, source.total_bytes_billed,
         source.tib_billed, source.total_slot_ms, source.slot_hours,
-        source.updated_at
+        source.normalized_query, source.sample_raw_fingerprint,
+        source.distinct_raw_fingerprint_count, source.updated_at
       )
     WHEN NOT MATCHED BY SOURCE AND target.usage_date >= @refresh_from_date THEN
       DELETE
@@ -286,6 +300,7 @@ BEGIN
         SELECT
           normalized_fingerprint,
           normalizer_version,
+          normalized_query,
           normalized_preview,
           normalized_from_preview,
           referenced_tables_text
@@ -301,6 +316,7 @@ BEGIN
         s.normalizer_version,
         t.first_seen_date,
         t.last_seen_date,
+        s.normalized_query,
         s.normalized_preview,
         s.normalized_from_preview,
         s.referenced_tables_text,
@@ -326,6 +342,7 @@ BEGIN
       -- job_cost を刈り込んだあとはサンプルが取れなくなるので、
       -- 取れなかった場合は既存のプレビューをそのまま残す。
       normalizer_version      = IFNULL(source.normalizer_version, target.normalizer_version),
+      normalized_query        = IFNULL(source.normalized_query, target.normalized_query),
       normalized_preview      = IFNULL(source.normalized_preview, target.normalized_preview),
       normalized_from_preview = IFNULL(source.normalized_from_preview, target.normalized_from_preview),
       referenced_tables_text  = IFNULL(source.referenced_tables_text, target.referenced_tables_text),
@@ -339,6 +356,7 @@ BEGIN
       normalizer_version,
       first_seen_date,
       last_seen_date,
+      normalized_query,
       normalized_preview,
       normalized_from_preview,
       referenced_tables_text,
@@ -352,6 +370,7 @@ BEGIN
       source.normalizer_version,
       source.first_seen_date,
       source.last_seen_date,
+      source.normalized_query,
       source.normalized_preview,
       source.normalized_from_preview,
       source.referenced_tables_text,

@@ -69,6 +69,54 @@ def _check_limit_literals(path: str, source: str) -> list:
     return problems
 
 
+# 01 の CREATE TABLE の列定義
+DDL_TABLE = re.compile(
+    r"CREATE OR REPLACE TABLE `%s` \(\n(.*?)\n    \)", re.DOTALL)
+DDL_COLUMN = re.compile(
+    r"^\s{6}([a-z_]+)\s+(?:STRING|INT64|FLOAT64|DATE|TIMESTAMP|BOOL)", re.M)
+# 03 の MERGE の INSERT (...) VALUES (...)
+MERGE_INSERT = re.compile(
+    r"INSERT \(\n(.*?)\n\s*\) VALUES \(\n(.*?)\n\s*\)", re.DOTALL)
+
+
+def _split_items(text: str) -> list:
+    return [item.strip() for item in text.replace("\n", " ").split(",") if item.strip()]
+
+
+def _check_insert_column_alignment(setup_source: str, refresh_source: str) -> list:
+    """01 の CREATE TABLE と 03 の INSERT 列リストがずれていないかを見る。
+
+    列を1つ足したときに片方だけ直す事故が起きやすい。実行すれば BigQuery が
+    エラーにしてくれるが、流す前に気づけるほうがよい。
+    """
+    problems = []
+    ddl_tables = [set(DDL_COLUMN.findall(body)) for body in DDL_TABLE.findall(setup_source)]
+
+    for index, (columns_text, values_text) in enumerate(
+            MERGE_INSERT.findall(refresh_source), start=1):
+        columns = _split_items(columns_text)
+        values = _split_items(values_text)
+
+        if len(columns) != len(values):
+            problems.append(
+                f"03 の INSERT #{index}: 列リスト {len(columns)} 個と "
+                f"VALUES {len(values)} 個の数が合わない")
+            continue
+
+        for column, value in zip(columns, values):
+            # source.X 以外（CURRENT_TIMESTAMP() 等の式）は名前照合の対象外。
+            if value.startswith("source.") and value[len("source."):] != column:
+                problems.append(
+                    f"03 の INSERT #{index}: 列 {column} の位置に {value} が来ている")
+
+        if set(columns) not in ddl_tables:
+            problems.append(
+                f"03 の INSERT #{index}: 列の集合が 01 のどの CREATE TABLE とも一致しない "
+                f"（列を片方だけ足した可能性）")
+
+    return problems
+
+
 def main() -> int:
     failures = 0
     checked = 0
@@ -110,6 +158,24 @@ def main() -> int:
             except Exception as error:  # noqa: BLE001 - 表示目的
                 failures += 1
                 print(f"FAIL  {label}: {str(error)[:300]}")
+
+    setup_path = "pipeline/01_setup_cost_environment.sql"
+    refresh_path = "pipeline/03_refresh_reports.sql"
+    try:
+        alignment_problems = _check_insert_column_alignment(
+            open(setup_path, encoding="utf-8").read(),
+            open(refresh_path, encoding="utf-8").read(),
+        )
+    except FileNotFoundError:
+        alignment_problems = []
+    else:
+        for problem in alignment_problems:
+            failures += 1
+            checked += 1
+            print(f"FAIL  {problem}")
+        if not alignment_problems:
+            checked += 1
+            print("ok    01 の CREATE TABLE と 03 の INSERT 列リストが整合")
 
     print(f"\n{checked - failures}/{checked} checks passed")
     return 1 if failures else 0

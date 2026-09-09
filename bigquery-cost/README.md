@@ -138,6 +138,22 @@ python3 tools/normalize_reference.py           # 自己テスト
 echo "SELECT 1 FROM t WHERE x = 'a'" | python3 tools/normalize_reference.py -
 ```
 
+**正規化の結果そのものを確かめたいとき**は、`bqc_t_daily_cost` と
+`bqc_m_query_fingerprint` の `normalized_query`（全文）を見てください。
+次元表のほうが fingerprint あたり1行なので実質の正本で、`daily_cost` 側の同名列は
+**開発中に1つの表だけで確かめられるようにした冗長なコピー**です。不要になったら
+`01` の daily_cost DDL とその列、`03` STEP 1 の該当行を落としてください。
+
+`daily_cost` には原文 SQL の fingerprint も入れていますが、粒度が違うので形を変えて
+います。1 つの `normalized_fingerprint` に対して原文の fingerprint は複数ありうる
+（リテラルが違うぶんだけ別物になる）ため、**粒度キーには入れていません**。入れると
+日 × リテラル違いで行が膨らみ、正規化した意味が無くなります。
+
+| 列 | 内容 |
+|---|---|
+| `sample_raw_fingerprint` | 代表1件。`job_cost.raw_fingerprint` で実ジョブに辿る手がかり |
+| `distinct_raw_fingerprint_count` | 畳み込まれた原文の異なり数。**大きいほど正規化が効いている指標** |
+
 ロジックを変更したら `normalizer_version` を必ず上げてください。正規化結果が変われば
 同じ SQL でも別 fingerprint になるため、この列が無いと履歴の断絶を説明できません。
 
@@ -272,7 +288,7 @@ SUM(root_slot_hours) = SUM(statement_slot_hours) = 総量
 | 対象 | 状況 |
 |---|---|
 | 正規化ロジック | **RE2 実機で 29/29 パス**（`tools/normalize_reference.py`） |
-| 埋め込み動的SQLの構文 / DECLARE の位置 / LIMIT が定数か | **38/38 パス**（`tools/check_templates.py`、sqlglot bigquery。pipeline と adhoc の両方） |
+| 動的SQLの構文 / DECLARE の位置 / LIMIT が定数か / DDL と INSERT 列の整合 | **39/39 パス**（`tools/check_templates.py`、sqlglot bigquery。pipeline と adhoc の両方） |
 | 親子分類の不変条件 | **6/6 パス**（`tools/verify_hierarchy_logic.py`、`SUM(root)=SUM(statement)` を孤児込みで検証） |
 | BigQuery 実機での実行 | **未実施。** 本セッションに `bq` / `gcloud` と GCP 認証が無いため |
 
