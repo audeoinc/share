@@ -24,7 +24,9 @@ bigquery-cost/
     ├── 05_billing_export_bigquery.sql  請求エクスポートから BQ の実額
     ├── 06_billing_export_all_services.sql  サービス別の実額
     ├── 07_dry_run.sh                   実行前のスキャン量チェック
-    └── 08_inspect_job_hierarchy.sql    親子ジョブ構造の実測（設計確認用）
+    ├── 08_inspect_job_hierarchy.sql    親子ジョブ構造の実測（設計確認用）
+    ├── 09_top_slot_consumers_of_day.sql   ある1日のスロット消費 上位10（原文SQL＋所属スクリプト）
+    └── 10_month_over_month_by_fingerprint.sql  今月 vs 先月（正規化単位、追加/削除/増減＋親）
 ```
 
 ## クイックスタート
