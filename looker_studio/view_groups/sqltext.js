@@ -45,7 +45,13 @@ function sqlViews(b) {
       });
     }
   }
-  out.sort((x, y) => String(x.suffix).localeCompare(String(y.suffix)));
+  // **suffix の文字数 → アルファベット順。** 単純な辞書順だと中間語つきの
+  // suffix（v2_txjp）が素のもの（txjp）に混ざって並ぶ。文字数を先に見ると
+  // 素のものが先に固まり、枝番や版はその後ろにまとまる。
+  out.sort((x, y) => {
+    const a = String(x.suffix), b = String(y.suffix);
+    return a.length - b.length || a.localeCompare(b);
+  });
   return out;
 }
 

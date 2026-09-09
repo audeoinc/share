@@ -1270,12 +1270,34 @@ const checks = [
     Co.columnsCss().includes('.vg-ctable') && !R.chromeCss().includes('.vg-ctable')],
   // SQL タブ。ロジック差分が出すのはパラメータ化した SQL なので、素のテキストを
   // 読みたいときの受け皿がここになる。インナーのタブは View（suffix）単位。
-  ['SQL のインナー タブは View 単位で suffix 順', (() => {
+  ['SQL のインナー タブは View 単位で suffix の文字数 → アルファベット順', (() => {
     const h = sqlCases[0].html;
     const tabs = [...h.matchAll(/class="vg-stab vg-st\d+"[^>]*>([^<]*)</g)].map((m) => m[1]);
-    const want = base3.groups.flatMap((g, i) =>
-      g.suffixes.map((s, j) => s || g.members[j].viewName)).sort();
+    const want = base3.groups.flatMap((g) =>
+      g.suffixes.map((s, j) => s || g.members[j].viewName))
+      .sort((a, b) => a.length - b.length || a.localeCompare(b));
     return tabs.length === base3.viewCount && tabs.join(',') === want.join(',');
+  })()],
+  // 文字数を先に見る意味は、長さが混ざったときにだけ出る。サンプルの suffix は
+  // 全部 4 文字なので、そこだけ見ていると並べ替えを変えても気づけない。
+  // 中間語つき（v2_txjp）が入ると素のものと長さが違う。
+  ['SQL タブは素の suffix を先に、長いものを後ろにまとめる', (() => {
+    const b = {
+      base: 'sales',
+      groups: [{
+        suffixes: ['v2_txus', 'txjp', 'v2_txjp', 'txus', 'txuk'],
+        members: ['v2_txus', 'txjp', 'v2_txjp', 'txus', 'txuk']
+          .map((s) => ({ viewName: 'sales_' + s })),
+      }],
+    };
+    return Sq.sqlViews(b).map((v) => v.suffix).join(',') ===
+      'txjp,txuk,txus,v2_txjp,v2_txus';
+  })()],
+  // SQL タブは base の View を 1 本残らず出す（打ち切りの上限は上げてある）。
+  ['SQL タブは base の View を全部出す', (() => {
+    const h = sqlCases[0].html;
+    const tabs = [...h.matchAll(/class="vg-stab vg-st\d+"/g)].length;
+    return tabs === base3.viewCount && !h.includes('のみタブ表示しています');
   })()],
   ['SQL は素のテキストを出す（パラメータ化しない）', (() => {
     const h = sqlCases[0].html;

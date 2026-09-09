@@ -531,6 +531,17 @@ for (const t of ['__T_DIFF_SRC__', '__T_DIFF__']) {
     !/EXCEPT \([^)]*ref_index/.test(table) &&
     !/EXCEPT \([^)]*ref_label/.test(table));
 
+  // (3c) 基準グループの View 数。「既定の基準を View が最多のグループに」
+  //      を、グラフの並べ替えだけで決められるようにするための列。
+  //      groupSizes は groupLabels と同じ並びなので ref_index で引ける。
+  //      添字が外れうる（打ち切り・解析できなかった base）ので SAFE_OFFSET。
+  //      OFFSET に変えると base ごとクエリが落ちる。
+  add('基準グループの View 数を列で持っている',
+    /\$\.groupSizes'\)\[SAFE_OFFSET\(ref_index\)\]/.test(table) &&
+    /AS ref_view_count/.test(table) &&
+    /ref_view_count *INT64/.test(table) &&
+    !/EXCEPT \([^)]*ref_view_count/.test(table));
+
   // (4) 行数の上限があり、**それを描画側にも渡している**か。
   //     渡さないと、打ち切られたことをカードに書けない ―― 選べないだけなのに
   //     「グループが無い」と読めてしまう。

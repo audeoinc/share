@@ -908,6 +908,7 @@ CREATE OR REPLACE TABLE `__T_DIFF_SRC__`
   base            STRING         OPTIONS (description = 'suffix を除いた View 名。Looker のキー。suffix を認識できなかった View は View 名そのもの'),
   ref_index       INT64          OPTIONS (description = '基準グループの番号（0 起点）。base ごとに 0..グループ数-1 の行ができる'),
   ref_label       STRING         OPTIONS (description = '基準グループの見出し（suffix の列記）。レポートの「基準」コントロールはこれを使う'),
+  ref_view_count  INT64          OPTIONS (description = '基準グループに属する View 数。グループは大きい順に並ぶので ref_index=0 が最多。既定の基準を「View が最多のグループ」にしたいときは、グラフの並べ替えを ref_index 昇順にする'),
   view_count      INT64          OPTIONS (description = 'この base に属する View 数'),
   group_count     INT64          OPTIONS (description = 'ロジックのグループ数。1 なら全部同一'),
   has_multiple    BOOL           OPTIONS (description = 'group_count > 1。ロジック逸脱の検知用'),
@@ -1308,6 +1309,15 @@ SELECT
   base,
   ref_index,
   ref_label,
+  -- 基準グループの View 数。groupSizes は groupLabels と同じ並び（解析側が
+  -- 同じループで両方に積む）なので、ref_index でそのまま引ける。
+  -- グループは**メンバの多い順**に並んでいるので ref_index=0 が最多になる。
+  -- 打ち切りや解析できなかった base では配列が短いことがあるので、
+  -- 添字が外れたら NULL にする（SAFE_OFFSET）。
+  (
+    SELECT CAST(x AS INT64)
+    FROM UNNEST([JSON_VALUE_ARRAY(analysis, '$.groupSizes')[SAFE_OFFSET(ref_index)]]) AS x
+  ) AS ref_view_count,
   CAST(JSON_VALUE(analysis, '$.viewCount')  AS INT64) AS view_count,
   CAST(JSON_VALUE(analysis, '$.groupCount') AS INT64) AS group_count,
   CAST(JSON_VALUE(analysis, '$.groupCount') AS INT64) > 1 AS has_multiple,
