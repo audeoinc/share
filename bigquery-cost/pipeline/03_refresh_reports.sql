@@ -5,13 +5,14 @@
 -- 02 の直後に日次で実行する。
 --   STEP 1: 日次集約 bqc_t_daily_cost を対象期間だけ作り直す（MERGE で原子的に）
 --   STEP 2: fingerprint 次元 bqc_m_query_fingerprint を更新する
+--   STEP 3: 保持期間 (retention_days) を超えた行を 3 表から刈り取る
 --
 -- 初回（集約表が空）は job_cost の全期間を作り直し、以降は
 -- refresh_lookback_days だけを作り直す。02 の incremental_lookback_days より
 -- 必ず広く取ること。狭いと、02 が遅れて取り込んだ古い日付の行が集約に反映されない。
 --
--- first_seen_date は LEAST() で決して後退させない。JOBS が 180 日で消えても、
--- ここに積んだ first_seen が「新しくコストを発生させた SQL」の判定基準になる。
+-- first_seen_date は保持期間の中では LEAST() で後退させない。これが
+-- 「新しくコストを発生させた SQL」の判定基準になる。
 --
 -- 実行順:  01（初回のみ） → 02（日次） → 03（日次、02 の後）
 --
@@ -41,6 +42,13 @@ BEGIN
   DECLARE default_project_id STRING;
   -- 作り直す日数。02 の incremental_lookback_days より広く取ること。
   DECLARE refresh_lookback_days INT64 DEFAULT 7;
+  -- 保持期間。この日数より古い行を STEP 3 で削除する。
+  -- 既定の 180 は INFORMATION_SCHEMA.JOBS の履歴保持期間そのもの。つまり削除対象は
+  -- 「JOBS 側でも既に消えている期間」だけなので、元データから作り直せる範囲は
+  -- 失われない。JOBS より長く持ちたくなったらこの値を伸ばすこと。
+  DECLARE retention_days INT64 DEFAULT 180;
+  -- 刈り取り自体を止めたい場合に FALSE。表は際限なく伸びる。
+  DECLARE enable_retention_pruning BOOL DEFAULT TRUE;
 
   -- --------------------------------------------------------------------------
   -- [C] DERIVED / INTERNAL -- from [A]; DO NOT edit
@@ -52,6 +60,7 @@ BEGIN
   DECLARE query_dim_fqn STRING;
   DECLARE daily_cost_row_count INT64;
   DECLARE refresh_from_date DATE;
+  DECLARE retention_cutoff_date DATE;
 
   EXECUTE IMMEDIATE FORMAT(
     "SELECT DISTINCT catalog_name FROM `region-%s`.INFORMATION_SCHEMA.SCHEMATA LIMIT 1",
@@ -70,6 +79,10 @@ BEGIN
   ASSERT REGEXP_CONTAINS(repository_dataset, r'^[A-Za-z0-9_]+$')
   AS 'repository_dataset must be letters/digits/underscore only (check for an unsubstituted {project_token}).';
   ASSERT refresh_lookback_days >= 1 AS 'refresh_lookback_days must be >= 1.';
+  ASSERT retention_days >= 1 AS 'retention_days must be >= 1.';
+  -- 保持期間が作り直し幅より狭いと、入れた直後の行をその実行の中で消してしまう。
+  ASSERT retention_days > refresh_lookback_days
+  AS 'retention_days must be greater than refresh_lookback_days (otherwise rows are pruned in the same run that rebuilds them).';
 
   SET job_cost_fqn = FORMAT(
     '%s.%s.%s', repository_project_id, repository_dataset,
@@ -157,9 +170,9 @@ BEGIN
   -- --------------------------------------------------------------------------
   -- STEP 2: bqc_m_query_fingerprint の更新
   -- --------------------------------------------------------------------------
-  -- 通算値は daily_cost の全期間から都度計算し直す（差分加算しないので再実行が安全）。
-  -- first_seen_date は LEAST で必ず過去側に倒す。job_cost をあとで刈り込んでも
-  -- 「いつ最初に現れた SQL か」が失われないようにするため。
+  -- 合計値は daily_cost の保持期間全体から都度計算し直す（差分加算しないので
+  -- 再実行が安全）。first_seen_date は LEAST で過去側に倒すので、02 の増分幅が
+  -- 狭くても既に記録した初回観測日が上書きで新しくなることはない。
   EXECUTE IMMEDIATE FORMAT(r"""
     MERGE `%s` AS target
     USING (
@@ -168,9 +181,9 @@ BEGIN
           normalized_fingerprint,
           MIN(usage_date)             AS first_seen_date,
           MAX(usage_date)             AS last_seen_date,
-          SUM(job_count)              AS lifetime_job_count,
-          SUM(tib_billed)             AS lifetime_tib_billed,
-          SUM(slot_hours)             AS lifetime_slot_hours,
+          SUM(job_count)              AS retained_job_count,
+          SUM(tib_billed)             AS retained_tib_billed,
+          SUM(slot_hours)             AS retained_slot_hours,
           COUNT(DISTINCT executor_id) AS distinct_executor_count
         FROM `%s`
         GROUP BY normalized_fingerprint
@@ -199,9 +212,9 @@ BEGIN
         s.normalized_preview,
         s.normalized_from_preview,
         s.referenced_tables_text,
-        t.lifetime_job_count,
-        t.lifetime_tib_billed,
-        t.lifetime_slot_hours,
+        t.retained_job_count,
+        t.retained_tib_billed,
+        t.retained_slot_hours,
         t.distinct_executor_count
       FROM fingerprint_totals AS t
       LEFT JOIN fingerprint_sample AS s
@@ -224,9 +237,9 @@ BEGIN
       normalized_preview      = IFNULL(source.normalized_preview, target.normalized_preview),
       normalized_from_preview = IFNULL(source.normalized_from_preview, target.normalized_from_preview),
       referenced_tables_text  = IFNULL(source.referenced_tables_text, target.referenced_tables_text),
-      lifetime_job_count      = source.lifetime_job_count,
-      lifetime_tib_billed     = source.lifetime_tib_billed,
-      lifetime_slot_hours     = source.lifetime_slot_hours,
+      retained_job_count      = source.retained_job_count,
+      retained_tib_billed     = source.retained_tib_billed,
+      retained_slot_hours     = source.retained_slot_hours,
       distinct_executor_count = source.distinct_executor_count,
       updated_at              = CURRENT_TIMESTAMP()
     WHEN NOT MATCHED THEN INSERT (
@@ -237,9 +250,9 @@ BEGIN
       normalized_preview,
       normalized_from_preview,
       referenced_tables_text,
-      lifetime_job_count,
-      lifetime_tib_billed,
-      lifetime_slot_hours,
+      retained_job_count,
+      retained_tib_billed,
+      retained_slot_hours,
       distinct_executor_count,
       updated_at
     ) VALUES (
@@ -250,13 +263,38 @@ BEGIN
       source.normalized_preview,
       source.normalized_from_preview,
       source.referenced_tables_text,
-      source.lifetime_job_count,
-      source.lifetime_tib_billed,
-      source.lifetime_slot_hours,
+      source.retained_job_count,
+      source.retained_tib_billed,
+      source.retained_slot_hours,
       source.distinct_executor_count,
       CURRENT_TIMESTAMP()
     )
   """, query_dim_fqn, daily_cost_fqn, job_cost_fqn);
+
+  -- --------------------------------------------------------------------------
+  -- STEP 3: 保持期間を超えた行の刈り取り
+  -- --------------------------------------------------------------------------
+  -- 対象期間は JOBS が持っている範囲だけ、という方針なので、それより古い行は残さない。
+  -- 既定の retention_days = 180 は JOBS の履歴保持期間と同じなので、消えるのは
+  -- 「JOBS からも既に消えている期間」に限られる＝再取得できるデータは失われない。
+  --
+  -- fingerprint 次元は last_seen_date で判定する。保持期間内に一度でも実行された
+  -- SQL は、first_seen が古くても残す（新規判定の基準を保つため）。
+  IF enable_retention_pruning THEN
+    SET retention_cutoff_date = DATE_SUB(CURRENT_DATE(), INTERVAL retention_days DAY);
+
+    EXECUTE IMMEDIATE FORMAT(
+      'DELETE FROM `%s` WHERE creation_date < @retention_cutoff_date', job_cost_fqn
+    ) USING retention_cutoff_date AS retention_cutoff_date;
+
+    EXECUTE IMMEDIATE FORMAT(
+      'DELETE FROM `%s` WHERE usage_date < @retention_cutoff_date', daily_cost_fqn
+    ) USING retention_cutoff_date AS retention_cutoff_date;
+
+    EXECUTE IMMEDIATE FORMAT(
+      'DELETE FROM `%s` WHERE last_seen_date < @retention_cutoff_date', query_dim_fqn
+    ) USING retention_cutoff_date AS retention_cutoff_date;
+  END IF;
 
   -- --------------------------------------------------------------------------
   -- 再構築結果
@@ -269,6 +307,8 @@ BEGIN
       (SELECT MIN(usage_date) FROM `%s`)               AS min_usage_date,
       (SELECT MAX(usage_date) FROM `%s`)               AS max_usage_date,
       (SELECT COUNTIF(first_seen_date = CURRENT_DATE()) FROM `%s`)
-        AS fingerprints_first_seen_today
-  """, daily_cost_fqn, query_dim_fqn, daily_cost_fqn, daily_cost_fqn, query_dim_fqn);
+        AS fingerprints_first_seen_today,
+      @retention_cutoff_date AS pruned_before
+  """, daily_cost_fqn, query_dim_fqn, daily_cost_fqn, daily_cost_fqn, query_dim_fqn)
+  USING retention_cutoff_date AS retention_cutoff_date;
 END;

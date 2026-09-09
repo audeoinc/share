@@ -44,21 +44,31 @@ Looker Studio の接続は [`looker/README.md`](looker/README.md) を参照し�
 ## データ構成
 
 ```
-INFORMATION_SCHEMA.JOBS  （履歴 180 日で消える）
+INFORMATION_SCHEMA.JOBS  （履歴 180 日）
    │  02 が日次で増分取り込み。SCRIPT 親を除外して子jobだけを取る
    ▼
 bqc_t_job_cost           job 粒度。正規化SQL・fingerprint・参照テーブルを付与
-   │  03 が集約
+   │  03 が集約し、保持期間を超えた行を刈り取る
    ▼
-bqc_t_daily_cost         日 × fingerprint × 実行者。Looker が読む実体（長期保持）
+bqc_t_daily_cost         日 × fingerprint × 実行者。Looker が読む実体
    │                     ＋ bqc_m_query_fingerprint（first_seen / プレビュー）
    ▼
 bqc_vw_t_daily_cost_report   ← Looker Studio のデータソースはこれ 1 本
 ```
 
-**JOBS は 180 日で消えますが、この3テーブルは消えません。** ここに積むこと自体が、
-「いつ最初に現れた SQL か」を 180 日より先まで判定できる唯一の手段です。
-`bqc_m_query_fingerprint` は絶対に truncate しないでください。
+### 対象期間と保持期間
+
+**対象は `INFORMATION_SCHEMA.JOBS` が持っている範囲（最大 180 日）だけです。**
+それより古い履歴を積み増して保持することは目的にしていないので、`03` が
+`retention_days`（既定 180 日）を超えた行を 3 表から削除します。
+
+既定値が 180 なのは JOBS の履歴保持期間と同じだからです。つまり削除されるのは
+**JOBS 側でも既に消えている期間だけ**で、元データから作り直せる範囲は失われません。
+JOBS より長く持ちたくなったら `03` の `retention_days` を伸ばしてください
+（`enable_retention_pruning = FALSE` で刈り取り自体を止められますが、表は際限なく伸びます）。
+
+この方針の帰結として、**「新しくコストを発生させた SQL」は保持期間の中での新規**という
+意味になります。それ以前に動いていた SQL でも、保持期間内で初めて現れれば新規として出ます。
 
 ## 主要な設計判断
 
@@ -141,6 +151,8 @@ GA プロパティID（`analytics_123456789`）は桁数が違うので影響を
   不要になった時点でこの列だけ落としてください（fingerprint は残るので分析は継続できます）。
 - **単一リージョン運用です。** 別リージョンも見る場合は各スクリプト冒頭の
   `SET @@location` を変えて再実行します。`job_region` 列で混在して蓄積できます。
+- **`retained_*` 列は保持期間内の合計**であって通算値ではありません。刈り取りが
+  走ると値は減ります。
 - 時刻はすべて **UTC** です。月次の境界を JST にしたい場合は、02 の `creation_date` を
   `DATE(creation_time, 'Asia/Tokyo')` に変えてバックフィルし直してください。
 

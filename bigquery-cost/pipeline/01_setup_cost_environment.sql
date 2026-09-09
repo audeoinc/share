@@ -7,13 +7,14 @@
 --
 --   UDF   bqc_normalize_sql          … SQL からリテラル/コメントを除去した正規化文字列
 --   表    bqc_t_job_cost             … job 粒度のコスト実績（子job のみ）
---   表    bqc_t_daily_cost           … 日 × fingerprint × 実行者 の集約（長期保持）
+--   表    bqc_t_daily_cost           … 日 × fingerprint × 実行者 の集約（Looker が読む実体）
 --   表    bqc_m_query_fingerprint    … fingerprint 次元（first_seen / プレビュー）
 --   VIEW  bqc_vw_t_daily_cost_report … Looker Studio が参照する唯一のデータソース
 --
--- INFORMATION_SCHEMA.JOBS の履歴保持は 180 日しかないため、bqc_t_daily_cost と
--- bqc_m_query_fingerprint は「180 日を超えて履歴を残すための資産」として扱う。
--- ここを消すと「新しくコストを発生させた SQL」の判定基準（first_seen）が失われる。
+-- 対象期間は INFORMATION_SCHEMA.JOBS が持っている範囲（最大 180 日）だけ。
+-- それより古い履歴を積み増して保持することは目的にしていないので、03 が保持期間を
+-- 超えた行を刈り取る（retention_days、既定 180 日）。JOBS 自身が既に捨てた分しか
+-- 消さないため、元データから作り直せる範囲は失われない。
 --
 -- 実行順:  01（初回のみ） → 02（日次） → 03（日次、02 の後）
 --
@@ -258,14 +259,13 @@ BEGIN
     )
     PARTITION BY creation_date
     CLUSTER BY normalized_fingerprint, executor_id
-    OPTIONS(description = 'BigQuery クエリコストの job 粒度実績。INFORMATION_SCHEMA.JOBS から 02 が日次で取り込む。JOBS の 180 日制限を超えて履歴を残すための実体。')
+    OPTIONS(description = 'BigQuery クエリコストの job 粒度実績。INFORMATION_SCHEMA.JOBS から 02 が日次で取り込み、03 が保持期間を超えた行を刈り取る。')
   """, job_cost_fqn);
 
   -- --------------------------------------------------------------------------
   -- STEP 4: bqc_t_daily_cost -- 日 x fingerprint x 実行者 の集約
   -- --------------------------------------------------------------------------
   -- Looker Studio が実際に読むのはこちら。job 粒度より数桁小さいので速い。
-  -- JOBS が 180 日で消えても、この表は消さない限り残り続ける。
   EXECUTE IMMEDIATE FORMAT(r"""
     CREATE TABLE IF NOT EXISTS `%s` (
       usage_date              DATE      OPTIONS(description = '対象日 (UTC)。パーティションキー'),
@@ -287,7 +287,7 @@ BEGIN
     )
     PARTITION BY usage_date
     CLUSTER BY normalized_fingerprint, executor_id
-    OPTIONS(description = 'BigQuery クエリコストの日次集約。Looker Studio の主データソース (レポートは bqc_vw_t_daily_cost_report 経由で読む)。')
+    OPTIONS(description = 'BigQuery クエリコストの日次集約。Looker Studio の主データソース (レポートは bqc_vw_t_daily_cost_report 経由で読む)。保持期間は 03 の retention_days に従う。')
   """, daily_cost_fqn);
 
   -- --------------------------------------------------------------------------
@@ -295,24 +295,24 @@ BEGIN
   -- --------------------------------------------------------------------------
   -- 1 行 = 1 fingerprint。「新しくコストを発生させた SQL」の判定に使う
   -- first_seen_date と、レポート表示用のプレビューを持つ。
-  -- 03 が MERGE で更新し、first_seen_date は LEAST() で決して後退させない。
+  -- 03 が MERGE で更新し、first_seen_date は保持期間の中では LEAST() で後退させない。
   EXECUTE IMMEDIATE FORMAT(r"""
     CREATE TABLE IF NOT EXISTS `%s` (
       normalized_fingerprint  STRING    OPTIONS(description = '正規化SQLの fingerprint。主キー'),
       normalizer_version      STRING    OPTIONS(description = 'この fingerprint を作った正規化ロジックのバージョン'),
-      first_seen_date         DATE      OPTIONS(description = 'この SQL が最初に観測された日。新規コスト源の判定基準'),
+      first_seen_date         DATE      OPTIONS(description = '保持期間内でこの SQL が最初に観測された日。新規コスト源の判定基準'),
       last_seen_date          DATE      OPTIONS(description = '最後に観測された日'),
       normalized_preview      STRING    OPTIONS(description = '正規化SQLの先頭100文字'),
       normalized_from_preview STRING    OPTIONS(description = '正規化SQLの最初の FROM 以降100文字'),
       referenced_tables_text  STRING    OPTIONS(description = '直近実行時の参照テーブル一覧 (改行区切り)'),
-      lifetime_job_count      INT64     OPTIONS(description = '通算実行回数 (集約表が持つ全期間)'),
-      lifetime_tib_billed     FLOAT64   OPTIONS(description = '通算の課金対象バイト数 (TiB)'),
-      lifetime_slot_hours     FLOAT64   OPTIONS(description = '通算のスロット時間'),
+      retained_job_count      INT64     OPTIONS(description = '保持期間内の実行回数の合計'),
+      retained_tib_billed     FLOAT64   OPTIONS(description = '保持期間内の課金対象バイト数 (TiB)'),
+      retained_slot_hours     FLOAT64   OPTIONS(description = '保持期間内のスロット時間'),
       distinct_executor_count INT64     OPTIONS(description = 'この SQL を実行した実行者の異なり数'),
       updated_at              TIMESTAMP OPTIONS(description = 'この行を最後に更新した時刻')
     )
     CLUSTER BY normalized_fingerprint
-    OPTIONS(description = 'SQL fingerprint の次元表。JOBS の 180 日制限を超えて first_seen を保持するため、この表は決して truncate しないこと。')
+    OPTIONS(description = 'SQL fingerprint の次元表。保持期間内での first_seen と表示用プレビューを持つ。03 が保持期間外の fingerprint を刈り取る。')
   """, query_dim_fqn);
 
   -- --------------------------------------------------------------------------
@@ -348,7 +348,7 @@ BEGIN
       q.normalized_preview,
       q.normalized_from_preview,
       q.referenced_tables_text,
-      q.lifetime_job_count,
+      q.retained_job_count,
       q.distinct_executor_count,
       DATE_DIFF(d.usage_date, q.first_seen_date, DAY) AS days_since_first_seen,
       -- 「その日に初めてコストを発生させた SQL」。Looker Studio ではこれを
