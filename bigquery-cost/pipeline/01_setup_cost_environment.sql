@@ -12,6 +12,10 @@
 --    データの正本は INFORMATION_SCHEMA.JOBS 側なので、保持期間内であれば
 --    ここを消しても失われるものはありません。
 --
+-- 前提: データセット（repository_dataset / udf_dataset）は事前に作成されていること。
+--       インフラチームへの作成依頼が必要な運用のため、このスクリプトは作りません。
+--       存在しない場合はエラーで停止します。
+--
 -- 作成物:
 --
 --   UDF   bqc_normalize_sql          … SQL からリテラル/コメントを除去した正規化文字列
@@ -58,10 +62,12 @@ BEGIN
   --     自動取得した project id から token を抜く正規表現（group 1）。データセット名と
   --     prefix/suffix 中の '{project_token}' を実行時に置換する。既定は先頭ハイフン区切り。
   --   repository_dataset
-  --     表・ビューを置くデータセット。存在しなければ作成する。
+  --     表・ビューを置くデータセット。事前に作成されている必要がある
+  --     （このスクリプトは作らず、無ければエラーで停止する）。
   --   udf_dataset
   --     UDF を置くデータセット。既定は repository_dataset と同じだが、UDF だけ
   --     共有データセットに集約している運用もあるため独立したノブにしてある。
+  --     こちらも事前に作成されている必要がある。
   --     別データセットにする場合は 02 の udf_dataset も同じ値に揃えること
   --     （02 はここで作った UDF を名前で呼ぶだけなので、食い違うと Not found になる）。
   --   table_name_prefix / table_name_suffix
@@ -109,6 +115,7 @@ BEGIN
   DECLARE report_view_name STRING;
   DECLARE backtick_replacement STRING;
   DECLARE smoke_test_result STRING;
+  DECLARE dataset_exists_count INT64;
 
   -- 実行プロジェクトの自動取得（catalog_name = ジョブ実行プロジェクト）。
   -- DECLARE-DEFAULT の評価順の都合で、全 DECLARE の後の最初の実行文に置く。
@@ -156,20 +163,43 @@ BEGIN
   SET report_view_fqn   = FORMAT('%s.%s', dataset_fqn, report_view_name);
 
   -- --------------------------------------------------------------------------
-  -- STEP 1: datasets
+  -- STEP 1: dataset の存在確認（作成はしない）
   -- --------------------------------------------------------------------------
-  -- 表とは違い、データセットは CREATE OR REPLACE にしない。
-  -- CREATE OR REPLACE SCHEMA はデータセットごと作り直すため、同じデータセットに
-  -- 同居している無関係なテーブルまで巻き込んで消してしまう。
+  -- データセットはインフラチームが作成する運用なので、このスクリプトでは作らない。
+  -- 存在しなければここで止める。
+  --
+  -- 黙って作ってしまう（CREATE SCHEMA IF NOT EXISTS）と、[A] の dataset 名を
+  -- 打ち間違えたときに想定外の場所へ一式ができあがり、しかもエラーにならないため
+  -- 気づけない。作成依頼が必要な運用なら、なおさら「無い」ことは失敗にする。
+  --
+  -- 判定はリージョン修飾の SCHEMATA で行う。別リージョンに同名のデータセットが
+  -- あっても、この @@location からは使えないので「無い」と扱うのが正しい。
   EXECUTE IMMEDIATE FORMAT(
-    "CREATE SCHEMA IF NOT EXISTS `%s` OPTIONS(location = '%s')",
-    dataset_fqn, @@location
-  );
+    """SELECT COUNT(*) FROM `%s.region-%s`.INFORMATION_SCHEMA.SCHEMATA
+       WHERE schema_name = '%s'""",
+    repository_project_id, @@location, repository_dataset
+  ) INTO dataset_exists_count;
 
-  -- UDF を別データセットに置く設定なら、そちらも作る（同じなら上で作成済み）。
-  IF udf_dataset_fqn != dataset_fqn THEN
-    EXECUTE IMMEDIATE FORMAT(
-      "CREATE SCHEMA IF NOT EXISTS `%s` OPTIONS(location = '%s')",
+  IF dataset_exists_count = 0 THEN
+    -- ASSERT の説明文は文字列リテラルしか受け付けないので、名前を含む案内を
+    -- 出すために RAISE を使う。
+    RAISE USING MESSAGE = FORMAT(
+      'Repository dataset `%s` does not exist in region %s. This script does not create datasets -- ask the infrastructure team to create it first.',
+      dataset_fqn, @@location
+    );
+  END IF;
+
+  -- UDF 用データセットも同様に確認する（表と別プロジェクト/別データセットを
+  -- 指定できるため、同じ値のときも含めて改めて引く）。
+  EXECUTE IMMEDIATE FORMAT(
+    """SELECT COUNT(*) FROM `%s.region-%s`.INFORMATION_SCHEMA.SCHEMATA
+       WHERE schema_name = '%s'""",
+    udf_project_id, @@location, udf_dataset
+  ) INTO dataset_exists_count;
+
+  IF dataset_exists_count = 0 THEN
+    RAISE USING MESSAGE = FORMAT(
+      'UDF dataset `%s` does not exist in region %s. This script does not create datasets -- ask the infrastructure team to create it first.',
       udf_dataset_fqn, @@location
     );
   END IF;
