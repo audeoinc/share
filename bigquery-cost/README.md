@@ -23,7 +23,8 @@ bigquery-cost/
     ├── 04_storage_by_table.sql         テーブル別ストレージ費用
     ├── 05_billing_export_bigquery.sql  請求エクスポートから BQ の実額
     ├── 06_billing_export_all_services.sql  サービス別の実額
-    └── 07_dry_run.sh                   実行前のスキャン量チェック
+    ├── 07_dry_run.sh                   実行前のスキャン量チェック
+    └── 08_inspect_job_hierarchy.sql    親子ジョブ構造の実測（設計確認用）
 ```
 
 ## クイックスタート
