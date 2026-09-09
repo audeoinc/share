@@ -372,6 +372,26 @@ const OUTER_TABS_OK = (css) => Ch.OUTER_TABS.every((_, i) =>
     css.includes(`.vg-or${i + 1}:checked ~ ${path}.vg-ot${i + 1}`))) &&
   !/:checked ~ [^,{]*\*/.test(css) &&
   !/:checked ~ \.vg-ohead \./.test(css);
+
+// 添字ごとの規則は**セレクタを ',' で束ねて 1 本にまとめてある**
+// （配る CSS は viewlgc_group_css の定義本文として BigQuery に載り、本文は
+// 32 KB まで。添字ごとに飾りを書くと飾りが添字の数だけ複製される）。
+// なので 'セレクタ{飾り}' の形で直に探しても当たらない。束ねた中に
+// そのセレクタが居て、飾りが期待どおりかで見る。
+// 束ねた規則を 1 本ずつのセレクタに開く。結合子の形を見る検査は、行ではなく
+// セレクタ 1 本ずつに掛けないと ',' で束ねた時点で落ちる。
+const eachSelector = (css) => css.split('\n').flatMap((line) => {
+  const open = line.lastIndexOf('{');
+  return open < 0 ? [] : line.slice(0, open).split(',');
+});
+
+const hasRule = (css, selector, decl) => css.split('\n').some((line) => {
+  const open = line.lastIndexOf('{');
+  const close = line.lastIndexOf('}');
+  if (open < 0 || close < open) return false;
+  return line.slice(0, open).split(',').indexOf(selector) >= 0 &&
+    (decl == null || line.slice(open + 1, close) === decl);
+});
 const checks = [
   ['タイトルが base 名', h3.includes('v_daily_sales')],
   ['グループ数バッジが出る', h3.includes('3 グループ')],
@@ -562,7 +582,7 @@ const checks = [
     // checked が付くのは 1 枚目だけ。外側タブの CSS も 1 枚目を開く形になる。
     return /class="vg-or vg-or1" type="radio" name="[^"]*" id="[^"]*-1" checked>/.test(h) &&
       !/vg-or(2|3)" type="radio"[^>]*checked/.test(h) &&
-      R.chromeCss().includes('.vg-or1:checked ~ .vg-opanels > .vg-op1{display:block}');
+      hasRule(R.chromeCss(), '.vg-or1:checked ~ .vg-opanels > .vg-op1', 'display:block');
   })()],
   ['メモは作り置きせずビューが差し込む（目印が残っている）', (() => {
     const raw = Ch.wrapPage('<i>D</i>', '<i>E</i>', 'x', 'y');
@@ -600,7 +620,7 @@ const checks = [
   ['選択中のタブを塗る規則が、配った全世代のカードで効く形になっている', (() => {
     const css = R.chromeCss();
     return OUTER_TABS_OK(css) &&
-      css.includes('.vg-or2:checked ~ .vg-opanels > .vg-op2{display:block}') &&
+      hasRule(css, '.vg-or2:checked ~ .vg-opanels > .vg-op2', 'display:block') &&
       // 見出しは帯の中の直接の子。包む入れ物を挟むと上の形が崩れる
       /<div class="vg-otablist"><div class="vg-header">/.test(pageCases[0].html) &&
       !pageCases[0].html.includes('vg-ohead');
@@ -614,7 +634,7 @@ const checks = [
     const n = Ch.OUTER_TABS.length;
     return Ch.MAX_OUTER_TABS > n &&
       [...Array(Ch.MAX_OUTER_TABS).keys()].every((i) =>
-        css.includes(`.vg-or${i + 1}:checked ~ .vg-opanels > .vg-op${i + 1}{display:block}`) &&
+        hasRule(css, `.vg-or${i + 1}:checked ~ .vg-opanels > .vg-op${i + 1}`, 'display:block') &&
         CARD_GENERATIONS.every(([path]) =>
           css.includes(`.vg-or${i + 1}:checked ~ ${path}.vg-ot${i + 1}`))) &&
       !css.includes(`.vg-or${Ch.MAX_OUTER_TABS + 1}:checked`);
@@ -858,7 +878,7 @@ const checks = [
     const css = V.descCss();
     const on = 'background:#EAEEF2;border-color:#8C959F;color:#24292F';
     return css.includes(`.vg-dtab.vg-dstatic{${on};cursor:default}`) &&
-      css.includes(`.vg-dr1:checked ~ .vg-dtablist > .vg-dt1{${on}}`) &&
+      hasRule(css, '.vg-dr1:checked ~ .vg-dtablist > .vg-dt1', on) &&
       // 緑は使わない。このカードでは緑に別の意味がある（差分の追加・
       // 「1 グループ = 全部同じ」バッジ）ので、選択状態と読み分けられなくなる
       !/\.vg-d[a-z]*[0-9]*[^}]*#DAFBE1/.test(css) &&
@@ -866,7 +886,7 @@ const checks = [
       // 見た目の規則は description とラベルで共有する（別にすべきなのは
       // ラジオの名前空間だけで、塗りまで二重に書く理由が無い）。
       css.includes('.vg-dtab:hover,.vg-lbtab:hover{background:#F6F8FA;color:#24292F}') &&
-      css.includes(`.vg-lbr1:checked ~ .vg-lbtablist > .vg-lbt1{${on}}`) &&
+      hasRule(css, '.vg-lbr1:checked ~ .vg-lbtablist > .vg-lbt1', on) &&
       // 押せない見出しは hover のあとに置いて勝たせる（乗っても光らない）
       css.indexOf('.vg-dtab.vg-dstatic{') > css.indexOf('.vg-dtab:hover,');
   })()],
@@ -897,7 +917,7 @@ const checks = [
   })()],
   ['note タブのラジオは外側・基準・比較・SQL と別のクラス（連動しない）', (() => {
     const css = V.descCss();
-    return /\.vg-dr1:checked ~ \.vg-dpanels > \.vg-dp1\{display:block\}/.test(css) &&
+    return hasRule(css, '.vg-dr1:checked ~ .vg-dpanels > .vg-dp1', 'display:block') &&
       !/\.vg-or\d|\.vg-br\d|\.vg-sr\d/.test(css) &&
       !/[^d]\.vg-r\d/.test(css);
   })()],
@@ -965,7 +985,7 @@ const checks = [
   })()],
   ['ラベルのラジオは外側・基準・比較・SQL・description と別のクラス', (() => {
     const css = V.descCss();
-    return /\.vg-lbr1:checked ~ \.vg-lbpanels > \.vg-lbp1\{display:block\}/.test(css) &&
+    return hasRule(css, '.vg-lbr1:checked ~ .vg-lbpanels > .vg-lbp1', 'display:block') &&
       // description のラジオがラベルのパネルに届かない（逆も同じ）
       !/\.vg-dr\d+:checked ~ \.vg-lb/.test(css) &&
       !/\.vg-lbr\d+:checked ~ \.vg-d/.test(css);
@@ -1394,11 +1414,12 @@ const checks = [
     return /class="vg-sr vg-sr1"/.test(h) &&
       !/class="vg-r vg-sr/.test(h) && !/class="vg-br vg-sr/.test(h) &&
       // 形は「兄弟 > 子」から動かさない（この viz で動くと確認できている形）
-      css.includes('.vg-sr1:checked ~ .vg-spanels > .vg-sp1{display:block}') &&
+      hasRule(css, '.vg-sr1:checked ~ .vg-spanels > .vg-sp1', 'display:block') &&
       css.includes('.vg-sr1:checked ~ .vg-stablist > .vg-st1') &&
-      // 結合子は ~ と > だけ。子孫結合子や * を使うと実機で効かなくなる
-      css.split('\n').filter((r) => r.includes(':checked')).every((r) =>
-        /^\.[\w-]+:checked(?: [~>] \.[\w-]+)+\{/.test(r));
+      // 結合子は ~ と > だけ。子孫結合子や * を使うと実機で効かなくなる。
+      // 束ねた規則はセレクタ 1 本ずつに掛ける。
+      eachSelector(css).filter((r) => r.includes(':checked')).every((r) =>
+        /^\.[\w-]+:checked(?: [~>] \.[\w-]+)+$/.test(r));
   })()],
   ['SQL タブの CSS が上限枚数ぶんある', (() => {
     const css = Sq.sqlCss();

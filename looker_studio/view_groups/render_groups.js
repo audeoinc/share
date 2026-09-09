@@ -25,7 +25,7 @@
 const { splitLines, build2Way } = require('../ddl_diff_viz/src/lib/diff');
 const { renderFragment1, renderFragment2 } = require('../ddl_diff_viz/src/lib/render');
 const {
-  MAX_TABS, OUTER_TABS, MAX_OUTER_TABS, CSS_GEN,
+  MAX_TABS, OUTER_TABS, MAX_OUTER_TABS, CSS_GEN, groupRule,
   esc, hashId, label, header, notice, kindText,
 } = require('./chrome.js');
 
@@ -471,11 +471,11 @@ function chromeCss() {
   // ぶんしか規則が無いと、足したタブは押せるのに中身が出ない（反転もしない）。
   // 先の番号まで出しておけば、次にタブを足すときはカードの貼り替えだけで済む。
   const TAB_PATHS = ['.vg-otablist > ', '.vg-ohead > .vg-otablist > '];
-  for (let i = 1; i <= MAX_OUTER_TABS; i++) {
-    rules.push(`.vg-or${i}:checked ~ .vg-opanels > .vg-op${i}{display:block}`);
-    rules.push(TAB_PATHS.map((path) => `.vg-or${i}:checked ~ ${path}.vg-ot${i}`).join(',') +
-      `{background:#24292F;border-color:#24292F;color:#fff}`);
-  }
+  rules.push(groupRule(MAX_OUTER_TABS,
+    (i) => `.vg-or${i}:checked ~ .vg-opanels > .vg-op${i}`, 'display:block'));
+  rules.push(groupRule(MAX_OUTER_TABS,
+    (i) => TAB_PATHS.map((path) => `.vg-or${i}:checked ~ ${path}.vg-ot${i}`),
+    'background:#24292F;border-color:#24292F;color:#fff'));
   // 内側のタブ本体。ID ではなくクラスで書くので、CSS を静的に保てる。
   //
   // **選択中は比較ペインと同じ薄い緑にする。** このタブが選ぶのは「右ペインに
@@ -489,12 +489,14 @@ function chromeCss() {
   //
   // 以前は白（＝パネルと同じ）だった。未選択も白地だったので**白 → 白**に
   // なり、切り替えは効いているのに「色が変わらない」と読まれた。
-  for (let i = 1; i <= MAX_TABS; i++) {
-    rules.push(`.vg-r${i}:checked ~ .vg-panels > .vg-p${i}{display:block}`);
-    rules.push(`.vg-r${i}:checked ~ .vg-tablist > .vg-t${i}` +
-      `{background:#f0f4ea;border-color:#c4d2ac;color:#24292F}`);
-    rules.push(`.vg-r${i}:checked ~ .vg-tablist > .vg-t${i} .vg-tabn{background:#dfe7d2;color:#58683e}`);
-  }
+  rules.push(groupRule(MAX_TABS,
+    (i) => `.vg-r${i}:checked ~ .vg-panels > .vg-p${i}`, 'display:block'));
+  rules.push(groupRule(MAX_TABS,
+    (i) => `.vg-r${i}:checked ~ .vg-tablist > .vg-t${i}`,
+    'background:#f0f4ea;border-color:#c4d2ac;color:#24292F'));
+  rules.push(groupRule(MAX_TABS,
+    (i) => `.vg-r${i}:checked ~ .vg-tablist > .vg-t${i} .vg-tabn`,
+    'background:#dfe7d2;color:#58683e'));
   return rules.join('\n');
 }
 

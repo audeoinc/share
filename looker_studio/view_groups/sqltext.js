@@ -23,7 +23,7 @@
  * もう片方も切り替わる。
  */
 
-const { esc, hashId, label, notice, MAX_SQL_TABS } = require('./chrome.js');
+const { esc, hashId, label, notice, MAX_SQL_TABS, groupRule } = require('./chrome.js');
 
 /**
  * base の全 View を 1 列に並べる。これがそのままタブの並びになる。
@@ -178,11 +178,11 @@ function sqlCss() {
   // 形は「兄弟 > 子」から動かさない。この viz で radio + :checked が動くと
   // 確かめたときの形がこれ（templated_record/samples/07_radio_tabs_test.html）。
   // 選択中は青系にして、外側（黒）・基準（薄い赤）と見分けられるようにする。
-  for (let i = 1; i <= MAX_SQL_TABS; i++) {
-    rules.push(`.vg-sr${i}:checked ~ .vg-spanels > .vg-sp${i}{display:block}`);
-    rules.push(`.vg-sr${i}:checked ~ .vg-stablist > .vg-st${i}` +
-      `{background:#DDF4FF;border-color:#54AEFF;color:#0969DA}`);
-  }
+  rules.push(groupRule(MAX_SQL_TABS,
+    (i) => `.vg-sr${i}:checked ~ .vg-spanels > .vg-sp${i}`, 'display:block'));
+  rules.push(groupRule(MAX_SQL_TABS,
+    (i) => `.vg-sr${i}:checked ~ .vg-stablist > .vg-st${i}`,
+    'background:#DDF4FF;border-color:#54AEFF;color:#0969DA'));
   return rules.join('\n');
 }
 

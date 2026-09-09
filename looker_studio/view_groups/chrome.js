@@ -13,12 +13,24 @@ const MAX_TABS = 12; // 静的 CSS が面倒を見るタブ数の上限
 // アルファベット順）。だから上限は「割れ方」ではなく **base の View 数**で
 // 決まり、リージョンを足すたびに伸びる。
 //
-// 上げても UDF のコード量は変わらない（規則はループで作るので、増えるのは
-// 生成される CSS のほうだけ）。実測で 1 枚あたり約 153 バイト:
-//   24 枚 → 26.4 KB ／ 64 枚 → 32.4 KB ／ 128 枚 → 42.2 KB
-// 描画メモリにもほぼ効かない（144 View で 0.46 MB。比較ペインの 13 MB に対し
-// て小さい）。効くのは**保存されるバイト数**で、SQL タブは基準の行ごとに
-// 毎回描かれるので base 全体では ×行数（既定 24）になる。
+// 上げても UDF のコード量は変わらない（規則はループで作る）。描画メモリにも
+// ほぼ効かない（144 View で 0.46 MB。比較ペインの 13 MB に対して小さい）。
+//
+// **効くのは配る CSS の大きさ。** これは viewlgc_group_css の**定義本文**として
+// BigQuery に載り、本文は 32 KB までしか無い（JavaScript でも SQL でも同じ）。
+// 24 → 128 に上げたときに 43,771 バイトになり、CREATE が
+//   Definition body too long 43771; max allowed 32768 bytes
+// で落ちた。いまは groupRule() が同じ飾りの規則を ',' で束ねるので 1 枚
+// あたり約 89 バイト。固定ぶんが約 20 KB あるので **載るのは 140 枚あたりが
+// 頭打ち**（128 枚で 31,381 B ／ 残り 1,387 B）。
+//
+// **上げるときは node build_udf.mjs が本文の大きさを見張る。** 超えると生成が
+// 失敗して view_group_html.sql を書き出さないので、BigQuery まで持って行けない。
+// それ以上を出したくなったら、CSS を分割して複数の関数に載せ group_css が
+// 連結する形にする（本文の上限は関数ごとなので、分ければ天井が上がる）。
+//
+// 保存されるバイト数にも効く。SQL タブは基準の行ごとに毎回描かれるので
+// base 全体では ×行数（max_ref_rows、既定 24）になる。
 const MAX_SQL_TABS = 128;
 // note タブの上段（View の description）のタブ数の上限。description が
 // 何種類に割れているかで決まる。全 View が別々の説明を持てば View 数まで
@@ -111,6 +123,38 @@ function cssGuard() {
     `template_style.html を貼り直してください。` +
     `貼り替えるまで、タブが正しく出ません` +
     `（切り替わらない・中身が全部同時に出る・選択中が分からない）。</div>`;
+}
+
+/**
+ * 同じ飾りを持つ添字つきの規則を **1 本にまとめる**。
+ *
+ *   まとめない  .vg-sr1:checked ~ .vg-spanels > .vg-sp1{display:block}
+ *               .vg-sr2:checked ~ .vg-spanels > .vg-sp2{display:block}   … × N
+ *   まとめる    .vg-sr1:checked ~ .vg-spanels > .vg-sp1,
+ *               .vg-sr2:checked ~ .vg-spanels > .vg-sp2{display:block}
+ *
+ * 配る CSS は `viewlgc_group_css` の**本文として BigQuery に載る**。関数の
+ * 定義本文は 32 KB までで、これは JavaScript でも SQL でも同じ（SQL なら
+ * 上限が無いと思って SQL 側に焼いた経緯があるが、そちらでも当たる）。
+ * 添字ごとに飾りを書くと飾りの文字列が添字の数だけ複製されるので、
+ * **タブの上限を上げたときにいちばん効くのがここ**。
+ *
+ * セレクタの形（'兄弟 ~ 親 > 子'）と空白は動かさない。この viz で
+ * radio + :checked が動くと確かめたときの形がこれで、',' で束ねても
+ * 一つひとつのセレクタは変わらない。
+ *
+ * @param {number} n        添字の上限（1 起点）
+ * @param {(i:number)=>string|string[]} selector 添字 i のセレクタ
+ * @param {string} decl     '{' と '}' を除いた飾り
+ */
+function groupRule(n, selector, decl) {
+  const sels = [];
+  for (let i = 1; i <= n; i++) {
+    const s = selector(i);
+    if (Array.isArray(s)) for (const x of s) sels.push(x);
+    else sels.push(s);
+  }
+  return sels.join(',') + '{' + decl + '}';
 }
 
 function esc(s) {
@@ -234,6 +278,6 @@ function wrapPage(diffHtml, erdHtml, colsHtml, sqlHtml, noteHtml, base, labelSpl
 module.exports = {
   MAX_TABS, MAX_SQL_TABS, MAX_DESC_TABS, MAX_LABEL_TABS,
   MAX_OUTER_TABS, OUTER_TABS,
-  NOTE_MARK, CSS_GEN, cssGuard,
+  NOTE_MARK, CSS_GEN, cssGuard, groupRule,
   esc, hashId, label, badge, header, notice, KIND_TEXT, kindText, wrapPage,
 };

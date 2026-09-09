@@ -1030,12 +1030,35 @@ const checks = [
 ];
 
 // サイズ検証
-// cssPack は生成時に CSS を作るためだけに使う。SQL には本文を焼き込むので、
-// インラインのコード ブロブの上限とは無関係。
 for (const p of [analyzePack, renderPack, erdPack, pagePack, markdownPack]) {
   const size = Buffer.byteLength(p.code);
   checks.push([`${p.label} が ${(SIZE_LIMIT / 1024).toFixed(0)} KB 以内`, size <= SIZE_LIMIT]);
 }
+
+// 焼き込んだ CSS の本文サイズ。
+//
+// **32 KB の上限は「関数の定義本文」に掛かる。JavaScript でも SQL でも同じ。**
+// cssPack はインラインの JS 枠に収まらなくなったので SQL 側へ焼き込んだ経緯が
+// あり、そのとき「SQL なら上限と無関係」と書いてここを見張っていなかった。
+// SQL タブの上限を 24 → 128 に上げたときに 43,771 バイトになり、
+//   Definition body too long 43771; max allowed 32768 bytes
+// で viewlgc_group_css の CREATE が落ちた。**生成は通り、BigQuery で落ちる**
+// ので、ここで止めないと気づけない。
+//
+// 本文は AS (<TO_JSON_STRING(css_text)>) なので、JSON にした長さ + 括弧 2 文字。
+// CSS はほぼ ASCII で、TO_JSON_STRING の逃がし方も JSON.stringify と同じ。
+//
+// 伸びるのはタブの上限（とくに MAX_SQL_TABS。1 枚あたり約 89 バイト）。
+// 固定ぶんが約 20 KB あるので、載るのは 140 枚あたりが頭打ち。それ以上を
+// 出したくなったら、CSS を分割して複数の関数に載せ、group_css が連結する形に
+// する（本文の上限は関数ごとなので、分ければ天井が上がる）。
+const CSS_BODY_LIMIT = 32 * 1024;
+const cssBodyBytes = Buffer.byteLength(JSON.stringify(css)) + 2;
+checks.push([
+  `焼き込んだ CSS が ${(CSS_BODY_LIMIT / 1024).toFixed(0)} KB 以内` +
+  `（viewlgc_group_css の定義本文。いま ${cssBodyBytes} B / 残り ` +
+  `${CSS_BODY_LIMIT - cssBodyBytes} B。超えたら MAX_SQL_TABS を下げる）`,
+  cssBodyBytes <= CSS_BODY_LIMIT]);
 
 let failed = 0;
 for (const [name, ok] of checks) {

@@ -55,7 +55,7 @@
  * :checked の規則さえ別なら、塗りを分ける理由が無いため。
  */
 
-const { esc, hashId, notice, MAX_DESC_TABS, MAX_LABEL_TABS } = require('./chrome.js');
+const { esc, hashId, notice, MAX_DESC_TABS, MAX_LABEL_TABS, groupRule } = require('./chrome.js');
 
 /**
  * 選択中のタブの塗り。**無彩色にしてある。**
@@ -391,14 +391,14 @@ function descCss() {
   // タブ本体。ID ではなくクラスで書くので、レコードが変わってもこの CSS のまま。
   // 形は「兄弟 > 子」から動かさない。この viz で radio + :checked が動くと
   // 確かめたときの形がこれ（templated_record/samples/07_radio_tabs_test.html）。
-  for (let i = 1; i <= MAX_DESC_TABS; i++) {
-    rules.push(`.vg-dr${i}:checked ~ .vg-dpanels > .vg-dp${i}{display:block}`);
-    rules.push(`.vg-dr${i}:checked ~ .vg-dtablist > .vg-dt${i}{${DESC_TAB_ON}}`);
-  }
-  for (let i = 1; i <= MAX_LABEL_TABS; i++) {
-    rules.push(`.vg-lbr${i}:checked ~ .vg-lbpanels > .vg-lbp${i}{display:block}`);
-    rules.push(`.vg-lbr${i}:checked ~ .vg-lbtablist > .vg-lbt${i}{${DESC_TAB_ON}}`);
-  }
+  rules.push(groupRule(MAX_DESC_TABS,
+    (i) => `.vg-dr${i}:checked ~ .vg-dpanels > .vg-dp${i}`, 'display:block'));
+  rules.push(groupRule(MAX_DESC_TABS,
+    (i) => `.vg-dr${i}:checked ~ .vg-dtablist > .vg-dt${i}`, DESC_TAB_ON));
+  rules.push(groupRule(MAX_LABEL_TABS,
+    (i) => `.vg-lbr${i}:checked ~ .vg-lbpanels > .vg-lbp${i}`, 'display:block'));
+  rules.push(groupRule(MAX_LABEL_TABS,
+    (i) => `.vg-lbr${i}:checked ~ .vg-lbtablist > .vg-lbt${i}`, DESC_TAB_ON));
   return rules.join('\n');
 }
 
