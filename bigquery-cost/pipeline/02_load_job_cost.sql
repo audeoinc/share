@@ -8,9 +8,9 @@
 -- 二重登録にならない。
 --
 -- 設計上のポイント:
---   * SCRIPT 親ジョブは除外し、子ジョブだけを取り込む。親は子の合計を持つため、
---     両方入れると二重計上になる。除外は IFNULL(statement_type,'') で行う
---     （statement_type != 'SCRIPT' と書くと NULL 行が黙って落ちる）。
+--   * 親 SCRIPT と子文の両方を取り込む。二重計上の切り分けはここではせず、
+--     bqc_vw_t_job_cost_resolved の is_cost_countable が担当する
+--     （チャンク分割スキャンだと親子が別チャンクに落ちて判定できないため）。
 --   * ラベル subsystemid は子ジョブに継承されることを実測で確認済み（2026-09）。
 --     そのため親を引き当てる join は持たない。継承されない環境に移す場合は
 --     parent_job_id で親のラベルを引く必要がある。
@@ -189,10 +189,18 @@ BEGIN
           AND state = 'DONE'
           AND query IS NOT NULL
           AND job_type IN UNNEST(@collected_job_types)
-          -- SCRIPT 親は子ジョブの合計を持つため、両方入れると二重計上になる。
-          -- statement_type != 'SCRIPT' と書くと statement_type が NULL の行まで
-          -- 三値論理で黙って落ちるので、必ず IFNULL を噛ませて比較する。
-          AND IFNULL(statement_type, '') != 'SCRIPT'
+          -- 親 SCRIPT も子文もそのまま取り込む。親はスクリプト全文・ラベル・
+          -- 全体の所要時間を持っており、「このスケジュールドクエリ1本でいくら」を
+          -- 見るための単位になるため、捨てずに残す。
+          --
+          -- ただし親 SCRIPT の total_bytes_billed / total_slot_ms は子の合計と
+          -- 一致する（実測確認済み）。つまり親は集計行であり、そのまま両方を
+          -- 足すと二重計上になる。その切り分けは bqc_vw_t_job_cost_resolved の
+          -- is_cost_countable が担当する。ここでは判定しない。
+          --
+          -- 判定を 02 でやらない理由: このスキャンは load_chunk_days 日ずつに
+          -- 分かれているため、親が前のチャンク・子が次のチャンクに落ちると
+          -- その時点では親子関係が見えない。表全体が見えるビュー側で判定する。
       ),
       deduped AS (
         SELECT *

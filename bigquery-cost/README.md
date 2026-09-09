@@ -65,8 +65,11 @@ Looker Studio の接続は [`looker/README.md`](looker/README.md) を参照し�
 INFORMATION_SCHEMA.JOBS  （履歴 180 日）
    │  02 が日次で増分取り込み。SCRIPT 親を除外して子jobだけを取る
    ▼
-bqc_t_job_cost           job 粒度。正規化SQL・fingerprint・参照テーブルを付与
-   │  03 が集約し、保持期間を超えた行を刈り取る
+bqc_t_job_cost           job 粒度。親 SCRIPT と子文の両方。正規化SQL・fingerprint を付与
+   │
+bqc_vw_t_job_cost_resolved   親子関係の解決ビュー（job_role / is_cost_countable /
+   │                         root_job_id / statement_index）
+   │  03 が is_cost_countable の行だけを集約し、保持期間を超えた行を刈り取る
    ▼
 bqc_t_daily_cost         日 × fingerprint × 実行者
    │                     ＋ bqc_m_query_fingerprint（first_seen / プレビュー）
@@ -158,6 +161,41 @@ echo "SELECT 1 FROM t WHERE x = 'a'" | python3 tools/normalize_reference.py -
 畳まないと GA4 のクエリが毎日別 fingerprint になり、月次集計が成立しません。
 GA プロパティID（`analytics_123456789`）は桁数が違うので影響を受けません。
 
+### 親子ジョブ（SCRIPT と子文）
+
+`bqc_t_job_cost` には **親 SCRIPT と子文の両方**が入っています。親はスクリプト全文・
+ラベル・全体の所要時間を持っていて、「このスケジュールドクエリ1本でいくら」という
+単位を出すのに要るためです。
+
+ただし実測の結果、**親 SCRIPT の `total_bytes_billed` / `total_slot_ms` は子の合計と
+一致します**（親は集計行）。そのまま両方を足すと二重計上になるので、集計は必ず
+`bqc_vw_t_job_cost_resolved` を経由し、`is_cost_countable = TRUE` で絞ってください。
+
+| 列 | 内容 |
+|---|---|
+| `job_role` | `PARENT`（子を持つ）/ `CHILD`（親を持つ）/ `STANDALONE` |
+| `is_cost_countable` | 集計してよい行か。`NOT has_child_jobs AND statement_type != 'SCRIPT'` |
+| `root_job_id` | 作業単位のキー。子なら `parent_job_id`、それ以外は自分の `job_id` |
+| `statement_index` | 親の中での実行順。スクリプトのどの文が重いかを見る軸（親・単独は NULL） |
+| `root_statement_count` | その作業単位に属する子の本数 |
+
+判定を `02` ではなくビューに置いているのは、`02` が `load_chunk_days` 日ずつに
+分けて JOBS をスキャンするためです。親が前のチャンク・子が次のチャンクに落ちると
+その時点では親子関係が見えません。表全体が見えるビューで判定すれば、チャンクの
+切れ目に影響されません。
+
+`is_cost_countable` を「**葉であること**」で定義しているのも意図的です。
+`statement_type != 'SCRIPT'` だけだと、子を持つ別種のジョブ（`CALL` など）が
+将来現れたときに素通りします。両方で挟んで安全側に倒しています。
+
+**`bqc_t_daily_cost` 以降には集計対象の行しか入りません。** つまり Looker Studio の
+利用者は親行に触れないので、二重計上のしようがありません。親を見るのは BigQuery 側で
+アドホックに掘るときだけ、という切り分けです。
+
+多段ネスト（親がさらに親を持つ）は実測で 0 件だったため、`root_job_id` は
+`parent_job_id` の 1 ホップで解決しています。将来ネストが現れた場合は再帰的な解決が
+必要になります。
+
 ### 実行者の識別
 
 ジョブラベル `subsystemid` の値、無ければ `user_email` を `executor_id` にします。
@@ -201,7 +239,7 @@ GA プロパティID（`analytics_123456789`）は桁数が違うので影響を
 | 対象 | 状況 |
 |---|---|
 | 正規化ロジック | **RE2 実機で 29/29 パス**（`tools/normalize_reference.py`） |
-| 埋め込み動的SQLの構文 + DECLARE の位置 | **14/14 パス**（`tools/check_templates.py`、sqlglot bigquery） |
+| 埋め込み動的SQLの構文 + DECLARE の位置 | **17/17 パス**（`tools/check_templates.py`、sqlglot bigquery） |
 | BigQuery 実機での実行 | **未実施。** 本セッションに `bq` / `gcloud` と GCP 認証が無いため |
 
 `pipeline/*.sql` は BigQuery スクリプト構文（`BEGIN` / `DECLARE` / `EXECUTE IMMEDIATE`）を

@@ -19,7 +19,8 @@
 -- 作成物:
 --
 --   UDF   bqc_normalize_sql          … SQL からリテラル/コメントを除去した正規化文字列
---   表    bqc_t_job_cost             … job 粒度のコスト実績（子job のみ）
+--   表    bqc_t_job_cost             … job 粒度のコスト実績（親 SCRIPT と子文の両方）
+--   VIEW  bqc_vw_t_job_cost_resolved … 上に親子関係の解決列を足したもの。集計はこちらを使う
 --   表    bqc_t_daily_cost           … 日 × fingerprint × 実行者 の集約（Looker が読む実体）
 --   表    bqc_m_query_fingerprint    … fingerprint 次元（first_seen / プレビュー）
 --   VIEW  bqc_vw_t_daily_cost_report … レポート定義の正本
@@ -105,11 +106,13 @@ BEGIN
   DECLARE udf_dataset_fqn STRING;
   DECLARE normalize_udf_fqn STRING;
   DECLARE job_cost_fqn STRING;
+  DECLARE job_cost_resolved_fqn STRING;
   DECLARE daily_cost_fqn STRING;
   DECLARE query_dim_fqn STRING;
   DECLARE report_view_fqn STRING;
   DECLARE normalize_udf_name STRING;
   DECLARE job_cost_name STRING;
+  DECLARE job_cost_resolved_name STRING;
   DECLARE daily_cost_name STRING;
   DECLARE query_dim_name STRING;
   DECLARE report_view_name STRING;
@@ -146,6 +149,8 @@ BEGIN
 
   SET normalize_udf_name = udf_name_prefix || 'bqc_' || 'normalize_sql' || udf_name_suffix;
   SET job_cost_name  = table_name_prefix || 'bqc_' || 't_'  || 'job_cost'          || table_name_suffix;
+  SET job_cost_resolved_name =
+    table_name_prefix || 'bqc_' || 'vw_t_' || 'job_cost_resolved' || table_name_suffix;
   SET daily_cost_name = table_name_prefix || 'bqc_' || 't_' || 'daily_cost'        || table_name_suffix;
   SET query_dim_name = table_name_prefix || 'bqc_' || 'm_'  || 'query_fingerprint' || table_name_suffix;
   SET report_view_name =
@@ -158,6 +163,7 @@ BEGIN
   SET udf_dataset_fqn   = FORMAT('%s.%s', udf_project_id, udf_dataset);
   SET normalize_udf_fqn = FORMAT('%s.%s', udf_dataset_fqn, normalize_udf_name);
   SET job_cost_fqn      = FORMAT('%s.%s', dataset_fqn, job_cost_name);
+  SET job_cost_resolved_fqn = FORMAT('%s.%s', dataset_fqn, job_cost_resolved_name);
   SET daily_cost_fqn    = FORMAT('%s.%s', dataset_fqn, daily_cost_name);
   SET query_dim_fqn     = FORMAT('%s.%s', dataset_fqn, query_dim_name);
   SET report_view_fqn   = FORMAT('%s.%s', dataset_fqn, report_view_name);
@@ -332,7 +338,73 @@ BEGIN
   """, job_cost_fqn);
 
   -- --------------------------------------------------------------------------
-  -- STEP 4: bqc_t_daily_cost -- 日 x fingerprint x 実行者 の集約
+  -- STEP 4: bqc_vw_t_job_cost_resolved -- 親子関係を解決したビュー
+  -- --------------------------------------------------------------------------
+  -- 親子のセマンティクスはすべてここに集約する。02 は JOBS の行をそのまま入れる
+  -- だけにして、判定はこのビューが担う。
+  --
+  -- なぜ 02 で判定しないか: 02 は 15 日ずつに分けて JOBS をスキャンするため、
+  -- 親が前のチャンク・子が次のチャンクに落ちると、その時点では親子関係が見えない。
+  -- 表全体が見えるビューで判定すれば、チャンクの切れ目に影響されない。
+  --
+  -- 実測で確認済み（2026-09、adhoc/08_inspect_job_hierarchy.sql）:
+  --   * 親子は 1 段のみ。「子であり、かつ子を持つ」ジョブは 0 件。
+  --     よって root_job_id = IFNULL(parent_job_id, job_id) で大元に到達できる。
+  --   * 親 SCRIPT の total_bytes_billed / total_slot_ms は子の合計と一致する。
+  --     つまり親は子の集計行であり、両方を足すと二重計上になる。
+  EXECUTE IMMEDIATE FORMAT(r"""
+    CREATE OR REPLACE VIEW `%s`
+    OPTIONS(description = 'bqc_t_job_cost に親子関係の解決列を足したビュー。コストを集計するときは必ず is_cost_countable = TRUE で絞ること。')
+    AS
+    WITH parent_ids AS (
+      -- 「子を持つか」は相関サブクエリではなく親IDの一覧との LEFT JOIN で判定する
+      -- （BigQuery は CTE を参照する相関サブクエリを常に de-correlate できない）。
+      SELECT DISTINCT job_region, project_id, parent_job_id AS job_id
+      FROM `%s`
+      WHERE parent_job_id IS NOT NULL
+    ),
+    flagged AS (
+      SELECT
+        j.*,
+        j.parent_job_id IS NOT NULL AS is_child,
+        p.job_id IS NOT NULL        AS has_child_jobs,
+        IFNULL(j.parent_job_id, j.job_id) AS root_job_id
+      FROM `%s` AS j
+      LEFT JOIN parent_ids AS p
+        ON  p.job_region = j.job_region
+        AND p.project_id = j.project_id
+        AND p.job_id     = j.job_id
+    )
+    SELECT
+      * EXCEPT(is_child),
+      CASE
+        WHEN has_child_jobs THEN 'PARENT'
+        WHEN is_child       THEN 'CHILD'
+        ELSE 'STANDALONE'
+      END AS job_role,
+      -- 子を持つ行は自分では計算していない集計行なので、コスト合計から外す。
+      -- statement_type でも重ねて弾いているのは、子が保持期間の外に出るなどして
+      -- 一時的に「子が見えない親」が生じても安全側に倒すため。
+      NOT has_child_jobs AND IFNULL(statement_type, '') != 'SCRIPT'
+        AS is_cost_countable,
+      -- 親の中での実行順。スクリプトのどの文が重いかを見るための軸。
+      -- 親自身と単独ジョブは NULL。
+      CASE
+        WHEN parent_job_id IS NULL THEN NULL
+        ELSE ROW_NUMBER() OVER (
+          PARTITION BY job_region, project_id, parent_job_id
+          ORDER BY creation_time, start_time, job_id
+        )
+      END AS statement_index,
+      -- この作業単位に属する子の本数（親行にも子行にも同じ値が入る）。
+      SUM(IF(parent_job_id IS NOT NULL, 1, 0)) OVER (
+        PARTITION BY job_region, project_id, root_job_id
+      ) AS root_statement_count
+    FROM flagged
+  """, job_cost_resolved_fqn, job_cost_fqn, job_cost_fqn);
+
+  -- --------------------------------------------------------------------------
+  -- STEP 5: bqc_t_daily_cost -- 日 x fingerprint x 実行者 の集約
   -- --------------------------------------------------------------------------
   -- Looker Studio が実際に読むのはこちら。job 粒度より数桁小さいので速い。
   EXECUTE IMMEDIATE FORMAT(r"""
@@ -360,7 +432,7 @@ BEGIN
   """, daily_cost_fqn);
 
   -- --------------------------------------------------------------------------
-  -- STEP 5: bqc_m_query_fingerprint -- fingerprint 次元
+  -- STEP 6: bqc_m_query_fingerprint -- fingerprint 次元
   -- --------------------------------------------------------------------------
   -- 1 行 = 1 fingerprint。「新しくコストを発生させた SQL」の判定に使う
   -- first_seen_date と、レポート表示用のプレビューを持つ。
@@ -385,7 +457,7 @@ BEGIN
   """, query_dim_fqn);
 
   -- --------------------------------------------------------------------------
-  -- STEP 6: bqc_vw_t_daily_cost_report -- Looker Studio 用ビュー
+  -- STEP 7: bqc_vw_t_daily_cost_report -- レポート定義
   -- --------------------------------------------------------------------------
   -- レポート定義の正本。ブレンドを使わずに済むよう、集約 (bqc_t_daily_cost) と
   -- 次元 (bqc_m_query_fingerprint) をここで結合する。
@@ -442,6 +514,7 @@ BEGIN
     udf_dataset_fqn       AS udf_dataset,
     normalize_udf_fqn     AS normalize_udf,
     job_cost_fqn          AS job_cost_table,
+    job_cost_resolved_fqn AS job_cost_resolved_view,
     daily_cost_fqn        AS daily_cost_table,
     query_dim_fqn         AS query_fingerprint_table,
     report_view_fqn       AS report_definition_view,

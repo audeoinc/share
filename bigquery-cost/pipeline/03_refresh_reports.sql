@@ -57,6 +57,7 @@ BEGIN
   DECLARE repository_project_id STRING DEFAULT NULL;
   DECLARE project_token STRING;
   DECLARE job_cost_fqn STRING;
+  DECLARE job_cost_resolved_fqn STRING;
   DECLARE daily_cost_fqn STRING;
   DECLARE query_dim_fqn STRING;
   DECLARE report_view_fqn STRING;
@@ -65,6 +66,7 @@ BEGIN
   DECLARE retention_cutoff_date DATE;
   -- 診断用。どこで止まったのかを最後の SELECT で見えるようにするためだけの変数。
   DECLARE job_cost_rows_in_window INT64 DEFAULT 0;
+  DECLARE countable_rows_in_window INT64 DEFAULT 0;
   DECLARE daily_cost_merged_rows INT64 DEFAULT 0;
   DECLARE query_dim_merged_rows INT64 DEFAULT 0;
   DECLARE daily_cost_rows_after INT64 DEFAULT 0;
@@ -96,6 +98,12 @@ BEGIN
   SET job_cost_fqn = FORMAT(
     '%s.%s.%s', repository_project_id, repository_dataset,
     table_name_prefix || 'bqc_' || 't_' || 'job_cost' || table_name_suffix
+  );
+  -- 集計は必ず解決ビュー経由で行う。親 SCRIPT は子の合計を持つ集計行なので、
+  -- 素の job_cost をそのまま足すと二重計上になる。
+  SET job_cost_resolved_fqn = FORMAT(
+    '%s.%s.%s', repository_project_id, repository_dataset,
+    table_name_prefix || 'bqc_' || 'vw_t_' || 'job_cost_resolved' || table_name_suffix
   );
   SET daily_cost_fqn = FORMAT(
     '%s.%s.%s', repository_project_id, repository_dataset,
@@ -131,7 +139,9 @@ BEGIN
       IFNULL(
         (
           SELECT MIN(j.creation_date)
-          FROM (SELECT DISTINCT creation_date FROM `%s`) AS j
+          FROM (
+            SELECT DISTINCT creation_date FROM `%s` WHERE is_cost_countable
+          ) AS j
           LEFT JOIN (SELECT DISTINCT usage_date FROM `%s`) AS d
             ON d.usage_date = j.creation_date
           WHERE d.usage_date IS NULL
@@ -139,7 +149,7 @@ BEGIN
         DATE_SUB(CURRENT_DATE(), INTERVAL @refresh_lookback_days DAY)
       )
     )
-  """, job_cost_fqn, daily_cost_fqn)
+  """, job_cost_resolved_fqn, daily_cost_fqn)
   INTO refresh_from_date
   USING refresh_lookback_days AS refresh_lookback_days;
 
@@ -156,10 +166,16 @@ BEGIN
 
   -- 集約対象の母数。これが 0 なら原因は 03 ではなく 02（あるいは参照先データセットの
   -- 食い違い）にある、と最後のサマリだけで切り分けられるようにしておく。
+  -- 全行と集計対象行を分けて数えるのは、親 SCRIPT の割合が見えるようにするため。
   EXECUTE IMMEDIATE FORMAT(
-    'SELECT COUNT(*) FROM `%s` WHERE creation_date >= @refresh_from_date', job_cost_fqn
+    r"""SELECT
+          COUNT(*)                       AS all_rows,
+          COUNTIF(is_cost_countable)     AS countable_rows
+        FROM `%s`
+        WHERE creation_date >= @refresh_from_date""",
+    job_cost_resolved_fqn
   )
-  INTO job_cost_rows_in_window
+  INTO job_cost_rows_in_window, countable_rows_in_window
   USING refresh_from_date AS refresh_from_date;
 
   -- --------------------------------------------------------------------------
@@ -190,6 +206,8 @@ BEGIN
         CURRENT_TIMESTAMP()             AS updated_at
       FROM `%s`
       WHERE creation_date >= @refresh_from_date
+        -- 親 SCRIPT を除く。これを外すと集計が二重になる。
+        AND is_cost_countable
       GROUP BY
         usage_date, job_region, normalized_fingerprint,
         executor_id, executor_source, pricing_model, reservation_id
@@ -230,7 +248,7 @@ BEGIN
       )
     WHEN NOT MATCHED BY SOURCE AND target.usage_date >= @refresh_from_date THEN
       DELETE
-  """, daily_cost_fqn, job_cost_fqn)
+  """, daily_cost_fqn, job_cost_resolved_fqn)
   USING refresh_from_date AS refresh_from_date;
 
   SET daily_cost_merged_rows = @@row_count;
@@ -267,6 +285,7 @@ BEGIN
           normalized_from_preview,
           referenced_tables_text
         FROM `%s`
+        WHERE is_cost_countable
         QUALIFY ROW_NUMBER() OVER (
           PARTITION BY normalized_fingerprint
           ORDER BY creation_time DESC
@@ -337,7 +356,7 @@ BEGIN
       source.distinct_executor_count,
       CURRENT_TIMESTAMP()
     )
-  """, query_dim_fqn, daily_cost_fqn, job_cost_fqn);
+  """, query_dim_fqn, daily_cost_fqn, job_cost_resolved_fqn);
 
   SET query_dim_merged_rows = @@row_count;
 
@@ -400,7 +419,9 @@ BEGIN
   -- daily_cost に行が入らなかったときは、この出力だけで原因を絞り込めるようにしてある。
   --   job_cost_rows_in_window = 0 → 集約する母数が無い。02 が入れていないか、
   --                                 参照している job_cost が別データセットのもの。
-  --   job_cost_rows_in_window > 0 かつ daily_cost_merged_rows = 0
+  --   countable_rows_in_window = 0 → 全行が親 SCRIPT 扱いになっている。
+  --                                 解決ビューの判定を疑う。
+  --   countable > 0 かつ daily_cost_merged_rows = 0
   --                               → 集約側の問題。refresh_from_date を確認する。
   EXECUTE IMMEDIATE FORMAT('SELECT COUNT(*) FROM `%s`', daily_cost_fqn)
     INTO daily_cost_rows_after;
@@ -415,6 +436,7 @@ BEGIN
     report_table_fqn         AS looker_studio_table,
     refresh_from_date        AS rebuilt_from_date,
     job_cost_rows_in_window  AS job_cost_rows_in_window,
+    countable_rows_in_window AS countable_rows_in_window,
     daily_cost_merged_rows   AS daily_cost_rows_affected,
     query_dim_merged_rows    AS query_fingerprint_rows_affected,
     daily_cost_rows_after    AS daily_cost_total_rows,
