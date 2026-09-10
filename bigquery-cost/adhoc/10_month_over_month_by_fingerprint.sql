@@ -19,7 +19,12 @@
 --   CONTINUING  両方の月にある。slot_hours_delta が増減
 --
 -- 親スクリプトの列:
---   parent_fingerprint / parent_preview     どのスクリプトに属する処理か
+--   parent_fingerprint / parent_preview     どのスクリプトに属する処理か。
+--                                           識別子は親の SQL 文ではなく
+--                                           root_composite_fingerprint（実際に流した
+--                                           文の並びのハッシュ）。定型スクリプトでも
+--                                           中身の違う処理を取り違えない。
+--                                           単独ジョブは自分自身が作業単位になる。
 --   parent_this_month_slot_hours            そのスクリプト全体の今月のスロット消費
 --   parent_prev_month_slot_hours            同じく先月
 --   ※ 親の値（root 系）は子の合計。子の値（statement 系）と足さないこと。
@@ -53,6 +58,8 @@ BEGIN
     is_cost_countable,
     normalized_fingerprint,
     normalized_preview,
+    root_composite_fingerprint,
+    statement_index,
     root_slot_hours,
     root_tib_billed,
     statement_slot_hours,
@@ -61,31 +68,44 @@ BEGIN
   WHERE creation_date >= prev_month
     AND creation_date < DATE_ADD(this_month, INTERVAL 1 MONTH);
 
-  -- 親スクリプト側の月次。親行は is_cost_countable = FALSE なので別に集計する。
+  -- スクリプト側の月次。親行は is_cost_countable = FALSE なので別に集計する。
+  -- 束ねるキーは親の SQL 文の fingerprint ではなく root_composite_fingerprint。
+  -- 定型スクリプト（SQL を変数に持って EXECUTE IMMEDIATE する形）だと親の SQL 文は
+  -- 全実行で同じ文面になり、正規化するとまったく別の処理が 1 つに融合してしまう。
+  -- 表示名。親の SQL 文（テンプレートなら中身が分からない）ではなく、実際に流した
+  -- 1 文目のプレビューを使う。
+  -- 相関サブクエリではなく独立した集計 + JOIN にしている。BigQuery は他テーブルを
+  -- 参照する相関サブクエリを常に de-correlate できるとは限らないため。
+  CREATE OR REPLACE TEMP TABLE composite_label AS
+  SELECT
+    root_composite_fingerprint,
+    ARRAY_AGG(
+      normalized_preview IGNORE NULLS
+      ORDER BY statement_index, normalized_preview
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS first_statement_preview
+  FROM scoped
+  WHERE is_cost_countable
+  GROUP BY root_composite_fingerprint;
+
   CREATE OR REPLACE TEMP TABLE parent_monthly AS
   SELECT
-    usage_month,
-    normalized_fingerprint AS parent_fingerprint,
-    ANY_VALUE(normalized_preview) AS parent_preview,
-    SUM(root_slot_hours) AS parent_slot_hours
-  FROM scoped
-  WHERE job_role = 'PARENT'
-  GROUP BY usage_month, normalized_fingerprint;
+    p.usage_month,
+    p.root_composite_fingerprint AS parent_fingerprint,
+    ANY_VALUE(l.first_statement_preview) AS parent_preview,
+    SUM(p.root_slot_hours) AS parent_slot_hours
+  FROM scoped AS p
+  LEFT JOIN composite_label AS l
+    ON l.root_composite_fingerprint = p.root_composite_fingerprint
+  WHERE p.job_role = 'PARENT'
+  GROUP BY p.usage_month, p.root_composite_fingerprint;
 
-  -- 子（と単独ジョブ）を、所属する親の fingerprint 付きで月次に畳む。
+  -- 子（と単独ジョブ）を月次に畳む。所属スクリプトは root_composite_fingerprint が
+  -- 全行に入っているので、親を引き当てる join は要らない。
   CREATE OR REPLACE TEMP TABLE child_monthly AS
-  WITH parent_of_job AS (
-    SELECT job_region, project_id, job_id, normalized_fingerprint AS parent_fingerprint
-    FROM scoped
-    WHERE job_role = 'PARENT'
-  ),
-  with_parent AS (
-    SELECT c.*, p.parent_fingerprint
+  WITH with_parent AS (
+    SELECT c.*, c.root_composite_fingerprint AS parent_fingerprint
     FROM scoped AS c
-    LEFT JOIN parent_of_job AS p
-      ON  p.job_region = c.job_region
-      AND p.project_id = c.project_id
-      AND p.job_id     = c.root_job_id
     WHERE c.is_cost_countable
   )
   SELECT

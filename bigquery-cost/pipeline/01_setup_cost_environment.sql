@@ -354,7 +354,7 @@ BEGIN
   --     つまり親は子の集計行であり、両方を足すと二重計上になる。
   EXECUTE IMMEDIATE FORMAT(r"""
     CREATE OR REPLACE VIEW `%s`
-    OPTIONS(description = 'bqc_t_job_cost に親子関係の解決列を足したビュー。コストは root_* (作業単位) と statement_* (文単位) の2系統で持つ。どちらを合計しても総量は一致し、粒度だけが変わる。2つを足さないこと。')
+    OPTIONS(description = 'bqc_t_job_cost に親子関係の解決列を足したビュー。コストは root_* (作業単位) と statement_* (文単位) の2系統で持つ。どちらを合計しても総量は一致し、粒度だけが変わる。2つを足さないこと。作業単位の識別には root_composite_fingerprint を使う (親の SQL 文はテンプレートだと識別力が無いため)。')
     AS
     WITH parent_ids AS (
       -- 「子を持つか」は相関サブクエリではなく親IDの一覧との LEFT JOIN で判定する
@@ -369,6 +369,29 @@ BEGIN
       -- 時刻の途中で切れるため、親だけが落ちて子が残る「孤児」が必ず端に生じる。
       SELECT DISTINCT job_region, project_id, job_id
       FROM `%s`
+    ),
+    child_composition AS (
+      -- 作業単位の「中身」による識別子。
+      --
+      -- 親 SCRIPT の SQL 文そのものは識別子として使えないことがある。実行する SQL を
+      -- 変数に持って EXECUTE IMMEDIATE する定型スクリプトだと、中身は文字列リテラル
+      -- なので正規化で ? に潰れ、まったく別の処理が同じ fingerprint になる:
+      --   DECLARE target_sql STRING; SET target_sql = ?; EXECUTE IMMEDIATE target_sql;
+      -- これでは「どのスクリプトが高いか」も「新しく増えたスクリプトはどれか」も出せない。
+      --
+      -- そこで、その作業単位が実際に流した文の並びをハッシュして識別子にする。
+      -- 中身が同じなら同じ値、違えば違う値になるので、テンプレートでも識別できる。
+      SELECT
+        job_region,
+        project_id,
+        parent_job_id AS root_job_id,
+        TO_HEX(MD5(STRING_AGG(
+          normalized_fingerprint, '>'
+          ORDER BY creation_time, start_time, job_id
+        ))) AS root_composite_fingerprint
+      FROM `%s`
+      WHERE parent_job_id IS NOT NULL
+      GROUP BY job_region, project_id, parent_job_id
     ),
     flagged AS (
       SELECT
@@ -422,6 +445,20 @@ BEGIN
           PARTITION BY job_region, project_id, root_job_id
         ) AS root_statement_count
       FROM flagged AS f
+    ),
+    with_composition AS (
+      SELECT
+        c.*,
+        -- 子を持たない作業単位（単独ジョブ・孤児）は自分の fingerprint を使う。
+        -- これで root_composite_fingerprint は全行で必ず非 NULL になり、
+        -- 作業単位の粒度でそのまま GROUP BY できる。
+        COALESCE(cc.root_composite_fingerprint, c.normalized_fingerprint)
+          AS root_composite_fingerprint
+      FROM classified AS c
+      LEFT JOIN child_composition AS cc
+        ON  cc.job_region  = c.job_region
+        AND cc.project_id  = c.project_id
+        AND cc.root_job_id = c.root_job_id
     )
     SELECT
       -- 素のコスト列は意図的に外している。1 つの列で持つと、親と子を混ぜて
@@ -444,8 +481,8 @@ BEGIN
       IF(is_cost_countable, slot_hours,         NULL) AS statement_slot_hours,
       IF(is_cost_countable, total_bytes_billed, NULL) AS statement_total_bytes_billed,
       IF(is_cost_countable, tib_billed,         NULL) AS statement_tib_billed
-    FROM classified
-  """, job_cost_resolved_fqn, job_cost_fqn, job_cost_fqn, job_cost_fqn);
+    FROM with_composition
+  """, job_cost_resolved_fqn, job_cost_fqn, job_cost_fqn, job_cost_fqn, job_cost_fqn);
 
   -- --------------------------------------------------------------------------
   -- STEP 5: bqc_t_daily_cost -- 日 x fingerprint x 実行者 の集約

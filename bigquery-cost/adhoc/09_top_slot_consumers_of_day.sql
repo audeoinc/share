@@ -11,7 +11,11 @@
 -- 読み方:
 --   parent_job_id が NULL          … 単独で実行されたクエリ
 --   parent_job_id が入っている     … スクリプトの中の 1 文。
---                                    parent_query_head でどのスクリプトかが分かる。
+--                                    どのスクリプトかは root_composite_fingerprint で
+--                                    見分ける。parent_query_head は親の SQL 文だが、
+--                                    定型スクリプト（SQL を変数に持って EXECUTE
+--                                    IMMEDIATE する形）だと全実行で同じ文面になるので
+--                                    識別には使えない点に注意。
 --   statement_index / root_statement_count
 --                                  … そのスクリプトの何文目か / 全部で何文か
 --   parent_slot_hours              … スクリプト全体のスロット消費（root_slot_hours）。
@@ -60,6 +64,10 @@ BEGIN
     c.job_id,
     -- スクリプトの一部なら、その所属と位置
     c.parent_job_id,
+    -- スクリプトの識別子。親の SQL 文ではなく「実際に流した文の並び」のハッシュ。
+    -- 定型スクリプト（SQL を変数に持って EXECUTE IMMEDIATE する形）だと親の SQL 文は
+    -- 全実行で同じになってしまうため、こちらで見分ける。
+    c.root_composite_fingerprint,
     c.statement_index,
     p.root_statement_count,
     p.parent_slot_hours,

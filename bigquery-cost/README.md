@@ -233,6 +233,7 @@ SUM(root_slot_hours) = SUM(statement_slot_hours) = 総量
 | `root_job_id` | 作業単位のキー。子なら `parent_job_id`、それ以外は自分の `job_id` |
 | `statement_index` | 親の中での実行順。スクリプトのどの文が重いかを見る軸（親・単独は NULL） |
 | `root_statement_count` | その作業単位に属する子の本数 |
+| `root_composite_fingerprint` | **作業単位の識別子**。実際に流した文の並びのハッシュ |
 
 判定を `02` ではなくビューに置いているのは、`02` が `load_chunk_days` 日ずつに
 分けて JOBS をスキャンするためです。親が前のチャンク・子が次のチャンクに落ちると
@@ -250,6 +251,29 @@ SUM(root_slot_hours) = SUM(statement_slot_hours) = 総量
 **`bqc_t_daily_cost` 以降には集計対象の行しか入りません。** つまり Looker Studio の
 利用者は親行に触れないので、二重計上のしようがありません。親を見るのは BigQuery 側で
 アドホックに掘るときだけ、という切り分けです。
+
+### スクリプトの識別に親の SQL 文を使わない
+
+親 SCRIPT の SQL 文そのものは、識別子として使えないことがあります。**実行する SQL を
+変数に持って `EXECUTE IMMEDIATE` する定型スクリプト**だと、中身は文字列リテラルなので
+正規化で `?` に潰れ、まったく別の処理が同じ fingerprint になります。
+
+```
+DECLARE target_sql STRING; SET target_sql = ?; EXECUTE IMMEDIATE target_sql;
+```
+
+これでは「どのスクリプトが高いか」も「新しく増えたスクリプトはどれか」も出せません。
+そこで `root_composite_fingerprint` を用意しています。**その作業単位が実際に流した文の
+並び（子の `normalized_fingerprint` を実行順に連結）のハッシュ**なので、テンプレートでも
+中身が違えば違う値になります。子を持たない単独ジョブは自分の fingerprint を使うため、
+全行で必ず非 NULL です。
+
+スクリプト単位で束ねるときは、親の `normalized_fingerprint` ではなく必ずこちらを
+使ってください。`adhoc/09` と `adhoc/10` はこの列で束ねています。
+
+> **紐付け自体は壊れていません。** `parent_job_id` はジョブ実行ごとに BigQuery が
+> 振る ID なので、どの子がどの親に属するかは常に正確です。テンプレートで壊れるのは
+> 「その親が何者か」という識別だけで、コストの数値も文単位の分析も影響を受けません。
 
 多段ネスト（親がさらに親を持つ）は実測で 0 件だったため、`root_job_id` は
 `parent_job_id` の 1 ホップで解決しています。将来ネストが現れた場合は再帰的な解決が
