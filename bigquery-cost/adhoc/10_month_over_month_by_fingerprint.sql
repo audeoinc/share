@@ -43,6 +43,9 @@
 SET @@location = 'asia-northeast1';
 
 BEGIN
+  -- 比較する 2 か月。任意の月を比べたいときはここを書き換える
+  -- （例: DECLARE this_month DATE DEFAULT DATE '2026-07-01';）。
+  -- 実際に使われた月は結果の this_month / prev_month 列に出る。
   DECLARE this_month DATE DEFAULT DATE_TRUNC(CURRENT_DATE(), MONTH);
   DECLARE prev_month DATE DEFAULT DATE_SUB(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL 1 MONTH);
   DECLARE detail_limit INT64 DEFAULT 50;
@@ -144,6 +147,9 @@ BEGIN
   WITH summary AS (
     SELECT
       'SUMMARY' AS row_type,
+      -- 全行に同じ値が入るが、結果だけ受け取ったときに対象月が分かるように持たせる。
+      FORMAT_DATE('%Y-%m', this_month) AS this_month,
+      FORMAT_DATE('%Y-%m', prev_month) AS prev_month,
       change_type,
       CAST(NULL AS STRING) AS normalized_fingerprint,
       FORMAT('%d 件の SQL', COUNT(*)) AS preview,
@@ -162,6 +168,8 @@ BEGIN
   detail AS (
     SELECT
       'DETAIL' AS row_type,
+      FORMAT_DATE('%Y-%m', this_month) AS this_month,
+      FORMAT_DATE('%Y-%m', prev_month) AS prev_month,
       c.change_type,
       c.normalized_fingerprint,
       c.preview,
