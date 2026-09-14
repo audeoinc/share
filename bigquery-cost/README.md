@@ -314,6 +314,12 @@ DECLARE target_sql STRING; SET target_sql = ?; EXECUTE IMMEDIATE target_sql;
 分類から漏れた種別が黙って `ON_DEMAND` に混ざるからです。オンデマンドの課金額は
 「課金対象バイト × 単価」なので、バイトが 0 なら理由が何であれ課金額は 0 になります。
 
+> **`reservation_id IS NULL` は「オンデマンドで実行された」を意味しません。**
+> 予約に割り当てられる前に落ちたジョブ（構文エラーなど）も NULL になりえます。
+> ただし分類の結果は変わりません。そうしたジョブは課金対象バイトも 0 なので
+> `NOT_BILLED` に落ち、`ON_DEMAND` と判定されるのは**バイトが出ているとき＝確実に
+> 実行されたとき**だけだからです。この順序が `reservation_id` の曖昧さを吸収しています。
+
 内訳は `not_billed_reason` で分かります（`NOT_BILLED` 以外は NULL）。
 
 | 値 | 意味 |

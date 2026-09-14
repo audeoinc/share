@@ -268,6 +268,14 @@ BEGIN
         -- オンデマンドの課金額は「課金対象バイト × 単価」なので、バイトが 0 なら
         -- 理由が何であれ課金額は 0 になる。無料操作の一覧を先に列挙する方式だと
         -- 分類から漏れた種別が黙って ON_DEMAND に混ざる。
+        --
+        -- reservation_id IS NULL は「オンデマンドで実行された」を意味しない点に注意。
+        -- 予約に割り当てられる前に落ちたジョブ（構文エラー等）も NULL になりうる。
+        -- ただし分類の結果は変わらない: そうしたジョブは課金対象バイトも 0 なので
+        -- NOT_BILLED に落ちる。課金対象バイトが出ているジョブは必ず実行されている
+        -- ため、そこで reservation_id が NULL なら本当にオンデマンドである。
+        -- つまり ON_DEMAND と判定するのはバイトが出ているときだけ、という順序が
+        -- この曖昧さを吸収している。
         CASE
           WHEN reservation_id IS NOT NULL           THEN 'CAPACITY'
           WHEN IFNULL(total_bytes_billed, 0) > 0    THEN 'ON_DEMAND'
