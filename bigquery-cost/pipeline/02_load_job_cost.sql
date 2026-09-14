@@ -4,8 +4,9 @@
 -- ============================================================================
 -- 日次で実行する（スケジュールドクエリ推奨）。初回は自動的に
 -- initial_lookback_days（既定 120 日）を遡ってバックフィルし、2 回目以降は
--- incremental_lookback_days（既定 3 日）だけを読み直す。MERGE なので何度流しても
--- 二重登録にならない。
+-- incremental_lookback_days（既定 3 日）だけを読み直す。対象時間帯を削除してから
+-- 入れ直すので、何度流しても二重登録にならず、正規化ロジックを変えた場合も
+-- 対象期間ぶんは次の実行で作り直される。
 --
 -- 設計上のポイント:
 --   * 親 SCRIPT と子文の両方を取り込む。二重計上の切り分けはここではせず、
@@ -82,7 +83,9 @@ BEGIN
   DECLARE job_cost_fqn STRING;
   DECLARE normalize_udf_fqn STRING;
   DECLARE jobs_region_fqn STRING;
-  DECLARE merge_sql STRING;
+  DECLARE delete_sql STRING;
+  DECLARE insert_sql STRING;
+  DECLARE inserted_rows INT64 DEFAULT 0;
   DECLARE existing_row_count INT64;
   DECLARE lookback_days INT64;
   DECLARE window_start TIMESTAMP;
@@ -154,15 +157,30 @@ BEGIN
   SET chunk_start = window_start;
 
   -- --------------------------------------------------------------------------
-  -- MERGE テンプレート（チャンクごとに USING の値だけ差し替えて実行する）
+  -- 取り込みテンプレート（チャンクごとに値だけ差し替えて実行する）
   -- --------------------------------------------------------------------------
-  -- INSERT のみで UPDATE 分岐を持たない。完了済みジョブの実績は不変なので、
-  -- 既に取り込んだ行を上書きする理由がない＝再実行が安全かつ安価になる。
-  -- 正規化ロジックを変えて過去分を作り直したい場合は、対象パーティションを
-  -- 明示的に削除してから流し直すこと（normalizer_version 列で見分けられる）。
-  SET merge_sql = FORMAT(r"""
-    MERGE `%s` AS target
-    USING (
+  -- 対象時間帯をいったん削除してから入れ直す（re-derive）。MERGE の
+  -- INSERT のみでは既存行が二度と更新されないため、正規化 UDF や取り込み条件を
+  -- 変えても取り込み済みの行に反映されず、01 を破壊的に流し直すしかなかった。
+  -- 削除して入れ直せば、次の 02 で対象期間ぶんが自動的に作り直される。
+  --
+  -- DELETE の範囲は INSERT の抽出条件と同じ creation_time の区間で厳密に決める。
+  -- creation_date（パーティションキー）の述語も AND で足しているが、これは
+  -- プルーニング用の冗長条件で、範囲を広げも狭めもしない。
+  --
+  -- DELETE と INSERT は別の文なので、その間で落ちるとその時間帯が一時的に
+  -- 欠ける。ただし 02 は再実行で必ず復旧し、03 は「job_cost にあって
+  -- daily_cost に無い日」まで遡る自己修復型なので、次の実行で自然に直る。
+  SET delete_sql = FORMAT(r"""
+    DELETE FROM `%s`
+    WHERE creation_time >= @window_start
+      AND creation_time <  @window_end
+      AND creation_date >= DATE(@window_start)
+      AND creation_date <= DATE(@window_end)
+  """, job_cost_fqn);
+
+  SET insert_sql = FORMAT(r"""
+    INSERT INTO `%s`
       WITH raw_jobs AS (
         SELECT
           project_id,
@@ -205,8 +223,8 @@ BEGIN
       deduped AS (
         SELECT *
         FROM raw_jobs
-        -- MERGE は同一キーに複数の source 行があると実行時エラーになる。
-        -- JOBS は 1 ジョブ 1 行のはずだが、保険として明示的に 1 行へ絞る。
+        -- INSERT は MERGE と違って重複キーを弾かないので、ここで 1 行に絞るのは
+        -- 必須。JOBS は 1 ジョブ 1 行のはずだが、崩れると静かに二重計上になる。
         QUALIFY ROW_NUMBER() OVER (
           PARTITION BY project_id, job_id
           ORDER BY creation_time DESC
@@ -236,7 +254,8 @@ BEGIN
           `%s`(j.query) AS normalized_query
         FROM deduped AS j
       )
-      -- 列の順序は 01 の CREATE TABLE と一致させること（INSERT ROW のため）。
+      -- 列の順序は 01 の CREATE TABLE と一致させること。INSERT に列リストを
+      -- 書いていないので位置で対応する（tools/check_templates.py が検査する）。
       SELECT
         @job_region AS job_region,
         project_id,
@@ -286,12 +305,6 @@ BEGIN
         @normalizer_version AS normalizer_version,
         CURRENT_TIMESTAMP() AS loaded_at
       FROM enriched
-    ) AS source
-    ON  target.job_region = source.job_region
-    AND target.project_id = source.project_id
-    AND target.job_id     = source.job_id
-    WHEN NOT MATCHED THEN
-      INSERT ROW
   """, job_cost_fqn, jobs_region_fqn, normalize_udf_fqn);
 
   -- --------------------------------------------------------------------------
@@ -303,7 +316,10 @@ BEGIN
       window_end
     );
 
-    EXECUTE IMMEDIATE merge_sql
+    EXECUTE IMMEDIATE delete_sql
+    USING chunk_start AS window_start, chunk_end AS window_end;
+
+    EXECUTE IMMEDIATE insert_sql
     USING
       chunk_start AS window_start,
       chunk_end AS window_end,
@@ -312,6 +328,7 @@ BEGIN
       @@location AS job_region,
       normalizer_version AS normalizer_version;
 
+    SET inserted_rows = inserted_rows + @@row_count;
     SET chunk_count = chunk_count + 1;
     SET chunk_start = chunk_end;
   END WHILE;
@@ -322,6 +339,7 @@ BEGIN
   EXECUTE IMMEDIATE FORMAT(r"""
     SELECT
       'bqc load completed' AS status,
+      @inserted_rows              AS rows_inserted_this_run,
       @job_cost_fqn               AS job_cost_table,
       @normalize_udf_fqn          AS normalize_udf,
       COUNT(*)                    AS total_rows,
@@ -333,5 +351,6 @@ BEGIN
       SAFE_DIVIDE(COUNTIF(executor_source = 'LABEL'), COUNT(*)) AS label_coverage
     FROM `%s`
   """, job_cost_fqn)
-  USING job_cost_fqn AS job_cost_fqn, normalize_udf_fqn AS normalize_udf_fqn;
+  USING job_cost_fqn AS job_cost_fqn, normalize_udf_fqn AS normalize_udf_fqn,
+        inserted_rows AS inserted_rows;
 END;

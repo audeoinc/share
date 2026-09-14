@@ -117,9 +117,9 @@ def _check_insert_column_alignment(setup_source: str, refresh_source: str) -> li
     return problems
 
 
-# 02 は MERGE の INSERT ROW（列名省略）を使うため、source の SELECT の列順が
-# 01 の job_cost DDL と完全に一致している必要がある。位置依存なので、列を挿入した
-# 位置がずれると型が合う限り黙って別の列に入る。
+# 02 の INSERT は列リストを書かず位置で対応させるため、SELECT の列順が
+# 01 の job_cost DDL と完全に一致している必要がある。列を挿入した位置がずれると、
+# 型が合う限り黙って別の列に入る。
 SELECT_ALIAS = re.compile(r"\bAS ([a-z_]+)$")
 
 
@@ -230,7 +230,7 @@ def main() -> int:
             print(f"FAIL  {problem}")
         if not order_problems:
             checked += 1
-            print("ok    01 の job_cost DDL と 02 の SELECT 列順が一致（INSERT ROW 用）")
+            print("ok    01 の job_cost DDL と 02 の SELECT 列順が一致（位置対応の INSERT 用）")
 
     print(f"\n{checked - failures}/{checked} checks passed")
     return 1 if failures else 0
