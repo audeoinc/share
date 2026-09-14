@@ -314,7 +314,7 @@ BEGIN
       is_error                BOOL      OPTIONS(description = 'error_result が入っていたか。リトライ嵐の検出に使う'),
       error_reason            STRING    OPTIONS(description = 'error_result.reason'),
       reservation_id          STRING    OPTIONS(description = '割り当てられた予約。NULL は「オンデマンド」とは限らず、予約に割り当てられる前に落ちたジョブでも NULL になりうる'),
-      pricing_model           STRING    OPTIONS(description = 'CAPACITY (予約あり=スロットが課金の基礎) / ON_DEMAND (予約なしで課金対象バイトあり=バイトが基礎) / NOT_BILLED (予約なしで課金対象バイトが0=課金額0)'),
+      pricing_model           STRING    OPTIONS(description = 'CAPACITY (予約ありでスロット消費>0) / ON_DEMAND (予約なしで課金対象バイト>0) / NOT_BILLED (そのメーターで何も消費していない=課金額0)'),
       not_billed_reason       STRING    OPTIONS(description = 'NOT_BILLED の内訳: ERROR / CACHE_HIT / METADATA_ONLY / NO_DATA_SCANNED。それ以外は NULL'),
       total_bytes_processed   INT64     OPTIONS(description = 'スキャンしたバイト数'),
       total_bytes_billed      INT64     OPTIONS(description = '課金対象バイト数。オンデマンド課金の基礎'),

@@ -12,18 +12,28 @@ METADATA_PREFIX = re.compile(
     r"^(CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|SET|DECLARE|CALL|ASSERT|EXPORT|LOAD)")
 
 
-def classify(reservation_id, total_bytes_billed, error_result, cache_hit, statement_type):
-    """pipeline/02 の CASE 式をそのまま再現する。"""
-    billed = total_bytes_billed or 0
+def classify(reservation_id, total_bytes_billed, error_result, cache_hit, statement_type,
+             total_slot_ms=None):
+    """pipeline/02 の CASE 式をそのまま再現する。
 
-    if reservation_id is not None:
+    メーターごとに「実際に消費したか」を見るのが要点。予約が付いているだけで
+    CAPACITY にすると、割り当て直後に落ちてスロットを使っていないジョブまで
+    課金対象に見えてしまう。
+    """
+    billed = total_bytes_billed or 0
+    slots = total_slot_ms or 0
+
+    on_capacity_meter = reservation_id is not None and slots > 0
+    on_demand_meter = reservation_id is None and billed > 0
+
+    if on_capacity_meter:
         pricing_model = "CAPACITY"
-    elif billed > 0:
+    elif on_demand_meter:
         pricing_model = "ON_DEMAND"
     else:
         pricing_model = "NOT_BILLED"
 
-    if reservation_id is not None or billed > 0:
+    if on_capacity_meter or on_demand_meter:
         reason = None
     elif error_result is not None:
         reason = "ERROR"
@@ -38,40 +48,47 @@ def classify(reservation_id, total_bytes_billed, error_result, cache_hit, statem
 
 
 CASES = [
-    # (説明, reservation_id, bytes_billed, error, cache_hit, statement_type, 期待)
+    # (説明, reservation_id, bytes_billed, error, cache_hit, statement_type, slot_ms, 期待)
     ("通常のオンデマンドクエリ",
-     None, 10 * 1024**2, None, False, "SELECT", ("ON_DEMAND", None)),
+     None, 10 * 1024**2, None, False, "SELECT", 5_000, ("ON_DEMAND", None)),
     ("予約ありのクエリ",
-     "res-1", 10 * 1024**2, None, False, "SELECT", ("CAPACITY", None)),
-    ("予約あり・バイト0でもキャパシティ（予約の上で走っている）",
-     "res-1", 0, None, False, "SELECT", ("CAPACITY", None)),
+     "res-1", 10 * 1024**2, None, False, "SELECT", 5_000, ("CAPACITY", None)),
+    ("予約あり・バイト0でもスロットを使っていればキャパシティ",
+     "res-1", 0, None, False, "SELECT", 5_000, ("CAPACITY", None)),
+    ("予約あり・実行前に落ちてスロット未消費 → 課金なし",
+     "res-1", None, "notFound", False, "CREATE_TABLE_AS_SELECT", None,
+     ("NOT_BILLED", "ERROR")),
+    ("予約あり・実行中に落ちてスロット消費 → キャパシティ（実際に枠を食っている）",
+     "res-1", 0, "resourcesExceeded", False, "SELECT", 900_000, ("CAPACITY", None)),
+    ("オンデマンド・実行中に落ちてスロット消費 → 課金なし（メーターはバイト）",
+     None, 0, "resourcesExceeded", False, "SELECT", 900_000, ("NOT_BILLED", "ERROR")),
     ("失敗したクエリは課金されない",
-     None, 0, "resourcesExceeded", False, "SELECT", ("NOT_BILLED", "ERROR")),
+     None, 0, "resourcesExceeded", False, "SELECT", 0, ("NOT_BILLED", "ERROR")),
     ("失敗が最優先（キャッシュフラグより前）",
-     None, 0, "invalidQuery", True, "SELECT", ("NOT_BILLED", "ERROR")),
+     None, 0, "invalidQuery", True, "SELECT", 0, ("NOT_BILLED", "ERROR")),
     ("キャッシュヒットは課金されない",
-     None, 0, None, True, "SELECT", ("NOT_BILLED", "CACHE_HIT")),
+     None, 0, None, True, "SELECT", 0, ("NOT_BILLED", "CACHE_HIT")),
     ("データを伴わない CREATE",
-     None, 0, None, False, "CREATE_VIEW", ("NOT_BILLED", "METADATA_ONLY")),
+     None, 0, None, False, "CREATE_VIEW", 0, ("NOT_BILLED", "METADATA_ONLY")),
     ("ALTER も同様",
-     None, 0, None, False, "ALTER_TABLE", ("NOT_BILLED", "METADATA_ONLY")),
+     None, 0, None, False, "ALTER_TABLE", 0, ("NOT_BILLED", "METADATA_ONLY")),
     ("DROP も同様",
-     None, 0, None, False, "DROP_TABLE", ("NOT_BILLED", "METADATA_ONLY")),
+     None, 0, None, False, "DROP_TABLE", 0, ("NOT_BILLED", "METADATA_ONLY")),
     ("データを伴う CTAS はバイトが出るのでオンデマンド",
-     None, 5 * 1024**3, None, False, "CREATE_TABLE_AS_SELECT", ("ON_DEMAND", None)),
+     None, 5 * 1024**3, None, False, "CREATE_TABLE_AS_SELECT", 50_000, ("ON_DEMAND", None)),
     ("0バイトのクエリ（SELECT 1 など）",
-     None, 0, None, False, "SELECT", ("NOT_BILLED", "NO_DATA_SCANNED")),
+     None, 0, None, False, "SELECT", 0, ("NOT_BILLED", "NO_DATA_SCANNED")),
     ("statement_type が NULL でも落ちない",
-     None, 0, None, False, None, ("NOT_BILLED", "NO_DATA_SCANNED")),
+     None, 0, None, False, None, 0, ("NOT_BILLED", "NO_DATA_SCANNED")),
     ("バイトが NULL の種別（LOAD など）は無料扱い",
-     None, None, None, False, "LOAD_DATA", ("NOT_BILLED", "METADATA_ONLY")),
+     None, None, None, False, "LOAD_DATA", None, ("NOT_BILLED", "METADATA_ONLY")),
 ]
 
 
 def main() -> int:
     failures = 0
-    for label, reservation, billed, error, cache, stmt, expected in CASES:
-        actual = classify(reservation, billed, error, cache, stmt)
+    for label, reservation, billed, error, cache, stmt, slots, expected in CASES:
+        actual = classify(reservation, billed, error, cache, stmt, slots)
         if actual != expected:
             failures += 1
             print(f"FAIL  {label}\n        expected {expected} / actual {actual}")
@@ -80,11 +97,14 @@ def main() -> int:
                   + (f" / {actual[1]}" if actual[1] else ""))
 
     # 不変条件: 課金額が 0 になるのは NOT_BILLED のときだけ、という対応が崩れていないか。
-    for label, reservation, billed, error, cache, stmt, _ in CASES:
-        model, reason = classify(reservation, billed, error, cache, stmt)
+    for label, reservation, billed, error, cache, stmt, slots, _ in CASES:
+        model, reason = classify(reservation, billed, error, cache, stmt, slots)
         if model == "ON_DEMAND" and (billed or 0) == 0:
             failures += 1
             print(f"FAIL  不変条件: ON_DEMAND なのに課金対象バイトが 0 ({label})")
+        if model == "CAPACITY" and (slots or 0) == 0:
+            failures += 1
+            print(f"FAIL  不変条件: CAPACITY なのにスロット消費が 0 ({label})")
         if model == "NOT_BILLED" and reason is None:
             failures += 1
             print(f"FAIL  不変条件: NOT_BILLED なのに内訳が NULL ({label})")

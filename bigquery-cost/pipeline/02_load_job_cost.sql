@@ -258,11 +258,11 @@ BEGIN
         error_result.reason AS error_reason,
         reservation_id,
         -- どのメーターが当たるジョブかの切り分け。
-        --   CAPACITY   … 予約の上で走った。課金の基礎はスロット時間。
-        --   ON_DEMAND  … 予約なしで、課金対象バイトが実際に発生している。
-        --   NOT_BILLED … 予約なしで課金対象バイトが 0。どちらのメーターでも
-        --                課金額は 0 になる（失敗・キャッシュヒット・
-        --                データを伴わない DDL・0バイトのクエリなど）。
+        --   CAPACITY   … 予約の上でスロットを消費した。課金の基礎はスロット時間。
+        --   ON_DEMAND  … 予約なしで課金対象バイトが発生した。基礎はバイト。
+        --   NOT_BILLED … そのメーターで何も消費していない。課金額は 0
+        --                （実行前に落ちた・キャッシュヒット・データを伴わない
+        --                 DDL・0バイトのクエリ・オンデマンドで実行中に落ちた、など）。
         --
         -- 判定をバイト数で行っているのは、理由の列挙に頼らないため。
         -- オンデマンドの課金額は「課金対象バイト × 単価」なので、バイトが 0 なら
@@ -276,17 +276,26 @@ BEGIN
         -- ため、そこで reservation_id が NULL なら本当にオンデマンドである。
         -- つまり ON_DEMAND と判定するのはバイトが出ているときだけ、という順序が
         -- この曖昧さを吸収している。
+        --
+        -- メーターごとに「実際に消費したか」を見る。予約が付いているだけで
+        -- CAPACITY にすると、割り当てられた直後に落ちてスロットを1msも使って
+        -- いないジョブまで課金対象のように見えてしまう。予約の課金メーターは
+        -- スロット時間なので、スロット消費が 0 なら予約側にも何も足していない
+        -- （オートスケールも誘発しない）。
         CASE
-          WHEN reservation_id IS NOT NULL           THEN 'CAPACITY'
-          WHEN IFNULL(total_bytes_billed, 0) > 0    THEN 'ON_DEMAND'
+          WHEN reservation_id IS NOT NULL
+           AND IFNULL(total_slot_ms, 0) > 0         THEN 'CAPACITY'
+          WHEN reservation_id IS NULL
+           AND IFNULL(total_bytes_billed, 0) > 0    THEN 'ON_DEMAND'
           ELSE 'NOT_BILLED'
         END AS pricing_model,
         -- NOT_BILLED の内訳。課金額はどれも 0 だが、性質はまったく違う
         -- （リトライ嵐なのか、キャッシュが効いているのか、ただの DDL なのか）。
         -- 先に来る条件が優先。失敗していればまず ERROR とする。
         CASE
-          WHEN reservation_id IS NOT NULL
-            OR IFNULL(total_bytes_billed, 0) > 0    THEN NULL
+          WHEN (reservation_id IS NOT NULL AND IFNULL(total_slot_ms, 0) > 0)
+            OR (reservation_id IS NULL AND IFNULL(total_bytes_billed, 0) > 0)
+                                                    THEN NULL
           WHEN error_result IS NOT NULL             THEN 'ERROR'
           WHEN IFNULL(cache_hit, FALSE)             THEN 'CACHE_HIT'
           WHEN REGEXP_CONTAINS(
