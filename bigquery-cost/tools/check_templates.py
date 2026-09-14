@@ -117,21 +117,23 @@ def _check_insert_column_alignment(setup_source: str, refresh_source: str) -> li
     return problems
 
 
-# 02 の INSERT は列リストを書かず位置で対応させるため、SELECT の列順が
-# 01 の job_cost DDL と完全に一致している必要がある。列を挿入した位置がずれると、
-# 型が合う限り黙って別の列に入る。
+# 02 の INSERT は列リストを書かず位置で対応させるため、取り込みビューの列順が
+# bqc_t_job_cost の DDL と完全に一致している必要がある。
 SELECT_ALIAS = re.compile(r"\bAS ([a-z_]+)$")
 
 
-def _job_cost_select_aliases(load_source: str) -> list:
-    marker = "      -- 列の順序は 01 の CREATE TABLE と一致させること"
-    if marker not in load_source:
+def _job_cost_select_aliases(setup_source: str) -> list:
+    """取り込みビュー bqc_vw_t_job_cost_source の最終 SELECT の列名を順に返す。"""
+    start = setup_source.find("      '%s' AS job_region,")
+    if start == -1:
         return []
-    body = load_source[load_source.index(marker):load_source.index("      FROM enriched")]
+    end = setup_source.find("    FROM enriched", start)
+    if end == -1:
+        return []
     aliases = []
-    for raw in body.split("\n"):
+    for raw in setup_source[start:end].split("\n"):
         line = raw.strip().rstrip(",")
-        if not line or line.startswith("--") or line == "SELECT":
+        if not line or line.startswith("--"):
             continue
         matched = SELECT_ALIAS.search(line)
         if matched:
@@ -141,18 +143,23 @@ def _job_cost_select_aliases(load_source: str) -> list:
     return aliases
 
 
-def _check_insert_row_order(setup_source: str, load_source: str) -> list:
+def _check_insert_row_order(setup_source: str) -> list:
+    """取り込みビューの列順が bqc_t_job_cost の DDL と一致するかを見る。
+
+    02 の INSERT は列リストを書かず位置で対応させるので、どちらかに列を挿入した
+    位置がずれると、型が合う限り黙って別の列に入る。
+    """
     ddl_bodies = DDL_TABLE.findall(setup_source)
     if not ddl_bodies:
         return []
     job_cost_columns = DDL_COLUMN.findall(ddl_bodies[0])
-    aliases = _job_cost_select_aliases(load_source)
+    aliases = _job_cost_select_aliases(setup_source)
     if not aliases:
-        return ["02 の job_cost 用 SELECT を見つけられなかった（目印コメントを消した?）"]
+        return ["01 の取り込みビューの SELECT を見つけられなかった（目印を消した?）"]
     if job_cost_columns != aliases:
         head = next((f"{a} / {b}" for a, b in zip(job_cost_columns, aliases) if a != b),
                     "末尾の列数違い")
-        return [f"02 の SELECT 列順が 01 の job_cost DDL と一致しない（最初の相違: {head}）"]
+        return [f"取り込みビューの列順が bqc_t_job_cost の DDL と一致しない（最初の相違: {head}）"]
     return []
 
 
@@ -218,9 +225,7 @@ def main() -> int:
 
     try:
         order_problems = _check_insert_row_order(
-            open(setup_path, encoding="utf-8").read(),
-            open("pipeline/02_load_job_cost.sql", encoding="utf-8").read(),
-        )
+            open(setup_path, encoding="utf-8").read())
     except FileNotFoundError:
         order_problems = []
     else:
@@ -230,7 +235,7 @@ def main() -> int:
             print(f"FAIL  {problem}")
         if not order_problems:
             checked += 1
-            print("ok    01 の job_cost DDL と 02 の SELECT 列順が一致（位置対応の INSERT 用）")
+            print("ok    取り込みビューの列順と bqc_t_job_cost の DDL が一致")
 
     print(f"\n{checked - failures}/{checked} checks passed")
     return 1 if failures else 0

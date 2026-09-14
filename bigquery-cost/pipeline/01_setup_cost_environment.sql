@@ -19,6 +19,7 @@
 -- 作成物:
 --
 --   UDF   bqc_normalize_sql          … SQL からリテラル/コメントを除去した正規化文字列
+--   VIEW  bqc_vw_t_job_cost_source   … INFORMATION_SCHEMA.JOBS に加工を被せたビュー
 --   表    bqc_t_job_cost             … job 粒度のコスト実績（親 SCRIPT と子文の両方）
 --   VIEW  bqc_vw_t_job_cost_resolved … 上に親子関係の解決列を足したもの。集計はこちらを使う
 --   表    bqc_t_daily_cost           … 日 × fingerprint × 実行者 の集約（Looker が読む実体）
@@ -57,6 +58,8 @@ BEGIN
   -- UDF naming (ルーチン名にハイフンは使えないので表とは別ノブにする)
   DECLARE udf_name_prefix STRING DEFAULT '';
   DECLARE udf_name_suffix STRING DEFAULT '';
+  -- Executor identification
+  DECLARE executor_label_key STRING DEFAULT 'subsystemid';
   --
   -- Variable notes (keyed by name):
   --   project_token_pattern
@@ -75,6 +78,11 @@ BEGIN
   --     表・ビュー名の可変部。02/03 と必ず同じ値にすること。
   --   udf_name_prefix / udf_name_suffix
   --     UDF 名の可変部。02 が呼ぶ UDF 名と揃えること。
+  --   executor_label_key
+  --     実行者を識別するジョブラベルのキー。BigQuery のラベルキーは小文字のみ
+  --     なので 'subsystemid'（'subsystemId' ではない）。この値が付いていない
+  --     ジョブは user_email にフォールバックする。取り込みビューに焼き込むので
+  --     変更したら 01 を流し直すこと。
 
   -- --------------------------------------------------------------------------
   -- [B] BEHAVIOR OPTIONS -- defaults are safe; tune as needed
@@ -105,6 +113,10 @@ BEGIN
   DECLARE dataset_fqn STRING;
   DECLARE udf_dataset_fqn STRING;
   DECLARE normalize_udf_fqn STRING;
+  DECLARE source_project_id STRING DEFAULT NULL;
+  DECLARE jobs_region_fqn STRING;
+  DECLARE job_cost_source_fqn STRING;
+  DECLARE job_cost_source_name STRING;
   DECLARE job_cost_fqn STRING;
   DECLARE job_cost_resolved_fqn STRING;
   DECLARE daily_cost_fqn STRING;
@@ -130,6 +142,7 @@ BEGIN
     'Could not auto-detect the project id from INFORMATION_SCHEMA.SCHEMATA; set default_project_id to a literal.';
   SET repository_project_id = COALESCE(repository_project_id, default_project_id);
   SET udf_project_id = COALESCE(udf_project_id, default_project_id);
+  SET source_project_id = COALESCE(source_project_id, default_project_id);
 
   -- project token 置換（名前の組み立て・ASSERT より前に行う）
   SET project_token =
@@ -149,6 +162,8 @@ BEGIN
 
   SET normalize_udf_name = udf_name_prefix || 'bqc_' || 'normalize_sql' || udf_name_suffix;
   SET job_cost_name  = table_name_prefix || 'bqc_' || 't_'  || 'job_cost'          || table_name_suffix;
+  SET job_cost_source_name =
+    table_name_prefix || 'bqc_' || 'vw_t_' || 'job_cost_source' || table_name_suffix;
   SET job_cost_resolved_name =
     table_name_prefix || 'bqc_' || 'vw_t_' || 'job_cost_resolved' || table_name_suffix;
   SET daily_cost_name = table_name_prefix || 'bqc_' || 't_' || 'daily_cost'        || table_name_suffix;
@@ -162,6 +177,10 @@ BEGIN
   SET dataset_fqn       = FORMAT('%s.%s', repository_project_id, repository_dataset);
   SET udf_dataset_fqn   = FORMAT('%s.%s', udf_project_id, udf_dataset);
   SET normalize_udf_fqn = FORMAT('%s.%s', udf_dataset_fqn, normalize_udf_name);
+  -- region 修飾識別子のバッククォート内側。参照は
+  -- `<project>.region-<location>`.INFORMATION_SCHEMA.JOBS_BY_PROJECT の形。
+  SET jobs_region_fqn   = FORMAT('%s.region-%s', source_project_id, @@location);
+  SET job_cost_source_fqn = FORMAT('%s.%s', dataset_fqn, job_cost_source_name);
   SET job_cost_fqn      = FORMAT('%s.%s', dataset_fqn, job_cost_name);
   SET job_cost_resolved_fqn = FORMAT('%s.%s', dataset_fqn, job_cost_resolved_name);
   SET daily_cost_fqn    = FORMAT('%s.%s', dataset_fqn, daily_cost_name);
@@ -288,7 +307,125 @@ BEGIN
   AS 'bqc_normalize_sql smoke test failed -- the normalization chain did not produce the expected canonical form.';
 
   -- --------------------------------------------------------------------------
-  -- STEP 3: bqc_t_job_cost -- job 粒度のコスト実績
+  -- STEP 3: bqc_vw_t_job_cost_source -- JOBS の加工ロジック
+  -- --------------------------------------------------------------------------
+  -- INFORMATION_SCHEMA.JOBS に加工を被せたビュー。02 はここから期間を切り出して
+  -- bqc_t_job_cost へ入れるだけになる。加工の定義がこの1箇所に集まるので、
+  -- 02 の動的SQLに長い SELECT を埋め込まずに済む。
+  --
+  -- 列の順序は STEP 4 の CREATE TABLE と一致させること。02 の INSERT は列リストを
+  -- 書かず位置で対応させる（tools/check_templates.py が検査する）。
+  --
+  -- ビューなので実行時の値を受け取れない。executor_label_key / normalizer_version /
+  -- リージョンは作成時に焼き込まれる。変えたら 01 を流し直すこと。
+  --
+  -- 時間帯の絞り込みはここでは行わない。02 側の WHERE が押し下がる前提。
+  -- 押し下がらないと毎回 JOBS 全期間を舐めることになるので、初回は
+  -- 「同じ期間を直接 JOBS に問い合わせた場合」とスキャン量を比べて確認すること。
+  EXECUTE IMMEDIATE FORMAT(r"""
+    CREATE OR REPLACE VIEW `%s`
+    OPTIONS(description = 'INFORMATION_SCHEMA.JOBS に加工を被せたビュー。02 が期間を切り出して bqc_t_job_cost へ取り込む。列順は bqc_t_job_cost と一致させること。')
+    AS
+    WITH raw_jobs AS (
+      SELECT
+        project_id, job_id, parent_job_id, creation_time, start_time, end_time,
+        user_email, labels, job_type, statement_type, cache_hit, error_result,
+        reservation_id, total_bytes_processed, total_bytes_billed, total_slot_ms,
+        referenced_tables, query
+      FROM `%s`.INFORMATION_SCHEMA.JOBS_BY_PROJECT
+      WHERE state = 'DONE'
+        AND query IS NOT NULL
+      -- 親 SCRIPT も子文もそのまま通す。親はスクリプト全文・ラベル・全体の所要時間を
+      -- 持っており「このスケジュールドクエリ1本でいくら」の単位になる。
+      -- 二重計上の切り分けは bqc_vw_t_job_cost_resolved が担当する。
+    ),
+    deduped AS (
+      SELECT *
+      FROM raw_jobs
+      -- INSERT は重複キーを弾かないので 1 行に絞るのは必須。JOBS は 1 ジョブ 1 行の
+      -- はずだが、崩れると静かに二重計上になる。
+      QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY project_id, job_id
+        ORDER BY creation_time DESC
+      ) = 1
+    ),
+    enriched AS (
+      SELECT
+        j.*,
+        -- ラベルはキー重複しないので LIMIT 1 で確定する。
+        (
+          SELECT l.value
+          FROM UNNEST(j.labels) AS l
+          WHERE l.key = '%s'
+          LIMIT 1
+        ) AS subsystem_id,
+        -- 参照テーブルは fingerprint の入力にも使うので順序を固定して連結する。
+        -- Looker Studio は ARRAY を読めないため文字列で持つ。
+        (
+          SELECT STRING_AGG(
+            CONCAT(rt.project_id, '.', rt.dataset_id, '.', rt.table_id),
+            '\n'
+            ORDER BY CONCAT(rt.project_id, '.', rt.dataset_id, '.', rt.table_id)
+          )
+          FROM UNNEST(j.referenced_tables) AS rt
+        ) AS referenced_tables_text,
+        ARRAY_LENGTH(j.referenced_tables) AS referenced_table_count,
+        `%s`(j.query) AS normalized_query
+      FROM deduped AS j
+    )
+    SELECT
+      '%s' AS job_region,
+      project_id,
+      job_id,
+      parent_job_id,
+      creation_time,
+      DATE(creation_time) AS creation_date,
+      start_time,
+      end_time,
+      TIMESTAMP_DIFF(end_time, start_time, MILLISECOND) AS elapsed_ms,
+      user_email,
+      subsystem_id,
+      COALESCE(subsystem_id, user_email) AS executor_id,
+      IF(subsystem_id IS NULL, 'USER_EMAIL', 'LABEL') AS executor_source,
+      job_type,
+      statement_type,
+      IFNULL(cache_hit, FALSE) AS cache_hit,
+      error_result IS NOT NULL AS is_error,
+      error_result.reason AS error_reason,
+      reservation_id,
+      -- pricing_model / not_billed_reason はここでは作らない。親 SCRIPT は
+      -- reservation_id を持たず（予約は子に付く）、一方で課金対象バイトは子の合計を
+      -- 持つため、行だけを見ると「予約なしでバイトあり」に見える。親子が揃うのは
+      -- bqc_vw_t_job_cost_resolved だけなので、分類はそちらで行う。
+      total_bytes_processed,
+      total_bytes_billed,
+      IFNULL(total_bytes_billed, 0) / POW(1024, 4) AS tib_billed,
+      total_slot_ms,
+      IFNULL(total_slot_ms, 0) / 3600000 AS slot_hours,
+      referenced_table_count,
+      referenced_tables_text,
+      query,
+      TO_HEX(MD5(query)) AS raw_fingerprint,
+      normalized_query,
+      -- 識別子の大小文字差を吸収するため UPPER してからハッシュ化する。
+      TO_HEX(MD5(UPPER(normalized_query))) AS normalized_fingerprint,
+      TO_HEX(MD5(CONCAT(
+        UPPER(normalized_query), '|', IFNULL(referenced_tables_text, '')
+      ))) AS normalized_fingerprint_t,
+      SUBSTR(normalized_query, 1, 100) AS normalized_preview,
+      -- 先頭 100 文字は SELECT 句で終わって FROM に届かないことが多いので、
+      -- 最初の FROM 以降 100 文字も別に持つ。
+      SUBSTR(
+        REGEXP_EXTRACT(normalized_query, r'(?i)\bFROM\b.*'), 1, 100
+      ) AS normalized_from_preview,
+      '%s' AS normalizer_version,
+      CURRENT_TIMESTAMP() AS loaded_at
+    FROM enriched
+  """, job_cost_source_fqn, jobs_region_fqn, executor_label_key,
+       normalize_udf_fqn, @@location, normalizer_version);
+
+  -- --------------------------------------------------------------------------
+  -- STEP 4: bqc_t_job_cost -- job 粒度のコスト実績
   -- --------------------------------------------------------------------------
   -- 1 行 = 1 ジョブ。親 SCRIPT と子文の両方が入る（親子の切り分けは STEP 4 の
   -- 解決ビューが担当）。02 が MERGE で (job_region, project_id, job_id) 一意に投入する。
@@ -337,7 +474,7 @@ BEGIN
   """, job_cost_fqn);
 
   -- --------------------------------------------------------------------------
-  -- STEP 4: bqc_vw_t_job_cost_resolved -- 親子関係を解決したビュー
+  -- STEP 5: bqc_vw_t_job_cost_resolved -- 親子関係を解決したビュー
   -- --------------------------------------------------------------------------
   -- 親子のセマンティクスはすべてここに集約する。02 は JOBS の行をそのまま入れる
   -- だけにして、判定はこのビューが担う。
@@ -521,7 +658,7 @@ BEGIN
   """, job_cost_resolved_fqn, job_cost_fqn, job_cost_fqn, job_cost_fqn, job_cost_fqn);
 
   -- --------------------------------------------------------------------------
-  -- STEP 5: bqc_t_daily_cost -- 日 x fingerprint x 実行者 の集約
+  -- STEP 6: bqc_t_daily_cost -- 日 x fingerprint x 実行者 の集約
   -- --------------------------------------------------------------------------
   -- Looker Studio が実際に読むのはこちら。job 粒度より数桁小さいので速い。
   EXECUTE IMMEDIATE FORMAT(r"""
@@ -554,7 +691,7 @@ BEGIN
   """, daily_cost_fqn);
 
   -- --------------------------------------------------------------------------
-  -- STEP 6: bqc_m_query_fingerprint -- fingerprint 次元
+  -- STEP 7: bqc_m_query_fingerprint -- fingerprint 次元
   -- --------------------------------------------------------------------------
   -- 1 行 = 1 fingerprint。「新しくコストを発生させた SQL」の判定に使う
   -- first_seen_date と、レポート表示用のプレビューを持つ。
@@ -580,7 +717,7 @@ BEGIN
   """, query_dim_fqn);
 
   -- --------------------------------------------------------------------------
-  -- STEP 7: bqc_vw_t_daily_cost_report -- レポート定義
+  -- STEP 8: bqc_vw_t_daily_cost_report -- レポート定義
   -- --------------------------------------------------------------------------
   -- レポート定義の正本。ブレンドを使わずに済むよう、集約 (bqc_t_daily_cost) と
   -- 次元 (bqc_m_query_fingerprint) をここで結合する。
@@ -641,6 +778,7 @@ BEGIN
     dataset_fqn           AS dataset,
     udf_dataset_fqn       AS udf_dataset,
     normalize_udf_fqn     AS normalize_udf,
+    job_cost_source_fqn   AS job_cost_source_view,
     job_cost_fqn          AS job_cost_table,
     job_cost_resolved_fqn AS job_cost_resolved_view,
     daily_cost_fqn        AS daily_cost_table,
