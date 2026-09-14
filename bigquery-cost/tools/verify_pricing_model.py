@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """pricing_model / not_billed_reason の分類ロジックを再現して検証する。
 
-pipeline/02 の CASE 式と 1:1 で対応。どちらかを直したら両方直すこと。
+pipeline/01 の解決ビュー（bqc_vw_t_job_cost_resolved）の CASE 式と 1:1 で対応。
+どちらかを直したら両方直すこと。
+
+判定に使う予約IDは effective_reservation_id（自分に無ければ子から引き継いだもの）。
+親 SCRIPT は reservation_id を持たないのに課金対象バイトは子の合計を持つため、
+素の reservation_id で判定すると予約環境の親が軒並み ON_DEMAND になる。
 
   python3 tools/verify_pricing_model.py
 """
@@ -12,7 +17,7 @@ METADATA_PREFIX = re.compile(
     r"^(CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|SET|DECLARE|CALL|ASSERT|EXPORT|LOAD)")
 
 
-def classify(reservation_id, total_bytes_billed, error_result, cache_hit, statement_type,
+def classify(effective_reservation_id, total_bytes_billed, error_result, cache_hit, statement_type,
              total_slot_ms=None):
     """pipeline/02 の CASE 式をそのまま再現する。
 
@@ -23,8 +28,8 @@ def classify(reservation_id, total_bytes_billed, error_result, cache_hit, statem
     billed = total_bytes_billed or 0
     slots = total_slot_ms or 0
 
-    on_capacity_meter = reservation_id is not None and slots > 0
-    on_demand_meter = reservation_id is None and billed > 0
+    on_capacity_meter = effective_reservation_id is not None and slots > 0
+    on_demand_meter = effective_reservation_id is None and billed > 0
 
     if on_capacity_meter:
         pricing_model = "CAPACITY"
@@ -62,6 +67,14 @@ CASES = [
      "res-1", 0, "resourcesExceeded", False, "SELECT", 900_000, ("CAPACITY", None)),
     ("オンデマンド・実行中に落ちてスロット消費 → 課金なし（メーターはバイト）",
      None, 0, "resourcesExceeded", False, "SELECT", 900_000, ("NOT_BILLED", "ERROR")),
+    # 親 SCRIPT は reservation_id を持たないが、バイト・スロットは子の合計を持つ。
+    # 子から引き継いだ予約IDで判定しないと、予約環境の親が ON_DEMAND になる。
+    ("親SCRIPT・子の予約を引き継ぐ → キャパシティ",
+     "res-1", 50 * 1024**3, None, False, "SCRIPT", 900_000, ("CAPACITY", None)),
+    ("親SCRIPT・オンデマンド環境ならそのままオンデマンド",
+     None, 50 * 1024**3, None, False, "SCRIPT", 900_000, ("ON_DEMAND", None)),
+    ("親SCRIPT・子が1つも走らず落ちた（引き継ぐ予約も無い）",
+     None, None, "notFound", False, "SCRIPT", None, ("NOT_BILLED", "ERROR")),
     ("失敗したクエリは課金されない",
      None, 0, "resourcesExceeded", False, "SELECT", 0, ("NOT_BILLED", "ERROR")),
     ("失敗が最優先（キャッシュフラグより前）",

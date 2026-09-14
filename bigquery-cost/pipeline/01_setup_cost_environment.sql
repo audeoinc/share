@@ -314,8 +314,6 @@ BEGIN
       is_error                BOOL      OPTIONS(description = 'error_result が入っていたか。リトライ嵐の検出に使う'),
       error_reason            STRING    OPTIONS(description = 'error_result.reason'),
       reservation_id          STRING    OPTIONS(description = '割り当てられた予約。NULL は「オンデマンド」とは限らず、予約に割り当てられる前に落ちたジョブでも NULL になりうる'),
-      pricing_model           STRING    OPTIONS(description = 'CAPACITY (予約ありでスロット消費>0) / ON_DEMAND (予約なしで課金対象バイト>0) / NOT_BILLED (そのメーターで何も消費していない=課金額0)'),
-      not_billed_reason       STRING    OPTIONS(description = 'NOT_BILLED の内訳: ERROR / CACHE_HIT / METADATA_ONLY / NO_DATA_SCANNED。それ以外は NULL'),
       total_bytes_processed   INT64     OPTIONS(description = 'スキャンしたバイト数'),
       total_bytes_billed      INT64     OPTIONS(description = '課金対象バイト数。オンデマンド課金の基礎'),
       tib_billed              FLOAT64   OPTIONS(description = 'total_bytes_billed を TiB にしたもの。単価を掛ければ金額になる'),
@@ -389,7 +387,11 @@ BEGIN
         TO_HEX(MD5(STRING_AGG(
           normalized_fingerprint, '>'
           ORDER BY creation_time, start_time, job_id
-        ))) AS root_composite_fingerprint
+        ))) AS root_composite_fingerprint,
+        -- 子が載っていた予約。親 SCRIPT は reservation_id を持たない（予約は
+        -- 実際に実行する子に付く）ので、親はここから引き継ぐ。
+        -- MAX は NULL を無視するので「どれかの子に予約があれば、その値」になる。
+        MAX(reservation_id) AS child_reservation_id
       FROM `%s`
       WHERE parent_job_id IS NOT NULL
       GROUP BY job_region, project_id, parent_job_id
@@ -454,7 +456,11 @@ BEGIN
         -- これで root_composite_fingerprint は全行で必ず非 NULL になり、
         -- 作業単位の粒度でそのまま GROUP BY できる。
         COALESCE(cc.root_composite_fingerprint, c.normalized_fingerprint)
-          AS root_composite_fingerprint
+          AS root_composite_fingerprint,
+        -- 課金メーター判定に使う予約ID。自分に付いていなければ子のものを使う。
+        -- 子行は自分の値が優先されるので影響を受けない。
+        COALESCE(c.reservation_id, cc.child_reservation_id)
+          AS effective_reservation_id
       FROM classified AS c
       LEFT JOIN child_composition AS cc
         ON  cc.job_region  = c.job_region
@@ -481,7 +487,36 @@ BEGIN
       IF(is_cost_countable, total_slot_ms,      NULL) AS statement_total_slot_ms,
       IF(is_cost_countable, slot_hours,         NULL) AS statement_slot_hours,
       IF(is_cost_countable, total_bytes_billed, NULL) AS statement_total_bytes_billed,
-      IF(is_cost_countable, tib_billed,         NULL) AS statement_tib_billed
+      IF(is_cost_countable, tib_billed,         NULL) AS statement_tib_billed,
+      -- どのメーターが当たるジョブかの切り分け。メーターごとに「実際に消費したか」
+      -- を見る。予約が付いているだけで CAPACITY にすると、割り当て直後に落ちて
+      -- スロットを 1ms も使っていないジョブまで課金対象のように見えてしまう。
+      --
+      -- 予約IDは effective_reservation_id（自分に無ければ子から引き継いだもの）を
+      -- 使う。親 SCRIPT は reservation_id を持たないのに課金対象バイトは子の合計を
+      -- 持つため、素の reservation_id で判定すると予約環境の親が軒並み
+      -- ON_DEMAND になってしまう。
+      CASE
+        WHEN effective_reservation_id IS NOT NULL
+         AND IFNULL(total_slot_ms, 0) > 0         THEN 'CAPACITY'
+        WHEN effective_reservation_id IS NULL
+         AND IFNULL(total_bytes_billed, 0) > 0    THEN 'ON_DEMAND'
+        ELSE 'NOT_BILLED'
+      END AS pricing_model,
+      -- NOT_BILLED の内訳。課金額はどれも 0 だが性質はまったく違う。
+      -- 先に来る条件が優先（失敗していればまず ERROR）。
+      CASE
+        WHEN (effective_reservation_id IS NOT NULL AND IFNULL(total_slot_ms, 0) > 0)
+          OR (effective_reservation_id IS NULL AND IFNULL(total_bytes_billed, 0) > 0)
+                                                  THEN NULL
+        WHEN is_error                             THEN 'ERROR'
+        WHEN IFNULL(cache_hit, FALSE)             THEN 'CACHE_HIT'
+        WHEN REGEXP_CONTAINS(
+               IFNULL(statement_type, ''),
+               r'^(CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|SET|DECLARE|CALL|ASSERT|EXPORT|LOAD)'
+             )                                    THEN 'METADATA_ONLY'
+        ELSE 'NO_DATA_SCANNED'
+      END AS not_billed_reason
     FROM with_composition
   """, job_cost_resolved_fqn, job_cost_fqn, job_cost_fqn, job_cost_fqn, job_cost_fqn);
 

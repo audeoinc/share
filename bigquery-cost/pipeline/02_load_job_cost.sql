@@ -257,53 +257,11 @@ BEGIN
         error_result IS NOT NULL AS is_error,
         error_result.reason AS error_reason,
         reservation_id,
-        -- どのメーターが当たるジョブかの切り分け。
-        --   CAPACITY   … 予約の上でスロットを消費した。課金の基礎はスロット時間。
-        --   ON_DEMAND  … 予約なしで課金対象バイトが発生した。基礎はバイト。
-        --   NOT_BILLED … そのメーターで何も消費していない。課金額は 0
-        --                （実行前に落ちた・キャッシュヒット・データを伴わない
-        --                 DDL・0バイトのクエリ・オンデマンドで実行中に落ちた、など）。
-        --
-        -- 判定をバイト数で行っているのは、理由の列挙に頼らないため。
-        -- オンデマンドの課金額は「課金対象バイト × 単価」なので、バイトが 0 なら
-        -- 理由が何であれ課金額は 0 になる。無料操作の一覧を先に列挙する方式だと
-        -- 分類から漏れた種別が黙って ON_DEMAND に混ざる。
-        --
-        -- reservation_id IS NULL は「オンデマンドで実行された」を意味しない点に注意。
-        -- 予約に割り当てられる前に落ちたジョブ（構文エラー等）も NULL になりうる。
-        -- ただし分類の結果は変わらない: そうしたジョブは課金対象バイトも 0 なので
-        -- NOT_BILLED に落ちる。課金対象バイトが出ているジョブは必ず実行されている
-        -- ため、そこで reservation_id が NULL なら本当にオンデマンドである。
-        -- つまり ON_DEMAND と判定するのはバイトが出ているときだけ、という順序が
-        -- この曖昧さを吸収している。
-        --
-        -- メーターごとに「実際に消費したか」を見る。予約が付いているだけで
-        -- CAPACITY にすると、割り当てられた直後に落ちてスロットを1msも使って
-        -- いないジョブまで課金対象のように見えてしまう。予約の課金メーターは
-        -- スロット時間なので、スロット消費が 0 なら予約側にも何も足していない
-        -- （オートスケールも誘発しない）。
-        CASE
-          WHEN reservation_id IS NOT NULL
-           AND IFNULL(total_slot_ms, 0) > 0         THEN 'CAPACITY'
-          WHEN reservation_id IS NULL
-           AND IFNULL(total_bytes_billed, 0) > 0    THEN 'ON_DEMAND'
-          ELSE 'NOT_BILLED'
-        END AS pricing_model,
-        -- NOT_BILLED の内訳。課金額はどれも 0 だが、性質はまったく違う
-        -- （リトライ嵐なのか、キャッシュが効いているのか、ただの DDL なのか）。
-        -- 先に来る条件が優先。失敗していればまず ERROR とする。
-        CASE
-          WHEN (reservation_id IS NOT NULL AND IFNULL(total_slot_ms, 0) > 0)
-            OR (reservation_id IS NULL AND IFNULL(total_bytes_billed, 0) > 0)
-                                                    THEN NULL
-          WHEN error_result IS NOT NULL             THEN 'ERROR'
-          WHEN IFNULL(cache_hit, FALSE)             THEN 'CACHE_HIT'
-          WHEN REGEXP_CONTAINS(
-                 IFNULL(statement_type, ''),
-                 r'^(CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|SET|DECLARE|CALL|ASSERT|EXPORT|LOAD)'
-               )                                    THEN 'METADATA_ONLY'
-          ELSE 'NO_DATA_SCANNED'
-        END AS not_billed_reason,
+        -- pricing_model / not_billed_reason はここでは作らない。
+        -- 親 SCRIPT は reservation_id を持たず（予約は子に付く）、一方で
+        -- 課金対象バイトは子の合計を持つため、行だけを見ると「予約なしで
+        -- バイトあり」＝オンデマンドに見えてしまう。親子が揃うのは
+        -- bqc_vw_t_job_cost_resolved だけなので、分類はそちらで行う。
         total_bytes_processed,
         total_bytes_billed,
         IFNULL(total_bytes_billed, 0) / POW(1024, 4) AS tib_billed,
