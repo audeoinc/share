@@ -205,6 +205,7 @@ BEGIN
         executor_id,
         executor_source,
         pricing_model,
+        not_billed_reason,
         reservation_id,
         COUNT(*)                        AS job_count,
         COUNTIF(cache_hit)              AS cache_hit_count,
@@ -236,7 +237,8 @@ BEGIN
         AND is_cost_countable
       GROUP BY
         usage_date, job_region, normalized_fingerprint,
-        executor_id, executor_source, pricing_model, reservation_id
+        executor_id, executor_source, pricing_model, not_billed_reason,
+        reservation_id
       )
     ) AS source
     ON  target.usage_date             = source.usage_date
@@ -245,9 +247,10 @@ BEGIN
     AND target.executor_id            = source.executor_id
     AND target.executor_source        = source.executor_source
     AND target.pricing_model          = source.pricing_model
-    -- reservation_id は NULL を取りうる。素の = だと NULL 同士が一致せず
-    -- 同じ組み合わせが毎回 INSERT されて重複するので IFNULL で比較する。
-    AND IFNULL(target.reservation_id, '') = IFNULL(source.reservation_id, '')
+    -- reservation_id と not_billed_reason は NULL を取りうる。素の = だと NULL 同士が
+    -- 一致せず、同じ組み合わせが毎回 INSERT されて重複するので IFNULL で比較する。
+    AND IFNULL(target.reservation_id, '')    = IFNULL(source.reservation_id, '')
+    AND IFNULL(target.not_billed_reason, '') = IFNULL(source.not_billed_reason, '')
     WHEN MATCHED THEN UPDATE SET
       job_count           = source.job_count,
       cache_hit_count     = source.cache_hit_count,
@@ -266,7 +269,7 @@ BEGIN
       -- INSERT ROW（列名省略）は target の列順に完全依存するので、列を明示する。
       INSERT (
         usage_date, job_region, normalized_fingerprint, executor_id,
-        executor_source, pricing_model, reservation_id, job_count,
+        executor_source, pricing_model, not_billed_reason, reservation_id, job_count,
         cache_hit_count, error_count, distinct_user_count, total_bytes_billed,
         tib_billed, total_slot_ms, slot_hours, normalized_query,
         sample_query, sample_raw_fingerprint, distinct_raw_fingerprint_count,
@@ -274,7 +277,8 @@ BEGIN
       ) VALUES (
         source.usage_date, source.job_region, source.normalized_fingerprint,
         source.executor_id, source.executor_source, source.pricing_model,
-        source.reservation_id, source.job_count, source.cache_hit_count,
+        source.not_billed_reason, source.reservation_id, source.job_count,
+        source.cache_hit_count,
         source.error_count, source.distinct_user_count, source.total_bytes_billed,
         source.tib_billed, source.total_slot_ms, source.slot_hours,
         source.normalized_query, source.sample_query,

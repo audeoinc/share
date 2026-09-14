@@ -117,6 +117,45 @@ def _check_insert_column_alignment(setup_source: str, refresh_source: str) -> li
     return problems
 
 
+# 02 は MERGE の INSERT ROW（列名省略）を使うため、source の SELECT の列順が
+# 01 の job_cost DDL と完全に一致している必要がある。位置依存なので、列を挿入した
+# 位置がずれると型が合う限り黙って別の列に入る。
+SELECT_ALIAS = re.compile(r"\bAS ([a-z_]+)$")
+
+
+def _job_cost_select_aliases(load_source: str) -> list:
+    marker = "      -- 列の順序は 01 の CREATE TABLE と一致させること"
+    if marker not in load_source:
+        return []
+    body = load_source[load_source.index(marker):load_source.index("      FROM enriched")]
+    aliases = []
+    for raw in body.split("\n"):
+        line = raw.strip().rstrip(",")
+        if not line or line.startswith("--") or line == "SELECT":
+            continue
+        matched = SELECT_ALIAS.search(line)
+        if matched:
+            aliases.append(matched.group(1))
+        elif re.fullmatch(r"[a-z_]+", line):
+            aliases.append(line)
+    return aliases
+
+
+def _check_insert_row_order(setup_source: str, load_source: str) -> list:
+    ddl_bodies = DDL_TABLE.findall(setup_source)
+    if not ddl_bodies:
+        return []
+    job_cost_columns = DDL_COLUMN.findall(ddl_bodies[0])
+    aliases = _job_cost_select_aliases(load_source)
+    if not aliases:
+        return ["02 の job_cost 用 SELECT を見つけられなかった（目印コメントを消した?）"]
+    if job_cost_columns != aliases:
+        head = next((f"{a} / {b}" for a, b in zip(job_cost_columns, aliases) if a != b),
+                    "末尾の列数違い")
+        return [f"02 の SELECT 列順が 01 の job_cost DDL と一致しない（最初の相違: {head}）"]
+    return []
+
+
 def main() -> int:
     failures = 0
     checked = 0
@@ -176,6 +215,22 @@ def main() -> int:
         if not alignment_problems:
             checked += 1
             print("ok    01 の CREATE TABLE と 03 の INSERT 列リストが整合")
+
+    try:
+        order_problems = _check_insert_row_order(
+            open(setup_path, encoding="utf-8").read(),
+            open("pipeline/02_load_job_cost.sql", encoding="utf-8").read(),
+        )
+    except FileNotFoundError:
+        order_problems = []
+    else:
+        for problem in order_problems:
+            failures += 1
+            checked += 1
+            print(f"FAIL  {problem}")
+        if not order_problems:
+            checked += 1
+            print("ok    01 の job_cost DDL と 02 の SELECT 列順が一致（INSERT ROW 用）")
 
     print(f"\n{checked - failures}/{checked} checks passed")
     return 1 if failures else 0

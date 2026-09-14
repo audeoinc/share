@@ -294,8 +294,37 @@ DECLARE target_sql STRING; SET target_sql = ?; EXECUTE IMMEDIATE target_sql;
 過去データが実態と食い違います。`tib_billed`（TiB）と `slot_hours` を持たせ、
 金額は Looker Studio の計算フィールドで掛けてください（`looker/README.md` 参照）。
 
-`pricing_model` 列でオンデマンド（課金の基礎＝バイト）とキャパシティ（＝スロット）を
-切り分けられます。**この2つを1つの合計に混ぜないでください。**
+### 課金メーターの切り分け
+
+`pricing_model` は「このジョブにどのメーターが当たるか」を表します。
+
+| 値 | 条件 | 意味 |
+|---|---|---|
+| `CAPACITY` | 予約あり | 課金の基礎はスロット時間 |
+| `ON_DEMAND` | 予約なしで課金対象バイト > 0 | 課金の基礎は課金対象バイト |
+| `NOT_BILLED` | 予約なしで課金対象バイト = 0 | どちらのメーターでも課金額は 0 |
+
+**`CAPACITY` と `ON_DEMAND` を1つの合計に混ぜないでください。**
+
+`NOT_BILLED` を分けているのは、失敗・キャッシュヒット・データを伴わない DDL などを
+オンデマンドに混ぜると、「オンデマンドのジョブ数」が実態より大きく出るためです。
+課金額はどれも 0 なので金額は狂いませんが、件数や比率を見るときに効きます。
+
+判定を**課金対象バイト数**で行っているのは、無料操作の種別を列挙する方式だと、
+分類から漏れた種別が黙って `ON_DEMAND` に混ざるからです。オンデマンドの課金額は
+「課金対象バイト × 単価」なので、バイトが 0 なら理由が何であれ課金額は 0 になります。
+
+内訳は `not_billed_reason` で分かります（`NOT_BILLED` 以外は NULL）。
+
+| 値 | 意味 |
+|---|---|
+| `ERROR` | 失敗したジョブ。リトライ嵐の検出に使える |
+| `CACHE_HIT` | キャッシュヒット。削減が効いている証拠 |
+| `METADATA_ONLY` | データを伴わない CREATE / ALTER / DROP など |
+| `NO_DATA_SCANNED` | 上記以外で 0 バイト（`SELECT 1` など） |
+
+判定の優先順位は上から順です（失敗していればまず `ERROR`）。分類は
+`tools/verify_pricing_model.py` で13ケース検証しています。
 
 ## 既知の限界
 
@@ -322,7 +351,8 @@ DECLARE target_sql STRING; SET target_sql = ?; EXECUTE IMMEDIATE target_sql;
 | 対象 | 状況 |
 |---|---|
 | 正規化ロジック | **RE2 実機で 29/29 パス**（`tools/normalize_reference.py`） |
-| 動的SQLの構文 / DECLARE の位置 / LIMIT が定数か / DDL と INSERT 列の整合 | **39/39 パス**（`tools/check_templates.py`、sqlglot bigquery。pipeline と adhoc の両方） |
+| 動的SQLの構文 / DECLARE の位置 / LIMIT が定数か / DDL と INSERT 列の整合 / INSERT ROW の列順 | **40/40 パス**（`tools/check_templates.py`、sqlglot bigquery。pipeline と adhoc の両方） |
+| 課金メーターの分類 | **13/13 パス**（`tools/verify_pricing_model.py`） |
 | 親子分類の不変条件 | **6/6 パス**（`tools/verify_hierarchy_logic.py`、`SUM(root)=SUM(statement)` を孤児込みで検証） |
 | BigQuery 実機での実行 | **未実施。** 本セッションに `bq` / `gcloud` と GCP 認証が無いため |
 

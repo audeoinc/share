@@ -257,9 +257,36 @@ BEGIN
         error_result IS NOT NULL AS is_error,
         error_result.reason AS error_reason,
         reservation_id,
-        -- 予約が付いていればキャパシティ課金＝スロットが課金の基礎、
-        -- 付いていなければオンデマンド＝課金対象バイト数が基礎。
-        IF(reservation_id IS NULL, 'ON_DEMAND', 'CAPACITY') AS pricing_model,
+        -- どのメーターが当たるジョブかの切り分け。
+        --   CAPACITY   … 予約の上で走った。課金の基礎はスロット時間。
+        --   ON_DEMAND  … 予約なしで、課金対象バイトが実際に発生している。
+        --   NOT_BILLED … 予約なしで課金対象バイトが 0。どちらのメーターでも
+        --                課金額は 0 になる（失敗・キャッシュヒット・
+        --                データを伴わない DDL・0バイトのクエリなど）。
+        --
+        -- 判定をバイト数で行っているのは、理由の列挙に頼らないため。
+        -- オンデマンドの課金額は「課金対象バイト × 単価」なので、バイトが 0 なら
+        -- 理由が何であれ課金額は 0 になる。無料操作の一覧を先に列挙する方式だと
+        -- 分類から漏れた種別が黙って ON_DEMAND に混ざる。
+        CASE
+          WHEN reservation_id IS NOT NULL           THEN 'CAPACITY'
+          WHEN IFNULL(total_bytes_billed, 0) > 0    THEN 'ON_DEMAND'
+          ELSE 'NOT_BILLED'
+        END AS pricing_model,
+        -- NOT_BILLED の内訳。課金額はどれも 0 だが、性質はまったく違う
+        -- （リトライ嵐なのか、キャッシュが効いているのか、ただの DDL なのか）。
+        -- 先に来る条件が優先。失敗していればまず ERROR とする。
+        CASE
+          WHEN reservation_id IS NOT NULL
+            OR IFNULL(total_bytes_billed, 0) > 0    THEN NULL
+          WHEN error_result IS NOT NULL             THEN 'ERROR'
+          WHEN IFNULL(cache_hit, FALSE)             THEN 'CACHE_HIT'
+          WHEN REGEXP_CONTAINS(
+                 IFNULL(statement_type, ''),
+                 r'^(CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|SET|DECLARE|CALL|ASSERT|EXPORT|LOAD)'
+               )                                    THEN 'METADATA_ONLY'
+          ELSE 'NO_DATA_SCANNED'
+        END AS not_billed_reason,
         total_bytes_processed,
         total_bytes_billed,
         IFNULL(total_bytes_billed, 0) / POW(1024, 4) AS tib_billed,
