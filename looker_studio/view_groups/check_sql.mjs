@@ -15,6 +15,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const table = await readFile(join(here, 'build_table.sql'), 'utf8');
 const udf = await readFile(join(here, 'view_group_html.sql'), 'utf8');
 const chrome = await readFile(join(here, 'chrome.js'), 'utf8');
+const sqltext = await readFile(join(here, 'sqltext.js'), 'utf8');
+const usage = await readFile(join(here, 'usage.md'), 'utf8');
 
 const checks = [];
 const add = (name, ok, detail) => checks.push([name, ok, detail]);
@@ -776,6 +778,42 @@ for (const base of ['analyze', 'render', 'erd', 'page', 'markdown', 'group_css',
 for (const [name, src] of [['build_table.sql', table], ['view_group_html.sql', udf]]) {
   add(`${name} に 'viewlgc_' のリテラル連結が残っていない`,
     !/\|\|\s*'viewlgc_?'/.test(src));
+}
+
+// --- 6. usage.md の言い回しがコードとずれていないか ---------------------
+// usage.md は**レポートを見る人**が読む唯一の資料で、画面に出る文言をそのまま
+// 引用している。引用元を直したのにこちらを直し忘れると、読む人は画面と資料の
+// どちらが正しいのか判断できない（しかもコードは動いているので誰も気づかない）。
+// 引用しているものだけを機械で突き合わせる。
+{
+  // 外側のタブの並び。増減はもちろん、順番が変わっても資料は使えなくなる。
+  const m = chrome.match(/^const OUTER_TABS = \[([^\]]*)\];/m);
+  const tabs = m ? m[1].split(',').map((s) => s.trim().replace(/^'|'$/g, '')) : [];
+  const u = usage.match(/タブは左から \*\*([^*]+)\*\* の (\d+) 枚/);
+  const listed = u ? u[1].split(' / ').map((s) => s.trim()) : [];
+  add('usage.md のタブの並びが chrome.js の OUTER_TABS と同じ',
+    tabs.length > 0 && listed.join(',') === tabs.join(',') &&
+    u !== null && Number(u[2]) === tabs.length,
+    `chrome.js=[${tabs.join(',')}] / usage.md=[${listed.join(',')}]`);
+
+  // 打ち切りの案内文。usage.md は「困ったとき」の表に実物の文言を載せている。
+  const cap = (chrome.match(/^const MAX_SQL_TABS = (\d+);/m) || [])[1];
+  const tpl = sqltext.match(/notice\(`(View が多いため先頭 \$\{MAX_SQL_TABS\} 件[^`]*)`/);
+  const real = cap && tpl ? tpl[1].replace('${MAX_SQL_TABS}', cap) : null;
+  // 実物は `（全 ${views.length} 件）。` で終わる。資料側は件数を N と書くので、
+  // その手前までを突き合わせる。
+  const head = real ? real.slice(0, real.indexOf('（全')) : null;
+  add('usage.md の打ち切りの案内文が sqltext.js と同じ',
+    head !== null && usage.includes(head), `実物=${head || '読み取れなかった'}`);
+
+  // 読むオブジェクトの既定名。データソースの指定を間違えると何も出ない。
+  for (const [label, expr] of [
+    ['viewlgc_t_diff', "'t_' || 'diff'"],
+    ['viewlgc_vw_t_matrix', "'vw_' || 't_' || 'matrix'"],
+  ]) {
+    add(`usage.md の ${label} が build_table.sql の組み立てと同じ`,
+      table.includes(expr) && usage.includes(label), `組み立て: ${expr}`);
+  }
 }
 
 // --- 結果 --------------------------------------------------------------

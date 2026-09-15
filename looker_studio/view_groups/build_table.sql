@@ -399,7 +399,7 @@ DECLARE project_token      STRING;
 DECLARE table_diff_src  STRING;  -- 生成した素のカード（メモを差し込む前）
 DECLARE table_diff      STRING;  -- レポートが読むテーブル（メモ差し込み済み）
 DECLARE table_base_note STRING;  -- base ごとのメモ（スプレッドシートの外部テーブル）
-DECLARE view_diff       STRING;  -- レポートが読むビュー。メモを差し込む
+DECLARE view_diff       STRING;  -- 素のカードにメモを繋ぐビュー（3b の材料）
 DECLARE view_matrix     STRING;  -- base × suffix のマトリクス（1 行 = 1 View）
 -- 5 つの読み元（SQL 片）。拠点だけなら INFORMATION_SCHEMA がそのまま入り、
 -- 混ぜるなら UNION ALL になる。テンプレートは形を知らない。

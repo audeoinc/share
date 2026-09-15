@@ -1631,7 +1631,8 @@ ${cssConcatArgs});
 --   __T_DIFF_SRC__         生成した素のカードのテーブル（project.dataset.table）
 --   __T_DIFF__             メモを差し込み済みのテーブル。レポートはこれを読む
 --   __T_BASE_NOTE__        base ごとのメモの外部テーブル（同上）
---   __V_DIFF__             メモを差し込むビュー。レポートはこれを読む
+--   __V_DIFF__             メモを差し込むビュー（3b の材料。レポートは 3b が
+--                          焼き込んだ __T_DIFF__ のほうを読む）
 --   __V_MATRIX__           base × suffix のマトリクス用ビュー（同上）
 --   __UDF_ANALYZE__        analyze 関数（project.dataset.function）
 --   __UDF_RENDER__         render 関数（同上）
