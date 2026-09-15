@@ -720,6 +720,7 @@ DECLARE target_project_id STRING DEFAULT NULL;
 | `table_diff` | 生成結果のテーブル（最新の 1 世代だけ） | `viewlgc_t_diff` |
 | `table_base_note` | base ごとのメモ（スプレッドシートの外部テーブル） | `viewlgc_m_base_note` |
 | `view_diff` | レポートが読むビュー。メモを差し込む | `viewlgc_vw_t_diff` |
+| `view_matrix` | base × suffix のマトリクス（1 行 = 1 View） | `viewlgc_vw_t_matrix` |
 | `udf_analyze_function_name` | View 群を解析して JSON を返す UDF | `viewlgc_analyze` |
 | `udf_render_function_name` | その JSON を比較 HTML にする UDF | `viewlgc_render` |
 | `udf_page_function_name` | 参照関係を作り差分と束ねる UDF | `viewlgc_page` |
@@ -741,6 +742,8 @@ DECLARE target_project_id STRING DEFAULT NULL;
 > `node check_sql.mjs` が組み立ての式が同じかどうかまで見る。
 
 テーブルとビューは基本名が同じ `diff` で、`vw_` の有無だけで見分ける。
+マトリクスだけは基本名を `matrix` に分けてある。`diff` と grain が違う
+（1 行 = 1 View）ので、同じ基本名にすると中身の見当が付かなくなる。
 
 > 以前はテーブルだけ `_hist` が付いていた（日次スナップショットを積んでいた頃の
 > 名残）。履歴をやめたときに落とした。名前を変えても古いオブジェクトは残るので、
@@ -1264,20 +1267,30 @@ Looker の操作のたびに UDF を回すのは重いので、スケジュー�
 
 ```
 viewlgc_t_diff_src  CLUSTER BY base（素のカード。メモ差し込み前）
-  snapshot_date / base / ref_index / ref_label
+  snapshot_date / base / ref_index / ref_label / ref_view_count
   view_count / group_count / has_multiple
   group_labels / group_sizes / suffixes / unmatched_count
-  view_desc_md / diff_html
+  regions_json / diff_html
 
 viewlgc_vw_t_diff  上に次を足したもの（ref_index / ref_label はそのまま残る。
                    1 行 = 1 base × 1 基準なので、どの行がどの基準かを示す）
-  has_note / has_view_desc / note_md / note_html
+  has_note / note_md / note_html
   note_updated_at / note_updated_by
   diff_html は目印をメモに差し替え済み。**シートの内容がその場で出る**
 
 viewlgc_t_diff  SELECT * FROM viewlgc_vw_t_diff を焼き込んだもの
   **レポートが読むのはこれ**
+
+viewlgc_vw_t_matrix  base × suffix のマトリクス用。**1 行 = 1 View**
+  snapshot_date / base / location / suffix / view_name
+  group_no / group_label / group_size
+  view_count / group_count / has_multiple / unmatched_count
 ```
+
+**リージョンは `t_diff` では列になっていない。** 行の grain が base × 基準で、
+1 つの base は複数リージョンに跨るため、リージョンは行の属性にならない。
+畳んだ形（`regions_json`）だけを列に持たせてあり、割った形が要るときは
+マトリクスのビュー（下）を読む。
 
 Looker Studio はビューを読むだけ。`diff_html` を Templated Record に渡す。
 パラメータもカスタムクエリも UDF も不要。
@@ -1313,6 +1326,7 @@ AS WITH … SELECT …
 セクション 2    INFORMATION_SCHEMA → 解析 → 描画 → viewlgc_t_diff_src
 セクション 3    viewlgc_vw_t_diff = t_diff_src ＋ メモ（シート）  ← その場で出る
 セクション 3b   viewlgc_t_diff    = SELECT * FROM vw_t_diff       ← レポートが読む
+セクション 3c   viewlgc_vw_t_matrix = t_diff_src を 1 行 1 View に割ったもの
 ```
 
 **ビューをそのままレポートに読ませると遅い。** 開くたびに
@@ -1334,6 +1348,62 @@ AS WITH … SELECT …
 **シートを直したその場でレポートに反映したいときは、セクション 3b だけを
 流し直す**（解析も描画もやり直さないので軽い。読むのは `t_diff_src` と
 シートだけ）。待てるなら翌日の日次実行でも同じ結果になる。
+
+### base × suffix のマトリクス（`viewlgc_vw_t_matrix`）
+
+「どの base に、どのリージョンの、どの suffix が揃っているか」を 1 枚で見る表。
+カードを 1 つずつ開かないと欠けが分からない、という穴を埋める。
+
+**カードのテーブルからは作れない。** `t_diff` は 1 行 = base × 基準で、suffix は
+配列（`suffixes`）、リージョンは JSON（`regions_json`）に畳まれている。
+Looker Studio は繰り返し列を扱えないし、ピボットの列を 2 段（location の下に
+suffix）にするには**両方が行の列である**必要がある。そこで割ったものを
+セクション 3c のビューが出す。
+
+```
+1 行 = 1 View
+
+  base         v_daily_sales
+  location     asia-northeast1        ← ピボットの列・1 段目
+  suffix       abjp                   ← ピボットの列・2 段目
+  view_name    v_daily_sales_abjp
+  group_no     1                      ← セルに置く値
+  group_label  abjp, abuk, abus
+  group_size   3
+```
+
+#### Looker Studio での作り方
+
+| 置き場所 | 何を置くか |
+| --- | --- |
+| データソース | `viewlgc_vw_t_matrix` |
+| 行のディメンション | `base` |
+| 列のディメンション | `location`、`suffix`（**この順**。上が location） |
+| 指標 | `group_no`（集計は最大値か最小値。1 セル 1 行なので値はそのまま出る） |
+
+セルに `group_no` を置くと、**同じ base の行で番号が割れているところがロジック
+差分**になる。番号ではなく有無だけを見たいなら、指標を `view_name` の
+COUNT にすると「1 か空白」の表になる。
+
+差分のある base だけに絞るなら、フィルタに `has_multiple = true` を足す。
+
+#### 作りの決めごと
+
+- **suffix を切り直さない。** View 名から `base` を引いた残りをそのまま使う
+  （`SUBSTR(view_name, LENGTH(base) + 2)`）。`base` はセクション 2 の `keyed` が
+  「View 名から `_` + suffix を落としたもの」として作っているので、逆に取れば
+  必ず元の suffix に戻る。ここで一覧との最長一致や中間語
+  （`suffix_middle_list`）をやり直すと、**カードの見出しと列見出しで別の
+  suffix が出る**（どちらもエラーにはならない）。`node check_sql.mjs` が見張る。
+- **基準の先頭の行だけを読む**（`WHERE ref_index = 0`）。基準ごとに行が増える
+  が中身は同じなので、絞らないとセルがグループ数倍に膨らむ。
+- **テーブルに焼き込まない。** 読むのは `t_diff_src` の小さい列だけで、
+  `diff_html` には触らない（列指向なので数 MB のカードは走査されない）。
+  焼き込むと、スケジュールドクエリに 3c を足し忘れたときに**古いマトリクスが
+  黙って残る**。ビューならセクション 2 に自動で追従する。
+- suffix を認識できなかった View は `(suffix なし)` の 1 列にまとめる。
+  そういう View は `base` が View 名そのもの＝ base ごと単独なので、
+  まとめても他と混ざらない。
 
 ### 基準は行が持つ（レポートのコントロールで選ぶ）
 
@@ -2531,8 +2601,10 @@ viewlgc_page が作る（日次）        ビューが毎回やる
 
 事前生成テーブルができていれば、あとは読むだけ。
 
-1. **データを追加 → BigQuery** で `viewlgc_vw_t_diff` を選ぶ
-   （カスタムクエリではなくテーブル選択でよい）
+1. **データを追加 → BigQuery** で `viewlgc_t_diff` を選ぶ
+   （カスタムクエリではなくテーブル選択でよい。**ビュー `vw_t_diff` ではない。**
+   あちらは開くたびに Drive と JS UDF を通るので遅い。「ビューで繋いで、
+   テーブルに写す」の節を参照）
 2. **Templated Record** を配置し、表示対象のカラムに `diff_html` を指定
 3. **コントロール → プルダウン リスト**を **2 つ**置く。どちらも
    **「単一選択にする」をオン**（Templated Record は 1 レコードしか描かない）
@@ -2595,6 +2667,30 @@ SELECT `<project>.<udf_dataset>.viewlgc_group_css`('{"mode": "class"}');
 > あちらは 2 者比較用の `DIFF_CSS` の出力で、見出し・タブ・パラメータ表の
 > `.vg-*` 規則を含まないため、タブが動かない。
 
+### base × suffix のマトリクスを並べる
+
+カードとは別のページに、**普通のピボット テーブル**として置く。
+データソースだけ別（`viewlgc_vw_t_matrix`）で、あとは Looker Studio の標準機能。
+
+1. **データを追加 → BigQuery** で `viewlgc_vw_t_matrix` を選ぶ
+2. **ピボット テーブル**を配置する
+
+| 置き場所 | 何を置くか |
+| --- | --- |
+| 行のディメンション | `base` |
+| 列のディメンション | `location`、`suffix`（**この順**。上の段が `location`） |
+| 指標 | `group_no`（集計は最大値。1 セル 1 行なので値はそのまま出る） |
+
+**列を 2 段にするために `location` を先に置く。** 1 段だけだと suffix が
+リージョンをまたいで横に並び、数が増えるほど読めなくなる。
+
+セルに `group_no` を置くと、**同じ行で番号が割れているところがロジック差分**。
+有無だけを見たいなら指標を `view_name` の COUNT にすると「1 か空白」になる。
+差分のある base だけに絞るなら、フィルタに `has_multiple = true` を足す。
+
+> このビューは 1 行 = 1 View。`t_diff` のような base × 基準の重複は無いので、
+> `view_count` などをそのまま合計してよい。
+
 補助として、`has_multiple` でフィルタした表を並べると「要確認の base」の一覧になる。
 メモの登録状況は `build_table.sql` の 5-7（`has_note` の一覧と、
 「シートにあるのにどの base にも当たらない行」）で見られる。**5-7 は既定で
@@ -2618,6 +2714,15 @@ ORDER BY base;
 > `group_count` が想定より多い場合は、BigQuery が返す DDL が投入したテキストと
 > 違う（整形が正規化される、`OPTIONS` が付く等）可能性がある。
 > `diff_html` を見れば何が差分として残ったか分かる。
+
+マトリクスのピボットを作る前には `build_table.sql` の **5-8** を見る。
+1 行 = 1 View になっているかを 3 つの数で確かめる。
+
+| 列 | 期待 | 違うときに疑うもの |
+|---|---|---|
+| `cells` = `views` | 一致 | 基準の重複（`WHERE ref_index = 0` が効いていない） |
+| `duplicated_cells` | 0 | 同じ location × suffix が 2 つある（セルが重なる） |
+| `cells_without_group` | 0 | `group_labels` の区切りが `chrome.js` の `label()` と食い違う |
 
 ## バックログ（未着手）
 
@@ -2650,13 +2755,7 @@ JSON として読んだもの（`{"ja": "受注日", "en": "order date"}`）。*
   綴りを決め打ちにせず広めに受けている。編集画面を作るなら綴りを 1 つに
   そろえる好機だが、既存の値を壊さないこと（拾えないキーも表には出している）。
 
-### 2. base × suffix のマトリクス
-
-「どの base にどの suffix が揃っているか」を 1 枚で見る表。いまは base ごとの
-カードを開かないと欠けが分からない。`t_diff` の `suffixes` 列と 5-4 の suffix
-一覧があれば作れるので、新しい解析は要らない。
-
-### 3. GAS のメモ エディタ
+### 2. GAS のメモ エディタ
 
 シートを直接編集する代わりに、Markdown のプレビュー付きで書ける画面
 （`gas_markdown.html` / `コード.gs` / `Editor.html`）。`note_preview.html` に

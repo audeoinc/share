@@ -35,6 +35,8 @@
 --   __V_DIFF__             素のカードにメモを繋ぐビュー。3b の材料であり、
 --                          シートを直した内容をその場で見たいときの窓口
 --                          （レポートも確認クエリもこれは読まない。遅いので）
+--   __V_MATRIX__           base × suffix のマトリクス用ビュー。1 行 = 1 View で
+--                          location と suffix を別々の列に持つ（セクション 3c）
 --   __UDF_ANALYZE__        analyze 関数（project.dataset.function）
 --   __UDF_RENDER__         render 関数（同上）
 --   __UDF_ERD__            参照関係の図を作る関数（同上）
@@ -66,6 +68,9 @@
 --
 -- スケジュールドクエリには CONFIGURATION と セクション 2・3・3b を登録する
 -- （1 は初回だけ、4 と 5 は確認用なので不要）。
+-- 3c（マトリクス用ビュー）は入れても入れなくてもよい。ビューなので 1 度
+-- 作れば中身は毎日のセクション 2 に自動で追従する。このファイルを直したら
+-- 定義を作り直したいので、入れておくほうが手間は少ない。
 --
 -- メモ（base ごとの補足説明）について:
 --   note_sheet_url にスプレッドシートの URL を入れると、その内容を外部テーブル
@@ -395,6 +400,7 @@ DECLARE table_diff_src  STRING;  -- 生成した素のカード（メモを差�
 DECLARE table_diff      STRING;  -- レポートが読むテーブル（メモ差し込み済み）
 DECLARE table_base_note STRING;  -- base ごとのメモ（スプレッドシートの外部テーブル）
 DECLARE view_diff       STRING;  -- レポートが読むビュー。メモを差し込む
+DECLARE view_matrix     STRING;  -- base × suffix のマトリクス（1 行 = 1 View）
 -- 5 つの読み元（SQL 片）。拠点だけなら INFORMATION_SCHEMA がそのまま入り、
 -- 混ぜるなら UNION ALL になる。テンプレートは形を知らない。
 DECLARE src_schemata    STRING;
@@ -474,6 +480,11 @@ SET table_base_note =
   table_name_prefix || system_name || '_' || 'm_' || 'base_note' || table_name_suffix;
 SET view_diff =
   table_name_prefix || system_name || '_' || 'vw_' || 't_' || 'diff' || table_name_suffix;
+-- マトリクスはカードとは grain が違う（1 行 = 1 View）ので基本名も分ける。
+-- 実体はビューだけ。読むのは __T_DIFF_SRC__ の小さい列だけなので、
+-- テーブルに焼き込まなくてもレポートから直接読んで十分に速い。
+SET view_matrix =
+  table_name_prefix || system_name || '_' || 'vw_' || 't_' || 'matrix' || table_name_suffix;
 ASSERT REGEXP_CONTAINS(table_diff_src, r'^[A-Za-z0-9_-]+$') AS
   'table_diff_src の名前が不正です。';
 ASSERT REGEXP_CONTAINS(table_diff, r'^[A-Za-z0-9_-]+$') AS
@@ -482,6 +493,8 @@ ASSERT REGEXP_CONTAINS(table_base_note, r'^[A-Za-z0-9_-]+$') AS
   'table_base_note の名前が不正です。';
 ASSERT REGEXP_CONTAINS(view_diff, r'^[A-Za-z0-9_-]+$') AS
   'view_diff の名前が不正です。';
+ASSERT REGEXP_CONTAINS(view_matrix, r'^[A-Za-z0-9_-]+$') AS
+  'view_matrix の名前が不正です。';
 
 -- 運んできたメタデータのテーブルは、送り元ごとに名前が違いうるので
 -- ここでは組み立てない（下の SET src_* が import_sources から作る）。
@@ -681,11 +694,11 @@ SET src_table_opts = IF(ARRAY_LENGTH(import_sources) = 0,
 -- 固定の設定はここで焼き込み、テンプレートだけを @sql_template で渡す。
 -- 値は %T で埋める。条件文には引用符が入るので、%s だと壊れる。
 SET render_call_sql = FORMAT(
-  """SELECT `%s.%s.%s`(@sql_template, %T, %T, %T, %T, %T, %T, STRUCT(%T AS diff_src, %T AS diff_table, %T AS diff_view, %T AS base_note, %T AS analyze_function, %T AS render_function, %T AS erd_function, %T AS page_function, %T AS markdown_function, %T AS css_function), STRUCT(%T AS time_zone, %T AS suffix_pattern, %T AS note_sheet_url, %T AS note_sheet_range), STRUCT(%T AS schema_condition, %T AS view_dataset_condition, %T AS view_name_condition), STRUCT(%T AS schemata, %T AS views, %T AS columns, %T AS field_paths, %T AS table_opts))""",
+  """SELECT `%s.%s.%s`(@sql_template, %T, %T, %T, %T, %T, %T, STRUCT(%T AS diff_src, %T AS diff_table, %T AS diff_view, %T AS matrix_view, %T AS base_note, %T AS analyze_function, %T AS render_function, %T AS erd_function, %T AS page_function, %T AS markdown_function, %T AS css_function), STRUCT(%T AS time_zone, %T AS suffix_pattern, %T AS note_sheet_url, %T AS note_sheet_range), STRUCT(%T AS schema_condition, %T AS view_dataset_condition, %T AS view_name_condition), STRUCT(%T AS schemata, %T AS views, %T AS columns, %T AS field_paths, %T AS table_opts))""",
   udf_project_id, udf_dataset, udf_sql_function_name,
   work_project_id, work_dataset, udf_project_id, udf_dataset,
   target_project_id, job_region,
-  table_diff_src, table_diff, view_diff, table_base_note,
+  table_diff_src, table_diff, view_diff, view_matrix, table_base_note,
   udf_analyze_function_name, udf_render_function_name,
   udf_erd_function_name, udf_page_function_name,
   udf_markdown_function_name, udf_css_function_name,
@@ -791,11 +804,12 @@ END IF;
 --    CREATE OR REPLACE TABLE ... AS SELECT で作り直すので、置き場所を先に
 --    用意しておく必要がない。初回もセクション 2 だけで揃う。
 --
---    作るオブジェクトは 4 つ。
+--    作るオブジェクトは 5 つ。
 --
 --      viewlgc_t_diff_src   セクション 2。素のカード（メモ差し込み前）
 --      viewlgc_vw_t_diff    セクション 3。src ＋ メモ。**シートの内容がその場で出る**
 --      viewlgc_t_diff       セクション 3b。ビューを写したもの。**レポートはこれを読む**
+--      viewlgc_vw_t_matrix  セクション 3c。base × suffix のマトリクス（1 行 = 1 View）
 --      viewlgc_m_base_note  ここで作る。メモのスプレッドシート
 --
 --    【1 回きりの後片付け】名前を変える前・ビューを 2 本作っていた頃の
@@ -921,6 +935,7 @@ CREATE OR REPLACE TABLE `__T_DIFF_SRC__`
   group_sizes     ARRAY<INT64>   OPTIONS (description = '各グループの View 数'),
   suffixes        ARRAY<STRING>  OPTIONS (description = '認識した suffix 一覧'),
   unmatched_count INT64          OPTIONS (description = 'suffix を認識できなかった View 数。1 ならこの行が単独表示の View'),
+  regions_json    STRING         OPTIONS (description = 'どの View がどのリージョンに居るか。[{"r": リージョン, "v": [View 名, ...]}, ...]。行の grain は base × 基準なのでリージョンは列にできない。割った形が要るならマトリクスのビュー（3c）を読む'),
   diff_html       STRING         OPTIONS (description = '比較 HTML。Templated Record に渡す。note タブの description の段まで焼き込み済みで、シートのメモの目印だけが空いている')
 )
 CLUSTER BY base
@@ -1357,6 +1372,13 @@ SELECT
   ) AS group_sizes,
   JSON_VALUE_ARRAY(analysis, '$.suffixes') AS suffixes,
   CAST(JSON_VALUE(analysis, '$.unmatchedCount') AS INT64) AS unmatched_count,
+  -- どの View がどのリージョンに居るか。カードの中（note タブ・SQL タブ）で
+  -- 使うだけなら列にする必要はないが、**列にしておくとマトリクス（3c）が
+  -- ここから location を取れる。** 行の grain は base × 基準なので、
+  -- リージョンを行の属性にはできない（1 つの base が複数リージョンに跨る）。
+  -- 畳んだ JSON のまま持たせて、割るのは 3c の仕事にしてある。
+  --   [{"r":"asia-northeast1","v":["v_x_abjp", ...]}, ...]
+  regions_json,
   --
   -- 描画は 3 本の UDF に分かれている。render がロジック差分のカード、erd が
   -- 参照関係の図を作り、page がその 2 つを受け取ってカラム定義の表と
@@ -1501,6 +1523,107 @@ SELECT * FROM `__V_DIFF__`
 EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
 ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
   '焼き込みの SQL に未展開のプレースホルダが残っています。';
+EXECUTE IMMEDIATE rendered_sql;
+
+
+-- ---------------------------------------------------------------------
+-- 3c. base × suffix のマトリクス用ビュー
+--
+--     「どの base に、どのリージョンの、どの suffix が揃っているか」を
+--     Looker Studio のピボットで見るための行。**1 行 = 1 View。**
+--
+--     カードのテーブル（__T_DIFF__）は 1 行 = base × 基準なので、suffix は
+--     配列（suffixes）、リージョンは JSON（regions_json）に畳まれている。
+--     Looker Studio は繰り返し列を扱えないし、ピボットの列に 2 段
+--     （location > suffix）を置くには**両方が行の列である**必要がある。
+--     ここで割る。
+--
+--     ビューにしてある理由:
+--       ・読むのは __T_DIFF_SRC__ の小さい列だけ（diff_html には触らない）。
+--         列指向なので、数 MB のカードは走査されない
+--       ・3 のビューと違って Drive も JS UDF も REPLACE も通らないので速い
+--       ・焼き込むと、スケジュールドクエリに 3c を足し忘れたときに
+--         **古いマトリクスが黙って残る**。ビューなら毎日のセクション 2 に
+--         自動で追従する
+--
+--     基準（ref_index）ごとに行が増えても中身は同じなので、先頭だけ読む。
+--     ref_index = 0 の行は、グループが 0 件の base にも必ず 1 行ある
+--     （セクション 2 の CROSS JOIN UNNEST が NULL の 1 行を立てるため）。
+-- ---------------------------------------------------------------------
+SET sql_template = """
+CREATE OR REPLACE VIEW `__V_MATRIX__`
+OPTIONS (
+  description = 'base × suffix のマトリクス（1 行 = 1 View。location と suffix を別々の列に持つ）'
+)
+AS
+WITH bases AS (
+  SELECT
+    snapshot_date, base, regions_json, group_labels, group_sizes,
+    view_count, group_count, has_multiple, unmatched_count
+  FROM `__T_DIFF_SRC__`
+  WHERE ref_index = 0
+),
+-- regions_json を [{"r": リージョン, "v": [View 名, ...]}, ...] から 1 View 1 行へ。
+cells AS (
+  SELECT
+    b.* EXCEPT (regions_json),
+    JSON_VALUE(r, '$.r') AS location,
+    v AS view_name
+  FROM bases AS b,
+    UNNEST(JSON_QUERY_ARRAY(b.regions_json)) AS r,
+    UNNEST(JSON_VALUE_ARRAY(r, '$.v')) AS v
+),
+-- suffix は View 名から base を引いた残り。base はセクション 2 の keyed が
+-- 「View 名から '_' + suffix を落としたもの」として作っているので、
+-- 逆に取れば必ず元の suffix に戻る。**ここで suffix を切り直さない。**
+-- 切り直すと、一覧との最長一致や中間語（suffix_middle_list）の扱いが
+-- keyed と食い違い、カードと列見出しで別の suffix が出る。
+--
+-- suffix を認識できなかった View は base が View 名そのものなので、
+-- 引いた残りが空になる。そのときだけ NULL。
+keyed AS (
+  SELECT
+    c.*,
+    IF(LENGTH(c.view_name) > LENGTH(c.base) + 1,
+       SUBSTR(c.view_name, LENGTH(c.base) + 2), NULL) AS raw_suffix
+  FROM cells AS c
+),
+-- その View がどのロジック グループに入るか。group_labels は
+-- 'abjp, abuk, abus' のように suffix を ', ' で並べたもの（chrome.js の
+-- label() と同じ区切り。suffix を認識できなかった View は View 名が入る）。
+-- グループは**メンバの多い順**なので、group_no = 1 が最多グループ。
+grouped AS (
+  SELECT
+    k.*,
+    (SELECT MIN(gi) + 1
+     FROM UNNEST(k.group_labels) AS gl WITH OFFSET AS gi
+     WHERE k.raw_suffix IN UNNEST(SPLIT(gl, ', '))
+        OR k.view_name  IN UNNEST(SPLIT(gl, ', '))) AS group_no
+  FROM keyed AS k
+)
+SELECT
+  snapshot_date,
+  base,
+  -- ピボットの列はこの 2 つを 2 段に置く（location が上、suffix が下）。
+  location,
+  -- 認識できなかったぶんは 1 列にまとめる。そういう View は base が
+  -- View 名そのもの＝ base ごと単独なので、まとめても混ざらない。
+  IFNULL(raw_suffix, '(suffix なし)') AS suffix,
+  view_name,
+  -- セルに置く値。同じ base で番号が割れていれば、そこがロジック差。
+  group_no,
+  IF(group_no IS NULL, NULL, group_labels[SAFE_OFFSET(group_no - 1)]) AS group_label,
+  IF(group_no IS NULL, NULL, group_sizes[SAFE_OFFSET(group_no - 1)])  AS group_size,
+  -- base ごとの値。行の絞り込み（差分のある base だけ見る）に使う。
+  view_count,
+  group_count,
+  has_multiple,
+  unmatched_count
+FROM grouped
+""";
+EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+  'マトリクスのビューの SQL に未展開のプレースホルダが残っています。';
 EXECUTE IMMEDIATE rendered_sql;
 
 
@@ -1801,4 +1924,29 @@ EXECUTE IMMEDIATE rendered_sql;
 -- ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
 --   '5-7 の SQL に未展開のプレースホルダが残っています。';
 -- EXECUTE IMMEDIATE rendered_sql;
+
+-- 5-8 マトリクス（3c）の形。ピボットを作る前に、ここで grain を確かめる。
+--
+--     見るのは 3 つ。
+--       ・cells が views と同じ数か（多ければ基準の重複。WHERE ref_index = 0 が
+--         効いていない。ピボットのセルがグループ数倍に膨らむ）
+--       ・同じ location × suffix が 2 つ無いか（あればセルが重なる）
+--       ・グループに当たらなかった View が 0 か（group_no が NULL。
+--         group_labels の区切りが chrome.js の label() と食い違うと起きる）
+SET sql_template = """
+SELECT
+  '5-8 マトリクスの形'                  AS check_name,
+  (SELECT COUNT(*) FROM `__V_MATRIX__`)                        AS cells,
+  (SELECT SUM(view_count) FROM `__T_DIFF_SRC__` WHERE ref_index = 0) AS views,
+  (SELECT COUNT(DISTINCT location) FROM `__V_MATRIX__`)        AS locations,
+  (SELECT COUNT(DISTINCT suffix) FROM `__V_MATRIX__`)          AS suffixes,
+  (SELECT COUNT(*) FROM (
+     SELECT base, location, suffix FROM `__V_MATRIX__`
+     GROUP BY base, location, suffix HAVING COUNT(*) > 1))     AS duplicated_cells,
+  (SELECT COUNT(*) FROM `__V_MATRIX__` WHERE group_no IS NULL) AS cells_without_group
+""";
+EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+  '5-8 の SQL に未展開のプレースホルダが残っています。';
+EXECUTE IMMEDIATE rendered_sql;
 END;

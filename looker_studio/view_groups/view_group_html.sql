@@ -709,6 +709,7 @@ AS (`%s.%s.%s`() || `%s.%s.%s`() || `%s.%s.%s`() || `%s.%s.%s`())
 --   __T_DIFF__             メモを差し込み済みのテーブル。レポートはこれを読む
 --   __T_BASE_NOTE__        base ごとのメモの外部テーブル（同上）
 --   __V_DIFF__             メモを差し込むビュー。レポートはこれを読む
+--   __V_MATRIX__           base × suffix のマトリクス用ビュー（同上）
 --   __UDF_ANALYZE__        analyze 関数（project.dataset.function）
 --   __UDF_RENDER__         render 関数（同上）
 --   __UDF_ERD__            参照関係の図を作る関数（同上）
@@ -750,6 +751,7 @@ CREATE OR REPLACE FUNCTION `%s.%s.%s`(
     diff_src          STRING,
     diff_table        STRING,
     diff_view         STRING,
+    matrix_view       STRING,
     base_note         STRING,
     analyze_function  STRING,
     render_function   STRING,
@@ -803,6 +805,7 @@ AS (
   REPLACE(
   REPLACE(
   REPLACE(
+  REPLACE(
     sql_template,
     '__TARGET_PROJECT__', target_project_id),
     '__JOB_REGION__', job_region),
@@ -814,6 +817,8 @@ AS (
       work_project_id || '.' || work_dataset || '.' || objects.base_note),
     '__V_DIFF__',
       work_project_id || '.' || work_dataset || '.' || objects.diff_view),
+    '__V_MATRIX__',
+      work_project_id || '.' || work_dataset || '.' || objects.matrix_view),
     '__UDF_ANALYZE__',
       udf_project_id || '.' || udf_dataset || '.' || objects.analyze_function),
     '__UDF_RENDER__',

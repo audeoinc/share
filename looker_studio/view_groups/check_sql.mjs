@@ -248,7 +248,11 @@ add('IF … RAISE ではなく ASSERT を使っている',
   // 'FROM refs' の直前の SELECT。前方から非貪欲に取るとファイル先頭の別の
   // SELECT に当たるので、切り出してから最後の SELECT を採る。
   const upto = table.slice(0, table.indexOf('\nFROM refs\n'));
-  const body = upto.slice(upto.lastIndexOf('\nSELECT\n') + '\nSELECT\n'.length);
+  const body0 = upto.slice(upto.lastIndexOf('\nSELECT\n') + '\nSELECT\n'.length);
+  // コメント行は**割る前に**落とす。説明に JSON の例（[{"r": …, "v": […]}]）を
+  // 書くと、その ',' が深さ 0 のカンマとして数えられ、ありもしない列に割れる。
+  // 括弧しか数えていないので、角括弧や波括弧の中かどうかは見分けられない。
+  const body = body0.split('\n').filter((l) => !l.trim().startsWith('--')).join('\n');
   const cols = [];
   {
     // 括弧だけを数える。ここは型を書かないので < > は比較演算子
@@ -290,15 +294,21 @@ for (const t of ['__T_DIFF_SRC__', '__T_DIFF__']) {
 // メモを繋ぐのはビューの定義だけ。焼き込み（__T_DIFF__）はそれを SELECT * で
 // 写すだけにしておく。同じ SQL を 2 か所に書くと、片方だけ直したときに
 // 「レポートには出るがリアルタイムには出ない」ような食い違いが起きる。
+//
+// ビューは 1 本ではない（3c のマトリクスもビュー）ので、本数ではなく
+// **diff_html を触る箇所が 1 つだけか**を見る。数で見ていた頃は、ビューを
+// 1 本足しただけでここが落ちた（メモの繋ぎ方は何も変わっていないのに）。
 {
   const vAt = table.indexOf('CREATE OR REPLACE VIEW `__V_DIFF__`');
   const tAt = table.indexOf('CREATE OR REPLACE TABLE `__T_DIFF__`');
   const splice = table.indexOf("REPLACE(diff_html, '<!--VG_NOTE-->'");
+  const spliceCount = (table.match(/REPLACE\(diff_html,/g) || []).length;
   add('メモを繋ぐのはビューだけ（焼き込みは SELECT * で写す）',
     vAt > 0 && tAt > vAt && splice > vAt && splice < tAt &&
-    (table.match(/CREATE OR REPLACE VIEW/g) || []).length === 1 &&
+    spliceCount === 1 &&
     /CREATE OR REPLACE TABLE `__T_DIFF__`[\s\S]*?\nAS\nSELECT \* FROM `__V_DIFF__`/
-      .test(table));
+      .test(table),
+    `diff_html への REPLACE ${spliceCount} 回（1 回であること）`);
 }
 
 // --- 5d2. 確認クエリはテーブルを読む ------------------------------------
@@ -306,11 +316,69 @@ for (const t of ['__T_DIFF_SRC__', '__T_DIFF__']) {
 // Markdown の JS UDF・数 MB の diff_html への REPLACE をやり直す。base と
 // group_count しか見ない 5-2 でもそれが走る。3b が直前で焼き込んでいるので
 // テーブルを読めば中身は同じで、待ち時間だけが消える。
+//
+// **見張るのは __V_DIFF__ だけ。** 3c のマトリクスもビューだが、あちらは
+// Drive も JS UDF も通らず、読むのも小さい列だけなので 5 系から読んでよい。
 {
   const at = table.indexOf('-- 5. 確認');
   const sec5 = at > 0 ? table.slice(at) : '';
   add('確認（5 系）はビューではなくテーブルを読む',
     at > 0 && !sec5.includes('__V_DIFF__') && sec5.includes('`__T_DIFF__`'));
+}
+
+// --- 5d3. マトリクスのビュー（3c） --------------------------------------
+// base × suffix のマトリクスは 1 行 = 1 View。カードのテーブルとは grain が
+// 違うので、間違えやすいところを 4 つ押さえる。
+{
+  const at = table.indexOf('CREATE OR REPLACE VIEW `__V_MATRIX__`');
+  const end = at > 0 ? table.indexOf('\n""";', at) : -1;
+  const sec = at > 0 && end > at ? table.slice(at, end) : '';
+  add('マトリクスのビューがある', sec !== '');
+
+  // 基準（ref_index）ごとに行が増える。絞らないとグループ数ぶんの重複になり、
+  // ピボットのセルが「1」ではなく「グループ数」になる。エラーは出ない。
+  add('マトリクスは基準の先頭の行だけを読む',
+    /FROM `__T_DIFF_SRC__`\n *WHERE ref_index = 0/.test(sec));
+
+  // suffix は View 名から base を引いた残り。ここで切り直すと、一覧との
+  // 最長一致や中間語（suffix_middle_list）の扱いがセクション 2 の keyed と
+  // 食い違い、**カードの見出しと列見出しで別の suffix が出る**。
+  add('マトリクスは suffix を切り直さない（base を引いた残りを使う）',
+    sec.includes('SUBSTR(c.view_name, LENGTH(c.base) + 2)') &&
+    !sec.includes('@suffix_list') && !sec.includes('ENDS_WITH') &&
+    !sec.includes('__SUFFIX_PATTERN__'));
+
+  // ビューのまま置く。焼き込むと、スケジュールドクエリに 3c を足し忘れた
+  // ときに古いマトリクスが黙って残る（ビューなら 2 に自動で追従する）。
+  add('マトリクスは焼き込まない（ビューのまま）',
+    !table.includes('__T_MATRIX__') &&
+    !/CREATE OR REPLACE TABLE `__V_MATRIX__`/.test(table));
+
+  // 読むのは小さい列だけ。diff_html に触ると列指向の利点が消え、
+  // ピボットを開くたびに数 MB × base 数を走査する。
+  add('マトリクスは diff_html を読まない', sec !== '' && !sec.includes('diff_html'));
+}
+
+// --- 5d4. objects の STRUCT が両ファイルで同じか ------------------------
+// 目印を 1 つ足すと、build_table.sql の STRUCT(… AS x) と
+// view_group_html.sql の STRUCT<x STRING> の両方を直すことになる。
+// **名前付きの STRUCT は並びも型も一致していないと渡せない**ので、片方だけ
+// 直すと「引数の型が違う」で落ちる。実行するまで分からないので静的に見る。
+{
+  // 呼び出し側は render_call_sql の FORMAT の中。フィールドに括弧は
+  // 現れない（どれも %T）ので、最初の ')' までを 1 つの STRUCT と見てよい。
+  const call = table.match(/STRUCT\(%T AS diff_src[^)]*\)/);
+  const callNames = call
+    ? [...call[0].matchAll(/%T AS ([a-z_]+)/g)].map((m) => m[1]).join(',')
+    : '';
+  const decl = udf.match(/objects STRUCT<\n([\s\S]*?)\n  >,/);
+  const declNames = decl
+    ? decl[1].split('\n').map((l) => (l.trim().match(/^([a-z_]+)\s+STRING/) || [])[1])
+      .filter(Boolean).join(',')
+    : '';
+  add('objects の STRUCT のフィールドが両ファイルで同じ並び',
+    callNames !== '' && callNames === declNames,
+    `build_table.sql=[${callNames}] / view_group_html.sql=[${declNames}]`);
 }
 
 // --- 5e. STRING_AGG の区切りがリテラルか ------------------------------
