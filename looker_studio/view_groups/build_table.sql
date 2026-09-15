@@ -933,9 +933,10 @@ CREATE OR REPLACE TABLE `__T_DIFF_SRC__`
   has_multiple    BOOL           OPTIONS (description = 'group_count > 1。ロジック逸脱の検知用'),
   group_labels    ARRAY<STRING>  OPTIONS (description = 'タブ見出し（同一ロジックの suffix 列記）'),
   group_sizes     ARRAY<INT64>   OPTIONS (description = '各グループの View 数'),
-  suffixes        ARRAY<STRING>  OPTIONS (description = '認識した suffix 一覧'),
+  suffixes        ARRAY<STRING>  OPTIONS (description = '認識した suffix 一覧。suffix を認識できなかった View は View 名が入る。locations / view_names と同じ並びで、添字で対応する'),
+  locations       ARRAY<STRING>  OPTIONS (description = '各 View が居る BigQuery のリージョン。suffixes と同じ並びで、locations[i] が suffixes[i] の View のリージョン。取れなければ空文字。1 行 1 View の形が要るならマトリクスのビュー（3c）を読む'),
+  view_names      ARRAY<STRING>  OPTIONS (description = '各 View の名前。suffixes / locations と同じ並びで、添字で対応する'),
   unmatched_count INT64          OPTIONS (description = 'suffix を認識できなかった View 数。1 ならこの行が単独表示の View'),
-  regions_json    STRING         OPTIONS (description = 'どの View がどのリージョンに居るか。[{"r": リージョン, "v": [View 名, ...]}, ...]。行の grain は base × 基準なのでリージョンは列にできない。割った形が要るならマトリクスのビュー（3c）を読む'),
   diff_html       STRING         OPTIONS (description = '比較 HTML。Templated Record に渡す。note タブの description の段まで焼き込み済みで、シートのメモの目印だけが空いている')
 )
 CLUSTER BY base
@@ -1047,6 +1048,10 @@ keyed AS (
     src.view_name,
     src.ddl,
     src.source_region,
+    -- 切り出した suffix そのもの。認識できなければ NULL。
+    -- **base を組み立てるのと同じ 1 行から取る。** 別の場所で切り直すと
+    -- 最長一致や中間語の扱いが食い違い、base と suffix が対応しなくなる。
+    s.suffix,
     -- suffix を認識できない View は自分の名前を base にする。
     -- 束ねる相手がいないので 1 View / 1 グループとして単独で表示される。
     COALESCE(
@@ -1283,17 +1288,58 @@ analyzed AS (
 --   [{"r": "asia-northeast1", "v": ["v_x_abjp", ...]}, ...]
 -- 並びはリージョン名の昇順。実行のたびに順が変わると、同じ内容でも昨日と違う
 -- ものが出たように読める。
+-- base ごとの View 一覧。**3 本の配列を同じ ORDER BY で畳むので、添字で対応する。**
+--   suffixes[i] / locations[i] / view_names[i] が同じ View を指す
+--
+-- 並びは suffixes の昇順。UDF が返す $.suffixes と同じ材料・同じ並べ方に
+-- してある（あちらは out.suffixes.sort()）。**片方だけ変えないこと。**
+-- 食い違っていないかは 5-9 が突き合わせる。
+--
+-- suffix を認識できなかった View は View 名を置く。UDF の __run が
+-- out.suffixes に積むときと同じ代替で、これが無いと ARRAY_AGG が NULL 要素で
+-- 落ちる（BigQuery の配列は NULL を持てない）。**行ごと落とす手は採れない。**
+-- 落とすと添字がずれ、他の 2 本と対応しなくなる。
+base_views AS (
+  SELECT
+    base,
+    ARRAY_AGG(suffix        ORDER BY suffix, view_name) AS suffixes,
+    ARRAY_AGG(location      ORDER BY suffix, view_name) AS locations,
+    ARRAY_AGG(view_name     ORDER BY suffix, view_name) AS view_names
+  FROM (
+    SELECT
+      base,
+      view_name,
+      COALESCE(suffix, view_name) AS suffix,
+      -- リージョンが取れない読み元でも配列が落ちないようにする。空文字は
+      -- 描画側（regionByView）も「リージョン不明」として扱う。
+      IFNULL(source_region, '') AS location
+    FROM keyed
+  )
+  GROUP BY base
+),
+-- 描画側（note タブのリージョン表・SQL タブのリージョン見出し）へ渡す JSON。
+-- **材料は上の配列そのもの。** keyed から取り直すと、列に出るものと
+-- カードに出るものが別経路になる。
+--   [{"r": リージョン, "v": [View 名, ...]}, ...]
+-- 並びはリージョン名の昇順。実行のたびに順が変わると、同じ内容でも昨日と違う
+-- ものが出たように読める。
+--
+-- WHERE o = ov で添字をそろえる。**ここが配列の対応を使う唯一の場所**なので、
+-- 対応が崩れていれば note と SQL タブの見出しがずれて画面に出る。
 base_regions AS (
   SELECT
     base,
     CONCAT('[', STRING_AGG(
-      CONCAT('{"r":', TO_JSON_STRING(source_region), ',"v":', TO_JSON_STRING(view_names), '}'),
-      ',' ORDER BY source_region
+      CONCAT('{"r":', TO_JSON_STRING(location), ',"v":', TO_JSON_STRING(view_names), '}'),
+      ',' ORDER BY location
     ), ']') AS regions_json
   FROM (
-    SELECT base, source_region, ARRAY_AGG(view_name ORDER BY view_name) AS view_names
-    FROM keyed
-    GROUP BY base, source_region
+    SELECT bv.base, l AS location, ARRAY_AGG(v ORDER BY v) AS view_names
+    FROM base_views AS bv,
+      UNNEST(bv.locations)  AS l WITH OFFSET AS o,
+      UNNEST(bv.view_names) AS v WITH OFFSET AS ov
+    WHERE o = ov AND l != ''
+    GROUP BY bv.base, l
   )
   GROUP BY base
 ),
@@ -1328,6 +1374,11 @@ refs AS (
     COALESCE(bl.labels_json, '[]') AS labels_json,
     -- View がどのリージョンに居るか。取れなくても描画側は落ちない。
     COALESCE(br.regions_json, '[]') AS regions_json,
+    -- 列に出す 3 本の配列。**添字で対応する**（base_views で同じ順に畳んだもの）。
+    -- analyzed は keyed から作るので、ここが空になる base は無い。
+    bv.suffixes   AS suffixes,
+    bv.locations  AS locations,
+    bv.view_names AS view_names,
     g.off AS ref_index,
     g.lbl AS ref_label
   FROM analyzed AS a
@@ -1335,6 +1386,7 @@ refs AS (
   LEFT JOIN base_descs AS bd ON bd.base = a.base
   LEFT JOIN base_labels AS bl ON bl.base = a.base
   LEFT JOIN base_regions AS br ON br.base = a.base
+  LEFT JOIN base_views AS bv ON bv.base = a.base
   -- **基準ごとに 1 行。** グループが 0 件の base（解析できなかった等）でも
   -- 行が消えないよう、そのときは NULL の 1 行を立てる。CROSS JOIN で
   -- 空の配列を展開すると base ごと落ちてしまい、**カードが黙って消える。**
@@ -1370,15 +1422,20 @@ SELECT
     SELECT CAST(x AS INT64)
     FROM UNNEST(JSON_VALUE_ARRAY(analysis, '$.groupSizes')) AS x
   ) AS group_sizes,
-  JSON_VALUE_ARRAY(analysis, '$.suffixes') AS suffixes,
+  -- View 1 本につき 1 要素の**対応する 3 本の配列**（base_views で同じ順に畳む）。
+  --   suffixes[i] / locations[i] / view_names[i] が同じ View を指す
+  -- 行の grain は base × 基準なので、リージョンを 1 つの値の列にはできない
+  -- （1 つの base が複数リージョンに跨る）。**配列なら suffix と同じ高さで
+  -- 持てる**ので、JSON に畳まずに済む。割った 1 行 1 View の形が要るときは
+  -- マトリクスのビュー（3c）を読む。
+  --
+  -- suffixes は UDF が返す $.suffixes ではなく keyed から作る。**他の 2 本と
+  -- 添字をそろえるため**で、材料も並べ方も UDF と同じにしてある
+  -- （食い違っていないかは 5-9 が突き合わせる）。
+  suffixes,
+  locations,
+  view_names,
   CAST(JSON_VALUE(analysis, '$.unmatchedCount') AS INT64) AS unmatched_count,
-  -- どの View がどのリージョンに居るか。カードの中（note タブ・SQL タブ）で
-  -- 使うだけなら列にする必要はないが、**列にしておくとマトリクス（3c）が
-  -- ここから location を取れる。** 行の grain は base × 基準なので、
-  -- リージョンを行の属性にはできない（1 つの base が複数リージョンに跨る）。
-  -- 畳んだ JSON のまま持たせて、割るのは 3c の仕事にしてある。
-  --   [{"r":"asia-northeast1","v":["v_x_abjp", ...]}, ...]
-  regions_json,
   --
   -- 描画は 3 本の UDF に分かれている。render がロジック差分のカード、erd が
   -- 参照関係の図を作り、page がその 2 つを受け取ってカラム定義の表と
@@ -1532,11 +1589,15 @@ EXECUTE IMMEDIATE rendered_sql;
 --     「どの base に、どのリージョンの、どの suffix が揃っているか」を
 --     Looker Studio のピボットで見るための行。**1 行 = 1 View。**
 --
---     カードのテーブル（__T_DIFF__）は 1 行 = base × 基準なので、suffix は
---     配列（suffixes）、リージョンは JSON（regions_json）に畳まれている。
+--     カードのテーブル（__T_DIFF__）は 1 行 = base × 基準なので、View ごとの
+--     情報は配列（suffixes / locations / view_names）に畳まれている。
 --     Looker Studio は繰り返し列を扱えないし、ピボットの列に 2 段
 --     （location > suffix）を置くには**両方が行の列である**必要がある。
 --     ここで割る。
+--
+--     **3 本の配列を添字でそろえて割る**（WITH OFFSET と o = ol = ov）。
+--     セクション 2 の base_views が同じ ORDER BY で畳んでいるので、
+--     同じ添字が同じ View を指す。
 --
 --     ビューにしてある理由:
 --       ・読むのは __T_DIFF_SRC__ の小さい列だけ（diff_html には触らない）。
@@ -1558,57 +1619,48 @@ OPTIONS (
 AS
 WITH bases AS (
   SELECT
-    snapshot_date, base, regions_json, group_labels, group_sizes,
+    snapshot_date, base, suffixes, locations, view_names, group_labels, group_sizes,
     view_count, group_count, has_multiple, unmatched_count
   FROM `__T_DIFF_SRC__`
   WHERE ref_index = 0
 ),
--- regions_json を [{"r": リージョン, "v": [View 名, ...]}, ...] から 1 View 1 行へ。
+-- 配列 3 本を 1 View 1 行へ。**添字をそろえるのがこの CTE の仕事。**
+-- 対応が崩れていれば行数が View 数と合わなくなるので、5-8 が気づく。
 cells AS (
   SELECT
-    b.* EXCEPT (regions_json),
-    JSON_VALUE(r, '$.r') AS location,
+    b.* EXCEPT (suffixes, locations, view_names),
+    s AS label,
+    l AS location,
     v AS view_name
   FROM bases AS b,
-    UNNEST(JSON_QUERY_ARRAY(b.regions_json)) AS r,
-    UNNEST(JSON_VALUE_ARRAY(r, '$.v')) AS v
-),
--- suffix は View 名から base を引いた残り。base はセクション 2 の keyed が
--- 「View 名から '_' + suffix を落としたもの」として作っているので、
--- 逆に取れば必ず元の suffix に戻る。**ここで suffix を切り直さない。**
--- 切り直すと、一覧との最長一致や中間語（suffix_middle_list）の扱いが
--- keyed と食い違い、カードと列見出しで別の suffix が出る。
---
--- suffix を認識できなかった View は base が View 名そのものなので、
--- 引いた残りが空になる。そのときだけ NULL。
-keyed AS (
-  SELECT
-    c.*,
-    IF(LENGTH(c.view_name) > LENGTH(c.base) + 1,
-       SUBSTR(c.view_name, LENGTH(c.base) + 2), NULL) AS raw_suffix
-  FROM cells AS c
+    UNNEST(b.suffixes)   AS s WITH OFFSET AS o,
+    UNNEST(b.locations)  AS l WITH OFFSET AS ol,
+    UNNEST(b.view_names) AS v WITH OFFSET AS ov
+  WHERE o = ol AND o = ov
 ),
 -- その View がどのロジック グループに入るか。group_labels は
--- 'abjp, abuk, abus' のように suffix を ', ' で並べたもの（chrome.js の
--- label() と同じ区切り。suffix を認識できなかった View は View 名が入る）。
+-- 'abjp, abuk, abus' のように**この label を** ', ' で並べたもの
+-- （chrome.js の label() と同じ区切り・同じ代替）。突き合わせはそのまま効く。
 -- グループは**メンバの多い順**なので、group_no = 1 が最多グループ。
 grouped AS (
   SELECT
-    k.*,
+    c.*,
     (SELECT MIN(gi) + 1
-     FROM UNNEST(k.group_labels) AS gl WITH OFFSET AS gi
-     WHERE k.raw_suffix IN UNNEST(SPLIT(gl, ', '))
-        OR k.view_name  IN UNNEST(SPLIT(gl, ', '))) AS group_no
-  FROM keyed AS k
+     FROM UNNEST(c.group_labels) AS gl WITH OFFSET AS gi
+     WHERE c.label IN UNNEST(SPLIT(gl, ', '))) AS group_no
+  FROM cells AS c
 )
 SELECT
   snapshot_date,
   base,
   -- ピボットの列はこの 2 つを 2 段に置く（location が上、suffix が下）。
   location,
-  -- 認識できなかったぶんは 1 列にまとめる。そういう View は base が
-  -- View 名そのもの＝ base ごと単独なので、まとめても混ざらない。
-  IFNULL(raw_suffix, '(suffix なし)') AS suffix,
+  -- label は suffix そのもの。認識できなかった View だけ View 名が入って
+  -- いる（base_views の COALESCE）ので、そこは 1 列にまとめる。そういう
+  -- View は base が View 名そのもの＝ base ごと単独なので、まとめても
+  -- 他と混ざらない。base + '_' + suffix が View 名なので、label と View 名が
+  -- 一致するのは「suffix が取れなかった」ときだけ。
+  IF(label = view_name, '(suffix なし)', label) AS suffix,
   view_name,
   -- セルに置く値。同じ base で番号が割れていれば、そこがロジック差。
   group_no,
@@ -1928,11 +1980,12 @@ EXECUTE IMMEDIATE rendered_sql;
 -- 5-8 マトリクス（3c）の形。ピボットを作る前に、ここで grain を確かめる。
 --
 --     見るのは 3 つ。
---       ・cells が views と同じ数か（多ければ基準の重複。WHERE ref_index = 0 が
---         効いていない。ピボットのセルがグループ数倍に膨らむ）
+--       ・cells が views と同じ数か。多ければ基準の重複（WHERE ref_index = 0 が
+--         効いていない）か、**配列を添字でそろえ忘れて総当たりになっている**。
+--         少なければ配列の長さが 3 本でそろっていない
 --       ・同じ location × suffix が 2 つ無いか（あればセルが重なる）
 --       ・グループに当たらなかった View が 0 か（group_no が NULL。
---         group_labels の区切りが chrome.js の label() と食い違うと起きる）
+--         列の suffixes と UDF の見出しが食い違うと起きる。内訳は 5-9）
 SET sql_template = """
 SELECT
   '5-8 マトリクスの形'                  AS check_name,
@@ -1948,5 +2001,53 @@ SELECT
 EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
 ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
   '5-8 の SQL に未展開のプレースホルダが残っています。';
+EXECUTE IMMEDIATE rendered_sql;
+
+-- 5-9 suffix の切り出しが SQL と UDF で一致しているか
+--
+--     **suffixes の列は SQL（keyed）が作り、カードの見出しは UDF
+--     （extractSuffix）が作る。** どちらも「一覧との最長一致」で同じ結果に
+--     なるように書いてあるが、**食い違ってもエラーは出ない。**
+--     列とカードで別の suffix が出るだけで、画面からは正しく見える。
+--
+--     group_labels は UDF が返した見出し（この列の値を ', ' で並べたもの）
+--     なので、割れば UDF 側の suffix 一覧になる。列の suffixes と集合として
+--     突き合わせれば、取り直さずに確かめられる。
+--
+--     **0 件が正常。** 出たら base の切り出しが両者で違っているということで、
+--     suffix_list / suffix_middle_list / suffix_tail_lengths の渡し方を疑う。
+--     マトリクス（3c）はこの一致を前提に group_no を引いているので、
+--     ここが 0 件でないとマトリクスのセルも空く。
+--
+--     解析できなかった base（group_labels が空）は対象外。UDF 側に
+--     比べるものが無いので、出しても切り分けに使えない。
+SET sql_template = """
+SELECT
+  '5-9 suffix の切り出しの食い違い'      AS check_name,
+  base                                AS base_view_name,
+  ARRAY_TO_STRING(only_in_column, ', ') AS only_in_column,
+  ARRAY_TO_STRING(only_in_card, ', ')   AS only_in_card
+FROM (
+  SELECT
+    base,
+    ARRAY(
+      SELECT s FROM UNNEST(suffixes) AS s
+      WHERE s NOT IN (
+        SELECT x FROM UNNEST(group_labels) AS gl, UNNEST(SPLIT(gl, ', ')) AS x)
+    ) AS only_in_column,
+    ARRAY(
+      SELECT DISTINCT x
+      FROM UNNEST(group_labels) AS gl, UNNEST(SPLIT(gl, ', ')) AS x
+      WHERE x NOT IN UNNEST(suffixes)
+    ) AS only_in_card
+  FROM `__T_DIFF__`
+  WHERE ref_index = 0 AND ARRAY_LENGTH(group_labels) > 0
+)
+WHERE ARRAY_LENGTH(only_in_column) > 0 OR ARRAY_LENGTH(only_in_card) > 0
+ORDER BY base_view_name
+""";
+EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+  '5-9 の SQL に未展開のプレースホルダが残っています。';
 EXECUTE IMMEDIATE rendered_sql;
 END;

@@ -342,13 +342,21 @@ for (const t of ['__T_DIFF_SRC__', '__T_DIFF__']) {
   add('マトリクスは基準の先頭の行だけを読む',
     /FROM `__T_DIFF_SRC__`\n *WHERE ref_index = 0/.test(sec));
 
-  // suffix は View 名から base を引いた残り。ここで切り直すと、一覧との
+  // suffix は列の配列をそのまま割ったもの。ここで切り直すと、一覧との
   // 最長一致や中間語（suffix_middle_list）の扱いがセクション 2 の keyed と
   // 食い違い、**カードの見出しと列見出しで別の suffix が出る**。
-  add('マトリクスは suffix を切り直さない（base を引いた残りを使う）',
-    sec.includes('SUBSTR(c.view_name, LENGTH(c.base) + 2)') &&
-    !sec.includes('@suffix_list') && !sec.includes('ENDS_WITH') &&
-    !sec.includes('__SUFFIX_PATTERN__'));
+  add('マトリクスは suffix を切り直さない（列の配列をそのまま割る）',
+    sec.includes('UNNEST(b.suffixes)') &&
+    !sec.includes('SUBSTR') && !sec.includes('@suffix_list') &&
+    !sec.includes('ENDS_WITH') && !sec.includes('__SUFFIX_PATTERN__'));
+
+  // 3 本の配列は添字でしか対応していない。割るときに WITH OFFSET でそろえ
+  // 忘れると**総当たりになり**、行数が View 数の 3 乗に膨らむ。
+  add('マトリクスは 3 本の配列を添字でそろえて割る',
+    /UNNEST\(b\.suffixes\)\s+AS s WITH OFFSET AS o/.test(sec) &&
+    /UNNEST\(b\.locations\)\s+AS l WITH OFFSET AS ol/.test(sec) &&
+    /UNNEST\(b\.view_names\) AS v WITH OFFSET AS ov/.test(sec) &&
+    /WHERE o = ol AND o = ov/.test(sec));
 
   // ビューのまま置く。焼き込むと、スケジュールドクエリに 3c を足し忘れた
   // ときに古いマトリクスが黙って残る（ビューなら 2 に自動で追従する）。
@@ -683,9 +691,37 @@ for (const base of ['analyze', 'render', 'erd', 'page', 'markdown', 'group_css',
   add('base ごとのリージョンを組み立てて渡している',
     cte !== null &&
     /'\{"r":'/.test(cte ? cte[1] : '') &&
-    /GROUP BY base, source_region/.test(cte ? cte[1] : '') &&
     /COALESCE\(br\.regions_json, '\[\]'\) AS regions_json/.test(table) &&
     /LEFT JOIN base_regions AS br ON br\.base = a\.base/.test(table));
+
+  // **描画側へ渡す JSON は列の配列から作る。** keyed から取り直すと、列に出る
+  // ものとカードに出るものが別経路になり、片方だけ直したときに食い違う
+  // （note の見出しと列の中身が違う、という形で出る。エラーにはならない）。
+  add('リージョンの JSON は列の配列から組み立てる',
+    cte !== null &&
+    /FROM base_views AS bv/.test(cte ? cte[1] : '') &&
+    !/FROM keyed/.test(cte ? cte[1] : ''));
+
+  // 列に出す 3 本の配列。**同じ ORDER BY で畳んでいないと添字で対応しない。**
+  // 対応が崩れると、マトリクスの location が別の View のものになる
+  // （行数は合うので画面からは気づけない）。
+  {
+    const bv = table.match(/^base_views AS \(([\s\S]*?)^\),$/m);
+    const aggs = [...(bv ? bv[1] : '')
+      .matchAll(/ARRAY_AGG\(\s*\w+\s+ORDER BY ([^)]+)\)\s+AS (\w+)/g)];
+    const orders = [...new Set(aggs.map((m) => m[1].trim()))];
+    add('View ごとの 3 本の配列を同じ並びで畳んでいる',
+      bv !== null && aggs.length === 3 &&
+      aggs.map((m) => m[2]).sort().join(',') === 'locations,suffixes,view_names' &&
+      orders.length === 1,
+      `畳んでいる列=[${aggs.map((m) => m[2]).join(',')}] / ORDER BY=[${orders.join(' | ')}]`);
+    // 配列は NULL 要素を持てない。suffix も source_region も欠けうるので、
+    // 畳む前に代替を入れておく。**行ごと落とす手は採れない**（添字がずれる）。
+    add('配列に入れる前に NULL をつぶしている',
+      bv !== null &&
+      /COALESCE\(suffix, view_name\) AS suffix/.test(bv[1]) &&
+      /IFNULL\(source_region, ''\) AS location/.test(bv[1]));
+  }
 
   // page の引数は順番で効く。SQL 側の並びと UDF 側の宣言が食い違うと、
   // labels に regions が入るような形で**静かに壊れる**。

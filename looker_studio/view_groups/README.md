@@ -315,7 +315,7 @@ node build_udf.mjs
 | `node test.mjs` | アナライザ（`analyze.js`）の判定 | 195 |
 | `node preview.mjs` | 描画の markup と CSS（`dist/preview.html` も作る） | 178 |
 | `node build_udf.mjs` | UDF の生成物（JS の構文・サイズ・クラス網羅） | 75 |
-| `node check_sql.mjs` | `build_table.sql` と `view_group_html.sql` の突き合わせ、`usage.md` の引用のずれ | 74 |
+| `node check_sql.mjs` | `build_table.sql` と `view_group_html.sql` の突き合わせ、`usage.md` の引用のずれ | 78 |
 | `node check_cross_region.mjs` | リージョン間の運搬 3 ファイルの命名と配線 | 22 |
 
 件数は現時点の値。**増えるぶんには気にしなくてよい**（数を合わせるための
@@ -1295,8 +1295,9 @@ Looker の操作のたびに UDF を回すのは重いので、スケジュー�
 viewlgc_t_diff_src  CLUSTER BY base（素のカード。メモ差し込み前）
   snapshot_date / base / ref_index / ref_label / ref_view_count
   view_count / group_count / has_multiple
-  group_labels / group_sizes / suffixes / unmatched_count
-  regions_json / diff_html
+  group_labels / group_sizes
+  suffixes / locations / view_names   ← View 1 本 = 1 要素。**添字で対応する**
+  unmatched_count / diff_html
 
 viewlgc_vw_t_diff  上に次を足したもの（ref_index / ref_label はそのまま残る。
                    1 行 = 1 base × 1 基準なので、どの行がどの基準かを示す）
@@ -1313,10 +1314,30 @@ viewlgc_vw_t_matrix  base × suffix のマトリクス用。**1 行 = 1 View**
   view_count / group_count / has_multiple / unmatched_count
 ```
 
-**リージョンは `t_diff` では列になっていない。** 行の grain が base × 基準で、
-1 つの base は複数リージョンに跨るため、リージョンは行の属性にならない。
-畳んだ形（`regions_json`）だけを列に持たせてあり、割った形が要るときは
-マトリクスのビュー（下）を読む。
+**リージョンは `suffixes` と同じ高さの配列で持つ。** 行の grain が base × 基準
+で、1 つの base は複数リージョンに跨るため、リージョンは**1 つの値の列**には
+ならない。かといって JSON に畳むと読むたびに解く必要がある。View 1 本を
+1 要素とする 3 本の配列にして、**添字で対応**させてある。
+
+```
+suffixes    ['abjp',            'abus',       'efjp']
+locations   ['asia-northeast1', 'us-central1','asia-southeast1']
+view_names  ['v_x_abjp',        'v_x_abus',   'v_x_efjp']
+              └─ 同じ添字が同じ View を指す
+```
+
+3 本は `base_views` が**同じ `ORDER BY` で畳む**ので、対応は構造で保証される
+（値を突き合わせて後から結び直してはいない）。`node check_sql.mjs` が
+「3 本が同じ並びか」「NULL をつぶしてから畳んでいるか」を見張る。
+
+> **配列は Looker Studio からは読めない**（BigQuery コネクタは繰り返し列を
+> 扱えない）。レポートで location を使うなら、割った形を出すマトリクスの
+> ビュー（下）を読む。配列が効くのは BigQuery で直に問い合わせるとき。
+
+> **`suffixes` は UDF ではなく SQL（`keyed`）が作る。** 他の 2 本と添字を
+> そろえるため。UDF の `$.suffixes` と同じ材料・同じ並べ方にしてあり、
+> 食い違っていないかは確認クエリ **5-9** が突き合わせる
+> （食い違ってもエラーは出ず、列とカードで別の suffix が出るだけなので）。
 
 Looker Studio はビューを読むだけ。`diff_html` を Templated Record に渡す。
 パラメータもカスタムクエリも UDF も不要。
@@ -1380,8 +1401,8 @@ AS WITH … SELECT …
 「どの base に、どのリージョンの、どの suffix が揃っているか」を 1 枚で見る表。
 カードを 1 つずつ開かないと欠けが分からない、という穴を埋める。
 
-**カードのテーブルからは作れない。** `t_diff` は 1 行 = base × 基準で、suffix は
-配列（`suffixes`）、リージョンは JSON（`regions_json`）に畳まれている。
+**カードのテーブルからは作れない。** `t_diff` は 1 行 = base × 基準で、View ごと
+の情報は配列（`suffixes` / `locations` / `view_names`）に畳まれている。
 Looker Studio は繰り返し列を扱えないし、ピボットの列を 2 段（location の下に
 suffix）にするには**両方が行の列である**必要がある。そこで割ったものを
 セクション 3c のビューが出す。
@@ -1415,12 +1436,14 @@ COUNT にすると「1 か空白」の表になる。
 
 #### 作りの決めごと
 
-- **suffix を切り直さない。** View 名から `base` を引いた残りをそのまま使う
-  （`SUBSTR(view_name, LENGTH(base) + 2)`）。`base` はセクション 2 の `keyed` が
-  「View 名から `_` + suffix を落としたもの」として作っているので、逆に取れば
-  必ず元の suffix に戻る。ここで一覧との最長一致や中間語
-  （`suffix_middle_list`）をやり直すと、**カードの見出しと列見出しで別の
-  suffix が出る**（どちらもエラーにはならない）。`node check_sql.mjs` が見張る。
+- **suffix を切り直さない。** 列の `suffixes` をそのまま割るだけ。切り出しを
+  するのはセクション 2 の `keyed` だけで、ここは 1 か所も持たない。一覧との
+  最長一致や中間語（`suffix_middle_list`）をやり直すと、**カードの見出しと
+  列見出しで別の suffix が出る**（どちらもエラーにはならない）。
+  `node check_sql.mjs` が見張る。
+- **3 本の配列は添字でそろえて割る**（`WITH OFFSET` と `o = ol AND o = ov`）。
+  そろえ忘れると総当たりになり、**行数が View 数の 3 乗**に膨らむ。
+  数が合っているかは確認クエリ **5-8**（`cells` と `views`）で見る。
 - **基準の先頭の行だけを読む**（`WHERE ref_index = 0`）。基準ごとに行が増える
   が中身は同じなので、絞らないとセルがグループ数倍に膨らむ。
 - **テーブルに焼き込まない。** 読むのは `t_diff_src` の小さい列だけで、
@@ -1428,6 +1451,10 @@ COUNT にすると「1 か空白」の表になる。
   焼き込むと、スケジュールドクエリに 3c を足し忘れたときに**古いマトリクスが
   黙って残る**。ビューならセクション 2 に自動で追従する。
 - suffix を認識できなかった View は `(suffix なし)` の 1 列にまとめる。
+  列の `suffixes` にはそこだけ View 名が入っている（`base_views` の
+  `COALESCE(suffix, view_name)`。配列は NULL を持てないため）ので、
+  **`suffixes[i] = view_names[i]` かどうかで見分ける。** View 名は
+  `base` + `_` + suffix なので、一致するのは suffix が取れなかったときだけ。
   そういう View は `base` が View 名そのもの＝ base ごと単独なので、
   まとめても他と混ざらない。
 
@@ -2309,10 +2336,20 @@ base では毎回それが出るだけで読む手掛かりにならない。ラ
 として足している**（運んできたテーブルには `source_region` 列がある）。
 
 ```
+base_views   → suffixes / locations / view_names   ← 列に出るのはこちら
 base_regions → regions_json  [{"r":"asia-northeast1","v":["v_x_abjp", …]}, …]
              → viewlgc_page(… labels_json, regions_json, options_json)
              → renderNote(b, descs, mark, labels, regions)
 ```
+
+**描画側へ渡す JSON は列の配列から組み立てる。** `keyed` から取り直すと、
+列に出るものとカードに出るものが別経路になり、片方だけ直したときに食い違う
+（note の見出しと列の中身が違う、という形で出る。エラーにはならない）。
+`node check_sql.mjs` が経路を見張る。
+
+> **JSON なのは JS UDF への渡し方だから。** `columns_json` / `sql_json` /
+> `descs_json` / `labels_json` と同じ扱いで、**テーブルには残さない**
+> （残すと同じ内容を 2 つの形で持つことになる）。
 
 > **page の引数は順番で効く。** SQL 側の並びと UDF 側の宣言が食い違うと、
 > `labels` に `regions` が入るような形で**静かに壊れる**。`node check_sql.mjs`
@@ -2490,7 +2527,7 @@ base ごとに添える。元が Confluence の文章なので、見出し・表
 | 段 | 出どころ | 変わるとき |
 |---|---|---|
 | ラベル | `INFORMATION_SCHEMA.TABLE_OPTIONS` の `labels` | View をデプロイしたとき |
-| View のリージョン | `regions_json`（`keyed` の `source_region`） | View を別リージョンに増やしたとき |
+| View のリージョン | `regions_json`（`base_views` の `locations` から組み立てる） | View を別リージョンに増やしたとき |
 | View の description | 上の `TABLE_OPTIONS` の `description` | View をデプロイしたとき |
 | メモ | スプレッドシート | 書き換えたその場で |
 
@@ -2769,9 +2806,16 @@ ORDER BY base;
 
 | 列 | 期待 | 違うときに疑うもの |
 |---|---|---|
-| `cells` = `views` | 一致 | 基準の重複（`WHERE ref_index = 0` が効いていない） |
+| `cells` = `views` | 一致 | 多い: 基準の重複（`WHERE ref_index = 0` が効いていない）か、配列を添字でそろえ忘れて総当たりになっている。少ない: 3 本の配列の長さがそろっていない |
 | `duplicated_cells` | 0 | 同じ location × suffix が 2 つある（セルが重なる） |
-| `cells_without_group` | 0 | `group_labels` の区切りが `chrome.js` の `label()` と食い違う |
+| `cells_without_group` | 0 | 列の `suffixes` と UDF の見出しが食い違う。内訳は **5-9** |
+
+**5-9** は `suffixes` の列（SQL の `keyed` が作る）と、カードの見出し
+（UDF の `extractSuffix` が作る）を集合で突き合わせる。**0 件が正常。**
+両者は同じ結果になるように書いてあるが、**食い違ってもエラーは出ない**
+（列とカードで別の suffix が出るだけで、画面からは正しく見える）ので、
+ここで見張る。出たら `suffix_list` / `suffix_middle_list` /
+`suffix_tail_lengths` の渡し方を疑う。
 
 ## バックログ（未着手）
 

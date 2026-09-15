@@ -290,6 +290,12 @@ v_pricing         1     2     1     1        1     1     1    ← abuk だけ別
 | `group_size` | そのグループの View 数 |
 | `view_count` / `group_count` / `has_multiple` / `unmatched_count` | base ごとの値。絞り込みに使う |
 
+> **BigQuery で直に問い合わせるなら**、カードのテーブル（`viewlgc_t_diff`）
+> にも同じ材料が `suffixes` / `locations` / `view_names` の 3 本の配列で
+> 入っている（**添字が対応する**。`locations[i]` が `suffixes[i]` の View の
+> リージョン）。ただし**配列は Looker Studio からは読めない**ので、
+> レポートで使うならこのマトリクスのほうを読む。
+
 ---
 
 ## 6. よくある読み違い
