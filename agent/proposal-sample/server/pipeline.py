@@ -91,6 +91,75 @@ recommended_product_ids は分析で有望とされた商品IDを入れる。
     )
 
 
+def emit_proposal(
+    title: str, body: str, recommended_product_ids: list[str]
+) -> dict:
+    """提案が固まったら呼び出して内容を確定する（チャット用の確定ツール）。
+
+    まだ要件が曖昧・相談中の段階では呼ばず、日本語のテキストで応答すること。
+    予算・トーン・訴求ポイント・対象商品など、提案に必要な条件が揃ったと判断した
+    ときにだけ、このツールで最終的な提案を確定する。
+
+    Args:
+        title: 提案タイトル（1行、訴求力のあるもの）。
+        body: 提案本文（3〜5文。顧客の現状に触れ、具体的な価値と根拠を示す）。
+        recommended_product_ids: 推奨する商品IDのリスト（例: ["P300", "P500"]）。
+
+    Returns:
+        確定した提案（そのままエコーして返す）。
+    """
+    return {
+        "title": title,
+        "body": body,
+        "recommended_product_ids": recommended_product_ids,
+    }
+
+
+def _build_chat_agent(name: str = "proposal_chat") -> LlmAgent:
+    """対話型の提案エージェント（往復のやりとりができる）。
+
+    ポイント: output_schema を付けない。JSON固定出力に縛らないことで、
+    情報が足りないときは自然文で「質問を返す」ことができる。要件が揃ったら
+    emit_proposal ツールを呼んで構造化された提案を確定する。
+    """
+    return LlmAgent(
+        name=name,
+        model=MODEL,
+        description="顧客提案を対話しながら固めるセールスコンサルタント（Web用）。",
+        instruction="""【最重要・言語ルール】
+あなたの思考（reasoning / thinking / 内部推論）も、最終的な回答も、**すべて日本語だけ**で
+書いてください。英語やその他の言語で考えたり書いたりすることは禁止です。
+
+あなたは経験豊富なB2Bセールスコンサルタントです。ユーザーと会話しながら、対象顧客への
+提案を一緒に固めていきます。次の方針で進めてください。
+
+1. 必要に応じて get_customer_detail / get_purchase_history / list_products で
+   対象顧客の状況（属性・購買履歴・提案候補の商品）を把握する。
+2. 提案に必要な条件（予算感・トーン・訴求ポイント・対象商品・目的など）が
+   **曖昧なときは、確認の質問を1〜2個に絞って返す**。一度にたくさん質問しない。
+   このときは emit_proposal を呼ばず、日本語のテキストだけで応答すること。
+3. 条件が十分に揃ったと判断したら、emit_proposal を呼んで提案を確定する
+   （title / body / recommended_product_ids）。recommended_product_ids には
+   実在する商品ID（list_products で得られるID）だけを入れる。
+4. emit_proposal を呼んだあとは、確定した旨と要点を1〜2文で簡潔に日本語で伝える。
+
+過去のやりとりは文脈として覚えているので、ユーザーの追加指示を尊重して調整すること。
+""",
+        tools=[
+            get_customer_detail,
+            get_purchase_history,
+            list_products,
+            emit_proposal,
+        ],
+        # 思考(thinking)を有効化。part.thought=True の思考パートとして流れる。
+        generate_content_config=types.GenerateContentConfig(
+            thinking_config=types.ThinkingConfig(
+                include_thoughts=True, thinking_level="high"
+            )
+        ),
+    )
+
+
 # 初回生成用: 分析 → 提案 の直列パイプライン
 proposal_pipeline = SequentialAgent(
     name="proposal_pipeline",
@@ -101,8 +170,12 @@ proposal_pipeline = SequentialAgent(
 # 再提案用: 提案エージェント単体（別インスタンス＝親の重複を避ける）
 proposal_refiner = _build_proposal_writer(name="proposal_refiner")
 
+# 対話用: 質問を返せる会話型エージェント（emit_proposal で確定）
+proposal_chat = _build_chat_agent()
+
 _pipeline_runner = InMemoryRunner(agent=proposal_pipeline, app_name=APP_NAME)
 _refine_runner = InMemoryRunner(agent=proposal_refiner, app_name=APP_NAME)
+_chat_runner = InMemoryRunner(agent=proposal_chat, app_name=APP_NAME)
 
 
 def _parse_proposal(value) -> dict:
@@ -344,5 +417,119 @@ async def refine_proposal_stream(
         "type": "final",
         "analysis": analysis,  # 分析は据え置き
         "proposal": _parse_proposal(final.state.get("proposal", {})),
+        "thinking": thinking_acc,
+    }
+
+
+# ---- 対話（チャット） -------------------------------------------------------
+#
+# 生成/再提案が「一方向のフロー」なのに対し、こちらは往復のやりとりができる。
+# エージェントは output_schema で縛られていないため、情報が足りなければ質問を返し、
+# 要件が揃ったら emit_proposal ツールで提案を確定する。会話は顧客ごとの
+# セッションで継続する（過去のやりとりを文脈として覚えている）。
+
+# 顧客ごとの「チャット会話セッションID」。再提案(_conversations)とは別管理。
+_chat_sessions: dict[str, str] = {}
+
+
+def reset_chat(customer_id: str) -> None:
+    """その顧客のチャット会話履歴を破棄する（新しい相談を始める時に呼ぶ）。"""
+    _chat_sessions.pop(customer_id, None)
+
+
+async def _ensure_chat_session(customer_id: str) -> tuple[str, bool]:
+    """チャット用セッションを取得（無ければ作成）。(session_id, 初回か) を返す。"""
+    is_first_turn = customer_id not in _chat_sessions
+    if is_first_turn:
+        session = await _chat_runner.session_service.create_session(
+            app_name=APP_NAME, user_id=USER_ID
+        )
+        _chat_sessions[customer_id] = session.id
+    return _chat_sessions[customer_id], is_first_turn
+
+
+def _chat_prompt(customer_id: str, message: str, is_first_turn: bool) -> str:
+    """チャットでエージェントに渡すメッセージ本文を組み立てる。"""
+    if is_first_turn:
+        return f"""対象は顧客ID {customer_id} です。必要ならツールで顧客の状況を把握してください。
+要件が曖昧なときは確認の質問を返し、十分に揃ったら emit_proposal で提案を確定してください。
+
+# ユーザーからのメッセージ
+{message}
+"""
+    return message
+
+
+async def chat_stream(customer_id: str, message: str, reset: bool = False):
+    """対話（往復）をストリーミングで行う非同期ジェネレータ。
+
+    yield する要素:
+      {"type": "status", "text": ...}         … ツール実行などの進捗通知
+      {"type": "thinking_delta", "text": ...}  … 思考の差分（ライブ表示用）
+      {"type": "reply_delta", "text": ...}     … エージェント返信テキストの差分
+      {"type": "final", "reply", "proposal", "thinking"}  … 最終確定値
+                                                （proposal は確定時のみ。未確定は None）
+    """
+    if reset:
+        reset_chat(customer_id)
+    session_id, is_first_turn = await _ensure_chat_session(customer_id)
+    text = _chat_prompt(customer_id, message, is_first_turn)
+    msg = types.Content(role="user", parts=[types.Part(text=text)])
+    cfg = RunConfig(streaming_mode=StreamingMode.SSE)
+
+    thinking_acc = ""
+    reply_acc = ""     # partial の差分を積む（ライブ表示用）
+    reply_full = ""    # 非partial（完成テキスト）は最新のものを正とする
+    emitted: dict | None = None
+
+    async for event in _chat_runner.run_async(
+        user_id=USER_ID, session_id=session_id, new_message=msg, run_config=cfg
+    ):
+        # ツール呼び出し（データ取得 or 提案確定）を検知
+        fcs = event.get_function_calls() if hasattr(event, "get_function_calls") else []
+        if fcs:
+            for fc in fcs:
+                if fc.name == "emit_proposal":
+                    emitted = dict(fc.args or {})
+                    yield {"type": "status", "text": "提案を確定しています…"}
+                else:
+                    yield {"type": "status", "text": f"顧客データを取得中…（{fc.name}）"}
+            continue
+
+        partial = getattr(event, "partial", None)
+        if not (getattr(event, "content", None) and event.content.parts):
+            continue
+        for part in event.content.parts:
+            t = getattr(part, "text", None)
+            if not t:
+                continue
+            if getattr(part, "thought", False):
+                if partial:
+                    thinking_acc += t
+                    yield {"type": "thinking_delta", "text": t}
+            else:
+                if partial:
+                    reply_acc += t
+                    yield {"type": "reply_delta", "text": t}
+                else:
+                    # 完成テキスト（累積）は上書きで正とする
+                    reply_full = t
+
+    reply = (reply_full or reply_acc).strip()
+    if emitted and not reply:
+        reply = "提案を作成しました。右のフォームでご確認ください。"
+
+    proposal = None
+    if emitted is not None:
+        proposal = {
+            "title": emitted.get("title", ""),
+            "body": emitted.get("body", ""),
+            "recommended_product_ids": list(emitted.get("recommended_product_ids") or []),
+        }
+
+    yield {
+        "type": "final",
+        "reply": reply,
+        "proposal": proposal,
         "thinking": thinking_acc,
     }

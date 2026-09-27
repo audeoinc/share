@@ -80,6 +80,18 @@
           <div id="history-list" class="history-list"></div>
         </details>
 
+        <!-- エージェントと相談して作る（対話・往復） -->
+        <details class="card chat" id="chat-card">
+          <summary>💬 エージェントと相談して作成 <span class="muted">（対話しながら要件を固める。質問が返ることもあります）</span></summary>
+          <div id="chat-log" class="chat-log"></div>
+          <div class="chat-row">
+            <input id="chat-input" type="text"
+              placeholder="例: 解約リスクが高いので、低予算で継続を促す提案にしたい" />
+            <button id="btn-chat-send" class="btn primary">送信</button>
+            <button id="btn-chat-reset" class="btn small" title="会話をリセットして最初から相談する">🗑 リセット</button>
+          </div>
+        </details>
+
         <!-- 分析 + 提案（編集フォーム） -->
         <div id="result" class="result hidden">
           <div class="card analysis">

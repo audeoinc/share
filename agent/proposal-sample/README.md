@@ -37,9 +37,12 @@ json-server は不要**です。
 
 [B] FastAPI ダッシュボード（server/ :8000, 1プロセス）
   web/（3ペインUI, 依存ゼロ）── 同一オリジンの /api/... を呼ぶ（CORS不要）
-    └─ server/main.py（UI配信 + データAPI + 生成/再提案/評価/承認/削除）
-         └─ server/pipeline.py: SequentialAgent(analyst_web → proposal_writer_web) を Runner で実行
-              提案は output_schema(ProposalOut) で構造化JSONとして受け取る
+    └─ server/main.py（UI配信 + データAPI + 生成/再提案/対話/評価/承認/削除）
+         └─ server/pipeline.py:
+              ・生成/再提案: SequentialAgent(analyst_web → proposal_writer_web) を Runner で実行
+                提案は output_schema(ProposalOut) で構造化JSONとして受け取る（一方向フロー）
+              ・対話: proposal_chat（output_schema なし＝質問を返せる）を Runner で実行
+                要件が揃うと emit_proposal ツールで構造化JSONを確定（会話型）
 
 データ層（両モード共通）: proposal_app/store.py（mock/db.json を seed にしたインメモリ）
   customers / products / purchases … BQ 読み取り相当
@@ -136,6 +139,10 @@ BQデータの一覧表示 → 顧客選択 → エージェントが提案生�
   **会話の流れの各ターン（初回生成／各再提案）にもそのターンの思考を折りたたみで併記**。
   ※思考の言語は日本語をプロンプトで誘導しているが、Gemini の thinking は言語制御が効きにくく英語のことが多い。
 - **指示して再提案（会話継続）**: 過去の指示を記憶。再提案も**SSEでライブ表示**（`/api/refine_stream`）。
+- **エージェントと相談して作成（対話・往復）**: チャットでやりとりしながら要件を固める（`/api/chat_stream`）。
+  対話用エージェントは `output_schema` で縛らないため**情報が足りなければ質問を返し**、条件が揃うと
+  `emit_proposal` ツールで提案を確定して右のフォームに反映（下書き保存＋版履歴 `対話` を記録）。
+  生成/再提案（一方向フロー）に対する**会話型**の入口で、確定後は評価・承認・履歴の導線にそのまま乗る。
 - **モデル稼働中のフロート表示**: 画面固定のスピナー＋ステータス。スクロール位置に関係なく「動いている」ことが分かる。
 - **版管理（生成履歴）**: 生成/再提案ごとに版を記録し、**復元**・**2版比較**。既定は折りたたみ。
 - **インライン評価（🧪）**: LLM-as-judge で grounding / relevance / actionability を採点（`/api/evaluate`）。
@@ -151,6 +158,7 @@ BQデータの一覧表示 → 顧客選択 → エージェントが提案生�
 | GET `/api/proposals?customer_id=` `/api/versions?customer_id=` | 保存済み提案 / 生成履歴 |
 | POST `/api/generate` / `/api/generate_stream`(SSE) | 提案生成（非ストリーム / ストリーム） |
 | POST `/api/refine` / `/api/refine_stream`(SSE) | 再提案（非ストリーム / ストリーム。会話継続） |
+| POST `/api/chat_stream`(SSE) | 対話（往復）。質問が返ることもあり、確定時のみ提案を返す（`reset` で会話リセット） |
 | POST `/api/evaluate` | LLM-as-judge 採点 |
 | POST `/api/approve` | 承認して保存（proposal_id 有=更新 / 無=新規） |
 | DELETE `/api/proposals/{id}` `/api/versions/{id}` | 削除 |
