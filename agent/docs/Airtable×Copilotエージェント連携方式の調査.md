@@ -3,7 +3,7 @@
 - 作成日：2026-09-27
 - 目的：Copilotのエージェントが推論した結果を、Airtableの配信カードの項目（テーマ・掲載商品・コピー・制作指示など）に設定する方法を、取りうる選択肢としてフラットに洗い出す
 - 位置付け：調査結果の整理（特定の方式を推奨するものではない）
-- 情報の時点：2026年9月時点の公開情報にもとづく
+- 情報の時点：2026年9月時点の公開情報にもとづく（2026-09-28にMicrosoft Learn等の公式資料で主要な点を確認済み）
 
 ---
 
@@ -24,7 +24,7 @@
 | 主な用途 | 指示とナレッジを固定したQ&A・文章生成 | Q&Aに加え、外部システムの操作・ワークフロー |
 | 外部システムへの書き込み | **できない** | できる（コネクタ、カスタムコネクタ、HTTP、MCP） |
 | 自動起動 | できない（人が話しかけて動く） | できる（イベントトリガー、Power Automateからの呼び出し） |
-| 追加費用 | なし（M365 Copilotのライセンスに含まれる） | 利用量に応じて課金（契約形態により要確認） |
+| 追加費用 | なし（M365 Copilotのライセンスに含まれる） | 利用量に応じてCopilotクレジットを消費。例外として、M365 Copilotのライセンスを持つ本人がサインインした状態でエージェントが動く場合は課金なし |
 
 → **Airtableへの自動書き込みや自動起動を伴う方式は、Copilot Studioのエージェントが前提**になる。Agent Builderで使えるのは、人が結果を運ぶ方式（下記のP1・P2）に限られる。
 
@@ -43,8 +43,8 @@
 
 | 手段 | 概要 | 主な制約 |
 |---|---|---|
-| Power Automate | 定期実行、HTTP受信、ファイル作成などをきっかけに処理 | HTTP受信トリガー・HTTPアクションはPremium。**AirtableのPower Automateコネクタは非推奨**（廃止されたAPIキー認証のため）で、書き込みはHTTPアクション＋PATが基本 |
-| Copilot Studioコネクタ「Execute Agent and wait」 | Power Automateやcode appsからエージェントを呼び、応答を受け取る | 呼べるのは公開済みのCopilot Studioエージェントのみ |
+| Power Automate | 定期実行、HTTP受信、ファイル作成などをきっかけに処理 | HTTP受信トリガー・HTTPアクションはPremium（フローの所有者のライセンスが使われる）。外部から呼ばれた場合、応答は120秒以内に返す必要がある（先に応答を返してから処理を続けることは可）。**AirtableのPower Automateコネクタは非推奨**（廃止されたAPIキー認証のため）で、書き込みはHTTPアクション＋PATが基本 |
+| Copilot Studioコネクタ「Execute Agent and wait」 | Power Automateやcode appsからエージェントを呼び、応答（最後の返答、返答の一覧、会話ID）を受け取る。会話IDを渡すと続きの会話ができる | 呼べるのは公開済みのCopilot Studioエージェントのみ。**コネクタ自体はStandard（Premium不要）**。接続はEntraでサインインして作り、他人と共有できない（接続を作った人のアカウントで動く） |
 | Copilot StudioのMCP対応（GA） | エージェントにMCPサーバーのツールを持たせる | 対応しているのはツールとリソースのみ |
 | M365 Copilot connector（Airtable、プレビュー） | Airtableのレコードを取り込み、Copilotから検索・参照できるようにする | **読み取り専用**。AirtableのEnterprise IDが必要 |
 
@@ -58,7 +58,7 @@
 | 流れ | フローがカードを取得 → エージェントが下書きを生成して返す → フローがAirtableに書き込む | トリガーがイベントを渡す → エージェントが自分で判断して取得・生成 → エージェントのツールでAirtableに書き込む |
 | エージェントの役割 | 生成だけ（取得・書き込み・エラー処理はフローが行う） | 取得・生成・書き込みまで、手順を自分で判断して実行 |
 | 確実さ | 書き込みの手順がフローで決まっているため、制御しやすい | 書き込むかどうかもエージェントの判断に依存するため、制御しにくい |
-| 費用 | エージェントの呼び出しごとにCopilotクレジット | 自律実行もCopilotクレジットの消費対象 |
+| 費用 | エージェントの利用分はCopilotクレジット。フローの実行はPower Automateのライセンス側で、クレジットは消費しない | 自律実行もCopilotクレジットの消費対象 |
 | 該当するパターン | P7・P8・P9・P12・P14 | P10 |
 
 ---
@@ -199,7 +199,7 @@
 - **流れ**：Airtableのボタン、またはレコード作成・条件一致をきっかけにオートメーションを実行 → スクリプトでPower AutomateのHTTPトリガーにPOST → Power Automateが「Execute Agent and wait」でエージェントを呼ぶ → 結果をAirtableの下書き欄に書き込む（第0章の「フローが主役」の使い方。P7との違いは、起動のきっかけが定期実行ではなくAirtableの操作である点）
 - **必要なもの**：Airtableのオートメーション（スクリプト）、Power Automate Premium（HTTPトリガー）、Copilot Studio、PAT
 - **長所**：Airtableの操作から数十秒〜数分で結果が反映される。Airtable側の送信は受付だけで終わるため、30秒制限に当たりにくい
-- **制約・留意点**：Airtableから社内のPower Automateを呼べる設定が必要。トリガーの「フローをトリガーできるユーザー」がAnyone（URLの署名だけで呼べる）でないと、Airtableから直接は呼べない。テナント内に限定する場合は、スクリプト側でEntraのトークンを取得する必要がある（クライアントシークレットをAirtable側に置くことになる）。DLPポリシーでHTTPトリガーが禁止されていないかの確認が必要
+- **制約・留意点**：Airtableから社内のPower Automateを呼べる設定が必要。トリガーの「フローをトリガーできるユーザー」は3通り（テナント内の任意のユーザー＝新規フローの既定／テナント内の特定のユーザー＝サービスプリンシパルも指定可／Anyone＝旧来の設定で、URLを知っていれば誰でも呼べる）。Anyone以外では、スクリプト側でEntraのトークンを取得する必要がある（クライアントシークレットをAirtable側に置くことになる）。フローは120秒以内に応答を返す必要があるため、先に「受付済み」を返してから推論・書き込みを続ける作りにする。DLPポリシーでHTTPトリガーが禁止されていないかの確認が必要
 
 #### P10：Airtableから、Copilot Studioのエージェントを自律的に起動する
 - **流れ**：Airtableのスクリプトからトリガー（Power AutomateのHTTP受信）を呼ぶ → Copilot Studioの自律エージェントがイベントトリガーで起動 → エージェントがツール（カスタムコネクタやMCP）でAirtableに書き戻す（第0章の「エージェントが主役」の使い方）
@@ -216,21 +216,23 @@
 ##### Direct Lineとは
 - Copilot Studioのエージェントに、**外部のプログラムから会話として話しかけるためのAPI**（Bot FrameworkのDirect Line API）。Teamsやホームページのチャット画面と同じ「会話」を、プログラムが画面なしで行うための入り口
 - エージェントの「チャネル」（Teams、Webのチャット画面など、エージェントと話す窓口）の1つ。Webのチャット画面も内部ではDirect Lineを使っている
-- 接続に使う**シークレット**（合言葉にあたる秘密の文字列）は、Copilot Studioのエージェントの設定（セキュリティ → Webチャネルのセキュリティ）で取得する
+- 接続に使う**シークレット**（合言葉にあたる秘密の文字列）は、Copilot Studioのエージェントの設定（セキュリティ → Webチャネルのセキュリティ）で取得する。シークレットは2つあり、切り替えながら再発行できる
+- サーバー同士の呼び出しでは、シークレットをそのまま認証に使うのが最も簡単とされている。ブラウザーなど利用者から見える場所ではシークレットを置かず、トークンに交換して使う
+- **エージェントの認証設定との関係**：シークレットで呼ぶ場合、エージェントは利用者の身元なしで動く（認証設定は「認証なし」）。**「認証なし」では、エージェントはSharePointのナレッジから情報を取得しない**（SharePointの内容は、話しかけている利用者本人の権限で取得されるため）。つまり、SharePointに置いたポリシーなどをナレッジとして参照させる使い方とは両立しない
 
 ##### なぜP11で必要になるか（必要性）
 - Airtableのスクリプトから、**Power Automateを通さずに**エージェントを直接呼ぶ手段が、Direct Line以外にほぼない
   - 「Execute Agent and wait」はPower Automate（とcode apps）の中でしか使えない
   - Power AutomateのHTTPトリガーを使う方式がP9
 - つまりDirect Lineは、**Power Automateを使わない（使えない）場合に限って必要**になる手段。他のパターン（P7〜P10、P12〜P17）では、Power Automateやチャット画面がエージェントとの接続を担うため不要
-- 参考：Direct Line以外に、Microsoft 365 Agents SDKのクライアントからエージェントを呼ぶ方法もあるが、Entraでの認証が必要になり、Airtableのスクリプトから使うのはさらに難しい
+- 参考：Direct Line以外に、Microsoft 365 Agents SDKのクライアント（.NET・JavaScript・Python）からエージェントを呼ぶ方法もある。ただし利用者本人のサインインが前提（委任された権限）で、サービスプリンシパルのトークンには対応していない。利用者のいない裏側の処理から呼ぶ場合は、公式にもDirect Lineを使うよう案内されている
 
 ##### 4段階の呼び出しの意味
 Direct Lineは「1回の問い合わせで答えが返る」仕組みではなく、**チャットと同じ手順を1つずつプログラムで行う**必要がある。
 
 | 段階 | 行うこと | たとえると |
 |---|---|---|
-| ① トークン取得 | シークレットを使って、一時的な通行証（トークン、有効期限つき）を発行してもらう | 受付で入館証をもらう |
+| ① トークン取得 | シークレットを使って、一時的な通行証（トークン）を発行してもらう。トークンは1つの会話にだけ使え、有効期限がある（公式の例では30分）。期限前なら更新できる | 受付で入館証をもらう |
 | ② 会話開始 | トークンを使って新しい会話を作り、会話IDを受け取る | チャット画面を開く |
 | ③ メッセージ送信 | 会話IDあてに、カードの情報と依頼内容をメッセージとして送る | 質問を入力して送信する |
 | ④ 応答の取得 | エージェントの返信が届いたかを問い合わせ、届くまで数秒おきに繰り返し確認する（または常時接続で受け取る） | 返信が表示されるのを待つ |
@@ -248,9 +250,12 @@ Direct Lineは「1回の問い合わせで答えが返る」仕組みではな�
 | Airtableへの書き戻し | Power AutomateからHTTPアクション＋PAT | Airtableのスクリプトから直接（PAT不要） |
 | 必要なライセンス | Power Automate Premium（HTTPトリガー）＋Copilot Studio | Copilot Studioのみ（Power Automateは不要） |
 | 秘密情報の置き場所 | HTTPトリガーのURL（またはEntraの認証情報）をAirtableに置く | Direct LineのシークレットをAirtableに置く |
+| SharePointのナレッジ | 接続を作った人のアカウントで動くため、使える可能性がある（要PoC） | 使えない（「認証なし」ではSharePointから取得しない） |
+| Copilotクレジット | 消費する（接続を作った人がM365 Copilotのライセンスを持つ場合に課金なしとなるかは要確認） | 消費する（利用者の身元なしで動くため、課金なしの条件に当たらない） |
 | 実装の手間 | フローの作成（ノーコード中心） | 4段階の呼び出しと待ち合わせをスクリプトで実装 |
 
-- 留意点：エージェントが利用者のサインインを求める設定の場合、スクリプトからの呼び出しは難しくなる。Direct Line経由のメッセージもCopilotクレジットの消費対象
+- 留意点：エージェントが利用者のサインインを求める設定の場合、スクリプトからの呼び出しは難しくなる（「Microsoftで認証」の設定のままDirect Lineで呼べるかは、公式の明記がなく要検証）
+- **Copilotクレジットについて**：課金は窓口（チャネル）ではなく、使った機能で決まる（決まった回答1、生成回答2、エージェントの動作5、Microsoft Graphでの強化10クレジットなど）。課金なしになるのは、M365 Copilotのライセンスを持つ本人がサインインした状態でエージェントが動く場合だけ。Direct Line（シークレット、認証なし）はこの条件に当たらないため、クレジットを消費する
 
 #### P12：AirtableのWebhooks APIで変更を通知する
 - **流れ**：Airtableの変更 → Webhookの通知 → Power Automateが差分を取得 → エージェントを呼ぶ → 書き戻す
@@ -404,6 +409,8 @@ Airtable（カードの「AIで修正」ボタン）
 - [ ] Copilot Studioの利用（ライセンス・容量）と、MCPサーバーへの接続が許可されるか（P6）
 - [ ] 自律エージェント（イベントトリガー）の利用が許可されるか（P10）
 - [ ] iPaaSなど外部SaaSの利用が許可されるか（P13）
+- [ ] Copilotクレジットの契約量と、エージェントごとの月の上限の設定（契約量の125%に達するとエージェントが止まる）
+- [ ] Execute Agentで呼んだ場合に、接続を作った人のM365 Copilotライセンスで課金なしの扱いになるか（Microsoftまたは販売店に確認）
 
 ### Airtable管理者
 - [ ] 契約プラン（Sync APIはBusiness／Enterprise Scaleのみ。オートメーションの実行回数の上限）
@@ -430,6 +437,13 @@ Airtable（カードの「AIで修正」ボタン）
 - [Airtable (Independent Publisher) [DEPRECATED] - Connectors | Microsoft Learn](https://learn.microsoft.com/en-us/connectors/airtable/)
 - [OAuth authentication for HTTP request triggers | Microsoft Learn](https://learn.microsoft.com/en-us/power-automate/oauth-authentication)
 - [Triggering Copilot Studio Agents with HTTP Calls | The Custom Engine](https://microsoft.github.io/mcscatblog/posts/triggering-copilot-studio-http/)
+- [Microsoft Copilot Studio connector reference | Microsoft Learn](https://learn.microsoft.com/en-us/connectors/microsoftcopilotstudio/)
+- [Limits of automated, scheduled, and instant flows（タイムアウト）| Microsoft Learn](https://learn.microsoft.com/en-us/power-automate/limits-and-config)
+- [Configure web and Direct Line channel security | Microsoft Learn](https://learn.microsoft.com/en-us/microsoft-copilot-studio/configure-web-security)
+- [Publish an agent to mobile or custom apps（Direct Line）| Microsoft Learn](https://learn.microsoft.com/en-us/microsoft-copilot-studio/publication-connect-bot-to-custom-application)
+- [Integrate with web or native apps using Microsoft 365 Agents SDK | Microsoft Learn](https://learn.microsoft.com/en-us/microsoft-copilot-studio/publication-integrate-web-or-native-app-m365-agents-sdk)
+- [Add SharePoint as a knowledge source | Microsoft Learn](https://learn.microsoft.com/en-us/microsoft-copilot-studio/knowledge-add-sharepoint)
+- [Billing rates and management（Copilotクレジット）| Microsoft Learn](https://learn.microsoft.com/en-us/microsoft-copilot-studio/requirements-messages-management)
 - [Airtable connector overview (preview) - Microsoft 365 Copilot connectors | Microsoft Learn](https://learn.microsoft.com/en-us/microsoft-365/copilot/connectors/airtable-overview)
 - [Using the Airtable MCP server | Airtable Help Center](https://support.airtable.com/docs/using-the-airtable-mcp-server)
 - [Airtable Sync integration: Sync API | Airtable Help Center](https://support.airtable.com/docs/airtable-sync-integration-sync-api)
