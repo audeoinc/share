@@ -1,5 +1,33 @@
 # 1.5.0-032
 
+- Cut the fixed per-run cost of 03 STEP 1's source-dataset access probe, which
+  dominated a daily run that changes nothing. The probe proves each source dataset's
+  INFORMATION_SCHEMA is readable so one unreadable dataset cannot fail the whole
+  UNION, but it costs ONE BigQuery job per dataset and a script runs its statements
+  sequentially -- with dozens of source datasets that is the run, before any work.
+  Two changes:
+  (a) Probe results are cached in a new repository table
+  `lnge_m_source_dataset_access` (project_id, dataset_id, is_accessible,
+  error_message, first_probed_at, probed_at, updated_at). A dataset is re-probed only
+  when it has no row or the row is older than the new
+  `source_access_probe_max_age_days` (default 7), so a daily run normally probes
+  nothing. Accessible and inaccessible results are both cached, so a dataset whose
+  permissions were just granted is picked up within that window; deleting its row
+  forces an immediate re-probe. 0 disables the cache and restores the previous
+  probe-everything behavior. `preview_only` writes nothing, so it neither reads nor
+  updates the cache and still probes every dataset.
+  (b) The probe reads TABLES and COLUMNS instead of TABLES, TABLE_OPTIONS, COLUMNS
+  and COLUMN_FIELD_PATHS. All four need the same dataset-level metadata permission,
+  and COLUMN_FIELD_PATHS is by far the heaviest of them on a dataset with many
+  date-sharded tables -- for no extra signal.
+  A dataset skipped from the cache is still dropped from the source scope and still
+  reported: `SKIPPED_INACCESSIBLE_SOURCE_DATASETS` gains a `detected_by` column
+  (`PROJECT_LISTING` / `PROBE` / `CACHE`) so the operator can tell a refusal this run
+  from a remembered one, and a new `SOURCE_ACCESS_PROBE` row reports how many
+  datasets this run actually probed. The table is created by 01 and self-healed by 03
+  with CREATE TABLE IF NOT EXISTS, like `lnge_t_column_usage`. SQL only; the bundle
+  is unchanged.
+
 - Added STATIC TABLES for the two report views, rebuilt by a new 03 STEP 4b:
   `lnge_vw_t_column_usage_impact` -> `lnge_t_column_usage_impact` and
   `lnge_vw_t_object_dependency` -> `lnge_t_object_dependency` (the view name with `vw_`
