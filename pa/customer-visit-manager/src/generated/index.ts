@@ -5,7 +5,11 @@
 
 // Models
 export * as CommonModels from './models/CommonModels';
+export * as Cr854_table_3d6fd778sModel from './models/Cr854_table_3d6fd778sModel';
 export * as Cr854_table_8c8e6d02sModel from './models/Cr854_table_8c8e6d02sModel';
+export * as Cr854_table_a2287751sModel from './models/Cr854_table_a2287751sModel';
 
 // Services
+export * from './services/Cr854_table_3d6fd778sService';
 export * from './services/Cr854_table_8c8e6d02sService';
+export * from './services/Cr854_table_a2287751sService';

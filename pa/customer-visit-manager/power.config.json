@@ -18,6 +18,16 @@
           "entitySetName": "cr854_table_8c8e6d02s",
           "logicalName": "cr854_table_8c8e6d02",
           "isHidden": false
+        },
+        "_0d187476": {
+          "entitySetName": "cr854_table_3d6fd778s",
+          "logicalName": "cr854_table_3d6fd778",
+          "isHidden": false
+        },
+        "_988c47ca": {
+          "entitySetName": "cr854_table_a2287751s",
+          "logicalName": "cr854_table_a2287751",
+          "isHidden": false
         }
       },
       "environmentVariableName": ""

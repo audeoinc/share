@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Cr854_table_8c8e6d02sService } from './generated/services/Cr854_table_8c8e6d02sService'
 import type { Cr854_table_8c8e6d02s } from './generated/models/Cr854_table_8c8e6d02sModel'
+import { Cr854_table_a2287751sService } from './generated/services/Cr854_table_a2287751sService'
+import { VisitHistory, type Salesperson } from './VisitHistory'
 import './App.css'
 
 type Customer = Cr854_table_8c8e6d02s
@@ -13,6 +15,7 @@ function App() {
   const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [salespeople, setSalespeople] = useState<Salesperson[]>([])
 
   useEffect(() => {
     let cancelled = false
@@ -31,6 +34,16 @@ function App() {
     return () => {
       cancelled = true
     }
+  }, [])
+
+  useEffect(() => {
+    Cr854_table_a2287751sService.getAll({ orderBy: ['cr854_column_fc12716f asc'] })
+      .then((res) => {
+        if (res.success) {
+          setSalespeople((res.data ?? []).map((p) => ({ id: p.cr854_table_a2287751id, name: p.cr854_column_fc12716f })))
+        }
+      })
+      .catch(() => {})
   }, [])
 
   const filtered = useMemo(() => {
@@ -56,6 +69,7 @@ function App() {
           <dt>次回訪問予定日</dt><dd>{fmtDate(selected.cr854_column_2f248d05)}</dd>
           <dt>フォローアップ内容</dt><dd className="pre">{selected.cr854_column_293add8b || '-'}</dd>
         </dl>
+        <VisitHistory customerId={selected.cr854_table_8c8e6d02id} salespeople={salespeople} />
       </div>
     )
   }

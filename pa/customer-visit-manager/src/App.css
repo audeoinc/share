@@ -1,4 +1,4 @@
-.app { max-width: 720px; margin: 0 auto; padding: 20px; text-align: left; width: 100%; }
+.app { max-width: 720px; margin: 0 auto; padding: 32px 20px 20px; text-align: left; width: 100%; }
 .search { width: 100%; box-sizing: border-box; padding: 10px; font-size: 1rem; margin-bottom: 8px; }
 .count { opacity: 0.7; margin: 4px 0 12px; }
 .error { color: #e5484d; }
@@ -8,3 +8,7 @@
 .detail dt { opacity: 0.7; }
 .detail dd { margin: 0; }
 .pre { white-space: pre-wrap; }
+.card.static { background: #f9f9f9; padding: 12px 16px; border-radius: 8px; display: flex; flex-direction: column; gap: 2px; }
+.form { display: grid; gap: 10px; }
+.form label { display: grid; gap: 4px; }
+.form input, .form select { padding: 8px; font-size: 1rem; }
