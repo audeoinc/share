@@ -91,7 +91,7 @@
 | ID | パターン | トリガー | インターフェース | 起点 | エージェント | 修正指示 | 難易度 |
 |---|---|---|---|---|---|---|---|
 | **P1** | チャットで生成し、人が転記 | 手動 | 人の手 | — | Agent Builder／Studio | チャット | ★ |
-| **P2** | エージェントがCSV・Excelを出力し、Airtableに取り込む | 手動 | ファイル（CSVインポート） | — | Agent Builder／Studio | チャット | ★ |
+| **P2** | カードの一覧をCSVで渡し、エージェントが下書きをCSVで出力して、Airtableに取り込む | 手動 | ファイル（CSVインポート） | — | Agent Builder／Studio | チャット | ★ |
 | **P3** | ファイルをSharePointに置き、Power AutomateがAirtableに書き込む | 半自動 | ファイル＋API | M365 → Airtable | Agent Builder／Studio | チャット | ★★ |
 | **P4** | ファイルをAirtableのSync APIで同期テーブルに取り込む | 半自動 | ファイル＋Sync API | M365 → Airtable | Agent Builder／Studio | チャット | ★★ |
 | **P5** | エージェントに対話で依頼し、エージェント自身がAirtableに書き込む（API） | 手動 | API（カスタムコネクタ・HTTP） | M365 → Airtable | Studio | チャット | ★★ |
@@ -131,17 +131,33 @@
 
 ### レベル1：ファイル経由
 
-#### P2：エージェントがCSV・Excelを出力し、Airtableに取り込む
-- **流れ**：エージェントに「カードの項目をCSVで出力して」と依頼 → ファイルをダウンロード → AirtableのCSVインポートで取り込む
-- **必要なもの**：ファイルを出力できるエージェント（コードインタープリターなどの機能の有効化状況による）
+#### P2：カードの一覧をCSVで渡し、エージェントが下書きをCSVで出力して、Airtableに取り込む
+- **前提**：生成した内容を正しい配信カードに紐づけるため、**カードを先にAirtableで作り、カードを特定するキー（カードID）をエージェントに渡す**。キーがないと、取り込んだ内容が新しいカードとして作られてしまう
+- **流れ**
+  ```
+  ① Airtable：配信日ごとのカードを先に作る（カードIDの列を持たせる）
+  ② Airtable：起案待ちのカードをビューで絞り、CSVでダウンロード
+  ③ Copilot：CSVを渡し、カードごとに下書きを作らせる。出力するCSVにはカードIDの列をそのまま残す
+  ④ Airtable：CSVインポート（拡張機能）の「Merge with existing records」でカードIDを指定して取り込む
+     → 既存のカードの下書き欄が更新される
+  ⑤ マーケター：下書きを確認し、確定する
+  ```
+- **必要なもの**：CSVを読み込み、ファイルとして出力できるエージェント（コードインタープリターなどの機能の有効化状況による）、AirtableのCSVインポート（拡張機能）
 - **長所**：複数カードを一括で反映できる。開発はほぼ不要
-- **制約・留意点**：取り込みは手作業。既存カードの更新（上書き）には、列の対応付けや照合キーの設計が必要
+- **制約・留意点**
+  - 取り込みは手作業
+  - **カードIDの持たせ方**：レコードIDを表示する数式の列（`RECORD_ID()`）を使うと重複しない
+  - **エージェントにカードIDを変えさせない**：指示文で「カードIDの列は変えずに出力する」と固定する。突き合わせは大文字・小文字を区別し、一致しない行やカードIDが空の行は新しいレコードとして作られる
+  - **取り込む列は下書き欄だけにする**：確定欄の列はCSVに含めない。「Skip blank or invalid CSV values」を有効にし、空の値で上書きしない
+  - **商品の欄が他のテーブルとリンクしている場合**：商品名（または商品コード）がAirtable側の表記と一致している必要がある
+  - CSVインポートは1回25,000行まで
 
 #### P3：ファイルをSharePointに置き、Power AutomateがAirtableに書き込む
-- **流れ**：エージェントの出力ファイル（Excel・CSV・JSON）をSharePointに保存 → Power Automateがファイル作成を検知 → 内容を読み取り、AirtableのREST APIでカードを更新
+- **前提**：P2と同じく、**カードを先にAirtableで作り、カードの一覧（カードIDつき）をエージェントに渡す**。REST APIで既存のカードを更新するには、レコードIDが必要なため
+- **流れ**：Airtableからカードの一覧（カードIDつき）をダウンロードしてエージェントに渡す → エージェントの出力ファイル（Excel・CSV・JSON。カードIDの列を残す）をSharePointに保存 → Power Automateがファイル作成を検知 → 内容を読み取り、カードIDを使ってAirtableのREST APIで下書き欄を更新
 - **必要なもの**：Power Automate Premium（HTTPアクション）、AirtableのPAT
-- **長所**：エージェントはAgent Builderでもよい。書き込み処理はPower Automateで一元管理できる
-- **制約・留意点**：ファイルの形式を固定する必要がある。ファイルを置く作業は人が行う
+- **長所**：エージェントはAgent Builderでもよい。書き込み処理はPower Automateで一元管理できる。書き込む欄をフロー側で下書き欄に限定できる
+- **制約・留意点**：ファイルの形式を固定する必要がある。カードの一覧を渡す作業と、ファイルを置く作業は人が行う。カードIDが見つからない行は書き込まずにエラーとして通知する（P2のように新しいカードが作られることはない）
 
 #### P4：ファイルをAirtableのSync APIで同期テーブルに取り込む
 - **流れ**：エージェントの出力をCSVにする → Power AutomateなどからSync APIへ送る → Airtableの「同期テーブル」に反映 → 配信カードからリンク・ルックアップで参照
@@ -450,6 +466,7 @@ Airtable（カードの「AIで修正」ボタン）
 - [Airtable automation action: Run a script | Airtable Help Center](https://support.airtable.com/docs/run-a-script-action)
 - [Guide to Airtable Webhooks | Hookdeck](https://hookdeck.com/webhooks/platforms/guide-to-airtable-webhooks-features-and-best-practices)
 - [Using Airtable AI in fields | Airtable Help Center](https://support.airtable.com/articles/8052242094-using-airtable-ai-in-fields)
+- [CSV import extension | Airtable Help Center](https://support.airtable.com/articles/3067164948-csv-import-extension)
 - [Using buttons in interfaces | Airtable Help Center](https://support.airtable.com/articles/2099494420-using-buttons-in-interfaces)
 - [Airtable automation trigger: When a button is clicked | Airtable Help Center](https://support.airtable.com/articles/4600140573-airtable-automation-trigger-when-a-button-is-clicked)
 - [New: Interface extensions SDK releasing to open beta | Airtable Community](https://community.airtable.com/announcements-6/new-interface-extensions-sdk-releasing-to-open-beta-46375)
