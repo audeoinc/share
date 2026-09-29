@@ -255,8 +255,12 @@ npm test                        # build + verify:bundle + test:release を一括
   `lnge_m_source_dataset_access` に保存し、`source_access_probe_max_age_days`（既定 7）以内は
   再プローブしない。可否どちらもキャッシュするので権限付与も期限内に拾える（即時反映は該当行を
   DELETE）。0 でキャッシュ無効＝旧挙動。`preview_only` は書かないのでキャッシュを読まず全数プローブ。
-  プローブの検査対象も 4 ビュー→ `TABLES`＋`COLUMNS` の 2 つに削減（権限は同じで、
-  `COLUMN_FIELD_PATHS` は日次シャードのデータセットで突出して重い）。スキップしたデータセットは
+  プローブの検査対象も 4 ビュー→ `TABLES` 1 本に削減（4 つとも
+  `bigquery.tables.list`/`get` で制御され IAM はビュー単位に分けられないので 1 本で足りる。
+  `COLUMN_FIELD_PATHS` は日次シャードのデータセットで突出して重い）。**「dataset 単位の
+  メタデータ権限は all-or-nothing」という前提**はプローブのコメントに明記してある。
+  プローブを通ったデータセットで後段が Access Denied になったらこの前提が崩れた合図なので、
+  拒否されたビューをプローブに戻す（キャッシュがあるので全数への影響は無い）。スキップしたデータセットは
   従来どおり `SKIPPED_INACCESSIBLE_SOURCE_DATASETS` に出す（`detected_by` で
   `PROJECT_LISTING`/`PROBE`/`CACHE` を区別）。`SOURCE_ACCESS_PROBE` 行で実プローブ数も報告。
   (b) **`current_target_tables` を宛先データセットだけに絞り STEP 2 内へ移動**：利用箇所は
