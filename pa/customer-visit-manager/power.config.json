@@ -28,6 +28,11 @@
           "entitySetName": "cr854_table_a2287751s",
           "logicalName": "cr854_table_a2287751",
           "isHidden": false
+        },
+        "_b1347637": {
+          "entitySetName": "cr854_deliverycards",
+          "logicalName": "cr854_deliverycard",
+          "isHidden": false
         }
       },
       "environmentVariableName": ""
