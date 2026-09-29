@@ -821,8 +821,14 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
     `source_access_probe_max_age_days`（既定 7）以内は再プローブしない。
   - **可否どちらもキャッシュ**する。権限を付けた直後に即反映したいときは該当行を DELETE。
   - `preview_only` は何も書かない原則があるのでキャッシュを読み書きせず全数プローブ（遅いが正しい）。
-  - プローブ対象を `TABLES` + `COLUMNS` の 2 ビューに削減。4 ビューとも同じデータセット
-    メタデータ権限で、`COLUMN_FIELD_PATHS` は日次シャードのデータセットで突出して重い。
+  - プローブ対象を `TABLES` 1 本に削減。4 ビューとも `bigquery.tables.list` /
+    `bigquery.tables.get` で制御され、**IAM はビュー単位に権限を分けられない**ので 1 本で足りる
+    （`COLUMN_FIELD_PATHS` は日次シャードのデータセットで突出して重い）。
+  - **前提＝「dataset 単位のメタデータ権限は all-or-nothing」**。これはプローブのコメントに
+    明記してある。プローブを通ったデータセットで後段（STEP 2 の `TABLE_OPTIONS`、STEP 3 の
+    `COLUMNS`/`COLUMN_FIELD_PATHS`）が Access Denied になったら前提が崩れた合図で、
+    対処は「拒否されたビューをプローブに戻す」。キャッシュがあるので、戻しても実プローブ数は
+    少数のままで全数には影響しない。
   - **黙って狭めない**：キャッシュ由来のスキップも `SKIPPED_INACCESSIBLE_SOURCE_DATASETS` に
     出し、`detected_by`（`PROJECT_LISTING`/`PROBE`/`CACHE`）で「今回確認した/記憶していた」を区別。
     `SOURCE_ACCESS_PROBE` 行で今回の実プローブ数も報告する。

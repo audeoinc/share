@@ -40,10 +40,16 @@
   forces an immediate re-probe. 0 disables the cache and restores the previous
   probe-everything behavior. `preview_only` writes nothing, so it neither reads nor
   updates the cache and still probes every dataset.
-  (b) The probe reads TABLES and COLUMNS instead of TABLES, TABLE_OPTIONS, COLUMNS
-  and COLUMN_FIELD_PATHS. All four need the same dataset-level metadata permission,
-  and COLUMN_FIELD_PATHS is by far the heaviest of them on a dataset with many
-  date-sharded tables -- for no extra signal.
+  (b) The probe reads TABLES only, instead of TABLES, TABLE_OPTIONS, COLUMNS and
+  COLUMN_FIELD_PATHS. All four are gated by the same dataset-level metadata
+  permissions (`bigquery.tables.list` / `bigquery.tables.get`), which IAM cannot grant
+  per view, so reading one proves the rest; COLUMN_FIELD_PATHS is also by far the
+  heaviest of them on a dataset with many date-sharded tables. The assumption that
+  dataset-level metadata access is all-or-nothing is written into the probe's comment,
+  because that is where it would break: an Access Denied from a later
+  INFORMATION_SCHEMA scan on a dataset the probe passed means putting the refused view
+  back into the probe -- which now costs one sub-query on the few datasets a run
+  actually probes, not on every dataset every run.
   A dataset skipped from the cache is still dropped from the source scope and still
   reported: `SKIPPED_INACCESSIBLE_SOURCE_DATASETS` gains a `detected_by` column
   (`PROJECT_LISTING` / `PROBE` / `CACHE`) so the operator can tell a refusal this run

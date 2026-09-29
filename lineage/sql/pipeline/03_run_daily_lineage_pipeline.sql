@@ -936,10 +936,19 @@ BEGIN
   -- (source_access_probe_max_age_days). A dataset the cache marks inaccessible is
   -- dropped without re-probing until its entry expires.
   --
-  -- The probe reads TABLES and COLUMNS. Both need the same dataset-level metadata
-  -- permission as TABLE_OPTIONS and COLUMN_FIELD_PATHS, which the probe used to read
-  -- as well -- and COLUMN_FIELD_PATHS is by far the heaviest of the four on a dataset
-  -- with many (e.g. date-sharded) tables, for no extra signal.
+  -- The probe reads TABLES only. The pipeline also reads TABLE_OPTIONS (STEP 2) and
+  -- COLUMNS / COLUMN_FIELD_PATHS (STEP 3), and the probe used to read all four -- but
+  -- every one of them is gated by the same dataset-level metadata permissions
+  -- (bigquery.tables.list / bigquery.tables.get), which IAM cannot grant per view, so
+  -- reading one proves the rest. COLUMN_FIELD_PATHS in particular is by far the
+  -- heaviest of the four on a dataset with many (e.g. date-sharded) tables.
+  --
+  -- THE ASSUMPTION, written down because this is where it would break: dataset-level
+  -- metadata access is all-or-nothing. If a later INFORMATION_SCHEMA scan ever fails
+  -- with Access Denied on a dataset this probe passed, that assumption did not hold
+  -- for that dataset -- put the refused view back into the probe below. The cost is
+  -- one extra sub-query on the few datasets a run actually probes (see
+  -- source_access_probe_max_age_days), not on every dataset every run.
   --
   -- The dropped datasets are reported, not swallowed: their tables are then absent
   -- from the metadata, so an object referencing one resolves as "source no longer
@@ -987,14 +996,12 @@ BEGIN
     )
     DO
       BEGIN
-        -- LIMIT 1 per view: the ACL is checked when the reference is resolved, so
-        -- one row is enough to prove readability without counting every column of a
-        -- wide dataset. An empty but readable dataset returns 0 and passes.
+        -- LIMIT 1: the ACL is checked when the reference is resolved, so one row is
+        -- enough to prove readability without listing every table of a wide dataset.
+        -- An empty but readable dataset returns 0 and passes.
         EXECUTE IMMEDIATE FORMAT(
-          'SELECT COUNT(*) FROM ('
-          || '(SELECT 1 FROM `%s.%s.INFORMATION_SCHEMA.TABLES` LIMIT 1) '
-          || 'UNION ALL (SELECT 1 FROM `%s.%s.INFORMATION_SCHEMA.COLUMNS` LIMIT 1))',
-          probe_ds.project_id, probe_ds.dataset_id,
+          'SELECT COUNT(*) FROM '
+          || '(SELECT 1 FROM `%s.%s.INFORMATION_SCHEMA.TABLES` LIMIT 1)',
           probe_ds.project_id, probe_ds.dataset_id
         )
         INTO source_access_probe;
