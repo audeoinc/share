@@ -1,5 +1,29 @@
 # 1.5.0-032
 
+- Narrowed the other per-run INFORMATION_SCHEMA scan that a no-change run paid for:
+  `current_target_tables`. It was built in STEP 1 as a `TABLES LEFT JOIN
+  TABLE_OPTIONS` union over EVERY source dataset, on every run -- two metadata reads
+  per source dataset before anything was known to have changed. Both of its consumers
+  ask about generated tables' DESTINATIONS (is this job's destination a persistent
+  table or a temporary one; has a registered generated table's destination gone
+  away?), so it is now built inside STEP 2 over just the destination datasets, which
+  is normally a handful.
+  The scope comes from the JOB REGISTRY, not from this run's JOBS scan:
+  `latest_generated_table_definitions` classifies every registry row, including jobs
+  collected by earlier runs whose destinations are outside the current lookback
+  window, and a missing dataset there would read as "destination gone" and flip a
+  persistent table to EPHEMERAL. Registered generated tables are unioned in so the
+  deactivation check sees its own objects, and the whole thing is intersected with
+  `source_datasets` (the readable ones), as before.
+  STEP 3's two source object-type lookups used `current_target_tables` to tell a VIEW
+  source from a TABLE source. They now use `current_referenced_tables`, which is the
+  right set for a SOURCE lookup (the datasets changed objects reference) and is read
+  at the same moment as the column metadata, closing the same
+  dropped-between-snapshots window the publishability classifier already avoided.
+  `current_referenced_tables` gains `table_type` for that. With this, nothing outside
+  STEP 2 reads `current_target_tables`, so `process_generated_tables = FALSE` no
+  longer builds it at all. SQL only; the bundle is unchanged.
+
 - Cut the fixed per-run cost of 03 STEP 1's source-dataset access probe, which
   dominated a daily run that changes nothing. The probe proves each source dataset's
   INFORMATION_SCHEMA is readable so one unreadable dataset cannot fail the whole
