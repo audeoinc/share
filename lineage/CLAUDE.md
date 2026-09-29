@@ -248,6 +248,24 @@ npm test                        # build + verify:bundle + test:release を一括
   'SCHEDULED_QUERY'/'DAG' 等＝生成テーブル Job）。値は元々診断ステージングを流れており
   永続化しただけ。書込みは 03 STEP 3 の3系統（UDF診断・非publishableマーカー・
   pre-analysis失敗）と 06 単体経路。
+  **変更なし実行の固定コスト削減（STEP 1/2）**：変更が無くても STEP 1/2 は毎回走るため、
+  58 データセット規模のリージョンではここが実行時間の大半を占めていた。2 点対処。
+  (a) **ソースデータセットのアクセスプローブをキャッシュ**：プローブは 1 データセット 1 ジョブ・
+  逐次実行なので、毎回全数プローブすると無変更日でもそれだけで数十分かかる。結果を
+  `lnge_m_source_dataset_access` に保存し、`source_access_probe_max_age_days`（既定 7）以内は
+  再プローブしない。可否どちらもキャッシュするので権限付与も期限内に拾える（即時反映は該当行を
+  DELETE）。0 でキャッシュ無効＝旧挙動。`preview_only` は書かないのでキャッシュを読まず全数プローブ。
+  プローブの検査対象も 4 ビュー→ `TABLES`＋`COLUMNS` の 2 つに削減（権限は同じで、
+  `COLUMN_FIELD_PATHS` は日次シャードのデータセットで突出して重い）。スキップしたデータセットは
+  従来どおり `SKIPPED_INACCESSIBLE_SOURCE_DATASETS` に出す（`detected_by` で
+  `PROJECT_LISTING`/`PROBE`/`CACHE` を区別）。`SOURCE_ACCESS_PROBE` 行で実プローブ数も報告。
+  (b) **`current_target_tables` を宛先データセットだけに絞り STEP 2 内へ移動**：利用箇所は
+  どちらも「生成テーブルの宛先」の話なので、全ソースデータセットを舐める必要が無い。スコープは
+  **ジョブレジストリの宛先**（＋登録済み生成テーブル）から取る（今回の JOBS スキャンだけだと、
+  lookback 外の過去ジョブの宛先が欠けて persistent が EPHEMERAL に化ける）。STEP 3 の
+  ソース種別判定 2 箇所は `current_referenced_tables` に切替（参照側のデータセットが正しい集合で、
+  列メタと同時刻＝ドロップ済み判定も正確）。`current_referenced_tables` に `table_type` を追加。
+  これで STEP 2 の外から `current_target_tables` を参照する箇所は無い。
   **absent 判定の鮮度（STEP 3）**：publish 可否分類 `batch_object_source_flags` の存在
   判定は、STEP 1 スナップショット `current_target_tables` ではなく、STEP 3 で列メタと
   同時・同一参照データセット範囲で採る `current_referenced_tables`（フレッシュな TABLES

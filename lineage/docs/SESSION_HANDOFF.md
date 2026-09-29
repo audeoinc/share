@@ -808,6 +808,37 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   行ごとに繰り返す（1行 = 起点カラム × 利用箇所 × 経路）。
   `static_tables_include_usage_sql = FALSE` で static テーブルから外せる。
 
+## 4.34 変更なし実行の固定コスト削減（03 STEP 1/2・SQLのみ）
+
+- **症状**：フィルタ無しで 03 を実行すると、**変更が無いのに 1 時間経っても終わらない**
+  （58 データセットのリージョン）。STEP 3/4/4b はゲートでスキップされるが、**STEP 1/2 は
+  毎回フルで走る**ため、そこの固定コストがすべてだった。
+- **(a) アクセスプローブのキャッシュ**：プローブは `skip_inaccessible_source_datasets` の
+  ために **1 データセット 1 ジョブ**で回す。スクリプトの文は逐次実行なので、58 本の
+  ジョブ起動オーバーヘッドがそのまま積み上がる。
+  - `lnge_m_source_dataset_access`（project/dataset/is_accessible/error_message/
+    first_probed_at/probed_at/updated_at）に結果を保存し、
+    `source_access_probe_max_age_days`（既定 7）以内は再プローブしない。
+  - **可否どちらもキャッシュ**する。権限を付けた直後に即反映したいときは該当行を DELETE。
+  - `preview_only` は何も書かない原則があるのでキャッシュを読み書きせず全数プローブ（遅いが正しい）。
+  - プローブ対象を `TABLES` + `COLUMNS` の 2 ビューに削減。4 ビューとも同じデータセット
+    メタデータ権限で、`COLUMN_FIELD_PATHS` は日次シャードのデータセットで突出して重い。
+  - **黙って狭めない**：キャッシュ由来のスキップも `SKIPPED_INACCESSIBLE_SOURCE_DATASETS` に
+    出し、`detected_by`（`PROJECT_LISTING`/`PROBE`/`CACHE`）で「今回確認した/記憶していた」を区別。
+    `SOURCE_ACCESS_PROBE` 行で今回の実プローブ数も報告する。
+- **(b) `current_target_tables` のスコープ縮小**：STEP 1 で**全ソースデータセット**の
+  `TABLES ⨝ TABLE_OPTIONS` を毎回作っていたが、利用箇所は 2 つとも
+  「生成テーブルの**宛先**」の判定。STEP 2 の中へ移し、宛先データセットだけに絞った。
+  - **スコープはジョブレジストリから取る**（今回の JOBS スキャンからではなく）。
+    `latest_generated_table_definitions` はレジストリ**全行**を分類するので、lookback 外の
+    過去ジョブの宛先データセットが欠けると「宛先が存在しない」＝ EPHEMERAL に化ける。
+    登録済みの生成テーブルも union（無効化判定が自分のオブジェクトを見られるように）。
+  - STEP 3 のソース種別判定 2 箇所は `current_referenced_tables` に切替。**参照側**の
+    データセットが正しい集合であり、列メタと同時刻に採るのでドロップ済み判定も正確になる
+    （publish 可否分類が既に同じ理由で切り替え済み）。`table_type` を projection に追加。
+  - これで `process_generated_tables = FALSE` のときは `current_target_tables` を作らない。
+- エンジン変更なし。**BigQuery 未検証**（別環境での測定待ち）。
+
 ## 4.22 本ドキュメントと実装の乖離（重要）
 
 `docs/SESSION_HANDOFF.md` の §1〜§4.20 は **1.5.0-032 の途中まで**しか追随していない。

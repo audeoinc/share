@@ -1186,40 +1186,17 @@ BEGIN
   -- Everything below writes to the repository, so it is skipped in preview.
   IF NOT preview_only THEN
 
-  -- TABLES per source dataset (dataset-scoped, so only dataset-level metadata
-  -- access is needed; the region-qualified form requires broader permissions).
-  -- TABLE_OPTIONS is joined to expose each table's expiration_timestamp: a table
-  -- with an expiration set is a temporary output (collapsed by fingerprint like a
-  -- non-existent destination), while a table with no expiration is a persistent
-  -- generated table kept per destination. expiration_timestamp is NULL when no
-  -- expiration is configured.
-  SET tables_union_sql = (
-    SELECT STRING_AGG(
-      FORMAT(
-        'SELECT LOWER(t.table_catalog) AS table_catalog, '
-        || 'LOWER(t.table_schema) AS table_schema, '
-        || 'LOWER(t.table_name) AS table_name, t.table_type, '
-        || 'opt.option_value AS expiration_timestamp '
-        || 'FROM `%s.%s.INFORMATION_SCHEMA.TABLES` AS t '
-        || 'LEFT JOIN `%s.%s.INFORMATION_SCHEMA.TABLE_OPTIONS` AS opt '
-        || 'ON opt.table_name = t.table_name '
-        || 'AND opt.option_name = \'expiration_timestamp\'',
-        project_id, dataset_id, project_id, dataset_id
-      ),
-      ' UNION ALL '
-    )
-    FROM (SELECT DISTINCT project_id, dataset_id FROM source_datasets)
-  );
-  EXECUTE IMMEDIATE FORMAT(
-    'CREATE OR REPLACE TEMP TABLE current_target_tables AS %s',
-    tables_union_sql
-  );
-
-  -- current_target_columns and current_target_column_field_paths (the COLUMNS and
-  -- COLUMN_FIELD_PATHS scans over every source dataset) are NOT loaded here. They
-  -- are the heaviest scan in the run and are only consumed by STEP 3 analysis, so
-  -- STEP 3 loads them behind its has-changes gate -- an unchanged daily run never
-  -- pays for them. current_target_tables above is kept because STEP 2 uses it.
+  -- No INFORMATION_SCHEMA scan happens here. The three the pipeline needs are all
+  -- loaded where they are consumed, over the narrowest scope that consumer needs:
+  --   * current_target_tables  -> STEP 2, over the generated tables' destination
+  --                               datasets (a handful), not every source dataset.
+  --   * current_target_columns / current_target_column_field_paths
+  --                            -> STEP 3, behind its has-changes gate, over the
+  --                               datasets the changed objects actually reference.
+  --   * current_referenced_tables
+  --                            -> STEP 3, same scope as the columns.
+  -- Scanning all of them here over the whole source scope is what made a daily run
+  -- that changes nothing pay for the entire region.
 
   SET sql_template = """
       MERGE
@@ -1785,6 +1762,102 @@ BEGIN
   );
 
   EXECUTE IMMEDIATE rendered_sql;
+
+  -- --------------------------------------------------------------------------
+  -- TABLES + TABLE_OPTIONS for the DESTINATION datasets only.
+  --
+  -- Used twice below: to decide whether each collected job's destination is a
+  -- PERSISTENT table (it exists and has no expiration) or a temporary one, and to
+  -- deactivate registered generated tables whose destination is gone. Both ask about
+  -- destinations, so the scan only needs the datasets that generated tables land in
+  -- -- normally a handful -- not every source dataset. Scanning the whole source
+  -- scope here (which is what this used to do, in STEP 1) cost a TABLES and a
+  -- TABLE_OPTIONS read per source dataset on every run, changes or not.
+  --
+  -- The scope is taken from the JOB REGISTRY rather than from this run's JOBS scan:
+  -- latest_generated_table_definitions classifies EVERY registry row, including jobs
+  -- collected by earlier runs whose destinations are outside the current lookback
+  -- window. Missing one of those datasets would read as "destination gone" and flip
+  -- a persistent table to EPHEMERAL. Registered generated tables are unioned in for
+  -- the same reason, so the deactivation check below sees its own objects.
+  -- Intersected with source_datasets, since only those are known to be readable.
+  --
+  -- TABLE_OPTIONS exposes expiration_timestamp: an expiration set means a temporary
+  -- output (collapsed by fingerprint like a non-existent destination); NULL means a
+  -- persistent generated table kept per destination.
+  -- --------------------------------------------------------------------------
+  CREATE OR REPLACE TEMP TABLE generated_table_datasets (
+    project_id STRING,
+    dataset_id STRING
+  );
+
+  SET sql_template = """
+    INSERT INTO generated_table_datasets (project_id, dataset_id)
+    SELECT DISTINCT destination_project, destination_dataset
+    FROM `__T_JOB_REGISTRY__`
+    WHERE destination_project IS NOT NULL
+      AND destination_dataset IS NOT NULL
+    UNION DISTINCT
+    SELECT DISTINCT object_project, object_dataset
+    FROM `__T_DEF_REGISTRY__`
+    WHERE object_type = 'TABLE'
+      AND generation_type IN ('SCHEDULED_QUERY', 'DAG')
+      AND is_active = TRUE
+      AND is_ephemeral = FALSE
+  """;
+
+  EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+
+  ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
+  AS 'Unresolved placeholder in generated_table_datasets SQL.';
+
+  EXECUTE IMMEDIATE rendered_sql;
+
+  SET tables_union_sql = (
+    SELECT STRING_AGG(
+      FORMAT(
+        'SELECT LOWER(t.table_catalog) AS table_catalog, '
+        || 'LOWER(t.table_schema) AS table_schema, '
+        || 'LOWER(t.table_name) AS table_name, t.table_type, '
+        || 'opt.option_value AS expiration_timestamp '
+        || 'FROM `%s.%s.INFORMATION_SCHEMA.TABLES` AS t '
+        || 'LEFT JOIN `%s.%s.INFORMATION_SCHEMA.TABLE_OPTIONS` AS opt '
+        || 'ON opt.table_name = t.table_name '
+        || 'AND opt.option_name = \'expiration_timestamp\'',
+        project_id, dataset_id, project_id, dataset_id
+      ),
+      ' UNION ALL '
+    )
+    FROM (
+      SELECT DISTINCT sd.project_id, sd.dataset_id
+      FROM source_datasets AS sd
+      JOIN generated_table_datasets AS dest
+        ON LOWER(dest.project_id) = LOWER(sd.project_id)
+       AND LOWER(dest.dataset_id) = LOWER(sd.dataset_id)
+    )
+  );
+  -- Nothing registered yet (a first run, or no generated tables in scope): a typed
+  -- empty table, so the joins below behave as "destination not found".
+  SET tables_union_sql = COALESCE(
+    tables_union_sql,
+    (SELECT FORMAT(
+       'SELECT LOWER(t.table_catalog) AS table_catalog, '
+       || 'LOWER(t.table_schema) AS table_schema, '
+       || 'LOWER(t.table_name) AS table_name, t.table_type, '
+       || 'opt.option_value AS expiration_timestamp '
+       || 'FROM `%s.%s.INFORMATION_SCHEMA.TABLES` AS t '
+       || 'LEFT JOIN `%s.%s.INFORMATION_SCHEMA.TABLE_OPTIONS` AS opt '
+       || 'ON opt.table_name = t.table_name '
+       || 'AND opt.option_name = \'expiration_timestamp\' '
+       || 'WHERE FALSE',
+       project_id, dataset_id, project_id, dataset_id
+     )
+     FROM source_datasets LIMIT 1)
+  );
+  EXECUTE IMMEDIATE FORMAT(
+    'CREATE OR REPLACE TEMP TABLE current_target_tables AS %s',
+    tables_union_sql
+  );
 
   -- Representative definition per JOBS group, split by whether the destination is
   -- a PERSISTENT table or a temporary one:
@@ -2428,14 +2501,17 @@ BEGIN
   -- --------------------------------------------------------------------------
   -- Fresh TABLES existence set, taken HERE (STEP 3) alongside the column
   -- metadata and over the SAME referenced source datasets. The publishability
-  -- classifier (batch_object_source_flags) uses this, NOT the STEP 1
-  -- current_target_tables snapshot: a source table dropped between STEP 1 and
-  -- STEP 3 is still listed in that older snapshot, which would make it look
-  -- "present but uncollected" (a coverage gap -> object FAILED) instead of
-  -- "absent" (a dropped table -> object publishable, warning suppressed). Reading
-  -- existence at the same moment as the columns closes that window, so a table
-  -- that no longer exists when its columns are scanned is correctly treated as
-  -- absent. Same scope as current_target_columns (referenced & accessible source
+  -- classifier (batch_object_source_flags) and the source object-type lookups in
+  -- the analysis loop both use this rather than STEP 2's current_target_tables: a
+  -- source table dropped since that snapshot is still listed in it, which would
+  -- make the source look "present but uncollected" (a coverage gap -> object
+  -- FAILED) instead of "absent" (a dropped table -> object publishable, warning
+  -- suppressed). Reading existence at the same moment as the columns closes that
+  -- window. Scope also matters: current_target_tables now covers the generated
+  -- tables' DESTINATION datasets, which is the wrong set for a source lookup --
+  -- this one covers exactly the datasets the changed objects reference. table_type
+  -- is projected because those lookups classify a source as VIEW or TABLE.
+  -- Same scope as current_target_columns (referenced & accessible source
   -- datasets); the typed empty fallback covers "nothing referenced".
   -- --------------------------------------------------------------------------
   SET tables_union_sql = (
@@ -2443,7 +2519,7 @@ BEGIN
       FORMAT(
         'SELECT LOWER(table_catalog) AS table_catalog, '
         || 'LOWER(table_schema) AS table_schema, '
-        || 'LOWER(table_name) AS table_name '
+        || 'LOWER(table_name) AS table_name, table_type '
         || 'FROM `%s.%s.INFORMATION_SCHEMA.TABLES`',
         project_id, dataset_id
       ),
@@ -2464,7 +2540,7 @@ BEGIN
     (SELECT FORMAT(
        'SELECT LOWER(table_catalog) AS table_catalog, '
        || 'LOWER(table_schema) AS table_schema, '
-       || 'LOWER(table_name) AS table_name '
+       || 'LOWER(table_name) AS table_name, table_type '
        || 'FROM `%s.%s.INFORMATION_SCHEMA.TABLES` WHERE FALSE',
        project_id, dataset_id
      )
@@ -3041,11 +3117,11 @@ BEGIN
     -- exists_in_tables must be judged on the SAME dataset scope AND the SAME
     -- moment that column metadata was collected for. current_referenced_tables is
     -- a fresh TABLES scan taken in STEP 3 alongside current_target_columns, over
-    -- the referenced source datasets (option D). Using it (not the STEP 1
-    -- current_target_tables snapshot) means: a source whose dataset was NOT
-    -- column-scanned is treated as absent (has_absent_source), AND a source table
-    -- dropped between STEP 1 and STEP 3 is treated as absent rather than
-    -- present-but-uncollected. Otherwise such a source looks like a coverage gap
+    -- the referenced source datasets (option D). Using it (not STEP 2's
+    -- current_target_tables, which covers destination datasets) means: a source
+    -- whose dataset was NOT column-scanned is treated as absent
+    -- (has_absent_source), AND a source table dropped since that snapshot is
+    -- treated as absent rather than present-but-uncollected. Otherwise such a source looks like a coverage gap
     -- -> object non-publishable -> its absent-source not-found WARNINGS leak into
     -- lineage_diagnostic (and the object FAILs transiently until the next run).
     -- Genuine coverage gaps within referenced datasets (table present at scan
@@ -3335,7 +3411,7 @@ BEGIN
        AND LOWER(source_registry.object_name) = parsed.source_object
        AND source_registry.object_type = 'VIEW'
       LEFT JOIN
-        current_target_tables AS source_table
+        current_referenced_tables AS source_table
         ON LOWER(source_table.table_catalog) = parsed.source_project
        AND LOWER(source_table.table_schema) = parsed.source_dataset
        AND LOWER(source_table.table_name) = parsed.source_object
@@ -3482,7 +3558,7 @@ BEGIN
        AND LOWER(source_registry.object_dataset) = parsed.source_dataset
        AND LOWER(source_registry.object_name) = parsed.source_object
        AND source_registry.object_type = 'VIEW'
-      LEFT JOIN current_target_tables AS source_table
+      LEFT JOIN current_referenced_tables AS source_table
         ON LOWER(source_table.table_catalog) = parsed.source_project
        AND LOWER(source_table.table_schema) = parsed.source_dataset
        AND LOWER(source_table.table_name) = parsed.source_object
