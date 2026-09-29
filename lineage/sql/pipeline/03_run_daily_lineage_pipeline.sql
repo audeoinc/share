@@ -243,6 +243,20 @@ DECLARE configured_max_impact_rank INT64 DEFAULT 100;
 -- failing -- see the STEP 3 source classifier.
 DECLARE skip_inaccessible_source_datasets BOOL DEFAULT TRUE;
 
+-- Source-dataset access cache. The probe above costs ONE BigQuery job per source
+-- dataset, and a script's statements run sequentially, so a region with dozens of
+-- datasets pays that whole cost on EVERY run -- including a run that changes nothing.
+-- Probe results are therefore kept in lnge_m_source_dataset_access and reused: a
+-- dataset is re-probed only when it has no cached result, or the cached one is older
+-- than this many days. A daily run then normally probes nothing.
+-- Accessible and inaccessible results are both cached, so a dataset whose permissions
+-- were just granted is picked up within this many days; to force an immediate
+-- re-probe, DELETE that dataset's row (or every row) from the cache table.
+-- 0 disables the cache and probes every dataset on every run (the original behavior).
+-- Ignored under preview_only, which writes nothing and so neither reads nor updates
+-- the cache: a preview probes every dataset.
+DECLARE source_access_probe_max_age_days INT64 DEFAULT 7;
+
 -- Dry run. Set TRUE to resolve the analysis scope from the [A] settings, print what
 -- this run WOULD cover, and stop before anything is written: the target (analysis)
 -- datasets, the source datasets with their access status, and the View list that
@@ -351,6 +365,11 @@ DECLARE table_unanalyzed_definition STRING;
 -- so it is addressed by a directly-built qualified name (column_usage_fqn below).
 DECLARE table_column_usage STRING;
 DECLARE column_usage_fqn STRING;
+-- Source-dataset access cache (see source_access_probe_max_age_days). Outside
+-- lnge_render_dynamic_sql's fixed placeholder set, so it is addressed by a directly
+-- built qualified name.
+DECLARE table_source_dataset_access STRING;
+DECLARE source_dataset_access_fqn STRING;
 -- Report views created by 01, and the tables STEP 4b snapshots them into. Outside
 -- lnge_render_dynamic_sql's fixed placeholder set, so STEP 4b builds their qualified
 -- names directly from repository_project_id / repository_dataset.
@@ -496,6 +515,8 @@ SET table_unanalyzed_definition =
     || table_name_suffix;
 SET table_column_usage =
   table_name_prefix || 'lnge_' || 't_' || 'column_usage' || table_name_suffix;
+SET table_source_dataset_access =
+  table_name_prefix || 'lnge_' || 'm_' || 'source_dataset_access' || table_name_suffix;
 -- Report views (must match 01) and their static tables. The table keeps
 -- the view's name with 'vw_' dropped, so the pair is obvious at a glance.
 SET view_column_usage_impact =
@@ -523,6 +544,8 @@ ASSERT REGEXP_CONTAINS(table_unanalyzed_definition, r'^[A-Za-z0-9_-]+$')
 AS 'Invalid table_unanalyzed_definition name.';
 ASSERT REGEXP_CONTAINS(table_column_usage, r'^[A-Za-z0-9_-]+$')
 AS 'Invalid table_column_usage name.';
+ASSERT REGEXP_CONTAINS(table_source_dataset_access, r'^[A-Za-z0-9_-]+$')
+AS 'Invalid table_source_dataset_access name.';
 ASSERT REGEXP_CONTAINS(view_column_usage_impact, r'^[A-Za-z0-9_-]+$')
 AS 'Invalid view_column_usage_impact name.';
 ASSERT REGEXP_CONTAINS(view_object_dependency, r'^[A-Za-z0-9_-]+$')
@@ -593,6 +616,9 @@ AS 'analysis_include_generation_types accepts only VIEW_DEFINITION, SCHEDULED_QU
 SET column_usage_fqn = FORMAT(
   '%s.%s.%s', repository_project_id, repository_dataset, table_column_usage
 );
+SET source_dataset_access_fqn = FORMAT(
+  '%s.%s.%s', repository_project_id, repository_dataset, table_source_dataset_access
+);
 -- Skipped in preview: a dry run must not create anything, not even idempotently.
 IF NOT preview_only THEN
 EXECUTE IMMEDIATE FORMAT(
@@ -626,6 +652,34 @@ EXECUTE IMMEDIATE FORMAT(
   )
   """,
   column_usage_fqn
+);
+
+-- Source-dataset access cache (see source_access_probe_max_age_days). Self-healed
+-- here like the column-usage table above, so a deployment whose 01 predates it works
+-- without re-running setup; the authoritative schema lives in 01 -- keep the two in
+-- step. Rows are keyed by (project_id, dataset_id): one row per source dataset ever
+-- probed, updated in place, so the table stays as small as the source scope.
+EXECUTE IMMEDIATE FORMAT(
+  """
+  CREATE TABLE IF NOT EXISTS `%s`
+  (
+    project_id STRING NOT NULL,
+    dataset_id STRING NOT NULL,
+    -- FALSE means the probe could not read this dataset's INFORMATION_SCHEMA. The
+    -- dataset is then dropped from the source scope for as long as the row is fresh.
+    is_accessible BOOL NOT NULL,
+    -- The probe's error for an inaccessible dataset; NULL when accessible.
+    error_message STRING,
+    first_probed_at TIMESTAMP NOT NULL,
+    probed_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+  )
+  CLUSTER BY project_id, dataset_id
+  OPTIONS (
+    description = 'Cached per-dataset INFORMATION_SCHEMA readability, so the daily run does not re-probe every source dataset. Delete a row to force a re-probe.'
+  )
+  """,
+  source_dataset_access_fqn
 );
 END IF;
 
@@ -810,7 +864,12 @@ BEGIN
   CREATE OR REPLACE TEMP TABLE inaccessible_source_datasets (
     project_id STRING,
     dataset_id STRING,
-    error_message STRING
+    error_message STRING,
+    -- How this entry was established: 'PROJECT_LISTING' (the project's SCHEMATA
+    -- listing was denied), 'PROBE' (checked and refused this run) or 'CACHE' (a
+    -- previous run's refusal, still inside source_access_probe_max_age_days, so this
+    -- run did not re-check it).
+    detected_by STRING
   );
 
   FOR src IN (
@@ -851,8 +910,9 @@ BEGIN
       IF NOT skip_inaccessible_source_datasets THEN
         RAISE;
       END IF;
-      INSERT INTO inaccessible_source_datasets (project_id, dataset_id, error_message)
-      VALUES (src.project_id, NULL, @@error.message);
+      INSERT INTO inaccessible_source_datasets
+        (project_id, dataset_id, error_message, detected_by)
+      VALUES (src.project_id, NULL, @@error.message, 'PROJECT_LISTING');
     END;
   END FOR;
 
@@ -869,20 +929,60 @@ BEGIN
   -- datasets, a single unreadable one fails the entire statement with
   -- "Access Denied", so the run dies on a dataset it does not even need.
   --
-  -- Probe each dataset once and keep only those that answer. One job per dataset,
-  -- and all four views the pipeline reads are checked in that single job, so a
-  -- dataset with partial access is dropped here rather than surviving STEP 1's
-  -- TABLES scan and killing STEP 3's COLUMNS scan instead. INFORMATION_SCHEMA
-  -- queries bill no bytes; the cost is the job count.
+  -- Probing costs ONE BigQuery job per dataset and script statements run
+  -- sequentially, so probing the whole source scope every run is the dominant fixed
+  -- cost of an otherwise no-op daily run. Results are therefore cached in
+  -- lnge_m_source_dataset_access and only stale or never-seen datasets are probed
+  -- (source_access_probe_max_age_days). A dataset the cache marks inaccessible is
+  -- dropped without re-probing until its entry expires.
+  --
+  -- The probe reads TABLES and COLUMNS. Both need the same dataset-level metadata
+  -- permission as TABLE_OPTIONS and COLUMN_FIELD_PATHS, which the probe used to read
+  -- as well -- and COLUMN_FIELD_PATHS is by far the heaviest of the four on a dataset
+  -- with many (e.g. date-sharded) tables, for no extra signal.
   --
   -- The dropped datasets are reported, not swallowed: their tables are then absent
   -- from the metadata, so an object referencing one resolves as "source no longer
   -- present" (WARNING, still publishable) instead of FAILED.
   -- --------------------------------------------------------------------------
   IF skip_inaccessible_source_datasets THEN
-    FOR probe_ds IN (
+    -- What this run actually probed, and what came back. Merged into the cache below.
+    CREATE OR REPLACE TEMP TABLE source_access_probe_results (
+      project_id STRING,
+      dataset_id STRING,
+      is_accessible BOOL,
+      error_message STRING
+    );
+    CREATE OR REPLACE TEMP TABLE source_datasets_to_probe (
+      project_id STRING,
+      dataset_id STRING
+    );
+
+    -- A preview writes nothing, so it neither reads nor updates the cache (the table
+    -- may not even exist yet on a fresh deployment) and probes everything: correct,
+    -- just slower. max_age <= 0 asks for the same thing on a real run.
+    IF preview_only OR source_access_probe_max_age_days <= 0 THEN
+      INSERT INTO source_datasets_to_probe (project_id, dataset_id)
       SELECT DISTINCT project_id, dataset_id
-      FROM source_datasets
+      FROM source_datasets;
+    ELSE
+      EXECUTE IMMEDIATE FORMAT(
+        'INSERT INTO source_datasets_to_probe (project_id, dataset_id) '
+        || 'SELECT DISTINCT sd.project_id, sd.dataset_id '
+        || 'FROM source_datasets AS sd '
+        || 'LEFT JOIN `%s` AS cached '
+        || 'ON cached.project_id = sd.project_id '
+        || 'AND cached.dataset_id = sd.dataset_id '
+        || 'WHERE cached.dataset_id IS NULL '
+        || 'OR cached.probed_at < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @max_age DAY)',
+        source_dataset_access_fqn
+      )
+      USING source_access_probe_max_age_days AS max_age;
+    END IF;
+
+    FOR probe_ds IN (
+      SELECT project_id, dataset_id
+      FROM source_datasets_to_probe
       ORDER BY project_id, dataset_id
     )
     DO
@@ -893,20 +993,69 @@ BEGIN
         EXECUTE IMMEDIATE FORMAT(
           'SELECT COUNT(*) FROM ('
           || '(SELECT 1 FROM `%s.%s.INFORMATION_SCHEMA.TABLES` LIMIT 1) '
-          || 'UNION ALL (SELECT 1 FROM `%s.%s.INFORMATION_SCHEMA.TABLE_OPTIONS` LIMIT 1) '
-          || 'UNION ALL (SELECT 1 FROM `%s.%s.INFORMATION_SCHEMA.COLUMNS` LIMIT 1) '
-          || 'UNION ALL (SELECT 1 FROM `%s.%s.INFORMATION_SCHEMA.COLUMN_FIELD_PATHS` LIMIT 1))',
-          probe_ds.project_id, probe_ds.dataset_id,
-          probe_ds.project_id, probe_ds.dataset_id,
+          || 'UNION ALL (SELECT 1 FROM `%s.%s.INFORMATION_SCHEMA.COLUMNS` LIMIT 1))',
           probe_ds.project_id, probe_ds.dataset_id,
           probe_ds.project_id, probe_ds.dataset_id
         )
         INTO source_access_probe;
+        INSERT INTO source_access_probe_results
+          (project_id, dataset_id, is_accessible, error_message)
+        VALUES (probe_ds.project_id, probe_ds.dataset_id, TRUE, NULL);
       EXCEPTION WHEN ERROR THEN
-        INSERT INTO inaccessible_source_datasets (project_id, dataset_id, error_message)
-        VALUES (probe_ds.project_id, probe_ds.dataset_id, @@error.message);
+        INSERT INTO source_access_probe_results
+          (project_id, dataset_id, is_accessible, error_message)
+        VALUES (probe_ds.project_id, probe_ds.dataset_id, FALSE, @@error.message);
       END;
     END FOR;
+
+    -- Persist what was probed. Skipped in preview, which must not write.
+    IF NOT preview_only THEN
+      EXECUTE IMMEDIATE FORMAT(
+        'MERGE `%s` AS target '
+        || 'USING source_access_probe_results AS source '
+        || 'ON target.project_id = source.project_id '
+        || 'AND target.dataset_id = source.dataset_id '
+        || 'WHEN MATCHED THEN UPDATE SET '
+        || 'is_accessible = source.is_accessible, '
+        || 'error_message = source.error_message, '
+        || 'probed_at = CURRENT_TIMESTAMP(), '
+        || 'updated_at = CURRENT_TIMESTAMP() '
+        || 'WHEN NOT MATCHED THEN INSERT '
+        || '(project_id, dataset_id, is_accessible, error_message, '
+        || 'first_probed_at, probed_at, updated_at) VALUES '
+        || '(source.project_id, source.dataset_id, source.is_accessible, '
+        || 'source.error_message, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), '
+        || 'CURRENT_TIMESTAMP())',
+        source_dataset_access_fqn
+      );
+    END IF;
+
+    -- Blocked datasets = what failed the probe just now, plus what the cache already
+    -- knew about and this run therefore did not re-probe. detected_by says which, so
+    -- the report does not imply every listed dataset was checked this run.
+    INSERT INTO inaccessible_source_datasets
+      (project_id, dataset_id, error_message, detected_by)
+    SELECT project_id, dataset_id, error_message, 'PROBE'
+    FROM source_access_probe_results
+    WHERE NOT is_accessible;
+
+    IF NOT preview_only AND source_access_probe_max_age_days > 0 THEN
+      EXECUTE IMMEDIATE FORMAT(
+        'INSERT INTO inaccessible_source_datasets '
+        || '(project_id, dataset_id, error_message, detected_by) '
+        || 'SELECT cached.project_id, cached.dataset_id, cached.error_message, '
+        || '\'CACHE\' '
+        || 'FROM `%s` AS cached '
+        || 'JOIN source_datasets AS sd '
+        || 'ON sd.project_id = cached.project_id '
+        || 'AND sd.dataset_id = cached.dataset_id '
+        || 'WHERE NOT cached.is_accessible '
+        || 'AND NOT EXISTS (SELECT 1 FROM source_access_probe_results AS probed '
+        || 'WHERE probed.project_id = cached.project_id '
+        || 'AND probed.dataset_id = cached.dataset_id)',
+        source_dataset_access_fqn
+      );
+    END IF;
 
     DELETE FROM source_datasets AS sd
     WHERE EXISTS (
@@ -925,9 +1074,21 @@ BEGIN
       'SKIPPED_INACCESSIBLE_SOURCE_DATASETS' AS notice,
       project_id,
       dataset_id,
+      detected_by,
       error_message
     FROM inaccessible_source_datasets
     ORDER BY project_id, dataset_id;
+
+    -- How much of the probe cost this run actually paid, so a run that suddenly gets
+    -- slower (a widened source scope, an expired cache) is visible without digging
+    -- through the job history.
+    SELECT
+      'SOURCE_ACCESS_PROBE' AS notice,
+      source_access_probe_max_age_days AS cache_max_age_days,
+      (SELECT COUNT(*) FROM source_datasets_to_probe) AS datasets_probed_this_run,
+      (SELECT COUNTIF(NOT is_accessible) FROM source_access_probe_results)
+        AS probes_refused_this_run,
+      source_dataset_count AS source_datasets_in_scope;
   END IF;
 
   -- ==========================================================================
