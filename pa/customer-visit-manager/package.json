@@ -10,7 +10,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.1",
     "@microsoft/power-apps": "^1.2.5",
+    "@mui/icons-material": "^9.4.0",
+    "@mui/material": "^9.4.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
