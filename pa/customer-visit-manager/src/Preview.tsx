@@ -10,6 +10,7 @@ import ChevronRightIcon from '@mui/icons-material/ChevronRight'
 import type { Cr854_products } from './generated/models/Cr854_productsModel'
 import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
 import { DND_HERO, DND_ITEM, yen, type Item } from './items'
+import { heroImage, productImage } from './images'
 
 interface Props {
   channel: 'email' | 'push'
@@ -98,7 +99,7 @@ function EmailPreview({ subject, theme, copy, items, products, selectedKey, show
                   '&:hover .remove': { opacity: 1 },
                 }}
               >
-                <Box component="img" draggable={false} src={p?.cr854_imageurl} alt={p?.cr854_name} sx={{ width: '100%', aspectRatio: '3 / 4', objectFit: 'cover', borderRadius: 1, bgcolor: '#eee', display: 'block' }} />
+                <Box component="img" draggable={false} src={productImage(p)} alt={p?.cr854_name} sx={{ width: '100%', aspectRatio: '3 / 4', objectFit: 'cover', borderRadius: 1, bgcolor: '#eee', display: 'block' }} />
                 <Typography sx={{ fontSize: '0.85rem', fontWeight: 600, mt: 0.5, color: INK }} noWrap>{p?.cr854_name}</Typography>
                 <Typography sx={{ fontSize: '0.8rem', fontWeight: 700, color: INK }}>{yen(p?.cr854_price)}</Typography>
                 <Box sx={{ mt: 0.75, py: 0.5, textAlign: 'center', bgcolor: '#222', color: '#fff', fontSize: '0.75rem', borderRadius: 0.5 }}>
@@ -183,7 +184,7 @@ function EmailPreview({ subject, theme, copy, items, products, selectedKey, show
         >
           {hero ? (
             <>
-              <Box component="img" draggable={false} src={hero.cr854_imageurl} alt={hero.cr854_name} sx={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+              <Box component="img" draggable={false} src={heroImage(hero)} alt={hero.cr854_name} sx={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
               <IconButton
                 className="hero-clear"
                 size="small"
@@ -249,12 +250,13 @@ function EmailPreview({ subject, theme, copy, items, products, selectedKey, show
   )
 }
 
-function PushPreview({ subject, theme, copy, items, products, selectedKey, hero: heroImage, onSelect, onRemove, onMove, onDropAt }: Props) {
+function PushPreview({ subject, theme, copy, items, products, selectedKey, hero: pickedHero, onSelect, onRemove, onMove, onDropAt }: Props) {
   const { over, handlers, clear } = useDropTarget(onDropAt)
   const byId = new Map(products.map((p) => [p.cr854_productid, p]))
   const firstProduct = items[0] && byId.get(items[0].productId)
   // メイン画像が設定されていればそれを、なければ先頭の商品の画像を通知の画像にする
-  const hero = heroImage ?? firstProduct
+  const heroSrc = pickedHero ? heroImage(pickedHero) : productImage(firstProduct)
+  const heroAlt = pickedHero?.cr854_name ?? firstProduct?.cr854_name
 
   return (
     <Box sx={{ maxWidth: 380, mx: 'auto', display: 'grid', gap: 2 }}>
@@ -269,8 +271,8 @@ function PushPreview({ subject, theme, copy, items, products, selectedKey, hero:
           <Typography sx={{ fontSize: '0.85rem', color: INK, whiteSpace: 'pre-wrap' }}>{copy || '(コピー未入力)'}</Typography>
           {items.length > 1 && <Typography sx={{ fontSize: '0.75rem', color: SUB, mt: 0.5 }}>ほか{items.length - 1}点</Typography>}
         </Box>
-        {hero && (
-          <Box component="img" draggable={false} src={hero.cr854_imageurl} alt={hero.cr854_name} sx={{ width: 56, height: 56, borderRadius: 1.5, objectFit: 'cover', flexShrink: 0, bgcolor: '#eee' }} />
+        {heroSrc && (
+          <Box component="img" draggable={false} src={heroSrc} alt={heroAlt} sx={{ width: 56, height: 56, borderRadius: 1.5, objectFit: 'cover', flexShrink: 0, bgcolor: '#eee' }} />
         )}
       </Box>
       </Box>
@@ -303,7 +305,7 @@ function PushPreview({ subject, theme, copy, items, products, selectedKey, hero:
               }}
             >
               <Typography variant="caption" color="text.secondary" sx={{ width: 16 }}>{idx + 1}</Typography>
-              <Box component="img" draggable={false} src={p?.cr854_imageurl} alt="" sx={{ width: 32, height: 32, borderRadius: 1, objectFit: 'cover' }} />
+              <Box component="img" draggable={false} src={productImage(p)} alt="" sx={{ width: 32, height: 32, borderRadius: 1, objectFit: 'cover' }} />
               <Typography noWrap sx={{ flexGrow: 1, fontSize: '0.85rem' }}>{p?.cr854_name}</Typography>
               <IconButton
                 size="small"

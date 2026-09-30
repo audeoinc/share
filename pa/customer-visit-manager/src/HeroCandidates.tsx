@@ -8,6 +8,7 @@ import Typography from '@mui/material/Typography'
 import SearchIcon from '@mui/icons-material/Search'
 import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
 import { DND_HERO } from './items'
+import { heroImage } from './images'
 
 interface Props {
   heroes: Cr854_heroimages[]
@@ -62,7 +63,7 @@ export function HeroCandidates({ heroes, selectedId, onSelect }: Props) {
               bgcolor: 'background.paper',
             }}
           >
-            <Box component="img" draggable={false} src={h.cr854_imageurl} alt={h.cr854_name} sx={{ width: '100%', aspectRatio: '16 / 9', objectFit: 'cover', display: 'block', bgcolor: '#e9e9ee' }} />
+            <Box component="img" draggable={false} src={heroImage(h)} alt={h.cr854_name} sx={{ width: '100%', aspectRatio: '16 / 9', objectFit: 'cover', display: 'block', bgcolor: '#e9e9ee' }} />
             <Box sx={{ p: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
               <Box sx={{ flexGrow: 1, minWidth: 0 }}>
                 <Typography noWrap sx={{ fontWeight: 600, fontSize: '0.9rem' }}>{h.cr854_name}</Typography>

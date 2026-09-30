@@ -3,6 +3,7 @@ import Alert from '@mui/material/Alert'
 import Box from '@mui/material/Box'
 import Button from '@mui/material/Button'
 import Chip from '@mui/material/Chip'
+import CircularProgress from '@mui/material/CircularProgress'
 import Dialog from '@mui/material/Dialog'
 import DialogActions from '@mui/material/DialogActions'
 import DialogTitle from '@mui/material/DialogTitle'
@@ -18,6 +19,7 @@ import useMediaQuery from '@mui/material/useMediaQuery'
 import { useTheme } from '@mui/material/styles'
 import CloseIcon from '@mui/icons-material/Close'
 import SaveIcon from '@mui/icons-material/Save'
+import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome'
 import { Cr854_deliverycardsService } from './generated/services/Cr854_deliverycardsService'
 import type { Cr854_deliverycards } from './generated/models/Cr854_deliverycardsModel'
 import { Cr854_deliveryproductsService } from './generated/services/Cr854_deliveryproductsService'
@@ -28,6 +30,7 @@ import { HeroCandidates } from './HeroCandidates'
 import { Preview } from './Preview'
 import { Splitter } from './Splitter'
 import { DND_ITEM, DND_PRODUCT, SOURCE_AI, SOURCE_MANUAL, type Item } from './items'
+import { selectWithAi } from './aiSelect'
 import { channelOptions, countryOptions, departmentOptions, statusColor, statusOptions } from './status'
 
 interface Props {
@@ -118,6 +121,8 @@ export function CardDetail({ card, products, heroes, onBack, onSaved }: Props) {
     card?.cr854_channelname === 'プッシュ' ? 'push' : 'email',
   )
   const [showHeadings, setShowHeadings] = useState(true)
+  const [aiBusy, setAiBusy] = useState(false)
+  const [aiCount, setAiCount] = useState('4')
   const [heroId, setHeroId] = useState<string | undefined>(card?._cr854_heroimage_value)
   const [heroReason, setHeroReason] = useState(card?.cr854_heroreason ?? '')
   const [midTab, setMidTab] = useState<'products' | 'hero'>('products')
@@ -204,6 +209,47 @@ export function CardDetail({ card, products, heroes, onBack, onSaved }: Props) {
       localStorage.setItem(WIDTH_KEY, JSON.stringify(widths))
     } catch {
       // 保存できなくても動作には影響しない
+    }
+  }
+
+  // テーマに応じて、掲載商品とメイン画像をエージェントに選ばせる(現在の内容は置き換える)
+  async function runAi() {
+    if (!form.theme.trim()) {
+      setError('AI で選定するには、先にテーマを入力してください')
+      return
+    }
+    if ((items.length > 0 || heroId) && !window.confirm('現在の掲載商品とメイン画像を、AI の選定結果で置き換えます。よろしいですか?')) return
+    setAiBusy(true)
+    setError(null)
+    try {
+      const label = (opts: { value: number; label: string }[], v: string) => opts.find((o) => String(o.value) === v)?.label ?? ''
+      const result = await selectWithAi({
+        card: {
+          name: form.name,
+          scheduledAt: form.scheduledAt ? new Date(form.scheduledAt).toISOString() : '',
+          country: label(countryOptions, form.country),
+          channel: label(channelOptions, form.channel),
+          department: label(departmentOptions, form.department),
+          theme: form.theme,
+          copy: form.copy,
+          instructions: form.instructions,
+        },
+        productCount: Number(aiCount),
+        products,
+        heroes,
+      })
+      setItems(
+        result.products.map((p) => ({ key: crypto.randomUUID(), productId: p.productId, reason: p.reason, source: SOURCE_AI })),
+      )
+      setSelectedKey(null)
+      if (result.hero) {
+        setHeroId(result.hero.heroId)
+        setHeroReason(result.hero.reason)
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setAiBusy(false)
     }
   }
 
@@ -302,6 +348,27 @@ export function CardDetail({ card, products, heroes, onBack, onSaved }: Props) {
     >
       <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1, pr: 1 }}>
         <Box component="span" sx={{ flexGrow: 1 }}>{card ? card.cr854_name : '配信カードの新規作成'}</Box>
+        <TextField
+          select
+          size="small"
+          label="商品数"
+          value={aiCount}
+          onChange={(e) => setAiCount(e.target.value)}
+          sx={{ width: 84 }}
+          disabled={aiBusy || saving}
+        >
+          {[2, 3, 4, 5, 6, 8].map((n) => (
+            <MenuItem key={n} value={String(n)}>{n}件</MenuItem>
+          ))}
+        </TextField>
+        <Button
+          variant="outlined"
+          onClick={runAi}
+          disabled={aiBusy || saving}
+          startIcon={aiBusy ? <CircularProgress size={16} /> : <AutoAwesomeIcon fontSize="small" />}
+        >
+          {aiBusy ? '選定中...' : 'AIで選定'}
+        </Button>
         <Chip size="small" label={`工程 ${layersFilled} / 4`} color={layersFilled === 4 ? 'success' : 'default'} />
         <IconButton onClick={onBack} aria-label="閉じる"><CloseIcon /></IconButton>
       </DialogTitle>

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400">
+<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f4efe8"/><stop offset="1" stop-color="#e6dccd"/></linearGradient></defs>
+<rect width="300" height="400" fill="url(#bg)"/>
+<ellipse cx="150" cy="362" rx="98" ry="8" fill="#000" opacity=".10"/>
+<g><path d="M105 82 Q150 106 195 82 L255 112 L275 232 L238 242 L228 182 L228 350 L72 350 L72 182 L62 242 L25 232 L45 112 Z" fill="#cdb891" stroke="#b4955c" stroke-width="3" stroke-linejoin="round"/><path d="M150 96 L118 84 L104 140 L150 210 Z" fill="#d7c7a9" stroke="#ad8c4e" stroke-width="2"/><path d="M150 96 L182 84 L196 140 L150 210 Z" fill="#d7c7a9" stroke="#ad8c4e" stroke-width="2"/><rect x="72" y="222" width="156" height="14" fill="#ad8c4e"/><rect x="140" y="219" width="20" height="20" rx="3" fill="none" stroke="#e8d9b5" stroke-width="3"/><line x1="150" y1="236" x2="150" y2="350" stroke="#ad8c4e" stroke-width="2"/><circle cx="138" cy="252" r="4.5" fill="#846b3c"/><circle cx="138" cy="286" r="4.5" fill="#846b3c"/><circle cx="138" cy="320" r="4.5" fill="#846b3c"/><circle cx="162" cy="252" r="4.5" fill="#846b3c"/><circle cx="162" cy="286" r="4.5" fill="#846b3c"/><circle cx="162" cy="320" r="4.5" fill="#846b3c"/></g>
+<text x="150" y="390" text-anchor="middle" font-family="'Noto Sans JP','Yu Gothic UI',Meiryo,sans-serif" font-size="15" font-weight="700" fill="#4a4a4a">トレンチコート</text>
+</svg>

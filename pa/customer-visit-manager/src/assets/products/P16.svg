@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400">
+<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f3f0ea"/><stop offset="1" stop-color="#e4ddd0"/></linearGradient></defs>
+<rect width="300" height="400" fill="url(#bg)"/>
+<ellipse cx="150" cy="362" rx="98" ry="8" fill="#000" opacity=".10"/>
+<g><path d="M100 80 H176 L180 240 Q182 264 218 272 Q264 280 268 314 V336 H98 Z" fill="#6b3e26" stroke="#452818" stroke-width="3" stroke-linejoin="round"/><rect x="96" y="332" width="176" height="16" rx="4" fill="#2a180f"/><path d="M176 140 L180 240" stroke="#452818" stroke-width="2" opacity=".6"/><rect x="100" y="80" width="76" height="12" fill="#5a3420"/></g>
+<text x="150" y="390" text-anchor="middle" font-family="'Noto Sans JP','Yu Gothic UI',Meiryo,sans-serif" font-size="15" font-weight="700" fill="#4a4a4a">レザーブーツ</text>
+</svg>

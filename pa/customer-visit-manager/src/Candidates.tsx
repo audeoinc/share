@@ -10,6 +10,7 @@ import AddIcon from '@mui/icons-material/Add'
 import SearchIcon from '@mui/icons-material/Search'
 import type { Cr854_products } from './generated/models/Cr854_productsModel'
 import { DND_PRODUCT, yen } from './items'
+import { productImage } from './images'
 
 interface Props {
   products: Cr854_products[]
@@ -72,7 +73,7 @@ export function Candidates({ products, usedIds, onAdd }: Props) {
               '&:hover': used ? undefined : { borderColor: 'primary.main' },
             }}
           >
-            <Avatar variant="rounded" src={p.cr854_imageurl} alt={p.cr854_name} sx={{ width: 48, height: 48 }} />
+            <Avatar variant="rounded" src={productImage(p)} alt={p.cr854_name} sx={{ width: 48, height: 48 }} />
             <Box sx={{ flexGrow: 1, minWidth: 0 }}>
               <Typography noWrap sx={{ fontWeight: 600, fontSize: '0.9rem' }}>{p.cr854_name}</Typography>
               <Typography variant="caption" color="text.secondary" noWrap sx={{ display: 'block' }}>
