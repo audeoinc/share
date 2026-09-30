@@ -229,6 +229,31 @@ DECLARE udf_render_function_name STRING;
 DECLARE parser_strict_mode BOOL DEFAULT FALSE;
 DECLARE configured_max_impact_rank INT64 DEFAULT 100;
 
+-- STEP 3 analysis batch size. STEP 3 already loops over datasets so one UDF call
+-- never sees the whole region, but a dataset is not a reliable bound: every
+-- temporary / rotating-destination generated table collapses into the single
+-- synthetic dataset named by ephemeral_object_dataset_label, so hundreds of objects
+-- can land in one iteration and exhaust the UDF's V8 heap ("UDF out of memory").
+-- Each dataset is therefore cut into batches, and one UDF call handles one batch.
+--
+-- The primary bound is SQL VOLUME, not object count: an earlier row-count chunking
+-- attempt was removed because a few oversized objects in one chunk still blew the
+-- heap. analysis_batch_max_objects is a secondary cap for the opposite case (very
+-- many tiny objects, where per-object overhead rather than text dominates).
+-- Batches are cut on the cumulative length BEFORE each object, so an object larger
+-- than the budget gets a batch to itself rather than being merged into one.
+-- The budget is approximate in one direction: a batch can overshoot by up to the
+-- size of its last object.
+--
+-- Lower these if STEP 3 still reports out of memory; raise them to trade BigQuery
+-- job count for fewer, larger UDF calls. Only the first run after a large JOBS
+-- collection has batches worth counting -- a successful analysis clears is_changed,
+-- so a steady-state daily run is normally one small batch per dataset.
+-- sql/maintenance/10_pending_analysis_workload.sql reports the volume per dataset,
+-- which is what these should be set against.
+DECLARE analysis_batch_max_sql_bytes INT64 DEFAULT 200000;
+DECLARE analysis_batch_max_objects INT64 DEFAULT 200;
+
 -- Source-dataset access pre-check. source_project_filters resolves source datasets
 -- from INFORMATION_SCHEMA.SCHEMATA, but being listed there does not guarantee the job
 -- account can read that dataset's INFORMATION_SCHEMA: a single unreadable dataset makes
@@ -585,6 +610,11 @@ ASSERT NOT EXISTS (
   WHERE entry NOT IN ('VIEW_DEFINITION', 'SCHEDULED_QUERY', 'DAG')
 )
 AS 'analysis_include_generation_types accepts only VIEW_DEFINITION, SCHEDULED_QUERY and DAG.';
+
+ASSERT analysis_batch_max_sql_bytes >= 1
+AS 'analysis_batch_max_sql_bytes must be >= 1.';
+ASSERT analysis_batch_max_objects >= 1
+AS 'analysis_batch_max_objects must be >= 1.';
 
 -- Column usage index table qualified name (not a lnge_render_dynamic_sql placeholder).
 -- Built once and reused by STEP 3's publish. CREATE TABLE IF NOT EXISTS keeps a
@@ -1961,9 +1991,10 @@ BEGIN
   DECLARE strict_mode BOOL DEFAULT parser_strict_mode;
   DECLARE analyzed_object_count INT64 DEFAULT 0;
   DECLARE failed_object_count INT64 DEFAULT 0;
-  -- Datasets that have at least one analyzable changed object this run. Empty on
-  -- an unchanged run, which skips the metadata scan and the whole analysis loop.
-  DECLARE changed_datasets ARRAY<STRING>;
+  -- How many (dataset, batch) units the analysis loop will run. 0 on an unchanged
+  -- run, which skips the metadata scan and the whole analysis loop. The units
+  -- themselves live in the analysis_batches temp table built below.
+  DECLARE analysis_batch_total INT64 DEFAULT 0;
 
   -- --------------------------------------------------------------------------
   -- Remove repository rows whose target definition is no longer active.
@@ -2037,45 +2068,135 @@ BEGIN
   );
 
   -- --------------------------------------------------------------------------
-  -- Which datasets have analyzable changed objects this run. The registry already
-  -- holds only analysis targets (the analysis object/dataset filters are applied at
-  -- collection in STEP 1/2), so this just needs active, changed, defined objects of
-  -- the analyzed types -- no filter re-application. process_generated_tables still
-  -- gates whether generated TABLEs are analyzed. Empty => nothing changed =>
-  -- everything expensive below (the metadata scan and the analysis loop) is skipped.
+  -- The analysable changed set, cut into the units the analysis loop runs.
+  --
+  -- The registry already holds only analysis targets (the analysis object/dataset
+  -- filters are applied at collection in STEP 1/2), so this just needs active,
+  -- changed, defined objects of the analyzed types -- no filter re-application.
+  -- process_generated_tables still gates whether generated TABLEs are analyzed.
+  -- Empty => nothing changed => everything expensive below (the metadata scan and
+  -- the analysis loop) is skipped.
+  --
+  -- Each object also gets a batch_no, so one UDF call handles a bounded amount of
+  -- SQL. The loop unit is (dataset, batch_no), not dataset: a dataset alone is not a
+  -- bound, because every ephemeral generated table collapses into one synthetic
+  -- dataset (ephemeral_object_dataset_label) and would otherwise arrive as a single
+  -- iteration of arbitrary size. See analysis_batch_max_sql_bytes.
+  --
+  -- The cut is on bytes_before -- the cumulative SQL length BEFORE each object --
+  -- rather than on the inclusive total, so an object bigger than the whole budget
+  -- takes a batch of its own instead of dragging its neighbours over the limit. Both
+  -- terms of the GREATEST rise monotonically along the ordering, so a batch is
+  -- always a contiguous run; batch numbers may therefore skip values, which is why
+  -- the loop reads the DISTINCT values rather than counting from zero.
+  --
+  -- definition_text is carried here so the per-batch materialisation below is a
+  -- plain read of this session table, with no second trip to the registry.
   -- --------------------------------------------------------------------------
   SET sql_template = """
-    SELECT ARRAY_AGG(DISTINCT object_dataset)
-    FROM
-      `__T_DEF_REGISTRY__`
-    WHERE is_active = TRUE
-      AND is_changed = TRUE
-      AND definition_text IS NOT NULL
-      AND object_type IN ('VIEW', 'TABLE')
-      AND (@include_tables OR object_type = 'VIEW')
+    CREATE OR REPLACE TEMP TABLE changed_object_batches AS
+    WITH changed AS (
+      SELECT
+        object_project,
+        object_dataset,
+        object_name,
+        object_type,
+        generation_type,
+        definition_text,
+        definition_hash,
+        script_variables,
+        LENGTH(definition_text) AS sql_length
+      FROM
+        `__T_DEF_REGISTRY__`
+      WHERE is_active = TRUE
+        AND is_changed = TRUE
+        AND definition_text IS NOT NULL
+        AND object_type IN ('VIEW', 'TABLE')
+        AND (@include_tables OR object_type = 'VIEW')
+    ),
+    positioned AS (
+      SELECT
+        changed.*,
+        SUM(sql_length) OVER (
+          PARTITION BY object_dataset
+          ORDER BY object_name, object_type, definition_hash
+          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) - sql_length AS bytes_before,
+        ROW_NUMBER() OVER (
+          PARTITION BY object_dataset
+          ORDER BY object_name, object_type, definition_hash
+        ) - 1 AS index_in_dataset
+      FROM changed
+    )
+    SELECT
+      object_project,
+      object_dataset,
+      object_name,
+      object_type,
+      generation_type,
+      definition_text,
+      definition_hash,
+      script_variables,
+      sql_length,
+      GREATEST(
+        DIV(bytes_before, @max_sql_bytes),
+        DIV(index_in_dataset, @max_objects)
+      ) AS batch_no
+    FROM positioned
   """;
 
   EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
 
   ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-  AS 'Unresolved placeholder in changed-datasets probe SQL.';
+  AS 'Unresolved placeholder in changed-object batching SQL.';
 
   EXECUTE IMMEDIATE rendered_sql
-  INTO changed_datasets
   USING
-    process_generated_tables AS include_tables;
+    process_generated_tables AS include_tables,
+    analysis_batch_max_sql_bytes AS max_sql_bytes,
+    analysis_batch_max_objects AS max_objects;
 
-  SET changed_datasets = COALESCE(changed_datasets, CAST([] AS ARRAY<STRING>));
-  SET has_analysis_work = ARRAY_LENGTH(changed_datasets) > 0;
+  -- The loop units. Ordered reads of this table drive both the discovery pre-pass
+  -- and the analysis loop, so the two see identical batches.
+  CREATE OR REPLACE TEMP TABLE analysis_batches AS
+  SELECT DISTINCT object_dataset, batch_no
+  FROM changed_object_batches;
+
+  SET analysis_batch_total = (SELECT COUNT(*) FROM analysis_batches);
+  SET has_analysis_work = analysis_batch_total > 0;
+
+  -- Surfaced in "All results" so the batching is visible: a dataset cut into many
+  -- batches is where an out-of-memory would have happened, and the byte budget is
+  -- the knob to turn.
+  IF has_analysis_work THEN
+    SELECT
+      'ANALYSIS_BATCHES' AS notice,
+      analysis_batch_max_sql_bytes AS max_sql_bytes_per_batch,
+      analysis_batch_max_objects AS max_objects_per_batch,
+      analysis_batch_total AS batches_to_run,
+      (SELECT COUNT(DISTINCT object_dataset) FROM changed_object_batches)
+        AS datasets_to_analyze,
+      (SELECT COUNT(*) FROM changed_object_batches) AS changed_objects,
+      (SELECT SUM(sql_length) FROM changed_object_batches) AS total_sql_bytes,
+      (
+        SELECT MAX(batch_bytes)
+        FROM (
+          SELECT SUM(sql_length) AS batch_bytes
+          FROM changed_object_batches
+          GROUP BY object_dataset, batch_no
+        )
+      ) AS largest_batch_bytes;
+  END IF;
 
   IF has_analysis_work THEN
 
   -- ------------------------------------------------------------------------
   -- D -- discovery pre-pass. Run source discovery once for every changed object
-  -- (per dataset, for memory), accumulate the results, and collect the referenced
-  -- source dataset names -- so the column-metadata scan below covers only the
-  -- datasets the changed objects actually reference, not every source dataset.
-  -- The analysis loop reuses these accumulated discovery rows (no second UDF pass).
+  -- (one UDF call per batch, for memory), accumulate the results, and collect the
+  -- referenced source dataset names -- so the column-metadata scan below covers only
+  -- the datasets the changed objects actually reference, not every source dataset.
+  -- The analysis loop reuses these accumulated discovery rows (no second UDF pass),
+  -- and reads them back by the same (dataset, batch_no) unit.
   -- ------------------------------------------------------------------------
   CREATE OR REPLACE TEMP TABLE all_changed_with_discovery (
     object_project STRING,
@@ -2086,48 +2207,39 @@ BEGIN
     definition_text STRING,
     definition_hash STRING,
     script_variables ARRAY<STRING>,
-    source_discovery_json STRING
+    source_discovery_json STRING,
+    batch_no INT64
   );
   CREATE OR REPLACE TEMP TABLE referenced_source_datasets (dataset_name STRING);
 
   FOR ds_row IN (
-    SELECT ds FROM UNNEST(changed_datasets) AS ds ORDER BY ds
+    SELECT object_dataset AS ds, batch_no
+    FROM analysis_batches
+    ORDER BY object_dataset, batch_no
   ) DO
 
   EXECUTE IMMEDIATE FORMAT(
-    "SELECT '----- STEP 3.discovery | dataset: %s -----' AS processing_step",
-    ds_row.ds
+    "SELECT '----- STEP 3.discovery | dataset: %s | batch: %d -----' AS processing_step",
+    ds_row.ds,
+    ds_row.batch_no
   );
 
-  -- Materialize the changed-definition set for the current dataset only.
-  SET sql_template = """
-    CREATE OR REPLACE TEMP TABLE changed_definitions_to_analyze AS
-    SELECT
-      object_project,
-      object_dataset,
-      object_name,
-      object_type,
-      generation_type,
-      definition_text,
-      definition_hash,
-      script_variables
-    FROM
-      `__T_DEF_REGISTRY__`
-    WHERE is_active = TRUE
-      AND is_changed = TRUE
-      AND definition_text IS NOT NULL
-      AND object_type IN ('VIEW', 'TABLE')
-      AND (@include_tables OR object_type = 'VIEW')
-      AND LOWER(object_dataset) = LOWER(@current_dataset)
-  """;
-
-  EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-  ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-  AS 'Unresolved placeholder in changed-definitions materialization SQL.';
-  EXECUTE IMMEDIATE rendered_sql
-  USING
-    process_generated_tables AS include_tables,
-    ds_row.ds AS current_dataset;
+  -- This batch's changed definitions. A plain read of the session table built above
+  -- (which already applied the registry filters and assigned batch_no), so the
+  -- registry is not queried per batch.
+  CREATE OR REPLACE TEMP TABLE changed_definitions_to_analyze AS
+  SELECT
+    object_project,
+    object_dataset,
+    object_name,
+    object_type,
+    generation_type,
+    definition_text,
+    definition_hash,
+    script_variables
+  FROM changed_object_batches
+  WHERE LOWER(object_dataset) = LOWER(ds_row.ds)
+    AND batch_no = ds_row.batch_no;
 
   -- Source discovery: single UDF query over this dataset's changed set.
   SET sql_template = """
@@ -2162,12 +2274,12 @@ BEGIN
   INSERT INTO all_changed_with_discovery (
     object_project, object_dataset, object_name, object_type,
     generation_type, definition_text, definition_hash, script_variables,
-    source_discovery_json
+    source_discovery_json, batch_no
   )
   SELECT
     object_project, object_dataset, object_name, object_type,
     generation_type, definition_text, definition_hash, script_variables,
-    source_discovery_json
+    source_discovery_json, ds_row.batch_no
   FROM changed_definitions_with_discovery;
 
   INSERT INTO referenced_source_datasets (dataset_name)
@@ -2327,7 +2439,9 @@ BEGIN
   -- per dataset.
   -- --------------------------------------------------------------------------
   FOR ds_row IN (
-    SELECT ds FROM UNNEST(changed_datasets) AS ds ORDER BY ds
+    SELECT object_dataset AS ds, batch_no
+    FROM analysis_batches
+    ORDER BY object_dataset, batch_no
   ) DO
 
   -- Progress marker. BigQuery prepends the lnge_render_dynamic_sql TEMP FUNCTION DDL
@@ -2337,8 +2451,9 @@ BEGIN
   -- with the dataset name baked into the executed text (via FORMAT, not a bound
   -- variable), so each iteration surfaces which dataset STEP 3 is processing.
   EXECUTE IMMEDIATE FORMAT(
-    "SELECT '===== STEP 3 | dataset: %s =====' AS processing_step",
-    ds_row.ds
+    "SELECT '===== STEP 3 | dataset: %s | batch: %d =====' AS processing_step",
+    ds_row.ds,
+    ds_row.batch_no
   );
 
   -- Snapshot the active VIEW registry once so the per-object staging query can
@@ -2391,7 +2506,8 @@ BEGIN
     script_variables,
     source_discovery_json
   FROM all_changed_with_discovery
-  WHERE LOWER(object_dataset) = LOWER(ds_row.ds);
+  WHERE LOWER(object_dataset) = LOWER(ds_row.ds)
+    AND batch_no = ds_row.batch_no;
 
   -- ==========================================================================
   -- Batch analysis and publish (full set-based STEP 3).
@@ -2750,19 +2866,22 @@ BEGIN
     ) AS t;
 
     -- ------------------------------------------------------------------------
-    -- Progress marker: analysis sub-step for the current dataset.
+    -- Progress marker: analysis sub-step for the current batch.
     EXECUTE IMMEDIATE FORMAT(
-      "SELECT '----- STEP 3.analysis | dataset: %s -----' AS processing_step",
-      ds_row.ds
+      "SELECT '----- STEP 3.analysis | dataset: %s | batch: %d -----' AS processing_step",
+      ds_row.ds,
+      ds_row.batch_no
     );
 
     -- 3. Run the persistent lineage UDF over every analyzable object in the
-    -- current dataset in a single query. Per-dataset scoping (the enclosing
-    -- loop) bounds how many objects share one per-slot UDF context, which keeps
-    -- the JavaScript UDF under the memory ceiling that a region-wide single pass
-    -- would blow ("Resource exceeded during query execution: UDF out of
-    -- memory"). The result JSON lives in a table column (no 1 MiB script-
-    -- variable limit).
+    -- current BATCH in a single query. The enclosing loop bounds how many objects
+    -- share one per-slot UDF context, which keeps the JavaScript UDF under the
+    -- memory ceiling that a region-wide single pass would blow ("Resource
+    -- exceeded during query execution: UDF out of memory"). The bound is the
+    -- batch, not the dataset: a dataset is not a bound on its own, because every
+    -- ephemeral generated table collapses into one synthetic dataset -- see
+    -- analysis_batch_max_sql_bytes. The result JSON lives in a table column (no
+    -- 1 MiB script-variable limit).
     -- ------------------------------------------------------------------------
     SET sql_template = """
       CREATE OR REPLACE TEMP TABLE batch_udf_results AS

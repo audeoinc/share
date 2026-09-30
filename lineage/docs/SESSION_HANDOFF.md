@@ -808,6 +808,47 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   行ごとに繰り返す（1行 = 起点カラム × 利用箇所 × 経路）。
   `static_tables_include_usage_sql = FALSE` で static テーブルから外せる。
 
+## 4.32 STEP 3 のバッチ分割（UDF OOM・SQLのみ）
+
+- **症状**：`process_generated_tables = TRUE` で 03 を実行すると UDF out of memory。
+  `FALSE` にすると通る。
+- **原因はデータセット単位ループの盲点**：§4.21 のデータセット単位ループは
+  「1 反復 = 1 データセット = 1 UDF 呼び出し」だが、**ephemeral な生成テーブルは
+  全部が 1 つの合成データセット（`ephemeral_object_dataset_label` = 既定
+  `ephemeral_generated_sql`）に入る**。実データセットではないので、何百個あっても
+  1 反復に詰め込まれ、ループによる保護が効かない。
+- **実測**（`sql/maintenance/10_pending_analysis_workload.sql`）：
+
+  | dataset | 種別 | 個数 | SQL 合計 | 最大 |
+  |---|---|---|---|---|
+  | ephemeral | TABLE/DAG | 928 | 2,299,596 | 55,313 |
+  | datasetA | VIEW | 4 | 57,525 | 29,367 |
+  | datasetB | TABLE/DAG | 3 | 7,683 | 2,632 |
+  | datasetC | TABLE/DAG | 2 | 4,893 | 2,616 |
+
+  ephemeral が**総バイトの 97%・オブジェクト数の 99%**。`max` が合計の 2.4% しかない
+  ＝「巨大な単体」ではなく「多数の集中」なので、**分割で解決できる形**だと判断した。
+- **対処：ループ単位を (dataset, batch_no) に変更**。
+  - `changed_object_batches`（セッション一時表）が変更オブジェクトごとに batch_no を付ける。
+    `GREATEST(DIV(自分より前の累積バイト, @max_sql_bytes), DIV(データセット内の連番, @max_objects))`。
+  - **排他的プレフィックスで切る**のが要点。予算を超える単体オブジェクトは単独バッチになり、
+    隣を巻き込まない。両項が単調増加なのでバッチは連続区間になる（**番号は飛ぶ**ので
+    `analysis_batches` の DISTINCT を回す）。
+  - **基準はバイト量**。§4.19/4.20 の**行数**チャンクは「大オブジェクトが偏ると行数を絞っても
+    OOM」で撤去された経緯があるため、同じ失敗を繰り返さない。`analysis_batch_max_objects`
+    は「極小オブジェクトが大量」の逆ケース用の二次上限。
+  - discovery 先行パスと解析ループは**同じ `analysis_batches` を読む**（バッチ定義の二重管理なし）。
+    `all_changed_with_discovery` に `batch_no` を持たせて読み戻す。
+  - `changed_definitions_to_analyze` は registry への再クエリではなく
+    `changed_object_batches` の素読みになった（反復ごとのレジストリ参照が 1 本減る）。
+- **既定値の根拠が弱いことは自覚しておく**：この環境で通ることが分かっているバッチは
+  「4 オブジェクト / 57KB」（View のみ）だけ。200000 バイト / 200 個は**観測された失敗より
+  十分小さい値を置いただけ**で、上限の実測ではない。初回成功後に
+  `ANALYSIS_BATCHES` 行の `largest_batch_bytes` を見て調整する前提。
+- **これは主に初回だけの負荷**：`is_changed` は解析成功で FALSE に落ちるので、
+  初回の 60 日分を通しきれば以降は新規フィンガープリント分だけの小さなバッチになる。
+- エンジン変更なし。**BigQuery 未検証**。
+
 ## 4.22 本ドキュメントと実装の乖離（重要）
 
 `docs/SESSION_HANDOFF.md` の §1〜§4.20 は **1.5.0-032 の途中まで**しか追随していない。

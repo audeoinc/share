@@ -248,6 +248,23 @@ npm test                        # build + verify:bundle + test:release を一括
   'SCHEDULED_QUERY'/'DAG' 等＝生成テーブル Job）。値は元々診断ステージングを流れており
   永続化しただけ。書込みは 03 STEP 3 の3系統（UDF診断・非publishableマーカー・
   pre-analysis失敗）と 06 単体経路。
+  **STEP 3 のバッチ分割（UDF OOM 対策の最終形）**：データセット単位ループだけでは
+  不十分だった。**ephemeral な生成テーブルは全部が 1 つの合成データセット
+  （`ephemeral_object_dataset_label`）に入る**ため、何個あっても 1 反復＝1 UDF 呼び出しに
+  なる。実測では変更 937 個中 928 個・SQL 2.37MB 中 2.30MB がこのバケットに集中していた
+  （97%、次に重いデータセットの 40 倍）。View だけなら通るので
+  `process_generated_tables=FALSE` が回避策になっていた。
+  **ループ単位を (dataset, batch_no) に変更**。`changed_object_batches` が各オブジェクトに
+  「自分より前の SQL 累積長」から batch_no を割り当て、`analysis_batch_max_sql_bytes`
+  （既定 200000）で切る。`analysis_batch_max_objects`（既定 200）は「極小多数」用の
+  二次上限。discovery 先行パスと解析ループは同じ `analysis_batches` を読むので**両者の
+  バッチは必ず一致**する。**排他的プレフィックスで切る**ので、予算超えの単体オブジェクトは
+  単独バッチになる（隣を巻き込まない）。GREATEST の両項が単調増加なのでバッチは連続区間、
+  番号は飛ぶことがある（DISTINCT を回す理由）。バッチはバイト予算を「最後の 1 オブジェクト分」
+  だけ超えうる。**基準は行数ではなくバイト量**（§4.19/4.20 の行数チャンクは大オブジェクトの
+  偏りで OOM が続き撤去された）。`ANALYSIS_BATCHES` 行で予算・バッチ数・総バイト・最大バッチ
+  バイトを報告する。publish は従来どおり delete-by-object なので、失敗時のロールバックは
+  そのバッチ分だけ。診断は `sql/maintenance/10_pending_analysis_workload.sql`。
   **absent 判定の鮮度（STEP 3）**：publish 可否分類 `batch_object_source_flags` の存在
   判定は、STEP 1 スナップショット `current_target_tables` ではなく、STEP 3 で列メタと
   同時・同一参照データセット範囲で採る `current_referenced_tables`（フレッシュな TABLES
