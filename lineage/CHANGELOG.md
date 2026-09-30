@@ -1,5 +1,38 @@
 # 1.5.0-032
 
+- Fixed "UDF out of memory" in STEP 3 when generated tables are analyzed. STEP 3
+  already loops over datasets so one UDF call never sees the whole region, but a
+  dataset is not a bound: every temporary / rotating-destination generated table
+  collapses into the single synthetic dataset named by
+  `ephemeral_object_dataset_label`, so they all arrive as ONE loop iteration however
+  many there are. Measured on a real region: 928 of 937 changed objects and 2.30 MB
+  of 2.37 MB total SQL were in that one bucket -- 97% of the work in one UDF call,
+  40x the next heaviest dataset. Views alone analyzed fine, which is why
+  `process_generated_tables = FALSE` was a workaround.
+  The loop unit is now (dataset, batch_no) instead of dataset. A new
+  `changed_object_batches` session table assigns each changed object a batch number
+  from the cumulative SQL length BEFORE it, capped by the new
+  `analysis_batch_max_sql_bytes` (default 200000) with `analysis_batch_max_objects`
+  (default 200) as a secondary cap for many-tiny-objects; both loops -- the discovery
+  pre-pass and the analysis loop -- read the same `analysis_batches` units, so they
+  see identical batches. Cutting on the exclusive prefix means an object larger than
+  the whole budget takes a batch to itself instead of dragging its neighbours over;
+  both GREATEST terms rise monotonically along the ordering, so a batch is always a
+  contiguous run (numbers may skip, hence iterating DISTINCT values). A batch can
+  overshoot the byte budget by up to its last object's size.
+  The budget is on SQL VOLUME, not object count, because the row-count chunking tried
+  earlier (and removed) still blew the heap when a few oversized objects landed in one
+  chunk. Defaults are conservative: the only batch size proven to work in this
+  environment is the 4-object / 57 KB Views case, so they are set well below anything
+  observed to fail and are meant to be tuned from the first successful run.
+  Also reported: an `ANALYSIS_BATCHES` row gives the budgets, the batch count, the
+  changed-object count, total SQL bytes and the largest batch's bytes, so the split is
+  visible and the knob to turn is obvious. Per-batch publish keeps the same
+  delete-by-object semantics, so a failure rolls back that batch only.
+  `changed_definitions_to_analyze` is now a plain read of the session table rather
+  than a per-iteration registry query. SQL only; the bundle is unchanged.
+  Diagnosed with `sql/maintenance/10_pending_analysis_workload.sql`.
+
 - Added `sql/maintenance/10_pending_analysis_workload.sql`, a read-only report of how
   much work the next 03 STEP 3 run would hand to the analysis UDF, grouped the way
   STEP 3 actually batches it. STEP 3 avoids UDF out-of-memory by looping over
