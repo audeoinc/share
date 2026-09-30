@@ -18,3 +18,4 @@ export const DND_PRODUCT = 'application/x-product' // 候補 → プレビュー
 export const DND_ITEM = 'application/x-item' // プレビュー内の並べ替え(値は Item.key)
 
 export const yen = (v?: number) => (v === undefined ? '-' : `¥${v.toLocaleString('ja-JP')}`)
+export const DND_HERO = 'application/x-hero' // 候補 → プレビューのメインビジュアル枠(値はメイン画像ID)

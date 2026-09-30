@@ -42,6 +42,8 @@ export interface Cr854_deliverycardsBase {
   cr854_country?: Cr854_deliverycardscr854_country;
   cr854_deliverycardid: string;
   cr854_department?: Cr854_deliverycardscr854_department;
+  "cr854_heroimage@odata.bind"?: string;
+  cr854_heroreason?: string;
   cr854_instructions?: string;
   cr854_name: string;
   cr854_products?: string;
@@ -67,6 +69,8 @@ export interface Cr854_deliverycards extends Cr854_deliverycardsBase {
   statecodename?: string;
   statuscodename?: string;
   versionnumber?: number;
+  cr854_heroimage?: object;
+  _cr854_heroimage_value?: string;
   createdby?: object;
   _createdby_value?: string;
   createdonbehalfby?: object;

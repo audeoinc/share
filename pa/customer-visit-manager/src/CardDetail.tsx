@@ -22,7 +22,9 @@ import { Cr854_deliverycardsService } from './generated/services/Cr854_deliveryc
 import type { Cr854_deliverycards } from './generated/models/Cr854_deliverycardsModel'
 import { Cr854_deliveryproductsService } from './generated/services/Cr854_deliveryproductsService'
 import type { Cr854_products } from './generated/models/Cr854_productsModel'
+import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
 import { Candidates } from './Candidates'
+import { HeroCandidates } from './HeroCandidates'
 import { Preview } from './Preview'
 import { Splitter } from './Splitter'
 import { DND_ITEM, DND_PRODUCT, SOURCE_AI, SOURCE_MANUAL, type Item } from './items'
@@ -32,6 +34,7 @@ interface Props {
   /** undefined のときは新規作成 */
   card?: Cr854_deliverycards
   products: Cr854_products[]
+  heroes: Cr854_heroimages[]
   onBack: () => void
   onSaved: () => Promise<void>
 }
@@ -103,7 +106,7 @@ function loadWidths(): [number, number] {
 
 const paneSx = { p: 2, overflow: 'auto', minHeight: 0, display: 'grid', gap: 1.5, alignContent: 'start' } as const
 
-export function CardDetail({ card, products, onBack, onSaved }: Props) {
+export function CardDetail({ card, products, heroes, onBack, onSaved }: Props) {
   const [form, setForm] = useState<Form>(() => toForm(card))
   const theme = useTheme()
   const fullScreen = useMediaQuery(theme.breakpoints.down('md'))
@@ -115,6 +118,9 @@ export function CardDetail({ card, products, onBack, onSaved }: Props) {
     card?.cr854_channelname === 'プッシュ' ? 'push' : 'email',
   )
   const [showHeadings, setShowHeadings] = useState(true)
+  const [heroId, setHeroId] = useState<string | undefined>(card?._cr854_heroimage_value)
+  const [heroReason, setHeroReason] = useState(card?.cr854_heroreason ?? '')
+  const [midTab, setMidTab] = useState<'products' | 'hero'>('products')
   const [widths, setWidths] = useState<[number, number]>(loadWidths)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -248,6 +254,13 @@ export function CardDetail({ card, products, onBack, onSaved }: Props) {
         cr854_products: items.map((i) => productName(i.productId)).filter(Boolean).join(' / '),
         cr854_copy: form.copy,
         cr854_instructions: form.instructions,
+        cr854_heroreason: heroReason,
+        // 外したときは null を送ってルックアップを空にする
+        'cr854_heroimage@odata.bind': heroId
+          ? `/cr854_heroimages(${heroId})`
+          : card?._cr854_heroimage_value
+            ? (null as never)
+            : undefined,
       }
       const res = card
         ? await Cr854_deliverycardsService.update(card.cr854_deliverycardid, fields)
@@ -269,6 +282,7 @@ export function CardDetail({ card, products, onBack, onSaved }: Props) {
   const selectedProduct = selected && products.find((p) => p.cr854_productid === selected.productId)
   const layersFilled = [form.theme, items.length > 0, form.copy, form.instructions].filter(Boolean).length
   const usedIds = new Set(items.map((i) => i.productId))
+  const hero = heroes.find((h) => h.cr854_heroimageid === heroId)
 
   return (
     <Dialog
@@ -372,8 +386,15 @@ export function CardDetail({ card, products, onBack, onSaved }: Props) {
 
         {/* 中: 商品の候補 */}
         <Box sx={{ ...paneSx, bgcolor: 'action.hover' }}>
-          <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>商品の候補</Typography>
-          <Candidates products={products} usedIds={usedIds} onAdd={(id) => addProduct(id)} />
+          <Tabs value={midTab} onChange={(_, v) => setMidTab(v)} sx={{ minHeight: 36 }}>
+            <Tab value="products" label={`商品(${products.length})`} sx={{ minHeight: 36 }} />
+            <Tab value="hero" label={`メイン画像(${heroes.length})`} sx={{ minHeight: 36 }} />
+          </Tabs>
+          {midTab === 'products' ? (
+            <Candidates products={products} usedIds={usedIds} onAdd={(id) => addProduct(id)} />
+          ) : (
+            <HeroCandidates heroes={heroes} selectedId={heroId} onSelect={setHeroId} />
+          )}
         </Box>
 
         <Splitter onDrag={resize(1)} onDone={saveWidths} />
@@ -405,6 +426,9 @@ export function CardDetail({ card, products, onBack, onSaved }: Props) {
               products={products}
               selectedKey={selectedKey}
               showHeadings={showHeadings}
+              hero={hero}
+              onDropHero={setHeroId}
+              onClearHero={() => setHeroId(undefined)}
               onSelect={setSelectedKey}
               onRemove={removeItem}
               onMove={(key, d) => {
@@ -414,7 +438,16 @@ export function CardDetail({ card, products, onBack, onSaved }: Props) {
               onDropAt={dropAt}
             />
           </Box>
-          <Box sx={{ borderTop: 1, borderColor: 'divider', pt: 1.5, minHeight: 96 }}>
+          <Box sx={{ borderTop: 1, borderColor: 'divider', pt: 1.5, minHeight: 96, display: 'grid', gap: 1.5 }}>
+            {hero && (
+              <TextField
+                fullWidth
+                multiline
+                label={`メイン画像「${hero.cr854_name}」の選定理由`}
+                value={heroReason}
+                onChange={(e) => setHeroReason(e.target.value)}
+              />
+            )}
             {selected && selectedProduct ? (
               <Box sx={{ display: 'grid', gap: 1 }}>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>

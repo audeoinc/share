@@ -29,11 +29,6 @@
           "logicalName": "cr854_table_a2287751",
           "isHidden": false
         },
-        "_b1347637": {
-          "entitySetName": "cr854_deliverycards",
-          "logicalName": "cr854_deliverycard",
-          "isHidden": false
-        },
         "_005ea982": {
           "entitySetName": "cr854_products",
           "logicalName": "cr854_product",
@@ -47,6 +42,11 @@
         "_94626707": {
           "entitySetName": "cr854_heroimages",
           "logicalName": "cr854_heroimage",
+          "isHidden": false
+        },
+        "_b1347637": {
+          "entitySetName": "cr854_deliverycards",
+          "logicalName": "cr854_deliverycard",
           "isHidden": false
         }
       },

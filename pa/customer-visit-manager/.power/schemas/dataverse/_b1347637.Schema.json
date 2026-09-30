@@ -127,6 +127,34 @@
           "x-ms-dataverse-attribute-of": "cr854_department",
           "x-ms-read-only": true
         },
+        "cr854_heroimage": {
+          "type": "string",
+          "title": "heroimage",
+          "x-ms-dataverse-attribute": "cr854_heroimage",
+          "x-ms-dataverse-type": "LookupType",
+          "x-ms-schema-name": "cr854_heroimage",
+          "x-ms-dataverse-navigation-properties": [
+            "cr854_heroimage"
+          ]
+        },
+        "cr854_heroimagename": {
+          "type": "string",
+          "title": "cr854_heroimagename",
+          "x-ms-dataverse-attribute": "cr854_heroimagename",
+          "x-ms-dataverse-type": "StringType",
+          "x-ms-schema-name": "cr854_heroimageName",
+          "x-ms-dataverse-attribute-of": "cr854_heroimage",
+          "x-ms-read-only": true,
+          "maxLength": 850
+        },
+        "cr854_heroreason": {
+          "type": "string",
+          "title": "heroreason",
+          "x-ms-dataverse-attribute": "cr854_heroreason",
+          "x-ms-dataverse-type": "MemoType",
+          "x-ms-schema-name": "cr854_heroreason",
+          "maxLength": 2000
+        },
         "cr854_instructions": {
           "type": "string",
           "title": "制作指示",

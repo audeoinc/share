@@ -8,7 +8,8 @@ import ArrowUpwardIcon from '@mui/icons-material/ArrowUpward'
 import ChevronLeftIcon from '@mui/icons-material/ChevronLeft'
 import ChevronRightIcon from '@mui/icons-material/ChevronRight'
 import type { Cr854_products } from './generated/models/Cr854_productsModel'
-import { DND_ITEM, yen, type Item } from './items'
+import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
+import { DND_HERO, DND_ITEM, yen, type Item } from './items'
 
 interface Props {
   channel: 'email' | 'push'
@@ -19,6 +20,10 @@ interface Props {
   products: Cr854_products[]
   selectedKey: string | null
   showHeadings: boolean
+  /** 設定中のメイン画像 */
+  hero?: Cr854_heroimages
+  onDropHero: (heroId: string) => void
+  onClearHero: () => void
   onSelect: (key: string) => void
   onRemove: (key: string) => void
   /** 1つ前/後ろへ移す(delta は -1 か 1) */
@@ -53,8 +58,9 @@ function useDropTarget(onDropAt: Props['onDropAt']) {
   return { over, handlers, clear: () => setOver(null) }
 }
 
-function EmailPreview({ subject, theme, copy, items, products, selectedKey, showHeadings, onSelect, onRemove, onMove, onDropAt }: Props) {
+function EmailPreview({ subject, theme, copy, items, products, selectedKey, showHeadings, hero, onDropHero, onClearHero, onSelect, onRemove, onMove, onDropAt }: Props) {
   const { over, handlers, clear } = useDropTarget(onDropAt)
+  const [heroOver, setHeroOver] = useState(false)
   const byId = new Map(products.map((p) => [p.cr854_productid, p]))
 
   // 連続する同カテゴリの商品ごとに見出しを付ける(並び順はそのまま)
@@ -149,8 +155,48 @@ function EmailPreview({ subject, theme, copy, items, products, selectedKey, show
       <Typography variant="caption" color="text.secondary">件名: {subject || '(配信名未入力)'}</Typography>
       <Box sx={{ bgcolor: '#fff', color: INK, border: '1px solid #ddd', borderRadius: 2, overflow: 'hidden', mt: 0.5 }}>
         <Box sx={{ bgcolor: '#222', color: '#fff', textAlign: 'center', py: 1.5, letterSpacing: 4, fontWeight: 700 }}>SHOP</Box>
-        <Box sx={{ aspectRatio: '16 / 9', bgcolor: '#e9e9ee', color: '#999', display: 'grid', placeItems: 'center', fontSize: '0.8rem' }}>
-          メインビジュアル
+        <Box
+          onDragOver={(e) => {
+            if (!e.dataTransfer.types.includes(DND_HERO)) return
+            e.preventDefault()
+            setHeroOver(true)
+          }}
+          onDragLeave={() => setHeroOver(false)}
+          onDrop={(e) => {
+            e.preventDefault()
+            setHeroOver(false)
+            const id = e.dataTransfer.getData(DND_HERO)
+            if (id) onDropHero(id)
+          }}
+          sx={{
+            position: 'relative',
+            aspectRatio: '16 / 9',
+            bgcolor: heroOver ? 'rgba(103,80,164,0.15)' : '#e9e9ee',
+            outline: heroOver ? '3px solid #6750a4' : 'none',
+            outlineOffset: -3,
+            color: '#999',
+            display: 'grid',
+            placeItems: 'center',
+            fontSize: '0.8rem',
+            '&:hover .hero-clear': { opacity: 1 },
+          }}
+        >
+          {hero ? (
+            <>
+              <Box component="img" draggable={false} src={hero.cr854_imageurl} alt={hero.cr854_name} sx={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+              <IconButton
+                className="hero-clear"
+                size="small"
+                onClick={onClearHero}
+                aria-label="メイン画像を外す"
+                sx={{ position: 'absolute', top: 8, right: 8, opacity: 0, bgcolor: 'rgba(255,255,255,0.9)', '&:hover': { bgcolor: '#fff' } }}
+              >
+                <CloseIcon fontSize="small" sx={{ color: INK }} />
+              </IconButton>
+            </>
+          ) : (
+            'メインビジュアル(候補から画像をドロップ)'
+          )}
         </Box>
         <Box sx={{ px: 3, py: 2.5, textAlign: 'center' }}>
           <Typography
@@ -203,10 +249,12 @@ function EmailPreview({ subject, theme, copy, items, products, selectedKey, show
   )
 }
 
-function PushPreview({ subject, theme, copy, items, products, selectedKey, onSelect, onRemove, onMove, onDropAt }: Props) {
+function PushPreview({ subject, theme, copy, items, products, selectedKey, hero: heroImage, onSelect, onRemove, onMove, onDropAt }: Props) {
   const { over, handlers, clear } = useDropTarget(onDropAt)
   const byId = new Map(products.map((p) => [p.cr854_productid, p]))
-  const hero = items[0] && byId.get(items[0].productId)
+  const firstProduct = items[0] && byId.get(items[0].productId)
+  // メイン画像が設定されていればそれを、なければ先頭の商品の画像を通知の画像にする
+  const hero = heroImage ?? firstProduct
 
   return (
     <Box sx={{ maxWidth: 380, mx: 'auto', display: 'grid', gap: 2 }}>

@@ -19,6 +19,8 @@ import { Cr854_deliverycardsService } from './generated/services/Cr854_deliveryc
 import type { Cr854_deliverycards } from './generated/models/Cr854_deliverycardsModel'
 import { Cr854_productsService } from './generated/services/Cr854_productsService'
 import type { Cr854_products } from './generated/models/Cr854_productsModel'
+import { Cr854_heroimagesService } from './generated/services/Cr854_heroimagesService'
+import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
 import { Calendar } from './Calendar'
 import { CardDetail } from './CardDetail'
 import { channelOptions, countryOptions, departmentOptions, statusColor, statusOptions } from './status'
@@ -50,6 +52,7 @@ function FilterSelect({ label, value, options, onChange }: {
 function App() {
   const [cards, setCards] = useState<Cr854_deliverycards[]>([])
   const [products, setProducts] = useState<Cr854_products[]>([])
+  const [heroes, setHeroes] = useState<Cr854_heroimages[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [month, setMonth] = useState<Date | null>(null)
@@ -85,6 +88,12 @@ function App() {
       .then((res) => {
         if (res.success) setProducts(res.data ?? [])
         else setError(res.error?.message ?? '商品の取得に失敗しました')
+      })
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+    Cr854_heroimagesService.getAll({ orderBy: ['cr854_imagecode asc'] })
+      .then((res) => {
+        if (res.success) setHeroes(res.data ?? [])
+        else setError(res.error?.message ?? 'メイン画像の取得に失敗しました')
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
   }, [load])
@@ -155,6 +164,7 @@ function App() {
           key={selected?.cr854_deliverycardid ?? 'new'}
           card={selected}
           products={products}
+          heroes={heroes}
           onBack={() => {
             setSelectedId(null)
             setCreating(false)
