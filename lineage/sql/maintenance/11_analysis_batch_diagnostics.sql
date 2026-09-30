@@ -52,6 +52,12 @@ BEGIN
   DECLARE lookback_hours INT64 DEFAULT 3;
   -- Rows per report.
   DECLARE row_limit INT64 DEFAULT 20;
+  -- Report 2 lists every failed job in the window, which in a shared project is
+  -- mostly other people's work. TRUE keeps only statements that touch this system
+  -- (their SQL names an lnge_ object or one of STEP 3's staging tables), so an
+  -- unrelated access-denied or invalid-query failure is not mistaken for a 03
+  -- problem. Set FALSE to see everything that failed.
+  DECLARE lineage_statements_only BOOL DEFAULT TRUE;
 
   -- --------------------------------------------------------------------------
   -- [C] DERIVED / INTERNAL -- from [A]/[B]; DO NOT edit
@@ -131,6 +137,12 @@ BEGIN
     WHERE creation_time > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)
       AND error_result IS NOT NULL
       AND query IS NOT NULL
+      AND (
+        NOT @lineage_only
+        OR query LIKE '%%lnge_%%'
+        OR query LIKE '%%batch_udf_results%%'
+        OR query LIKE '%%changed_definitions%%'
+      )
     ORDER BY creation_time DESC
     LIMIT @max_rows
     """,
@@ -139,5 +151,8 @@ BEGIN
   );
 
   EXECUTE IMMEDIATE rendered_sql
-  USING lookback_hours AS hours, row_limit AS max_rows;
+  USING
+    lookback_hours AS hours,
+    row_limit AS max_rows,
+    lineage_statements_only AS lineage_only;
 END;

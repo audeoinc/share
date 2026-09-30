@@ -254,6 +254,34 @@ DECLARE configured_max_impact_rank INT64 DEFAULT 100;
 DECLARE analysis_batch_max_sql_bytes INT64 DEFAULT 200000;
 DECLARE analysis_batch_max_objects INT64 DEFAULT 200;
 
+-- What to do when a batch's UDF call runs out of memory. The analysis UDF query has
+-- no per-object isolation -- one batch is one query -- so a resource error there used
+-- to abort the whole script, losing every batch that had not run yet.
+--
+-- TRUE (default): record that batch's objects as FAILED_UDF_RESOURCE_ERROR with a
+-- diagnostic row, and carry on with the next batch. The run then COMPLETES with some
+-- objects unanalyzed rather than stopping partway. Those objects are not hidden: they
+-- keep a non-COMPLETED analysis_status, so lnge_t_unanalyzed_definition lists them
+-- (coverage_reason = ANALYSIS_FAILED_UDF_RESOURCE_ERROR), the run summary counts
+-- them, and the object-dependency view leaves them out.
+-- They are marked is_changed = FALSE, so a later run does not retry them and pay the
+-- same failure again. To retry deliberately -- after lowering the batch budgets, or
+-- after the metadata payload shrinks -- set is_changed = TRUE on those registry rows;
+-- the flag is sticky, so STEP 1/2 will not clear it before STEP 3 sees it.
+-- FALSE restores the original behavior: the error propagates and the run stops.
+DECLARE analysis_skip_on_udf_resource_error BOOL DEFAULT TRUE;
+-- Which errors count as "the batch was too big", matched case-insensitively against
+-- the error message as a substring. Deliberately narrow: anything NOT matching is
+-- re-raised, so a genuine bug in the publish logic still stops the run instead of
+-- being recorded as a skipped batch. BigQuery exposes no error code to the EXCEPTION
+-- handler, only @@error.message, so message matching is the only option -- widen this
+-- list if a resource error arrives with wording not covered here.
+DECLARE analysis_resource_error_patterns ARRAY<STRING> DEFAULT [
+  'out of memory',
+  'resources exceeded',
+  'exceeded resources'
+];
+
 -- Source-dataset access pre-check. source_project_filters resolves source datasets
 -- from INFORMATION_SCHEMA.SCHEMATA, but being listed there does not guarantee the job
 -- account can read that dataset's INFORMATION_SCHEMA: a single unreadable dataset makes
@@ -1991,6 +2019,19 @@ BEGIN
   DECLARE strict_mode BOOL DEFAULT parser_strict_mode;
   DECLARE analyzed_object_count INT64 DEFAULT 0;
   DECLARE failed_object_count INT64 DEFAULT 0;
+  -- Batches abandoned to a UDF resource error, and the objects in them (see
+  -- analysis_skip_on_udf_resource_error). Reported by the run summary.
+  DECLARE resource_skipped_batch_count INT64 DEFAULT 0;
+  DECLARE resource_skipped_object_count INT64 DEFAULT 0;
+  -- The batch-level EXCEPTION handler's scratch. These live HERE, outside the block
+  -- they serve, because BigQuery does not expose a block's own DECLAREs to that
+  -- block's EXCEPTION section -- the same reason publish_err_message is declared one
+  -- level up from the handler that reads it. current_batch_* mirror the FOR loop
+  -- variable for the same reason.
+  DECLARE batch_error_message STRING;
+  DECLARE current_batch_dataset STRING;
+  DECLARE current_batch_no INT64;
+  DECLARE current_batch_object_count INT64;
   -- How many (dataset, batch) units the analysis loop will run. 0 on an unchanged
   -- run, which skips the metadata scan and the whole analysis loop. The units
   -- themselves live in the analysis_batches temp table built below.
@@ -2450,6 +2491,9 @@ BEGIN
   -- lnge_render_dynamic_sql(" for each statement. This marker runs a dynamic SELECT
   -- with the dataset name baked into the executed text (via FORMAT, not a bound
   -- variable), so each iteration surfaces which dataset STEP 3 is processing.
+  SET current_batch_dataset = ds_row.ds;
+  SET current_batch_no = ds_row.batch_no;
+
   EXECUTE IMMEDIATE FORMAT(
     "SELECT '===== STEP 3 | dataset: %s | batch: %d =====' AS processing_step",
     ds_row.ds,
@@ -4088,6 +4132,129 @@ BEGIN
     ) + (
       SELECT COUNT(*) FROM batch_preanalysis_failures
     );
+
+  EXCEPTION WHEN ERROR THEN
+    -- ------------------------------------------------------------------------
+    -- The batch was too big for the UDF: abandon it and go on to the next one.
+    --
+    -- The analysis UDF query covers a whole batch, so a resource error in it has no
+    -- per-object granularity -- and it used to abort the script, throwing away every
+    -- batch that had not run yet. Recording the batch as failed and continuing turns
+    -- that into "the run finished, these objects are not analyzed", which is the
+    -- state the operator can actually work with.
+    --
+    -- ONLY resource errors. Anything else is re-raised unchanged, so a bug in the
+    -- publish logic still stops the run rather than being quietly filed as a skipped
+    -- batch. BigQuery gives the handler no error code, only @@error.message, so the
+    -- test is a substring match against analysis_resource_error_patterns.
+    --
+    -- The publish block has its own handler that restores the rows it was replacing
+    -- and re-raises; if that re-raised error is a resource error it lands here with
+    -- the repository already back to its pre-publish state, so continuing is safe.
+    -- ------------------------------------------------------------------------
+    -- Re-raise FIRST, before any other statement, so the original error propagates
+    -- unchanged when this is not a resource error.
+    IF NOT analysis_skip_on_udf_resource_error
+       OR NOT EXISTS (
+         SELECT 1
+         FROM UNNEST(analysis_resource_error_patterns) AS pattern
+         WHERE STRPOS(LOWER(@@error.message), LOWER(pattern)) > 0
+       )
+    THEN
+      RAISE;
+    END IF;
+
+    SET batch_error_message = @@error.message;
+
+    -- changed_definitions_with_discovery still holds exactly this batch's objects:
+    -- it is built before the UDF call, so it survives the failure.
+    SET current_batch_object_count = (
+      SELECT COUNT(*) FROM changed_definitions_with_discovery
+    );
+    SET resource_skipped_batch_count = resource_skipped_batch_count + 1;
+    SET resource_skipped_object_count =
+      resource_skipped_object_count + current_batch_object_count;
+
+    -- Registry: mark them failed, and leave is_changed = FALSE so the next run does
+    -- not pay the same failure again. Retrying is a deliberate act (set is_changed
+    -- back to TRUE once the batch budgets or the metadata payload have changed).
+    SET sql_template = """
+      UPDATE `__T_DEF_REGISTRY__` AS reg
+      SET
+        is_changed = FALSE,
+        analysis_status = 'FAILED_UDF_RESOURCE_ERROR',
+        last_analyzed_at = @analyzed_at,
+        updated_at = @analyzed_at
+      FROM changed_definitions_with_discovery AS obj
+      WHERE LOWER(reg.object_project) = LOWER(obj.object_project)
+        AND LOWER(reg.object_dataset) = LOWER(obj.object_dataset)
+        AND LOWER(reg.object_name) = LOWER(obj.object_name)
+        AND reg.object_type = obj.object_type
+        AND reg.generation_type = obj.generation_type
+        AND reg.definition_hash = obj.definition_hash
+    """;
+    EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+    ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
+    AS 'Unresolved placeholder in resource-error registry UPDATE SQL.';
+    EXECUTE IMMEDIATE rendered_sql USING CURRENT_TIMESTAMP() AS analyzed_at;
+
+    -- Diagnostic: one ERROR row per object, so the failure is discoverable from the
+    -- repository and not only from the run's console output.
+    SET sql_template = """
+      INSERT INTO `__T_DIAGNOSTIC__` (
+        definition_hash, object_project, object_dataset, object_name,
+        object_type, generation_type, diagnostic_code, engine_stage, severity,
+        output_column, expression, message, diagnostic_json, analyzed_at
+      )
+      SELECT
+        definition_hash,
+        object_project,
+        object_dataset,
+        object_name,
+        object_type,
+        generation_type,
+        'UDF_RESOURCE_ERROR' AS diagnostic_code,
+        '03_run_daily_lineage_pipeline' AS engine_stage,
+        'ERROR' AS severity,
+        CAST(NULL AS STRING) AS output_column,
+        CAST(NULL AS STRING) AS expression,
+        @error_message AS message,
+        TO_JSON_STRING(STRUCT(
+          @skip_dataset AS batch_dataset,
+          @skip_batch_no AS batch_no,
+          @skip_objects AS batch_objects
+        )) AS diagnostic_json,
+        @analyzed_at AS analyzed_at
+      FROM changed_definitions_with_discovery
+    """;
+    EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+    ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
+    AS 'Unresolved placeholder in resource-error diagnostic INSERT SQL.';
+    EXECUTE IMMEDIATE rendered_sql
+    USING
+      batch_error_message AS error_message,
+      current_batch_dataset AS skip_dataset,
+      current_batch_no AS skip_batch_no,
+      current_batch_object_count AS skip_objects,
+      CURRENT_TIMESTAMP() AS analyzed_at;
+
+    -- Surfaced immediately so a skipped batch is visible while the run continues.
+    EXECUTE IMMEDIATE FORMAT(
+      """
+      SELECT
+        'SKIPPED_BATCH_UDF_RESOURCE_ERROR' AS notice,
+        '%s' AS dataset,
+        %d AS batch_no,
+        %d AS objects_skipped,
+        @message AS error_message,
+        'Objects marked FAILED_UDF_RESOURCE_ERROR with is_changed = FALSE; lower analysis_batch_max_sql_bytes / analysis_batch_max_objects and set is_changed = TRUE to retry them.'
+          AS next_step
+      """,
+      current_batch_dataset,
+      current_batch_no,
+      current_batch_object_count
+    )
+    USING batch_error_message AS message;
   END;
 
   END FOR;
@@ -4107,6 +4274,12 @@ BEGIN
       CURRENT_TIMESTAMP() AS run_finished_at,
       @p_analyzed_object_count AS analyzed_object_count,
       @p_failed_object_count AS failed_object_count,
+      -- Batches abandoned to a UDF resource error, and the objects left unanalyzed by
+      -- them. Non-zero means the run COMPLETED but does not cover everything: see
+      -- SKIPPED_BATCH_UDF_RESOURCE_ERROR above, and the
+      -- ANALYSIS_FAILED_UDF_RESOURCE_ERROR rows in the unanalyzed-object snapshot.
+      @p_resource_skipped_batch_count AS resource_skipped_batch_count,
+      @p_resource_skipped_object_count AS resource_skipped_object_count,
       (
         SELECT COUNT(*)
         FROM
@@ -4136,7 +4309,9 @@ BEGIN
   USING
     run_started_at AS p_run_started_at,
     analyzed_object_count AS p_analyzed_object_count,
-    failed_object_count AS p_failed_object_count;
+    failed_object_count AS p_failed_object_count,
+    resource_skipped_batch_count AS p_resource_skipped_batch_count,
+    resource_skipped_object_count AS p_resource_skipped_object_count;
 END;
 
 -- ============================================================================

@@ -265,6 +265,26 @@ npm test                        # build + verify:bundle + test:release を一括
   偏りで OOM が続き撤去された）。`ANALYSIS_BATCHES` 行で予算・バッチ数・総バイト・最大バッチ
   バイトを報告する。publish は従来どおり delete-by-object なので、失敗時のロールバックは
   そのバッチ分だけ。診断は `sql/maintenance/10_pending_analysis_workload.sql`。
+  **UDF リソースエラーで実行を止めない（STEP 3）**：解析 UDF クエリはバッチ単位なので
+  OOM にオブジェクト粒度が無く、従来はスクリプト全体が落ちて**未実行のバッチが全部捨てられて
+  いた**（20 個/バッチで 31 バッチ通過後に落ちた実測あり）。バッチ本体に EXCEPTION ハンドラを
+  付け、該当バッチを `analysis_status='FAILED_UDF_RESOURCE_ERROR'`＋`UDF_RESOURCE_ERROR`
+  診断で記録し、**次のバッチへ進む**。実行は完走し、一部が未解析として残る。
+  隠蔽しない：`lnge_t_unanalyzed_definition` に出る（`coverage_reason =
+  ANALYSIS_FAILED_UDF_RESOURCE_ERROR`）、object_dependency ビューからは除外、
+  `SKIPPED_BATCH_UDF_RESOURCE_ERROR` 行を即時出力、run summary に
+  `resource_skipped_batch_count`/`_object_count`。
+  **吸収するのはリソースエラーだけ**（`analysis_resource_error_patterns` の部分一致）。
+  それ以外はハンドラの**最初の動作**として `RAISE` で再送出するので、publish のバグは
+  従来どおり実行を止める。BigQuery は EXCEPTION 節にエラーコードを渡さず
+  `@@error.message` しか無いため文字列一致が唯一の手段（DECLARE なので追加可）。
+  `analysis_skip_on_udf_resource_error=FALSE` で旧挙動。
+  スキップ対象は `is_changed=FALSE` にするので次回以降は再試行しない（再試行は意図的に
+  `is_changed=TRUE` を立てる。スティッキーなので STEP 1/2 で消えない）。
+  **実装上の注意**：ハンドラの作業変数（`batch_error_message`/`current_batch_*`）は
+  **1 つ外のスコープで宣言**する。BigQuery はブロック自身の DECLARE を、そのブロックの
+  EXCEPTION 節に見せない（`publish_err_message` が既に 1 段上にあるのと同じ理由）。
+  FOR ループ変数も同節では使わず、ループ先頭で外側変数へ写してから使う。
   **absent 判定の鮮度（STEP 3）**：publish 可否分類 `batch_object_source_flags` の存在
   判定は、STEP 1 スナップショット `current_target_tables` ではなく、STEP 3 で列メタと
   同時・同一参照データセット範囲で採る `current_referenced_tables`（フレッシュな TABLES
