@@ -5,8 +5,14 @@ export const theme = createTheme({
   colorSchemes: { light: true, dark: true },
   cssVariables: { colorSchemeSelector: 'media' },
   palette: { primary: { main: '#6750a4' } },
-  shape: { borderRadius: 12 },
+  shape: { borderRadius: 10 },
+  components: {
+    MuiTextField: { defaultProps: { size: 'small' } },
+    MuiToolbar: { defaultProps: { variant: 'dense' } },
+    MuiButton: { defaultProps: { size: 'small' } },
+  },
   typography: {
+    fontSize: 12,
     fontFamily: '"Noto Sans JP", "Yu Gothic UI", "Meiryo", system-ui, sans-serif',
     button: { textTransform: 'none' },
   },

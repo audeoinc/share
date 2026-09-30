@@ -33,6 +33,21 @@
           "entitySetName": "cr854_deliverycards",
           "logicalName": "cr854_deliverycard",
           "isHidden": false
+        },
+        "_005ea982": {
+          "entitySetName": "cr854_products",
+          "logicalName": "cr854_product",
+          "isHidden": false
+        },
+        "_2c1b3c8e": {
+          "entitySetName": "cr854_deliveryproducts",
+          "logicalName": "cr854_deliveryproduct",
+          "isHidden": false
+        },
+        "_94626707": {
+          "entitySetName": "cr854_heroimages",
+          "logicalName": "cr854_heroimage",
+          "isHidden": false
         }
       },
       "environmentVariableName": ""

@@ -12,6 +12,27 @@ export const dataSourcesInfo = {
     "dataSourceType": "Dataverse",
     "apis": {}
   },
+  "cr854_deliveryproducts": {
+    "tableId": "",
+    "version": "",
+    "primaryKey": "cr854_deliveryproductid",
+    "dataSourceType": "Dataverse",
+    "apis": {}
+  },
+  "cr854_heroimages": {
+    "tableId": "",
+    "version": "",
+    "primaryKey": "cr854_heroimageid",
+    "dataSourceType": "Dataverse",
+    "apis": {}
+  },
+  "cr854_products": {
+    "tableId": "",
+    "version": "",
+    "primaryKey": "cr854_productid",
+    "dataSourceType": "Dataverse",
+    "apis": {}
+  },
   "cr854_table1s": {
     "tableId": "",
     "version": "",

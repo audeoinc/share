@@ -6,12 +6,18 @@
 // Models
 export * as CommonModels from './models/CommonModels';
 export * as Cr854_deliverycardsModel from './models/Cr854_deliverycardsModel';
+export * as Cr854_deliveryproductsModel from './models/Cr854_deliveryproductsModel';
+export * as Cr854_heroimagesModel from './models/Cr854_heroimagesModel';
+export * as Cr854_productsModel from './models/Cr854_productsModel';
 export * as Cr854_table_3d6fd778sModel from './models/Cr854_table_3d6fd778sModel';
 export * as Cr854_table_8c8e6d02sModel from './models/Cr854_table_8c8e6d02sModel';
 export * as Cr854_table_a2287751sModel from './models/Cr854_table_a2287751sModel';
 
 // Services
 export * from './services/Cr854_deliverycardsService';
+export * from './services/Cr854_deliveryproductsService';
+export * from './services/Cr854_heroimagesService';
+export * from './services/Cr854_productsService';
 export * from './services/Cr854_table_3d6fd778sService';
 export * from './services/Cr854_table_8c8e6d02sService';
 export * from './services/Cr854_table_a2287751sService';

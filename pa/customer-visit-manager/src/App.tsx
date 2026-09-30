@@ -17,6 +17,8 @@ import ChevronRightIcon from '@mui/icons-material/ChevronRight'
 import CalendarMonthIcon from '@mui/icons-material/CalendarMonth'
 import { Cr854_deliverycardsService } from './generated/services/Cr854_deliverycardsService'
 import type { Cr854_deliverycards } from './generated/models/Cr854_deliverycardsModel'
+import { Cr854_productsService } from './generated/services/Cr854_productsService'
+import type { Cr854_products } from './generated/models/Cr854_productsModel'
 import { Calendar } from './Calendar'
 import { CardDetail } from './CardDetail'
 import { channelOptions, countryOptions, departmentOptions, statusColor, statusOptions } from './status'
@@ -47,6 +49,7 @@ function FilterSelect({ label, value, options, onChange }: {
 
 function App() {
   const [cards, setCards] = useState<Cr854_deliverycards[]>([])
+  const [products, setProducts] = useState<Cr854_products[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [month, setMonth] = useState<Date | null>(null)
@@ -78,6 +81,12 @@ function App() {
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void load()
+    Cr854_productsService.getAll({ orderBy: ['cr854_productcode asc'] })
+      .then((res) => {
+        if (res.success) setProducts(res.data ?? [])
+        else setError(res.error?.message ?? '商品の取得に失敗しました')
+      })
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
   }, [load])
 
   const filtered = useMemo(() => {
@@ -145,6 +154,7 @@ function App() {
         <CardDetail
           key={selected?.cr854_deliverycardid ?? 'new'}
           card={selected}
+          products={products}
           onBack={() => {
             setSelectedId(null)
             setCreating(false)
