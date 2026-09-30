@@ -1,5 +1,40 @@
 # 1.5.0-032
 
+- A UDF resource error in STEP 3 no longer aborts the run. The analysis UDF query
+  covers a whole batch, so "UDF out of memory" there has no per-object granularity and
+  used to kill the script, discarding every batch that had not run yet -- a run could
+  clear 31 batches of 20 objects and then throw the rest away. The batch body now has
+  an EXCEPTION handler that records the batch's objects as
+  `analysis_status = 'FAILED_UDF_RESOURCE_ERROR'` with an `UDF_RESOURCE_ERROR`
+  diagnostic row each, and continues with the next batch. The run COMPLETES with some
+  objects unanalyzed instead of stopping partway, which is the state an operator can
+  act on.
+  Nothing is hidden: those objects keep a non-COMPLETED status, so
+  `lnge_t_unanalyzed_definition` lists them (`coverage_reason =
+  ANALYSIS_FAILED_UDF_RESOURCE_ERROR`), the object-dependency view excludes them, a
+  `SKIPPED_BATCH_UDF_RESOURCE_ERROR` row is emitted as each batch is abandoned, and
+  the run summary carries `resource_skipped_batch_count` /
+  `resource_skipped_object_count`.
+  Scoped deliberately narrowly: only errors whose message matches
+  `analysis_resource_error_patterns` (default: out of memory / resources exceeded /
+  exceeded resources) are absorbed. Anything else is re-raised as the handler's FIRST
+  action, so a bug in the publish logic still stops the run rather than being filed as
+  a skipped batch. BigQuery exposes no error code to an EXCEPTION section, only
+  `@@error.message`, so substring matching is the only available test -- the list is a
+  DECLARE so it can be widened. `analysis_skip_on_udf_resource_error = FALSE` restores
+  the original abort.
+  Skipped objects get `is_changed = FALSE`, so a later run does not pay the same
+  failure again; retrying is deliberate (lower the batch budgets, then set
+  `is_changed = TRUE` -- the flag is sticky, so STEP 1/2 will not clear it first).
+  Implementation note: the handler's scratch variables (`batch_error_message`,
+  `current_batch_dataset` / `_no` / `_object_count`) are declared one scope UP, because
+  BigQuery does not expose a block's own DECLAREs -- nor, safely, the enclosing FOR
+  loop's variable -- to that block's EXCEPTION section. This is the same reason
+  `publish_err_message` already lived a level up.
+  Also: `11_analysis_batch_diagnostics.sql` report 2 gains `lineage_statements_only`
+  (default TRUE), so unrelated access-denied / invalid-query failures from other jobs
+  in a shared project are not mistaken for a 03 problem.
+
 - Added `sql/maintenance/11_analysis_batch_diagnostics.sql`, which reads
   INFORMATION_SCHEMA.JOBS to recover STEP 3's batch diagnostics after a failed run
   without scrolling a script's per-statement result list in the console. Report 1
