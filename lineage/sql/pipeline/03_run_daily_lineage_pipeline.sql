@@ -4219,11 +4219,13 @@ BEGIN
         CAST(NULL AS STRING) AS output_column,
         CAST(NULL AS STRING) AS expression,
         @error_message AS message,
-        TO_JSON_STRING(STRUCT(
-          @skip_dataset AS batch_dataset,
-          @skip_batch_no AS batch_no,
-          @skip_objects AS batch_objects
-        )) AS diagnostic_json,
+        -- diagnostic_json is a JSON column, not STRING: build it with JSON_OBJECT
+        -- (as the other writers do) rather than TO_JSON_STRING, which returns STRING.
+        JSON_OBJECT(
+          'batch_dataset', @skip_dataset,
+          'batch_no', @skip_batch_no,
+          'batch_objects', @skip_objects
+        ) AS diagnostic_json,
         @analyzed_at AS analyzed_at
       FROM changed_definitions_with_discovery
     """;
