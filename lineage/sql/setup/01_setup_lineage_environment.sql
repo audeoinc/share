@@ -143,7 +143,6 @@ DECLARE table_impact STRING;
 DECLARE table_diagnostic STRING;
 DECLARE table_job_registry STRING;
 DECLARE table_column_usage STRING;
-DECLARE table_source_dataset_access STRING;
 DECLARE view_column_usage_impact STRING;
 DECLARE view_object_dependency STRING;
 -- HTML 生成 UDF の本体 JS。build_usage_html_udf.js が生成ブロックで SET する。
@@ -255,9 +254,6 @@ SET table_diagnostic =
 SET table_column_usage =
   bootstrap_table_name_prefix || 'lnge_' || 't_' || 'column_usage'
     || bootstrap_table_name_suffix;
-SET table_source_dataset_access =
-  bootstrap_table_name_prefix || 'lnge_' || 'm_' || 'source_dataset_access'
-    || bootstrap_table_name_suffix;
 -- View naming convention: prefix + 'vw_' + marker + canonical base + suffix, where
 -- the marker is 't_' / 'm_' (transaction / master) like the tables. This view is
 -- built over the transaction tables lnge_t_column_usage / lnge_t_impact, so
@@ -283,8 +279,6 @@ ASSERT REGEXP_CONTAINS(table_job_registry, r'^[A-Za-z0-9_-]+$')
 AS 'Invalid table_job_registry name.';
 ASSERT REGEXP_CONTAINS(table_column_usage, r'^[A-Za-z0-9_-]+$')
 AS 'Invalid table_column_usage name.';
-ASSERT REGEXP_CONTAINS(table_source_dataset_access, r'^[A-Za-z0-9_-]+$')
-AS 'Invalid table_source_dataset_access name.';
 ASSERT REGEXP_CONTAINS(view_column_usage_impact, r'^[A-Za-z0-9_-]+$')
 AS 'Invalid view_column_usage_impact name.';
 ASSERT REGEXP_CONTAINS(view_object_dependency, r'^[A-Za-z0-9_-]+$')
@@ -605,39 +599,6 @@ EXECUTE IMMEDIATE FORMAT(
   ''',
   repository_dataset_full_name,
   table_column_usage
-);
-
--- Cached result of 03 STEP 1's per-dataset INFORMATION_SCHEMA readability probe.
--- That probe costs one BigQuery job per source dataset and the script runs its
--- statements sequentially, so probing the whole source scope on every run is the
--- dominant fixed cost of a daily run that changes nothing. 03 re-probes a dataset
--- only when it has no row here, or this row is older than its
--- source_access_probe_max_age_days. Delete a row to force an immediate re-probe
--- (e.g. right after granting access); deleting every row restores a full probe.
--- 03 also self-heals this table with CREATE TABLE IF NOT EXISTS, so a deployment
--- whose 01 predates it keeps working -- keep the two definitions in step.
-EXECUTE IMMEDIATE FORMAT(
-  '''
-  CREATE OR REPLACE TABLE `%s.%s`
-  (
-    project_id STRING NOT NULL,
-    dataset_id STRING NOT NULL,
-    -- FALSE means the probe could not read this dataset's INFORMATION_SCHEMA. The
-    -- dataset is then dropped from the source scope for as long as this row is fresh.
-    is_accessible BOOL NOT NULL,
-    -- The probe's error for an inaccessible dataset; NULL when accessible.
-    error_message STRING,
-    first_probed_at TIMESTAMP NOT NULL,
-    probed_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL
-  )
-  CLUSTER BY project_id, dataset_id
-  OPTIONS (
-    description = 'Cached per-dataset INFORMATION_SCHEMA readability, so the daily run does not re-probe every source dataset. Delete a row to force a re-probe.'
-  )
-  ''',
-  repository_dataset_full_name,
-  table_source_dataset_access
 );
 
 END IF;  -- NOT recreate_views_only (section 4: repository tables)

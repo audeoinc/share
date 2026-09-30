@@ -243,20 +243,6 @@ DECLARE configured_max_impact_rank INT64 DEFAULT 100;
 -- failing -- see the STEP 3 source classifier.
 DECLARE skip_inaccessible_source_datasets BOOL DEFAULT TRUE;
 
--- Source-dataset access cache. The probe above costs ONE BigQuery job per source
--- dataset, and a script's statements run sequentially, so a region with dozens of
--- datasets pays that whole cost on EVERY run -- including a run that changes nothing.
--- Probe results are therefore kept in lnge_m_source_dataset_access and reused: a
--- dataset is re-probed only when it has no cached result, or the cached one is older
--- than this many days. A daily run then normally probes nothing.
--- Accessible and inaccessible results are both cached, so a dataset whose permissions
--- were just granted is picked up within this many days; to force an immediate
--- re-probe, DELETE that dataset's row (or every row) from the cache table.
--- 0 disables the cache and probes every dataset on every run (the original behavior).
--- Ignored under preview_only, which writes nothing and so neither reads nor updates
--- the cache: a preview probes every dataset.
-DECLARE source_access_probe_max_age_days INT64 DEFAULT 7;
-
 -- Dry run. Set TRUE to resolve the analysis scope from the [A] settings, print what
 -- this run WOULD cover, and stop before anything is written: the target (analysis)
 -- datasets, the source datasets with their access status, and the View list that
@@ -365,11 +351,6 @@ DECLARE table_unanalyzed_definition STRING;
 -- so it is addressed by a directly-built qualified name (column_usage_fqn below).
 DECLARE table_column_usage STRING;
 DECLARE column_usage_fqn STRING;
--- Source-dataset access cache (see source_access_probe_max_age_days). Outside
--- lnge_render_dynamic_sql's fixed placeholder set, so it is addressed by a directly
--- built qualified name.
-DECLARE table_source_dataset_access STRING;
-DECLARE source_dataset_access_fqn STRING;
 -- Report views created by 01, and the tables STEP 4b snapshots them into. Outside
 -- lnge_render_dynamic_sql's fixed placeholder set, so STEP 4b builds their qualified
 -- names directly from repository_project_id / repository_dataset.
@@ -515,8 +496,6 @@ SET table_unanalyzed_definition =
     || table_name_suffix;
 SET table_column_usage =
   table_name_prefix || 'lnge_' || 't_' || 'column_usage' || table_name_suffix;
-SET table_source_dataset_access =
-  table_name_prefix || 'lnge_' || 'm_' || 'source_dataset_access' || table_name_suffix;
 -- Report views (must match 01) and their static tables. The table keeps
 -- the view's name with 'vw_' dropped, so the pair is obvious at a glance.
 SET view_column_usage_impact =
@@ -544,8 +523,6 @@ ASSERT REGEXP_CONTAINS(table_unanalyzed_definition, r'^[A-Za-z0-9_-]+$')
 AS 'Invalid table_unanalyzed_definition name.';
 ASSERT REGEXP_CONTAINS(table_column_usage, r'^[A-Za-z0-9_-]+$')
 AS 'Invalid table_column_usage name.';
-ASSERT REGEXP_CONTAINS(table_source_dataset_access, r'^[A-Za-z0-9_-]+$')
-AS 'Invalid table_source_dataset_access name.';
 ASSERT REGEXP_CONTAINS(view_column_usage_impact, r'^[A-Za-z0-9_-]+$')
 AS 'Invalid view_column_usage_impact name.';
 ASSERT REGEXP_CONTAINS(view_object_dependency, r'^[A-Za-z0-9_-]+$')
@@ -616,9 +593,6 @@ AS 'analysis_include_generation_types accepts only VIEW_DEFINITION, SCHEDULED_QU
 SET column_usage_fqn = FORMAT(
   '%s.%s.%s', repository_project_id, repository_dataset, table_column_usage
 );
-SET source_dataset_access_fqn = FORMAT(
-  '%s.%s.%s', repository_project_id, repository_dataset, table_source_dataset_access
-);
 -- Skipped in preview: a dry run must not create anything, not even idempotently.
 IF NOT preview_only THEN
 EXECUTE IMMEDIATE FORMAT(
@@ -652,34 +626,6 @@ EXECUTE IMMEDIATE FORMAT(
   )
   """,
   column_usage_fqn
-);
-
--- Source-dataset access cache (see source_access_probe_max_age_days). Self-healed
--- here like the column-usage table above, so a deployment whose 01 predates it works
--- without re-running setup; the authoritative schema lives in 01 -- keep the two in
--- step. Rows are keyed by (project_id, dataset_id): one row per source dataset ever
--- probed, updated in place, so the table stays as small as the source scope.
-EXECUTE IMMEDIATE FORMAT(
-  """
-  CREATE TABLE IF NOT EXISTS `%s`
-  (
-    project_id STRING NOT NULL,
-    dataset_id STRING NOT NULL,
-    -- FALSE means the probe could not read this dataset's INFORMATION_SCHEMA. The
-    -- dataset is then dropped from the source scope for as long as the row is fresh.
-    is_accessible BOOL NOT NULL,
-    -- The probe's error for an inaccessible dataset; NULL when accessible.
-    error_message STRING,
-    first_probed_at TIMESTAMP NOT NULL,
-    probed_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL
-  )
-  CLUSTER BY project_id, dataset_id
-  OPTIONS (
-    description = 'Cached per-dataset INFORMATION_SCHEMA readability, so the daily run does not re-probe every source dataset. Delete a row to force a re-probe.'
-  )
-  """,
-  source_dataset_access_fqn
 );
 END IF;
 
@@ -864,12 +810,7 @@ BEGIN
   CREATE OR REPLACE TEMP TABLE inaccessible_source_datasets (
     project_id STRING,
     dataset_id STRING,
-    error_message STRING,
-    -- How this entry was established: 'PROJECT_LISTING' (the project's SCHEMATA
-    -- listing was denied), 'PROBE' (checked and refused this run) or 'CACHE' (a
-    -- previous run's refusal, still inside source_access_probe_max_age_days, so this
-    -- run did not re-check it).
-    detected_by STRING
+    error_message STRING
   );
 
   FOR src IN (
@@ -910,9 +851,8 @@ BEGIN
       IF NOT skip_inaccessible_source_datasets THEN
         RAISE;
       END IF;
-      INSERT INTO inaccessible_source_datasets
-        (project_id, dataset_id, error_message, detected_by)
-      VALUES (src.project_id, NULL, @@error.message, 'PROJECT_LISTING');
+      INSERT INTO inaccessible_source_datasets (project_id, dataset_id, error_message)
+      VALUES (src.project_id, NULL, @@error.message);
     END;
   END FOR;
 
@@ -929,140 +869,44 @@ BEGIN
   -- datasets, a single unreadable one fails the entire statement with
   -- "Access Denied", so the run dies on a dataset it does not even need.
   --
-  -- Probing costs ONE BigQuery job per dataset and script statements run
-  -- sequentially, so probing the whole source scope every run is the dominant fixed
-  -- cost of an otherwise no-op daily run. Results are therefore cached in
-  -- lnge_m_source_dataset_access and only stale or never-seen datasets are probed
-  -- (source_access_probe_max_age_days). A dataset the cache marks inaccessible is
-  -- dropped without re-probing until its entry expires.
-  --
-  -- The probe reads TABLES only. The pipeline also reads TABLE_OPTIONS (STEP 2) and
-  -- COLUMNS / COLUMN_FIELD_PATHS (STEP 3), and the probe used to read all four -- but
-  -- every one of them is gated by the same dataset-level metadata permissions
-  -- (bigquery.tables.list / bigquery.tables.get), which IAM cannot grant per view, so
-  -- reading one proves the rest. COLUMN_FIELD_PATHS in particular is by far the
-  -- heaviest of the four on a dataset with many (e.g. date-sharded) tables.
-  --
-  -- THE ASSUMPTION, written down because this is where it would break: dataset-level
-  -- metadata access is all-or-nothing. If a later INFORMATION_SCHEMA scan ever fails
-  -- with Access Denied on a dataset this probe passed, that assumption did not hold
-  -- for that dataset -- put the refused view back into the probe below. The cost is
-  -- one extra sub-query on the few datasets a run actually probes (see
-  -- source_access_probe_max_age_days), not on every dataset every run.
+  -- Probe each dataset once and keep only those that answer. One job per dataset,
+  -- and all four views the pipeline reads are checked in that single job, so a
+  -- dataset with partial access is dropped here rather than surviving STEP 1's
+  -- TABLES scan and killing STEP 3's COLUMNS scan instead. INFORMATION_SCHEMA
+  -- queries bill no bytes; the cost is the job count.
   --
   -- The dropped datasets are reported, not swallowed: their tables are then absent
   -- from the metadata, so an object referencing one resolves as "source no longer
   -- present" (WARNING, still publishable) instead of FAILED.
   -- --------------------------------------------------------------------------
   IF skip_inaccessible_source_datasets THEN
-    -- What this run actually probed, and what came back. Merged into the cache below.
-    CREATE OR REPLACE TEMP TABLE source_access_probe_results (
-      project_id STRING,
-      dataset_id STRING,
-      is_accessible BOOL,
-      error_message STRING
-    );
-    CREATE OR REPLACE TEMP TABLE source_datasets_to_probe (
-      project_id STRING,
-      dataset_id STRING
-    );
-
-    -- A preview writes nothing, so it neither reads nor updates the cache (the table
-    -- may not even exist yet on a fresh deployment) and probes everything: correct,
-    -- just slower. max_age <= 0 asks for the same thing on a real run.
-    IF preview_only OR source_access_probe_max_age_days <= 0 THEN
-      INSERT INTO source_datasets_to_probe (project_id, dataset_id)
-      SELECT DISTINCT project_id, dataset_id
-      FROM source_datasets;
-    ELSE
-      EXECUTE IMMEDIATE FORMAT(
-        'INSERT INTO source_datasets_to_probe (project_id, dataset_id) '
-        || 'SELECT DISTINCT sd.project_id, sd.dataset_id '
-        || 'FROM source_datasets AS sd '
-        || 'LEFT JOIN `%s` AS cached '
-        || 'ON cached.project_id = sd.project_id '
-        || 'AND cached.dataset_id = sd.dataset_id '
-        || 'WHERE cached.dataset_id IS NULL '
-        || 'OR cached.probed_at < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @max_age DAY)',
-        source_dataset_access_fqn
-      )
-      USING source_access_probe_max_age_days AS max_age;
-    END IF;
-
     FOR probe_ds IN (
-      SELECT project_id, dataset_id
-      FROM source_datasets_to_probe
+      SELECT DISTINCT project_id, dataset_id
+      FROM source_datasets
       ORDER BY project_id, dataset_id
     )
     DO
       BEGIN
-        -- LIMIT 1: the ACL is checked when the reference is resolved, so one row is
-        -- enough to prove readability without listing every table of a wide dataset.
-        -- An empty but readable dataset returns 0 and passes.
+        -- LIMIT 1 per view: the ACL is checked when the reference is resolved, so
+        -- one row is enough to prove readability without counting every column of a
+        -- wide dataset. An empty but readable dataset returns 0 and passes.
         EXECUTE IMMEDIATE FORMAT(
-          'SELECT COUNT(*) FROM '
-          || '(SELECT 1 FROM `%s.%s.INFORMATION_SCHEMA.TABLES` LIMIT 1)',
+          'SELECT COUNT(*) FROM ('
+          || '(SELECT 1 FROM `%s.%s.INFORMATION_SCHEMA.TABLES` LIMIT 1) '
+          || 'UNION ALL (SELECT 1 FROM `%s.%s.INFORMATION_SCHEMA.TABLE_OPTIONS` LIMIT 1) '
+          || 'UNION ALL (SELECT 1 FROM `%s.%s.INFORMATION_SCHEMA.COLUMNS` LIMIT 1) '
+          || 'UNION ALL (SELECT 1 FROM `%s.%s.INFORMATION_SCHEMA.COLUMN_FIELD_PATHS` LIMIT 1))',
+          probe_ds.project_id, probe_ds.dataset_id,
+          probe_ds.project_id, probe_ds.dataset_id,
+          probe_ds.project_id, probe_ds.dataset_id,
           probe_ds.project_id, probe_ds.dataset_id
         )
         INTO source_access_probe;
-        INSERT INTO source_access_probe_results
-          (project_id, dataset_id, is_accessible, error_message)
-        VALUES (probe_ds.project_id, probe_ds.dataset_id, TRUE, NULL);
       EXCEPTION WHEN ERROR THEN
-        INSERT INTO source_access_probe_results
-          (project_id, dataset_id, is_accessible, error_message)
-        VALUES (probe_ds.project_id, probe_ds.dataset_id, FALSE, @@error.message);
+        INSERT INTO inaccessible_source_datasets (project_id, dataset_id, error_message)
+        VALUES (probe_ds.project_id, probe_ds.dataset_id, @@error.message);
       END;
     END FOR;
-
-    -- Persist what was probed. Skipped in preview, which must not write.
-    IF NOT preview_only THEN
-      EXECUTE IMMEDIATE FORMAT(
-        'MERGE `%s` AS target '
-        || 'USING source_access_probe_results AS source '
-        || 'ON target.project_id = source.project_id '
-        || 'AND target.dataset_id = source.dataset_id '
-        || 'WHEN MATCHED THEN UPDATE SET '
-        || 'is_accessible = source.is_accessible, '
-        || 'error_message = source.error_message, '
-        || 'probed_at = CURRENT_TIMESTAMP(), '
-        || 'updated_at = CURRENT_TIMESTAMP() '
-        || 'WHEN NOT MATCHED THEN INSERT '
-        || '(project_id, dataset_id, is_accessible, error_message, '
-        || 'first_probed_at, probed_at, updated_at) VALUES '
-        || '(source.project_id, source.dataset_id, source.is_accessible, '
-        || 'source.error_message, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), '
-        || 'CURRENT_TIMESTAMP())',
-        source_dataset_access_fqn
-      );
-    END IF;
-
-    -- Blocked datasets = what failed the probe just now, plus what the cache already
-    -- knew about and this run therefore did not re-probe. detected_by says which, so
-    -- the report does not imply every listed dataset was checked this run.
-    INSERT INTO inaccessible_source_datasets
-      (project_id, dataset_id, error_message, detected_by)
-    SELECT project_id, dataset_id, error_message, 'PROBE'
-    FROM source_access_probe_results
-    WHERE NOT is_accessible;
-
-    IF NOT preview_only AND source_access_probe_max_age_days > 0 THEN
-      EXECUTE IMMEDIATE FORMAT(
-        'INSERT INTO inaccessible_source_datasets '
-        || '(project_id, dataset_id, error_message, detected_by) '
-        || 'SELECT cached.project_id, cached.dataset_id, cached.error_message, '
-        || '\'CACHE\' '
-        || 'FROM `%s` AS cached '
-        || 'JOIN source_datasets AS sd '
-        || 'ON sd.project_id = cached.project_id '
-        || 'AND sd.dataset_id = cached.dataset_id '
-        || 'WHERE NOT cached.is_accessible '
-        || 'AND NOT EXISTS (SELECT 1 FROM source_access_probe_results AS probed '
-        || 'WHERE probed.project_id = cached.project_id '
-        || 'AND probed.dataset_id = cached.dataset_id)',
-        source_dataset_access_fqn
-      );
-    END IF;
 
     DELETE FROM source_datasets AS sd
     WHERE EXISTS (
@@ -1081,21 +925,9 @@ BEGIN
       'SKIPPED_INACCESSIBLE_SOURCE_DATASETS' AS notice,
       project_id,
       dataset_id,
-      detected_by,
       error_message
     FROM inaccessible_source_datasets
     ORDER BY project_id, dataset_id;
-
-    -- How much of the probe cost this run actually paid, so a run that suddenly gets
-    -- slower (a widened source scope, an expired cache) is visible without digging
-    -- through the job history.
-    SELECT
-      'SOURCE_ACCESS_PROBE' AS notice,
-      source_access_probe_max_age_days AS cache_max_age_days,
-      (SELECT COUNT(*) FROM source_datasets_to_probe) AS datasets_probed_this_run,
-      (SELECT COUNTIF(NOT is_accessible) FROM source_access_probe_results)
-        AS probes_refused_this_run,
-      source_dataset_count AS source_datasets_in_scope;
   END IF;
 
   -- ==========================================================================
@@ -1193,17 +1025,40 @@ BEGIN
   -- Everything below writes to the repository, so it is skipped in preview.
   IF NOT preview_only THEN
 
-  -- No INFORMATION_SCHEMA scan happens here. The three the pipeline needs are all
-  -- loaded where they are consumed, over the narrowest scope that consumer needs:
-  --   * current_target_tables  -> STEP 2, over the generated tables' destination
-  --                               datasets (a handful), not every source dataset.
-  --   * current_target_columns / current_target_column_field_paths
-  --                            -> STEP 3, behind its has-changes gate, over the
-  --                               datasets the changed objects actually reference.
-  --   * current_referenced_tables
-  --                            -> STEP 3, same scope as the columns.
-  -- Scanning all of them here over the whole source scope is what made a daily run
-  -- that changes nothing pay for the entire region.
+  -- TABLES per source dataset (dataset-scoped, so only dataset-level metadata
+  -- access is needed; the region-qualified form requires broader permissions).
+  -- TABLE_OPTIONS is joined to expose each table's expiration_timestamp: a table
+  -- with an expiration set is a temporary output (collapsed by fingerprint like a
+  -- non-existent destination), while a table with no expiration is a persistent
+  -- generated table kept per destination. expiration_timestamp is NULL when no
+  -- expiration is configured.
+  SET tables_union_sql = (
+    SELECT STRING_AGG(
+      FORMAT(
+        'SELECT LOWER(t.table_catalog) AS table_catalog, '
+        || 'LOWER(t.table_schema) AS table_schema, '
+        || 'LOWER(t.table_name) AS table_name, t.table_type, '
+        || 'opt.option_value AS expiration_timestamp '
+        || 'FROM `%s.%s.INFORMATION_SCHEMA.TABLES` AS t '
+        || 'LEFT JOIN `%s.%s.INFORMATION_SCHEMA.TABLE_OPTIONS` AS opt '
+        || 'ON opt.table_name = t.table_name '
+        || 'AND opt.option_name = \'expiration_timestamp\'',
+        project_id, dataset_id, project_id, dataset_id
+      ),
+      ' UNION ALL '
+    )
+    FROM (SELECT DISTINCT project_id, dataset_id FROM source_datasets)
+  );
+  EXECUTE IMMEDIATE FORMAT(
+    'CREATE OR REPLACE TEMP TABLE current_target_tables AS %s',
+    tables_union_sql
+  );
+
+  -- current_target_columns and current_target_column_field_paths (the COLUMNS and
+  -- COLUMN_FIELD_PATHS scans over every source dataset) are NOT loaded here. They
+  -- are the heaviest scan in the run and are only consumed by STEP 3 analysis, so
+  -- STEP 3 loads them behind its has-changes gate -- an unchanged daily run never
+  -- pays for them. current_target_tables above is kept because STEP 2 uses it.
 
   SET sql_template = """
       MERGE
@@ -1769,102 +1624,6 @@ BEGIN
   );
 
   EXECUTE IMMEDIATE rendered_sql;
-
-  -- --------------------------------------------------------------------------
-  -- TABLES + TABLE_OPTIONS for the DESTINATION datasets only.
-  --
-  -- Used twice below: to decide whether each collected job's destination is a
-  -- PERSISTENT table (it exists and has no expiration) or a temporary one, and to
-  -- deactivate registered generated tables whose destination is gone. Both ask about
-  -- destinations, so the scan only needs the datasets that generated tables land in
-  -- -- normally a handful -- not every source dataset. Scanning the whole source
-  -- scope here (which is what this used to do, in STEP 1) cost a TABLES and a
-  -- TABLE_OPTIONS read per source dataset on every run, changes or not.
-  --
-  -- The scope is taken from the JOB REGISTRY rather than from this run's JOBS scan:
-  -- latest_generated_table_definitions classifies EVERY registry row, including jobs
-  -- collected by earlier runs whose destinations are outside the current lookback
-  -- window. Missing one of those datasets would read as "destination gone" and flip
-  -- a persistent table to EPHEMERAL. Registered generated tables are unioned in for
-  -- the same reason, so the deactivation check below sees its own objects.
-  -- Intersected with source_datasets, since only those are known to be readable.
-  --
-  -- TABLE_OPTIONS exposes expiration_timestamp: an expiration set means a temporary
-  -- output (collapsed by fingerprint like a non-existent destination); NULL means a
-  -- persistent generated table kept per destination.
-  -- --------------------------------------------------------------------------
-  CREATE OR REPLACE TEMP TABLE generated_table_datasets (
-    project_id STRING,
-    dataset_id STRING
-  );
-
-  SET sql_template = """
-    INSERT INTO generated_table_datasets (project_id, dataset_id)
-    SELECT DISTINCT destination_project, destination_dataset
-    FROM `__T_JOB_REGISTRY__`
-    WHERE destination_project IS NOT NULL
-      AND destination_dataset IS NOT NULL
-    UNION DISTINCT
-    SELECT DISTINCT object_project, object_dataset
-    FROM `__T_DEF_REGISTRY__`
-    WHERE object_type = 'TABLE'
-      AND generation_type IN ('SCHEDULED_QUERY', 'DAG')
-      AND is_active = TRUE
-      AND is_ephemeral = FALSE
-  """;
-
-  EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-
-  ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-  AS 'Unresolved placeholder in generated_table_datasets SQL.';
-
-  EXECUTE IMMEDIATE rendered_sql;
-
-  SET tables_union_sql = (
-    SELECT STRING_AGG(
-      FORMAT(
-        'SELECT LOWER(t.table_catalog) AS table_catalog, '
-        || 'LOWER(t.table_schema) AS table_schema, '
-        || 'LOWER(t.table_name) AS table_name, t.table_type, '
-        || 'opt.option_value AS expiration_timestamp '
-        || 'FROM `%s.%s.INFORMATION_SCHEMA.TABLES` AS t '
-        || 'LEFT JOIN `%s.%s.INFORMATION_SCHEMA.TABLE_OPTIONS` AS opt '
-        || 'ON opt.table_name = t.table_name '
-        || 'AND opt.option_name = \'expiration_timestamp\'',
-        project_id, dataset_id, project_id, dataset_id
-      ),
-      ' UNION ALL '
-    )
-    FROM (
-      SELECT DISTINCT sd.project_id, sd.dataset_id
-      FROM source_datasets AS sd
-      JOIN generated_table_datasets AS dest
-        ON LOWER(dest.project_id) = LOWER(sd.project_id)
-       AND LOWER(dest.dataset_id) = LOWER(sd.dataset_id)
-    )
-  );
-  -- Nothing registered yet (a first run, or no generated tables in scope): a typed
-  -- empty table, so the joins below behave as "destination not found".
-  SET tables_union_sql = COALESCE(
-    tables_union_sql,
-    (SELECT FORMAT(
-       'SELECT LOWER(t.table_catalog) AS table_catalog, '
-       || 'LOWER(t.table_schema) AS table_schema, '
-       || 'LOWER(t.table_name) AS table_name, t.table_type, '
-       || 'opt.option_value AS expiration_timestamp '
-       || 'FROM `%s.%s.INFORMATION_SCHEMA.TABLES` AS t '
-       || 'LEFT JOIN `%s.%s.INFORMATION_SCHEMA.TABLE_OPTIONS` AS opt '
-       || 'ON opt.table_name = t.table_name '
-       || 'AND opt.option_name = \'expiration_timestamp\' '
-       || 'WHERE FALSE',
-       project_id, dataset_id, project_id, dataset_id
-     )
-     FROM source_datasets LIMIT 1)
-  );
-  EXECUTE IMMEDIATE FORMAT(
-    'CREATE OR REPLACE TEMP TABLE current_target_tables AS %s',
-    tables_union_sql
-  );
 
   -- Representative definition per JOBS group, split by whether the destination is
   -- a PERSISTENT table or a temporary one:
@@ -2508,17 +2267,14 @@ BEGIN
   -- --------------------------------------------------------------------------
   -- Fresh TABLES existence set, taken HERE (STEP 3) alongside the column
   -- metadata and over the SAME referenced source datasets. The publishability
-  -- classifier (batch_object_source_flags) and the source object-type lookups in
-  -- the analysis loop both use this rather than STEP 2's current_target_tables: a
-  -- source table dropped since that snapshot is still listed in it, which would
-  -- make the source look "present but uncollected" (a coverage gap -> object
-  -- FAILED) instead of "absent" (a dropped table -> object publishable, warning
-  -- suppressed). Reading existence at the same moment as the columns closes that
-  -- window. Scope also matters: current_target_tables now covers the generated
-  -- tables' DESTINATION datasets, which is the wrong set for a source lookup --
-  -- this one covers exactly the datasets the changed objects reference. table_type
-  -- is projected because those lookups classify a source as VIEW or TABLE.
-  -- Same scope as current_target_columns (referenced & accessible source
+  -- classifier (batch_object_source_flags) uses this, NOT the STEP 1
+  -- current_target_tables snapshot: a source table dropped between STEP 1 and
+  -- STEP 3 is still listed in that older snapshot, which would make it look
+  -- "present but uncollected" (a coverage gap -> object FAILED) instead of
+  -- "absent" (a dropped table -> object publishable, warning suppressed). Reading
+  -- existence at the same moment as the columns closes that window, so a table
+  -- that no longer exists when its columns are scanned is correctly treated as
+  -- absent. Same scope as current_target_columns (referenced & accessible source
   -- datasets); the typed empty fallback covers "nothing referenced".
   -- --------------------------------------------------------------------------
   SET tables_union_sql = (
@@ -2526,7 +2282,7 @@ BEGIN
       FORMAT(
         'SELECT LOWER(table_catalog) AS table_catalog, '
         || 'LOWER(table_schema) AS table_schema, '
-        || 'LOWER(table_name) AS table_name, table_type '
+        || 'LOWER(table_name) AS table_name '
         || 'FROM `%s.%s.INFORMATION_SCHEMA.TABLES`',
         project_id, dataset_id
       ),
@@ -2547,7 +2303,7 @@ BEGIN
     (SELECT FORMAT(
        'SELECT LOWER(table_catalog) AS table_catalog, '
        || 'LOWER(table_schema) AS table_schema, '
-       || 'LOWER(table_name) AS table_name, table_type '
+       || 'LOWER(table_name) AS table_name '
        || 'FROM `%s.%s.INFORMATION_SCHEMA.TABLES` WHERE FALSE',
        project_id, dataset_id
      )
@@ -3124,11 +2880,11 @@ BEGIN
     -- exists_in_tables must be judged on the SAME dataset scope AND the SAME
     -- moment that column metadata was collected for. current_referenced_tables is
     -- a fresh TABLES scan taken in STEP 3 alongside current_target_columns, over
-    -- the referenced source datasets (option D). Using it (not STEP 2's
-    -- current_target_tables, which covers destination datasets) means: a source
-    -- whose dataset was NOT column-scanned is treated as absent
-    -- (has_absent_source), AND a source table dropped since that snapshot is
-    -- treated as absent rather than present-but-uncollected. Otherwise such a source looks like a coverage gap
+    -- the referenced source datasets (option D). Using it (not the STEP 1
+    -- current_target_tables snapshot) means: a source whose dataset was NOT
+    -- column-scanned is treated as absent (has_absent_source), AND a source table
+    -- dropped between STEP 1 and STEP 3 is treated as absent rather than
+    -- present-but-uncollected. Otherwise such a source looks like a coverage gap
     -- -> object non-publishable -> its absent-source not-found WARNINGS leak into
     -- lineage_diagnostic (and the object FAILs transiently until the next run).
     -- Genuine coverage gaps within referenced datasets (table present at scan
@@ -3418,7 +3174,7 @@ BEGIN
        AND LOWER(source_registry.object_name) = parsed.source_object
        AND source_registry.object_type = 'VIEW'
       LEFT JOIN
-        current_referenced_tables AS source_table
+        current_target_tables AS source_table
         ON LOWER(source_table.table_catalog) = parsed.source_project
        AND LOWER(source_table.table_schema) = parsed.source_dataset
        AND LOWER(source_table.table_name) = parsed.source_object
@@ -3565,7 +3321,7 @@ BEGIN
        AND LOWER(source_registry.object_dataset) = parsed.source_dataset
        AND LOWER(source_registry.object_name) = parsed.source_object
        AND source_registry.object_type = 'VIEW'
-      LEFT JOIN current_referenced_tables AS source_table
+      LEFT JOIN current_target_tables AS source_table
         ON LOWER(source_table.table_catalog) = parsed.source_project
        AND LOWER(source_table.table_schema) = parsed.source_dataset
        AND LOWER(source_table.table_name) = parsed.source_object
