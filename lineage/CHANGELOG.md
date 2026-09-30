@@ -1,5 +1,19 @@
 # 1.5.0-032
 
+- Added `sql/maintenance/11_analysis_batch_diagnostics.sql`, which reads
+  INFORMATION_SCHEMA.JOBS to recover STEP 3's batch diagnostics after a failed run
+  without scrolling a script's per-statement result list in the console. Report 1
+  lists the `ANALYSIS_BATCH_PAYLOAD` statements newest first, parsing the dataset and
+  batch number straight out of each statement's SQL text (03 inlines them with
+  FORMAT), so the failing batch is identified without opening anything -- the job_id
+  is what to open for the byte counts. Report 2 lists the failed statements in the
+  same window with their error, so a STEP 3 "UDF out of memory" can be read against
+  `batch_udf_results` and paired with report 1's last row. Read-only and touches no
+  repository table; `jobs_project_id` can be pinned when 03 runs in another project.
+  Noted in the header: INFORMATION_SCHEMA.JOBS retains job metadata for months but
+  query RESULTS expire in about a day, after which report 1 still names the batch but
+  its numbers are gone.
+
 - Report each analysis batch's PHYSICAL-METADATA volume before the UDF runs, as an
   `ANALYSIS_BATCH_PAYLOAD` row. Batching by SQL volume did not stop "UDF out of
   memory": at 20 objects per batch a run cleared 31 batches and then died on the 32nd,
