@@ -7,16 +7,7 @@ export const COPILOT_AGENT_NAME = 'new_cr854_deliveryagent'
 
 // エージェントの指示欄に頼らず、毎回メッセージに出力形式とルールを含める
 // (標準ハーネスのエージェントは、指示欄の「JSON だけ返す」を守らず文章に整形して返すことがあるため)
-const PROMPT = `あなたは、ファッション通販の配信(メール・プッシュ)を企画するアシスタントです。
-下の「入力」の JSON を読み、配信テーマに合う「掲載商品」と「メイン画像」を選び、理由とともに JSON だけで返してください。
-
-# 出力の形式(厳守)
-次の JSON オブジェクト 1 つだけを返す。説明文、見出し、箇条書き、コードフェンス(\`\`\`)、前置き、あとがきは一切付けない。
-{"products":[{"code":"P01","reason":"..."}],"hero":{"code":"H01","reason":"..."}}
-- 入力の JSON が不正、または card.theme が空のときは、{"error":"理由を日本語で簡潔に"} だけを返す。
-- 適切なメイン画像がないときは、"hero" を null にする。
-
-# 選定のルール
+const RULES = `# 選定のルール
 1. 商品は products の中から、メイン画像は heroes の中からだけ選ぶ。候補にないものを作らない。code は入力のとおりに返す。
 2. 商品は productCount 件を選ぶ。同じ code を重複して選ばない。候補が足りなければ、選べた分だけ返す。
 3. 配信テーマ(card.theme)との適合を最優先にする。次に card.copy と card.instructions の内容、配信日(scheduledAt)の季節、国とチャネルを考慮する。
@@ -26,10 +17,38 @@ const PROMPT = `あなたは、ファッション通販の配信(メール・プ
 7. 商品は、カテゴリが偏りすぎないように選ぶ。ただし、テーマが特定のカテゴリ(例:「ブーツ特集」)を指す場合は、そのカテゴリを中心にする。
 8. 商品は、訴求したい順(先頭ほど重要)に並べる。先頭はテーマを最もよく表す商品にする。
 9. メイン画像は、テーマ、季節、用途(purpose)、タグ(tags)から最も合うものを 1 つ選ぶ。
-10. 理由(reason)は日本語で 60 文字以内。テーマとの関係や、在庫・売上トレンド・評価などの根拠を、具体的な数値や語を使って書く。
+10. 理由(reason)は日本語で 60 文字以内。テーマとの関係や、在庫・売上トレンド・評価などの根拠を、具体的な数値や語を使って書く。`
 
-# 入力
+const PROMPT = `あなたは、ファッション通販の配信(メール・プッシュ)を企画するアシスタントです。
+下の「入力」の JSON を読み、配信テーマに合う「掲載商品」と「メイン画像」を選び、理由とともに JSON だけで返してください。
+
+# 出力の形式(厳守)
+次の JSON オブジェクト 1 つだけを返す。説明文、見出し、箇条書き、コードフェンス(\`\`\`)、前置き、あとがきは一切付けない。
+{"products":[{"code":"P01","reason":"..."}],"hero":{"code":"H01","reason":"..."}}
+- 入力の JSON が不正、または card.theme が空のときは、{"error":"理由を日本語で簡潔に"} だけを返す。
+- 適切なメイン画像がないときは、"hero" を null にする。
+
+${RULES}# 入力
 `
+
+// カテゴリ系テンプレート用: セクションごとの見出しと、そこに入れる商品を返させる
+const SECTION_PROMPT = `あなたは、ファッション通販の配信(メール・プッシュ)を企画するアシスタントです。
+下の「入力」の JSON を読み、メールの各セクションの「見出し」と、そこに載せる「掲載商品」、および「メイン画像」を選び、理由とともに JSON だけで返してください。
+
+# 出力の形式(厳守)
+次の JSON オブジェクト 1 つだけを返す。説明文、見出し、箇条書き、コードフェンス(\`\`\`)、前置き、あとがきは一切付けない。
+{"sections":[{"title":"...","products":[{"code":"P01","reason":"..."}]}],"hero":{"code":"H01","reason":"..."}}
+- sections は、入力の sections と同じ数・同じ順で返す。各セクションの products の件数は、そのセクションの slots に合わせる(候補が足りなければ、選べた分だけ)。
+- 入力の JSON が不正、または card.theme が空のときは、{"error":"理由を日本語で簡潔に"} だけを返す。
+- 適切なメイン画像がないときは、"hero" を null にする。
+
+# セクションの見出し(title)のルール
+1. 日本語で 12 文字以内。そのセクションの商品に共通する切り口を、配信テーマに沿って表す(例:「寒い日のアウター」「重ね着のニット」「足元から秋支度」)。
+2. 商品カテゴリ名(「アウター」など)だけの見出しは避け、テーマや使う場面が伝わる言葉にする。
+3. セクション同士で、切り口が重ならないようにする。
+4. 同じセクションには、見出しに合う、関連性の高い商品をまとめる。
+
+${RULES}`
 
 export interface AiCard {
   name: string
@@ -45,6 +64,8 @@ export interface AiCard {
 export interface AiSelection {
   products: { productId: string; reason: string }[]
   hero: { heroId: string; reason: string } | null
+  /** カテゴリ系テンプレートのときだけ。セクションごとの見出し */
+  sectionTitles?: string[]
 }
 
 /** エージェントの応答テキストから JSON 部分を取り出す(前後の説明文やコードフェンスがあっても読む) */
@@ -84,13 +105,16 @@ export async function selectWithAi(args: {
   productCount: number
   products: Cr854_products[]
   heroes: Cr854_heroimages[]
+  /** 指定すると、セクション(見出し + 商品)ごとに選ばせる */
+  sections?: { slots: number }[]
 }): Promise<AiSelection> {
-  const { card, productCount, products, heroes } = args
+  const { card, productCount, products, heroes, sections } = args
 
   const payload = {
     task: 'select_products_and_hero',
     today: new Date().toISOString().slice(0, 10),
     productCount,
+    sections,
     card,
     products: products.map((p) => ({
       code: p.cr854_productcode,
@@ -114,16 +138,20 @@ export async function selectWithAi(args: {
     })),
   }
 
-  const parsed = (await askAgent(PROMPT, payload)) as {
+  const parsed = (await askAgent(sections ? SECTION_PROMPT : PROMPT, payload)) as {
     products?: { code?: string; reason?: string }[]
+    sections?: { title?: string; products?: { code?: string; reason?: string }[] }[]
     hero?: { code?: string; reason?: string } | null
   }
+  // セクション指定のときは、セクション順に商品を並べ、見出しを控える
+  const flat = sections ? (parsed.sections ?? []).flatMap((sec) => sec.products ?? []) : (parsed.products ?? [])
+  const sectionTitles = sections ? (parsed.sections ?? []).map((sec) => String(sec.title ?? '')) : undefined
 
   // コードから ID へ変換する。候補にないコードや重複は捨てる
   const byCode = new Map(products.map((p) => [p.cr854_productcode, p.cr854_productid]))
   const seen = new Set<string>()
   const picked: AiSelection['products'] = []
-  for (const it of parsed.products ?? []) {
+  for (const it of flat) {
     const id = it.code ? byCode.get(it.code) : undefined
     if (!id || seen.has(id)) continue
     seen.add(id)
@@ -135,5 +163,6 @@ export async function selectWithAi(args: {
   return {
     products: picked,
     hero: heroId ? { heroId, reason: parsed.hero?.reason ?? '' } : null,
+    sectionTitles,
   }
 }

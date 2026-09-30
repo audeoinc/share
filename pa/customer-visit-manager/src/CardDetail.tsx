@@ -28,7 +28,7 @@ import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
 import { Candidates } from './Candidates'
 import { HeroCandidates } from './HeroCandidates'
 import { Preview } from './Preview'
-import { TEMPLATE_OPTIONS, TEMPLATE_VALUES, slotsOf, templateFromValue, type EmailTemplateId } from './templates'
+import { EMAIL_TEMPLATES, TEMPLATE_OPTIONS, TEMPLATE_VALUES, slotsOf, templateFromValue, type EmailTemplateId } from './templates'
 import { Splitter } from './Splitter'
 import { DND_ITEM, DND_PRODUCT, SOURCE_AI, SOURCE_MANUAL, type Item } from './items'
 import { selectWithAi, type AiCard } from './aiSelect'
@@ -126,6 +126,8 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
   )
   const [showHeadings, setShowHeadings] = useState(true)
   const [template, setTemplate] = useState<EmailTemplateId>(() => templateFromValue(card?.cr854_emailtemplate))
+  // カテゴリ系テンプレートの見出し(セクションの順。保存は 1 行 1 見出し)
+  const [sectionTitles, setSectionTitles] = useState<string[]>(() => (card?.cr854_sectiontitles ? card.cr854_sectiontitles.split('\n') : []))
   const [aiBusy, setAiBusy] = useState(false)
   const [themeBusy, setThemeBusy] = useState(false)
   const [copyBusy, setCopyBusy] = useState(false)
@@ -293,11 +295,16 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
         productCount: Number(aiCount),
         products,
         heroes,
+        // カテゴリ系テンプレートのときは、セクションごとに見出しと商品を選ばせる
+        sections: EMAIL_TEMPLATES[template].sections.some((s) => s.categoryHeading)
+          ? EMAIL_TEMPLATES[template].sections.map((s) => ({ slots: s.slots }))
+          : undefined,
       })
       setItems(
         result.products.map((p) => ({ key: crypto.randomUUID(), productId: p.productId, reason: p.reason, source: SOURCE_AI })),
       )
       setSelectedKey(null)
+      if (result.sectionTitles) setSectionTitles(result.sectionTitles)
       if (result.hero) {
         setHeroId(result.hero.heroId)
         setHeroReason(result.hero.reason)
@@ -315,6 +322,14 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
     const n = slotsOf(id)
     if (n > 0) setAiCount(String(n))
   }
+
+  const setSectionTitle = (i: number, text: string) =>
+    setSectionTitles((prev) => {
+      const next = [...prev]
+      while (next.length <= i) next.push('')
+      next[i] = text
+      return next
+    })
 
   const removeItem = (key: string) => {
     setItems(items.filter((i) => i.key !== key))
@@ -365,6 +380,7 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
         cr854_instructions: form.instructions,
         cr854_heroreason: heroReason,
         cr854_emailtemplate: TEMPLATE_VALUES[template],
+        cr854_sectiontitles: sectionTitles.join('\n').replace(/\n+$/, ''),
         // 外したときは null を送ってルックアップを空にする
         'cr854_heroimage@odata.bind': heroId
           ? `/cr854_heroimages(${heroId})`
@@ -600,6 +616,8 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
               selectedKey={selectedKey}
               showHeadings={showHeadings}
               template={template}
+              sectionTitles={sectionTitles}
+              onSectionTitle={setSectionTitle}
               hero={hero}
               onDropHero={setHeroId}
               onClearHero={() => setHeroId(undefined)}

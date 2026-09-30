@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import Box from '@mui/material/Box'
 import IconButton from '@mui/material/IconButton'
+import InputBase from '@mui/material/InputBase'
 import Typography from '@mui/material/Typography'
 import CloseIcon from '@mui/icons-material/Close'
 import ArrowDownwardIcon from '@mui/icons-material/ArrowDownward'
@@ -23,6 +24,9 @@ interface Props {
   selectedKey: string | null
   showHeadings: boolean
   template: EmailTemplateId
+  /** カテゴリ系テンプレートの見出し(セクションの順) */
+  sectionTitles: string[]
+  onSectionTitle: (index: number, text: string) => void
   /** 設定中のメイン画像 */
   hero?: Cr854_heroimages
   onDropHero: (heroId: string) => void
@@ -61,7 +65,7 @@ function useDropTarget(onDropAt: Props['onDropAt']) {
   return { over, handlers, clear: () => setOver(null) }
 }
 
-function EmailPreview({ subject, theme, copy, items, products, selectedKey, showHeadings, template, hero, onDropHero, onClearHero, onSelect, onRemove, onMove, onDropAt }: Props) {
+function EmailPreview({ subject, theme, copy, items, products, selectedKey, showHeadings, template, sectionTitles, onSectionTitle, hero, onDropHero, onClearHero, onSelect, onRemove, onMove, onDropAt }: Props) {
   const { over, handlers, clear } = useDropTarget(onDropAt)
   const [heroOver, setHeroOver] = useState(false)
   const byId = new Map(products.map((p) => [p.cr854_productid, p]))
@@ -221,6 +225,32 @@ function EmailPreview({ subject, theme, copy, items, products, selectedKey, show
     </Box>
   )
 
+  // カテゴリ系テンプレートの見出し。クリックして書き換えられる(未設定なら商品カテゴリ名を出す)
+  const editableHeading = (index: number, fallback: string) => {
+    const value = sectionTitles[index] !== undefined ? sectionTitles[index] : fallback
+    return (
+      <Box sx={{ textAlign: 'center', my: 1.5 }}>
+        <InputBase
+          value={value}
+          onChange={(e) => onSectionTitle(index, e.target.value)}
+          inputProps={{ 'aria-label': `セクション${index + 1}の見出し`, style: { textAlign: 'center' } }}
+          sx={{
+            border: '2px solid',
+            borderColor: INK,
+            px: 2,
+            py: 0.25,
+            fontWeight: 700,
+            fontSize: '0.95rem',
+            color: INK,
+            letterSpacing: 2,
+            width: `${Math.max(10, value.length * 2 + 4)}ch`,
+            maxWidth: '100%',
+          }}
+        />
+      </Box>
+    )
+  }
+
   // ---- ヒーロー(メイン画像 + 見出し)。種類によって装飾が変わる
   const heroBox = (
     <Box
@@ -352,12 +382,12 @@ function EmailPreview({ subject, theme, copy, items, products, selectedKey, show
     const overflow = items.slice(offset)
     body = (
       <>
-        {sections.map(({ sec, start, list }) => {
+        {sections.map(({ sec, start, list }, si) => {
           const category = sec.categoryHeading ? byId.get(list[0]?.productId ?? '')?.cr854_categoryname : undefined
           const feature = sec.kind === 'feature'
           return (
             <Box key={start} sx={{ px: 2, pb: 2 }}>
-              {sec.categoryHeading && headingEl(category ?? `CATEGORY ${start / sec.slots + 1}`)}
+              {sec.categoryHeading && editableHeading(si, category ?? `CATEGORY ${si + 1}`)}
               <Box sx={{ display: 'grid', gridTemplateColumns: feature ? '1fr' : '1fr 1fr', gap: 1.5 }}>
                 {Array.from({ length: sec.slots }, (_, j) =>
                   list[j] ? (feature ? featureTile(list[j], start + j) : gridTile(list[j], start + j)) : emptySlot(`e${start + j}`, feature),

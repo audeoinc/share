@@ -232,6 +232,14 @@
           "x-ms-dataverse-type": "DateTimeType",
           "x-ms-schema-name": "cr854_scheduledat"
         },
+        "cr854_sectiontitles": {
+          "type": "string",
+          "title": "sectiontitles",
+          "x-ms-dataverse-attribute": "cr854_sectiontitles",
+          "x-ms-dataverse-type": "MemoType",
+          "x-ms-schema-name": "cr854_sectiontitles",
+          "maxLength": 2000
+        },
         "cr854_status": {
           "type": "string",
           "title": "ステータス",

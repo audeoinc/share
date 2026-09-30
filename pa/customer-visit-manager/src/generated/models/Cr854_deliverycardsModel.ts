@@ -58,6 +58,7 @@ export interface Cr854_deliverycardsBase {
   cr854_name: string;
   cr854_products?: string;
   cr854_scheduledat?: string;
+  cr854_sectiontitles?: string;
   cr854_status?: Cr854_deliverycardscr854_status;
   cr854_theme?: string;
   importsequencenumber?: number;
