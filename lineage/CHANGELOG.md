@@ -1,5 +1,23 @@
 # 1.5.0-032
 
+- Report each analysis batch's PHYSICAL-METADATA volume before the UDF runs, as an
+  `ANALYSIS_BATCH_PAYLOAD` row. Batching by SQL volume did not stop "UDF out of
+  memory": at 20 objects per batch a run cleared 31 batches and then died on the 32nd,
+  so neither measure already reported predicts the failure -- object count does not,
+  and SQL text length does not either (a 2 KB query can pull in a wide table's entire
+  schema). The remaining candidate is the `physical_columns_json` payload, which the
+  discovery pre-pass does NOT send: it runs the same objects through the same UDF in
+  the same batches and passes, and passing `'[]'` there is the only material
+  difference. `batch_object_metadata` already computes
+  `physical_metadata_json_bytes` per object, so the size was being measured and
+  discarded. It is now emitted as its own statement immediately before the UDF query:
+  when that query aborts the script, this row is the last thing in the results and
+  names the batch, its total and maximum payload bytes, and its largest object.
+  Diagnostic only -- no batching or analysis behavior changes. (Also ruled out along
+  the way: wildcard sources are NOT the explanation. `wildcard_ranked` /
+  `shard_rank = 1` already collapses a `events_*` style reference to one
+  representative shard, so date-sharded tables do not multiply the payload.)
+
 - Fixed "UDF out of memory" in STEP 3 when generated tables are analyzed. STEP 3
   already loops over datasets so one UDF call never sees the whole region, but a
   dataset is not a bound: every temporary / rotating-destination generated table

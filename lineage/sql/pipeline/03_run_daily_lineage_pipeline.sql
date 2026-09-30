@@ -2817,6 +2817,44 @@ BEGIN
       );
 
     -- ------------------------------------------------------------------------
+    -- 2. Report this batch's PHYSICAL-METADATA volume, before the UDF runs.
+    --
+    -- Deliberately its own statement, emitted BEFORE the UDF query: if that query
+    -- dies with "UDF out of memory" the script aborts, and this row is then the last
+    -- thing in the results -- naming the batch, its payload size, and its largest
+    -- object. That is the one number that is invisible otherwise, and neither of the
+    -- two measures already reported predicts it: SQL text length does not (a 2 KB
+    -- query can pull in a wide table's whole schema), and object count does not (a
+    -- batch of 20 can fail where 31 batches of 20 passed).
+    --
+    -- Why suspect this payload at all: the discovery pre-pass runs the SAME objects
+    -- through the SAME UDF in the same batches and passes, and the only material
+    -- difference is that it passes '[]' here instead of physical_columns_json.
+    -- ------------------------------------------------------------------------
+    EXECUTE IMMEDIATE FORMAT(
+      """
+      SELECT
+        'ANALYSIS_BATCH_PAYLOAD' AS notice,
+        '%s' AS dataset,
+        %d AS batch_no,
+        COUNT(*) AS objects,
+        SUM(physical_metadata_json_bytes) AS total_metadata_bytes,
+        MAX(physical_metadata_json_bytes) AS max_metadata_bytes,
+        CAST(ROUND(AVG(physical_metadata_json_bytes)) AS INT64)
+          AS avg_metadata_bytes,
+        ARRAY_AGG(
+          object_name ORDER BY physical_metadata_json_bytes DESC LIMIT 1
+        )[SAFE_OFFSET(0)] AS largest_object,
+        ARRAY_AGG(
+          object_type ORDER BY physical_metadata_json_bytes DESC LIMIT 1
+        )[SAFE_OFFSET(0)] AS largest_object_type
+      FROM batch_object_metadata
+      """,
+      ds_row.ds,
+      ds_row.batch_no
+    );
+
+    -- ------------------------------------------------------------------------
     -- 2. Assemble the analysis input for every changed object. Each row carries
     -- a stable analysis_id (materialized here so it is identical in the result
     -- column and the UDF context), the scoped metadata, and a pre-analysis
