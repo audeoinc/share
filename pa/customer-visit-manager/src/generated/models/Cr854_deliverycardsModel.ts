@@ -18,6 +18,15 @@ export const Cr854_deliverycardscr854_department = {
   588230002: 'EC'
 } as const;
 export type Cr854_deliverycardscr854_department = keyof typeof Cr854_deliverycardscr854_department;
+export const Cr854_deliverycardscr854_emailtemplate = {
+  588230000: '自由',
+  588230001: 'Standard4',
+  588230002: 'Collab',
+  588230003: 'Offer',
+  588230004: 'Cat2',
+  588230005: 'Cat3'
+} as const;
+export type Cr854_deliverycardscr854_emailtemplate = keyof typeof Cr854_deliverycardscr854_emailtemplate;
 export const Cr854_deliverycardscr854_status = {
   588230000: '未起案',
   588230001: '検討中',
@@ -42,6 +51,7 @@ export interface Cr854_deliverycardsBase {
   cr854_country?: Cr854_deliverycardscr854_country;
   cr854_deliverycardid: string;
   cr854_department?: Cr854_deliverycardscr854_department;
+  cr854_emailtemplate?: Cr854_deliverycardscr854_emailtemplate;
   "cr854_heroimage@odata.bind"?: string;
   cr854_heroreason?: string;
   cr854_instructions?: string;
@@ -62,6 +72,7 @@ export interface Cr854_deliverycards extends Cr854_deliverycardsBase {
   cr854_channelname?: string;
   cr854_countryname?: string;
   cr854_departmentname?: string;
+  cr854_emailtemplatename?: string;
   cr854_statusname?: string;
   createdon?: string;
   modifiedon?: string;

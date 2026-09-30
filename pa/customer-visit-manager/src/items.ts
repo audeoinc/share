@@ -17,5 +17,10 @@ export interface Item {
 export const DND_PRODUCT = 'application/x-product' // 候補 → プレビュー(値は商品ID)
 export const DND_ITEM = 'application/x-item' // プレビュー内の並べ替え(値は Item.key)
 
+// カード類(商品候補・配信カード・プレビュー)の中身の縮尺。枠の大きさは変えず、中身だけを縮める。
+// zoom と width(100/縮尺 %)を組み合わせて、見た目の幅を元の枠に合わせる。
+export const CARD_SCALE = 0.8
+export const scaled = { zoom: CARD_SCALE, width: `${100 / CARD_SCALE}%` } as const
+
 export const yen = (v?: number) => (v === undefined ? '-' : `¥${v.toLocaleString('ja-JP')}`)
 export const DND_HERO = 'application/x-hero' // 候補 → プレビューのメインビジュアル枠(値はメイン画像ID)

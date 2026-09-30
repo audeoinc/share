@@ -165,6 +165,7 @@ function App() {
           card={selected}
           products={products}
           heroes={heroes}
+          otherThemes={cards.filter((c) => c.cr854_deliverycardid !== selected?.cr854_deliverycardid && c.cr854_theme).map((c) => c.cr854_theme!)}
           onBack={() => {
             setSelectedId(null)
             setCreating(false)

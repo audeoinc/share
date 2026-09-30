@@ -127,6 +127,50 @@
           "x-ms-dataverse-attribute-of": "cr854_department",
           "x-ms-read-only": true
         },
+        "cr854_emailtemplate": {
+          "type": "string",
+          "title": "emailtemplate",
+          "x-ms-dataverse-attribute": "cr854_emailtemplate",
+          "x-ms-dataverse-type": "PicklistType",
+          "x-ms-schema-name": "cr854_emailtemplate",
+          "enum": [
+            "自由",
+            "Standard4",
+            "Collab",
+            "Offer",
+            "Cat2",
+            "Cat3"
+          ],
+          "x-ms-enum-values": [
+            588230000,
+            588230001,
+            588230002,
+            588230003,
+            588230004,
+            588230005
+          ],
+          "Color": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ],
+          "x-ms-optionsetmetadataid": "648ce7c7-a4bc-f111-aaae-002248e8103d",
+          "x-ms-isGlobal": false,
+          "x-ms-optionsetdisplayname": "emailtemplate",
+          "x-ms-optionSetType": "Picklist"
+        },
+        "cr854_emailtemplatename": {
+          "type": "string",
+          "title": "cr854_emailtemplatename",
+          "x-ms-dataverse-attribute": "cr854_emailtemplatename",
+          "x-ms-dataverse-type": "VirtualType",
+          "x-ms-schema-name": "cr854_emailtemplateName",
+          "x-ms-dataverse-attribute-of": "cr854_emailtemplate",
+          "x-ms-read-only": true
+        },
         "cr854_heroimage": {
           "type": "string",
           "title": "heroimage",

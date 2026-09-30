@@ -67,6 +67,18 @@ function responseText(data: unknown): string {
   throw new Error('エージェントから応答がありませんでした')
 }
 
+/** プロンプトと入力 JSON をエージェントへ送り、応答の JSON オブジェクトを返す */
+export async function askAgent(prompt: string, payload: unknown): Promise<Record<string, unknown>> {
+  const res = await MicrosoftCopilotStudioService.ExecuteCopilotAsyncV2(COPILOT_AGENT_NAME, {
+    message: prompt + JSON.stringify(payload),
+    notificationUrl: 'https://notificationurlplaceholder',
+  })
+  if (!res.success) throw new Error(res.error?.message ?? 'エージェントの呼び出しに失敗しました')
+  const parsed = extractJson(responseText(res.data)) as Record<string, unknown>
+  if (typeof parsed.error === 'string') throw new Error(`エージェントからのエラー: ${parsed.error}`)
+  return parsed
+}
+
 export async function selectWithAi(args: {
   card: AiCard
   productCount: number
@@ -102,18 +114,10 @@ export async function selectWithAi(args: {
     })),
   }
 
-  const res = await MicrosoftCopilotStudioService.ExecuteCopilotAsyncV2(COPILOT_AGENT_NAME, {
-    message: PROMPT + JSON.stringify(payload),
-    notificationUrl: 'https://notificationurlplaceholder',
-  })
-  if (!res.success) throw new Error(res.error?.message ?? 'エージェントの呼び出しに失敗しました')
-
-  const parsed = extractJson(responseText(res.data)) as {
+  const parsed = (await askAgent(PROMPT, payload)) as {
     products?: { code?: string; reason?: string }[]
     hero?: { code?: string; reason?: string } | null
-    error?: string
   }
-  if (parsed.error) throw new Error(`エージェントからのエラー: ${parsed.error}`)
 
   // コードから ID へ変換する。候補にないコードや重複は捨てる
   const byCode = new Map(products.map((p) => [p.cr854_productcode, p.cr854_productid]))

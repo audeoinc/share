@@ -28,9 +28,11 @@ import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
 import { Candidates } from './Candidates'
 import { HeroCandidates } from './HeroCandidates'
 import { Preview } from './Preview'
+import { TEMPLATE_OPTIONS, TEMPLATE_VALUES, slotsOf, templateFromValue, type EmailTemplateId } from './templates'
 import { Splitter } from './Splitter'
 import { DND_ITEM, DND_PRODUCT, SOURCE_AI, SOURCE_MANUAL, type Item } from './items'
-import { selectWithAi } from './aiSelect'
+import { selectWithAi, type AiCard } from './aiSelect'
+import { draftCopy, suggestThemes, type ThemeSuggestion } from './aiDraft'
 import { channelOptions, countryOptions, departmentOptions, statusColor, statusOptions } from './status'
 
 interface Props {
@@ -38,6 +40,8 @@ interface Props {
   card?: Cr854_deliverycards
   products: Cr854_products[]
   heroes: Cr854_heroimages[]
+  /** 他の配信で使われているテーマ(テーマ案の重複回避用) */
+  otherThemes: string[]
   onBack: () => void
   onSaved: () => Promise<void>
 }
@@ -109,7 +113,7 @@ function loadWidths(): [number, number] {
 
 const paneSx = { p: 2, overflow: 'auto', minHeight: 0, display: 'grid', gap: 1.5, alignContent: 'start' } as const
 
-export function CardDetail({ card, products, heroes, onBack, onSaved }: Props) {
+export function CardDetail({ card, products, heroes, otherThemes, onBack, onSaved }: Props) {
   const [form, setForm] = useState<Form>(() => toForm(card))
   const theme = useTheme()
   const fullScreen = useMediaQuery(theme.breakpoints.down('md'))
@@ -121,8 +125,15 @@ export function CardDetail({ card, products, heroes, onBack, onSaved }: Props) {
     card?.cr854_channelname === 'プッシュ' ? 'push' : 'email',
   )
   const [showHeadings, setShowHeadings] = useState(true)
+  const [template, setTemplate] = useState<EmailTemplateId>(() => templateFromValue(card?.cr854_emailtemplate))
   const [aiBusy, setAiBusy] = useState(false)
-  const [aiCount, setAiCount] = useState('4')
+  const [themeBusy, setThemeBusy] = useState(false)
+  const [copyBusy, setCopyBusy] = useState(false)
+  const [themeIdeas, setThemeIdeas] = useState<ThemeSuggestion[]>([])
+  const [aiCount, setAiCount] = useState(() => {
+    const n = slotsOf(templateFromValue(card?.cr854_emailtemplate))
+    return String(n > 0 ? n : 4)
+  })
   const [heroId, setHeroId] = useState<string | undefined>(card?._cr854_heroimage_value)
   const [heroReason, setHeroReason] = useState(card?.cr854_heroreason ?? '')
   const [midTab, setMidTab] = useState<'products' | 'hero'>('products')
@@ -212,6 +223,61 @@ export function CardDetail({ card, products, heroes, onBack, onSaved }: Props) {
     }
   }
 
+  // エージェントに渡す、配信カードの現在の入力内容
+  const buildAiCard = (): AiCard => {
+    const label = (opts: { value: number; label: string }[], v: string) => opts.find((o) => String(o.value) === v)?.label ?? ''
+    return {
+      name: form.name,
+      scheduledAt: form.scheduledAt ? new Date(form.scheduledAt).toISOString() : '',
+      country: label(countryOptions, form.country),
+      channel: label(channelOptions, form.channel),
+      department: label(departmentOptions, form.department),
+      theme: form.theme,
+      copy: form.copy,
+      instructions: form.instructions,
+    }
+  }
+
+  // 配信日・国・チャネル・部署などから、テーマ案を出させる
+  async function runThemeIdeas() {
+    if (!form.scheduledAt) {
+      setError('テーマ案を出すには、先に配信日時を入力してください')
+      return
+    }
+    setThemeBusy(true)
+    setError(null)
+    try {
+      setThemeIdeas(await suggestThemes({ card: buildAiCard(), otherThemes, products }))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setThemeBusy(false)
+    }
+  }
+
+  // テーマ・掲載商品・メイン画像から、コピーと制作指示の案を作らせる
+  async function runCopy() {
+    if (!form.theme.trim()) {
+      setError('コピーを作るには、先にテーマを入力してください')
+      return
+    }
+    if ((form.copy || form.instructions) && !window.confirm('現在のコピーと制作指示を、AI の案で置き換えます。よろしいですか?')) return
+    setCopyBusy(true)
+    setError(null)
+    try {
+      const draft = await draftCopy({
+        card: buildAiCard(),
+        items: items.map((i) => ({ product: products.find((p) => p.cr854_productid === i.productId), reason: i.reason })),
+        hero: heroes.find((h) => h.cr854_heroimageid === heroId),
+      })
+      setForm((f) => ({ ...f, copy: draft.copy || f.copy, instructions: draft.instructions || f.instructions }))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setCopyBusy(false)
+    }
+  }
+
   // テーマに応じて、掲載商品とメイン画像をエージェントに選ばせる(現在の内容は置き換える)
   async function runAi() {
     if (!form.theme.trim()) {
@@ -222,18 +288,8 @@ export function CardDetail({ card, products, heroes, onBack, onSaved }: Props) {
     setAiBusy(true)
     setError(null)
     try {
-      const label = (opts: { value: number; label: string }[], v: string) => opts.find((o) => String(o.value) === v)?.label ?? ''
       const result = await selectWithAi({
-        card: {
-          name: form.name,
-          scheduledAt: form.scheduledAt ? new Date(form.scheduledAt).toISOString() : '',
-          country: label(countryOptions, form.country),
-          channel: label(channelOptions, form.channel),
-          department: label(departmentOptions, form.department),
-          theme: form.theme,
-          copy: form.copy,
-          instructions: form.instructions,
-        },
+        card: buildAiCard(),
         productCount: Number(aiCount),
         products,
         heroes,
@@ -251,6 +307,13 @@ export function CardDetail({ card, products, heroes, onBack, onSaved }: Props) {
     } finally {
       setAiBusy(false)
     }
+  }
+
+  // テンプレートを変えたら、AI で選ぶ商品数も枠の数に合わせる
+  const changeTemplate = (id: EmailTemplateId) => {
+    setTemplate(id)
+    const n = slotsOf(id)
+    if (n > 0) setAiCount(String(n))
   }
 
   const removeItem = (key: string) => {
@@ -301,6 +364,7 @@ export function CardDetail({ card, products, heroes, onBack, onSaved }: Props) {
         cr854_copy: form.copy,
         cr854_instructions: form.instructions,
         cr854_heroreason: heroReason,
+        cr854_emailtemplate: TEMPLATE_VALUES[template],
         // 外したときは null を送ってルックアップを空にする
         'cr854_heroimage@odata.bind': heroId
           ? `/cr854_heroimages(${heroId})`
@@ -424,6 +488,27 @@ export function CardDetail({ card, products, heroes, onBack, onSaved }: Props) {
             onChange={(e) => set('theme')(e.target.value)}
             color={form.theme ? 'success' : 'primary'}
           />
+          <Button
+            onClick={runThemeIdeas}
+            disabled={themeBusy || saving}
+            startIcon={themeBusy ? <CircularProgress size={14} /> : <AutoAwesomeIcon fontSize="small" />}
+            sx={{ justifySelf: 'start' }}
+          >
+            {themeBusy ? '考え中...' : 'AIでテーマ案'}
+          </Button>
+          {themeIdeas.map((t) => (
+            <Box
+              key={t.theme}
+              onClick={() => {
+                set('theme')(t.theme)
+                setThemeIdeas([])
+              }}
+              sx={{ cursor: 'pointer', p: 1, border: 1, borderColor: 'divider', borderRadius: 1.5, '&:hover': { borderColor: 'primary.main', bgcolor: 'action.hover' } }}
+            >
+              <Typography sx={{ fontWeight: 600, fontSize: '0.9rem' }}>{t.theme}</Typography>
+              <Typography variant="caption" color="text.secondary">{t.reason}</Typography>
+            </Box>
+          ))}
           <Typography variant="caption" color={items.length ? 'success.main' : 'text.secondary'}>
             ② 掲載商品: {items.length}件(中央の候補から右のプレビューへドラッグ)
           </Typography>
@@ -447,6 +532,14 @@ export function CardDetail({ card, products, heroes, onBack, onSaved }: Props) {
             onChange={(e) => set('instructions')(e.target.value)}
             color={form.instructions ? 'success' : 'primary'}
           />
+          <Button
+            onClick={runCopy}
+            disabled={copyBusy || saving}
+            startIcon={copyBusy ? <CircularProgress size={14} /> : <AutoAwesomeIcon fontSize="small" />}
+            sx={{ justifySelf: 'start' }}
+          >
+            {copyBusy ? '作成中...' : 'AIでコピー・制作指示'}
+          </Button>
         </Box>
 
         <Splitter onDrag={resize(0)} onDone={saveWidths} />
@@ -474,6 +567,19 @@ export function CardDetail({ card, products, heroes, onBack, onSaved }: Props) {
               <Tab value="push" label="プッシュ" sx={{ minHeight: 40 }} />
             </Tabs>
             {previewTab === 'email' && (
+              <TextField
+                select
+                label="テンプレート"
+                value={template}
+                onChange={(e) => changeTemplate(e.target.value as EmailTemplateId)}
+                sx={{ minWidth: 250 }}
+              >
+                {TEMPLATE_OPTIONS.map((o) => (
+                  <MenuItem key={o.id} value={o.id}>{o.label}</MenuItem>
+                ))}
+              </TextField>
+            )}
+            {previewTab === 'email' && template === 'free' && (
               <>
                 <FormControlLabel
                   control={<Switch size="small" checked={showHeadings} onChange={(e) => setShowHeadings(e.target.checked)} />}
@@ -493,6 +599,7 @@ export function CardDetail({ card, products, heroes, onBack, onSaved }: Props) {
               products={products}
               selectedKey={selectedKey}
               showHeadings={showHeadings}
+              template={template}
               hero={hero}
               onDropHero={setHeroId}
               onClearHero={() => setHeroId(undefined)}

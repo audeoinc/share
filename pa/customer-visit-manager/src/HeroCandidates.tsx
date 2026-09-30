@@ -7,7 +7,7 @@ import TextField from '@mui/material/TextField'
 import Typography from '@mui/material/Typography'
 import SearchIcon from '@mui/icons-material/Search'
 import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
-import { DND_HERO } from './items'
+import { DND_HERO, scaled } from './items'
 import { heroImage } from './images'
 
 interface Props {
@@ -28,7 +28,7 @@ export function HeroCandidates({ heroes, selectedId, onSelect }: Props) {
   })
 
   return (
-    <Box sx={{ display: 'grid', gap: 1.5 }}>
+    <Box sx={{ display: 'grid', gap: 1.5, ...scaled }}>
       <TextField
         placeholder="画像名・タグ・説明で検索"
         value={query}
