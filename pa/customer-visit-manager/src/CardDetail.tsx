@@ -616,6 +616,7 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
               selectedKey={selectedKey}
               showHeadings={showHeadings}
               template={template}
+              scheduledAt={form.scheduledAt}
               sectionTitles={sectionTitles}
               onSectionTitle={setSectionTitle}
               hero={hero}

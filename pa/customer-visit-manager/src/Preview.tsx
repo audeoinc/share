@@ -2,6 +2,8 @@ import { useState } from 'react'
 import Box from '@mui/material/Box'
 import IconButton from '@mui/material/IconButton'
 import InputBase from '@mui/material/InputBase'
+import ToggleButton from '@mui/material/ToggleButton'
+import ToggleButtonGroup from '@mui/material/ToggleButtonGroup'
 import Typography from '@mui/material/Typography'
 import CloseIcon from '@mui/icons-material/Close'
 import ArrowDownwardIcon from '@mui/icons-material/ArrowDownward'
@@ -24,6 +26,10 @@ interface Props {
   selectedKey: string | null
   showHeadings: boolean
   template: EmailTemplateId
+  /** 配信日時(ロック画面の時計に使う) */
+  scheduledAt: string
+  /** true のとき、画像を小さくした表示(プッシュのメッセージ用) */
+  compact?: boolean
   /** カテゴリ系テンプレートの見出し(セクションの順) */
   sectionTitles: string[]
   onSectionTitle: (index: number, text: string) => void
@@ -65,7 +71,7 @@ function useDropTarget(onDropAt: Props['onDropAt']) {
   return { over, handlers, clear: () => setOver(null) }
 }
 
-function EmailPreview({ subject, theme, copy, items, products, selectedKey, showHeadings, template, sectionTitles, onSectionTitle, hero, onDropHero, onClearHero, onSelect, onRemove, onMove, onDropAt }: Props) {
+function EmailPreview({ subject, theme, copy, items, products, selectedKey, showHeadings, template, sectionTitles, onSectionTitle, compact = false, hero, onDropHero, onClearHero, onSelect, onRemove, onMove, onDropAt }: Props) {
   const { over, handlers, clear } = useDropTarget(onDropAt)
   const [heroOver, setHeroOver] = useState(false)
   const byId = new Map(products.map((p) => [p.cr854_productid, p]))
@@ -162,7 +168,7 @@ function EmailPreview({ subject, theme, copy, items, products, selectedKey, show
     const p = byId.get(it.productId)
     return (
       <Box key={it.key} {...dragProps(it, idx)} sx={frame(it, idx)}>
-        <Box component="img" draggable={false} src={productImage(p)} alt={p?.cr854_name} sx={{ width: '100%', aspectRatio: '3 / 4', objectFit: 'cover', borderRadius: 1, bgcolor: '#eee', display: 'block' }} />
+        <Box component="img" draggable={false} src={productImage(p)} alt={p?.cr854_name} sx={{ width: '100%', aspectRatio: compact ? '1 / 1' : '3 / 4', objectFit: 'cover', borderRadius: 1, bgcolor: '#eee', display: 'block' }} />
         <Typography sx={{ fontSize: '0.85rem', fontWeight: 600, mt: 0.5, color: INK }} noWrap>{p?.cr854_name}</Typography>
         {priceEl(p?.cr854_price)}
         {cta}
@@ -176,7 +182,7 @@ function EmailPreview({ subject, theme, copy, items, products, selectedKey, show
     const p = byId.get(it.productId)
     return (
       <Box key={it.key} {...dragProps(it, idx)} sx={{ ...frame(it, idx), display: 'flex', gap: 1.5 }}>
-        <Box component="img" draggable={false} src={productImage(p)} alt={p?.cr854_name} sx={{ width: '44%', aspectRatio: '3 / 4', objectFit: 'cover', borderRadius: 1, bgcolor: '#eee', display: 'block', flexShrink: 0 }} />
+        <Box component="img" draggable={false} src={productImage(p)} alt={p?.cr854_name} sx={{ width: compact ? '30%' : '44%', aspectRatio: compact ? '1 / 1' : '3 / 4', objectFit: 'cover', borderRadius: 1, bgcolor: '#eee', display: 'block', flexShrink: 0 }} />
         <Box sx={{ flexGrow: 1, minWidth: 0, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 0.5 }}>
           <Typography sx={{ fontSize: '0.7rem', letterSpacing: 2, color: SUB }}>FEATURE</Typography>
           <Typography sx={{ fontSize: '1rem', fontWeight: 700, color: INK }}>{p?.cr854_name}</Typography>
@@ -195,7 +201,7 @@ function EmailPreview({ subject, theme, copy, items, products, selectedKey, show
       key={key}
       {...handlers(items.length)}
       sx={{
-        aspectRatio: feature ? undefined : '3 / 4',
+        aspectRatio: feature ? undefined : compact ? '1 / 1' : '3 / 4',
         minHeight: feature ? 120 : undefined,
         border: '2px dashed',
         borderColor: over === items.length ? '#6750a4' : '#bbb',
@@ -268,7 +274,7 @@ function EmailPreview({ subject, theme, copy, items, products, selectedKey, show
       }}
       sx={{
         position: 'relative',
-        aspectRatio: '16 / 9',
+        aspectRatio: compact ? '3 / 1' : '16 / 9',
         bgcolor: heroOver ? 'rgba(103,80,164,0.15)' : '#e9e9ee',
         outline: heroOver ? '3px solid #6750a4' : 'none',
         outlineOffset: -3,
@@ -412,47 +418,111 @@ function EmailPreview({ subject, theme, copy, items, products, selectedKey, show
 
   return (
     <Box sx={{ maxWidth: 440, mx: 'auto' }}>
-      <Typography variant="caption" color="text.secondary">件名: {subject || '(配信名未入力)'}</Typography>
+      {!compact && <Typography variant="caption" color="text.secondary">件名: {subject || '(配信名未入力)'}</Typography>}
       <Box sx={{ bgcolor: '#fff', color: INK, border: '1px solid #ddd', borderRadius: 2, overflow: 'hidden', mt: 0.5, ...scaled }}>
         <Box sx={{ bgcolor: '#222', color: '#fff', textAlign: 'center', py: 1.5, letterSpacing: 4, fontWeight: 700 }}>SHOP</Box>
         {heroBox}
         {headline}
         {body}
-        <Box sx={{ bgcolor: '#f5f5f5', color: SUB, fontSize: '0.75rem', textAlign: 'center', py: 1.5 }}>配信停止はこちら</Box>
+        {!compact && <Box sx={{ bgcolor: '#f5f5f5', color: SUB, fontSize: '0.75rem', textAlign: 'center', py: 1.5 }}>配信停止はこちら</Box>}
       </Box>
     </Box>
   )
 }
 
-function PushPreview({ subject, theme, copy, items, products, selectedKey, hero: pickedHero, onSelect, onRemove, onMove, onDropAt }: Props) {
+function PushPreview(props: Props) {
+  const { subject, theme, copy, scheduledAt, items, products, selectedKey, hero: pickedHero, onSelect, onRemove, onMove, onDropAt } = props
   const { over, handlers, clear } = useDropTarget(onDropAt)
+  const [style, setStyle] = useState<'ios' | 'android'>('ios')
   const byId = new Map(products.map((p) => [p.cr854_productid, p]))
   const firstProduct = items[0] && byId.get(items[0].productId)
   // メイン画像が設定されていればそれを、なければ先頭の商品の画像を通知の画像にする
   const heroSrc = pickedHero ? heroImage(pickedHero) : productImage(firstProduct)
   const heroAlt = pickedHero?.cr854_name ?? firstProduct?.cr854_name
 
+  const when = scheduledAt ? new Date(scheduledAt) : null
+  const clock = when ? `${when.getHours()}:${String(when.getMinutes()).padStart(2, '0')}` : '9:41'
+  const dateText = when ? when.toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'long' }) : ''
+  const title = subject || theme || '(配信名未入力)'
+  const bodyText = copy || '(コピー未入力)'
+  const more = items.length > 1 ? `ほか${items.length - 1}点の商品` : ''
+
+  const appIcon = (size: number) => (
+    <Box sx={{ width: size, height: size, borderRadius: style === 'ios' ? '22%' : '50%', bgcolor: '#222', color: '#fff', display: 'grid', placeItems: 'center', fontSize: size * 0.5, fontWeight: 800, flexShrink: 0 }}>
+      S
+    </Box>
+  )
+
+  const image = heroSrc && (
+    <Box
+      component="img"
+      draggable={false}
+      src={heroSrc}
+      alt={heroAlt}
+      sx={{ width: '100%', aspectRatio: style === 'ios' ? '16 / 9' : '2 / 1', objectFit: 'cover', borderRadius: style === 'ios' ? 2 : 3, display: 'block', bgcolor: '#e9e9ee', mt: 1 }}
+    />
+  )
+
+  const notification =
+    style === 'ios' ? (
+      <Box sx={{ bgcolor: 'rgba(250,250,252,0.86)', color: INK, borderRadius: '22px', p: 1.5, boxShadow: '0 4px 18px rgba(0,0,0,0.25)' }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, mb: 0.75 }}>
+          {appIcon(20)}
+          <Typography sx={{ flexGrow: 1, fontSize: '0.7rem', letterSpacing: 1, color: SUB }}>SHOP</Typography>
+          <Typography sx={{ fontSize: '0.7rem', color: SUB }}>たった今</Typography>
+        </Box>
+        <Typography sx={{ fontWeight: 700, fontSize: '0.9rem', color: INK }}>{title}</Typography>
+        <Typography sx={{ fontSize: '0.85rem', color: INK, whiteSpace: 'pre-wrap' }}>{bodyText}</Typography>
+        {image}
+        {more && <Typography sx={{ fontSize: '0.7rem', color: SUB, mt: 0.75 }}>{more}</Typography>}
+      </Box>
+    ) : (
+      <Box sx={{ bgcolor: '#f3edf7', color: INK, borderRadius: '24px', p: 1.5, boxShadow: '0 2px 10px rgba(0,0,0,0.3)' }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, mb: 0.5 }}>
+          {appIcon(18)}
+          <Typography sx={{ flexGrow: 1, fontSize: '0.7rem', color: SUB }}>SHOP ・ たった今</Typography>
+          <Typography sx={{ fontSize: '0.8rem', color: SUB, lineHeight: 1 }}>⌃</Typography>
+        </Box>
+        <Typography sx={{ fontWeight: 600, fontSize: '0.9rem', color: INK }}>{title}</Typography>
+        <Typography sx={{ fontSize: '0.85rem', color: '#444', whiteSpace: 'pre-wrap' }}>{bodyText}</Typography>
+        {image}
+        {more && <Typography sx={{ fontSize: '0.7rem', color: SUB, mt: 0.75 }}>{more}</Typography>}
+      </Box>
+    )
+
   return (
     <Box sx={{ maxWidth: 380, mx: 'auto', display: 'grid', gap: 2 }}>
-      <Box sx={{ background: 'linear-gradient(160deg, #3b4a6b, #1d2438)', borderRadius: 4, p: 2, pt: 3, ...scaled }}>
-      <Box sx={{ bgcolor: 'rgba(245,245,248,0.96)', color: INK, borderRadius: 4, p: 1.5, display: 'flex', gap: 1.25, boxShadow: 3 }}>
-        <Box sx={{ width: 36, height: 36, borderRadius: 1.5, bgcolor: '#222', color: '#fff', display: 'grid', placeItems: 'center', fontSize: 11, fontWeight: 700, flexShrink: 0 }}>
-          SHOP
+      <ToggleButtonGroup size="small" exclusive value={style} onChange={(_, v) => v && setStyle(v)} sx={{ justifySelf: 'center' }}>
+        <ToggleButton value="ios">iOS風</ToggleButton>
+        <ToggleButton value="android">Android風</ToggleButton>
+      </ToggleButtonGroup>
+      {/* スマホのロック画面 */}
+      <Box
+        sx={{
+          background: style === 'ios' ? 'linear-gradient(165deg, #3b4a6b, #1d2438 70%, #2a2440)' : 'linear-gradient(165deg, #2b3a4a, #141c26)',
+          border: '6px solid #101010',
+          borderRadius: '36px',
+          px: 1.75,
+          pt: 3,
+          pb: 3,
+          color: '#fff',
+          boxShadow: 6,
+          ...scaled,
+        }}
+      >
+        <Box sx={{ textAlign: style === 'ios' ? 'center' : 'left', mb: 2.5, px: style === 'ios' ? 0 : 1 }}>
+          {dateText && <Typography sx={{ fontSize: '0.85rem', opacity: 0.85 }}>{dateText}</Typography>}
+          <Typography sx={{ fontSize: style === 'ios' ? '3.6rem' : '3rem', fontWeight: style === 'ios' ? 300 : 400, lineHeight: 1.1 }}>{clock}</Typography>
         </Box>
-        <Box sx={{ flexGrow: 1, minWidth: 0 }}>
-          <Typography sx={{ fontSize: '0.75rem', color: SUB }}>SHOP ・ たった今</Typography>
-          <Typography sx={{ fontWeight: 700, fontSize: '0.9rem', color: INK }}>{subject || theme || '(配信名未入力)'}</Typography>
-          <Typography sx={{ fontSize: '0.85rem', color: INK, whiteSpace: 'pre-wrap' }}>{copy || '(コピー未入力)'}</Typography>
-          {items.length > 1 && <Typography sx={{ fontSize: '0.75rem', color: SUB, mt: 0.5 }}>ほか{items.length - 1}点</Typography>}
-        </Box>
-        {heroSrc && (
-          <Box component="img" draggable={false} src={heroSrc} alt={heroAlt} sx={{ width: 56, height: 56, borderRadius: 1.5, objectFit: 'cover', flexShrink: 0, bgcolor: '#eee' }} />
-        )}
-      </Box>
+        {notification}
+        <Box sx={{ width: 96, height: 4, borderRadius: 2, bgcolor: 'rgba(255,255,255,0.55)', mx: 'auto', mt: 3 }} />
       </Box>
       <Typography variant="caption" color="text.secondary">
-        プッシュは先頭の商品が画像に使われます。ドラッグで順序を入れ替えられます。
+        通知の画像には、メイン画像(なければ先頭の商品)を使います。下のリストで、商品の順序を入れ替えられます。
       </Typography>
+      {/* 通知をタップしたあとのメッセージ本文。メールと同じレイアウトで、画像を小さくしたもの */}
+      <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>タップ後のメッセージ(メールと同じレイアウト)</Typography>
+      <EmailPreview {...props} compact />
       <Box sx={{ display: 'grid', gap: 0.75 }}>
         {items.map((it, idx) => {
           const p = byId.get(it.productId)
