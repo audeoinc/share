@@ -1,5 +1,21 @@
 # 1.5.0-032
 
+- Added `sql/maintenance/10_pending_analysis_workload.sql`, a read-only report of how
+  much work the next 03 STEP 3 run would hand to the analysis UDF, grouped the way
+  STEP 3 actually batches it. STEP 3 avoids UDF out-of-memory by looping over
+  datasets -- one UDF invocation per dataset -- so what predicts an OOM is not the
+  total changed-object count but the largest PER-DATASET SQL volume, which is one
+  call's V8 heap. Report 1 is exactly that unit (one row per dataset, ordered by
+  total SQL size, with a flag for the synthetic `ephemeral_generated_sql` bucket that
+  every temporary / rotating-destination generated table collapses into, and so gets
+  no protection from the dataset loop); report 2 splits a heavy dataset by object kind
+  and generation_type; report 3 gives the run total to read the others as shares.
+  The filter mirrors STEP 3's own changed-object probe, including the
+  `process_generated_tables` gate, so the numbers are what the next run would see.
+  Follows the maintenance-script conventions (`[A]`/`[B]`/`[C]` DECLARE blocks,
+  project auto-detection, `{project_token}` substitution, prefix/suffix name
+  assembly, backtick-quoted qualified references through EXECUTE IMMEDIATE).
+
 - Added STATIC TABLES for the two report views, rebuilt by a new 03 STEP 4b:
   `lnge_vw_t_column_usage_impact` -> `lnge_t_column_usage_impact` and
   `lnge_vw_t_object_dependency` -> `lnge_t_object_dependency` (the view name with `vw_`
