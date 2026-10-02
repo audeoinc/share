@@ -1,6 +1,7 @@
 import type { Cr854_products } from './generated/models/Cr854_productsModel'
 import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
 import { askAgent, type AiCard, type CopyLanguage } from './aiSelect'
+import { EMAIL_TEMPLATES, type EmailTemplateId } from './templates'
 
 // テーマ・コピー・制作指示の「案」の生成。出力形式はメッセージ内で毎回指定する(aiSelect.ts と同じ理由)
 
@@ -142,4 +143,46 @@ export async function suggestInstructions(ctx: DraftContext): Promise<Instructio
   const list = (parsed.instructions ?? []).filter((c) => c.text).map((c) => ({ text: String(c.text), angle: String(c.angle ?? '') }))
   if (list.length === 0) throw new Error('制作指示の案を取得できませんでした')
   return list
+}
+
+const TEMPLATE_PROMPT = `あなたは、ファッション通販の配信(メール・プッシュ)を企画するアシスタントです。
+下の「入力」の JSON を読み、この配信にふさわしいメールの構成(テンプレート)を 1 つ選んで、JSON だけで返してください。
+
+# 出力の形式(厳守)
+次の JSON オブジェクト 1 つだけを返す。説明文、見出し、箇条書き、コードフェンス(\`\`\`)、前置き、あとがきは一切付けない。
+{"template":"standard4","reason":"..."}
+
+# テンプレート
+- standard4: 標準。メイン画像 + 2×2 の商品 4 点。迷ったときは、これを選ぶ。
+- collab: コラボや特別企画。特集の商品 2 点 + グリッド 2 点。
+- offer: 期間限定、セール、お得な価格を打ち出す配信。価格を強調した 4 点。
+- cat2: 2 つの切り口(カテゴリ)で、各 2 点。切り口の違う提案を並べたいとき。
+- cat3: 3 つの切り口(カテゴリ)で、各 2 点。品揃えを広く見せたいとき。
+- free: 商品の数や並びが決まっていない、自由な構成。
+
+# ルール
+1. template は、上の id のどれか 1 つ。
+2. 配信テーマ(card.theme)を最優先にする。次に、配信日の時期、チャネル、部署を考慮する。
+3. セール、タイムセール、期間限定などのテーマは offer。コラボや特別企画のテーマは collab。
+4. 特定の商品を絞って訴求するテーマ(例:「ブーツ特集」)は standard4。複数の切り口を見せたいテーマは cat2 か cat3。
+5. reason は日本語で 60 文字以内。
+
+# 入力
+`
+
+export interface TemplateChoice {
+  template: EmailTemplateId
+  reason: string
+}
+
+/** テーマなどから、メールのテンプレートを選ばせる */
+export async function suggestTemplate(args: { card: AiCard }): Promise<TemplateChoice> {
+  const parsed = (await askAgent(TEMPLATE_PROMPT, {
+    task: 'suggest_template',
+    today: new Date().toISOString().slice(0, 10),
+    card: args.card,
+  })) as { template?: string; reason?: string }
+  const id = String(parsed.template ?? '') as EmailTemplateId
+  // 想定外の値は、標準にする
+  return { template: id in EMAIL_TEMPLATES ? id : 'standard4', reason: String(parsed.reason ?? '') }
 }

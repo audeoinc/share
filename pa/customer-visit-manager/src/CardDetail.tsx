@@ -3,10 +3,12 @@ import Alert from '@mui/material/Alert'
 import Box from '@mui/material/Box'
 import Button from '@mui/material/Button'
 import Chip from '@mui/material/Chip'
+import CircularProgress from '@mui/material/CircularProgress'
 import Dialog from '@mui/material/Dialog'
 import DialogActions from '@mui/material/DialogActions'
 import DialogTitle from '@mui/material/DialogTitle'
 import IconButton from '@mui/material/IconButton'
+import LinearProgress from '@mui/material/LinearProgress'
 import MenuItem from '@mui/material/MenuItem'
 import FormControlLabel from '@mui/material/FormControlLabel'
 import Slider from '@mui/material/Slider'
@@ -20,6 +22,7 @@ import Typography from '@mui/material/Typography'
 import useMediaQuery from '@mui/material/useMediaQuery'
 import { useTheme } from '@mui/material/styles'
 import AddIcon from '@mui/icons-material/Add'
+import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome'
 import CloseIcon from '@mui/icons-material/Close'
 import RemoveIcon from '@mui/icons-material/Remove'
 import SaveIcon from '@mui/icons-material/Save'
@@ -32,9 +35,10 @@ import { ContentPane } from './ContentPane'
 import { Preview } from './Preview'
 import { TEMPLATE_VALUES, sectionIndexAt, sectionsOf, templateFromValue, type EmailTemplateId } from './templates'
 import { Splitter } from './Splitter'
-import { DND_ITEM, DND_PRODUCT, SOURCE_MANUAL, STATE_CANDIDATE, STATE_SELECTED, type Candidate, type Item } from './items'
+import { DND_ITEM, DND_PRODUCT, SOURCE_AI, SOURCE_MANUAL, STATE_CANDIDATE, STATE_SELECTED, type Candidate, type Item } from './items'
 import type { AiCard, CopyLanguage, ProposedHero } from './aiSelect'
 import { progressOf } from './progress'
+import { runAutoDraft, type AutoDraftResult } from './autoDraft'
 import { useAiDrafts } from './useAiDrafts'
 import { channelOptions, countryOptions, departmentOptions, statusColor, statusOptions } from './status'
 
@@ -117,6 +121,18 @@ function loadZoom(): number | 'fit' {
   return 0.7
 }
 
+const AUTO_KEY = 'cardDetail.autoDraft'
+/** 開いたときの自動下書きの設定(既定はオン) */
+function loadAutoEnabled(): boolean {
+  try {
+    return localStorage.getItem(AUTO_KEY) !== 'off'
+  } catch {
+    return true
+  }
+}
+/** 自動下書きを済ませたカード(同じカードを開き直しても、再実行しない) */
+const autoDrafted = new Set<string>()
+
 const WIDTH_KEY = 'cardDetail.paneWidths.v2'
 const MIN_W = 220
 const MAX_W = 640
@@ -173,6 +189,11 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
   // プレビューの倍率(40〜120%)。'fit' は、メール全体が画面の高さに収まる倍率に自動で合わせる
   const [zoom, setZoom] = useState<number | 'fit'>(loadZoom)
   const [fitZoom, setFitZoom] = useState(1)
+  // 「すべてAIで下書き」の進み具合(実行中だけ、画面全体に「推論中」を出す)
+  const [autoEnabled, setAutoEnabled] = useState(loadAutoEnabled)
+  const [auto, setAuto] = useState<{ label: string; done: number; total: number } | null>(null)
+  const cancelRef = useRef(false)
+  const aliveRef = useRef(true)
   const previewBoxRef = useRef<HTMLDivElement>(null)
   const previewInnerRef = useRef<HTMLDivElement>(null)
   // コピー・ヘッドラインの言語(AI に渡す。保存はしない)
@@ -342,6 +363,85 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
     setError,
   )
 
+  // ---- すべてAIで下書き(テーマ → テンプレート・メイン画像 → ヘッドライン・コピー → 各セクション → 制作指示)
+  const applyAutoResult = (res: AutoDraftResult) => {
+    if (res.template) setTemplate(res.template)
+    setForm((f) => ({
+      ...f,
+      theme: res.theme ?? f.theme,
+      headline: res.headline ?? f.headline,
+      copy: res.copy ?? f.copy,
+      instructions: res.instructions ?? f.instructions,
+    }))
+    const toItem = (r: { productId: string; reason: string }): Item => ({ key: crypto.randomUUID(), productId: r.productId, reason: r.reason, source: SOURCE_AI })
+    if (res.sections.some((sec) => sec.selected.length > 0)) {
+      setItems(res.sections.flatMap((sec) => sec.selected.map(toItem)))
+      setCandidates(res.sections.flatMap((sec, i) => sec.candidates.map((r) => ({ ...toItem(r), section: i }))))
+    }
+    if (res.sections.length > 0) {
+      setSectionTitles(res.sections.map((sec) => sec.title))
+      setSectionCopies(res.sections.map((sec) => sec.copy))
+    }
+    if (res.hero) {
+      if (res.hero.hero) {
+        setHeroId(res.hero.hero.heroId)
+        setHeroReason(res.hero.hero.reason)
+      }
+      setHeroCandidates(res.hero.candidates)
+    }
+    drafts.applyAuto({
+      themeIdeas: res.themeIdeas,
+      copyIdeas: res.copyIdeas,
+      instructionIdeas: res.instructionIdeas,
+      titleCandidates: Object.fromEntries(res.sections.map((sec, i) => [i, sec.titles])),
+      sectionCopyCandidates: Object.fromEntries(res.sections.map((sec, i) => [i, sec.copies])),
+    })
+    setSelectedKey(null)
+    if (res.errors.length > 0) setError(`一部の工程で失敗しました: ${res.errors.join(' / ')}`)
+  }
+
+  async function startAutoDraft() {
+    if (!form.scheduledAt) {
+      setError('すべてAIで下書きするには、先に配信日時を入力してください')
+      return
+    }
+    cancelRef.current = false
+    setError(null)
+    setAuto({ label: '準備しています', done: 0, total: 7 })
+    const res = await runAutoDraft(
+      { card: buildAiCard(), language, otherThemes, products, heroes },
+      (label, done, total) => setAuto({ label, done, total }),
+      () => cancelRef.current || !aliveRef.current,
+    )
+    if (!cancelRef.current && aliveRef.current) applyAutoResult(res)
+    setAuto(null)
+  }
+
+  const hasContent = !!(form.theme.trim() || form.headline.trim() || form.copy.trim() || form.instructions.trim() || items.length > 0 || heroId)
+
+  function runAllManual() {
+    if (hasContent && !window.confirm('現在のテーマ・ヘッドライン・コピー・商品・メイン画像・制作指示を、AIの下書きで置き換えます。よろしいですか?')) return
+    void startAutoDraft()
+  }
+
+  useEffect(() => {
+    aliveRef.current = true
+    return () => {
+      aliveRef.current = false
+    }
+  }, [])
+
+  // 内容が空の既存のカードを開いたときは、自動で下書きを作る(同じカードで、1 回だけ)
+  useEffect(() => {
+    if (!card || !autoEnabled || original === null) return
+    if (products.length === 0 || heroes.length === 0) return
+    if (autoDrafted.has(card.cr854_deliverycardid)) return
+    autoDrafted.add(card.cr854_deliverycardid)
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (!hasContent) void startAutoDraft()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [card, original, products.length, heroes.length])
+
   // テンプレートを変えると、セクションの構成が変わるので、候補と商品選定の案は破棄する
   const changeTemplate = (id: EmailTemplateId) => {
     if (id === template) return
@@ -472,12 +572,73 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
         paper: {
           component: 'form',
           onSubmit: submit,
-          sx: { width: { md: 'min(1800px, 98vw)' }, height: { md: '92vh' }, maxHeight: { md: '92vh' } },
+          sx: { position: 'relative', width: { md: 'min(1800px, 98vw)' }, height: { md: '92vh' }, maxHeight: { md: '92vh' } },
         },
       }}
     >
+      {auto && (
+        <Box
+          sx={{
+            position: 'absolute',
+            inset: 0,
+            zIndex: 20,
+            display: 'grid',
+            placeContent: 'center',
+            justifyItems: 'center',
+            gap: 2,
+            px: 3,
+            textAlign: 'center',
+            bgcolor: 'background.paper',
+          }}
+        >
+          <CircularProgress />
+          <Typography variant="h6">AIが下書きを作っています</Typography>
+          <Typography>{auto.label}({Math.min(auto.done + 1, auto.total)} / {auto.total})</Typography>
+          <LinearProgress variant="determinate" value={Math.min(100, (auto.done / auto.total) * 100)} sx={{ width: 320 }} />
+          <Typography variant="caption" color="text.secondary">
+            結果は画面に反映されるだけで、保存はされません。気に入らなければ、保存せずに閉じられます。
+          </Typography>
+          <Button
+            onClick={() => {
+              cancelRef.current = true
+              setAuto(null)
+            }}
+          >
+            スキップして開く
+          </Button>
+        </Box>
+      )}
       <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1, pr: 1 }}>
         <Box component="span" sx={{ flexGrow: 1 }}>{card ? card.cr854_name : '配信カードの新規作成'}</Box>
+        <Button
+          size="small"
+          variant="outlined"
+          startIcon={<AutoAwesomeIcon fontSize="small" />}
+          onClick={runAllManual}
+          disabled={!!auto || saving}
+        >
+          すべてAIで下書き
+        </Button>
+        <Tooltip title="テーマも商品も空のカードを開いたとき、AIが自動で下書きを作ります(同じカードでは1回だけ)">
+          <FormControlLabel
+            control={
+              <Switch
+                size="small"
+                checked={autoEnabled}
+                onChange={(e) => {
+                  setAutoEnabled(e.target.checked)
+                  try {
+                    localStorage.setItem(AUTO_KEY, e.target.checked ? 'on' : 'off')
+                  } catch {
+                    // 保存できなくても動作には影響しない
+                  }
+                }}
+              />
+            }
+            label="開いたとき自動"
+            sx={{ m: 0, '& .MuiFormControlLabel-label': { fontSize: '0.75rem' } }}
+          />
+        </Tooltip>
         <Tooltip title={progress.remaining.length ? `未完了: ${progress.remaining.join('、')}` : 'すべての工程が完了しています'}>
           <Chip size="small" label={`工程 ${progress.done} / ${progress.total}`} color={progress.done === progress.total ? 'success' : 'default'} />
         </Tooltip>

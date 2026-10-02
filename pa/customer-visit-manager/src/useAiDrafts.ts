@@ -183,6 +183,21 @@ export function useAiDrafts(inputs: DraftInputs, onError: (message: string | nul
   const runSectionProducts = (index: number) =>
     withBusy<ProductSelection>(`section:${index}:products`, async () => proposeSectionProducts(sectionArgs(index)))
 
+  /** 「すべてAIで下書き」の結果を取り込む(テーマ・コピー・制作指示の案の一覧と、セクションの見出し・コピーの候補) */
+  const applyAuto = (r: {
+    themeIdeas: ThemeSuggestion[]
+    copyIdeas: CopyIdea[]
+    instructionIdeas: InstructionIdea[]
+    titleCandidates: Record<number, TitleCandidate[]>
+    sectionCopyCandidates: Record<number, CopyCandidate[]>
+  }) => {
+    setThemeIdeas(r.themeIdeas)
+    setCopyIdeas(r.copyIdeas)
+    setInstructionIdeas(r.instructionIdeas)
+    setTitleCandidates(r.titleCandidates)
+    setSectionCopyCandidates(r.sectionCopyCandidates)
+  }
+
   /** テンプレートを変えたときなど、見出し・コピーの候補を破棄する */
   const discardProposals = useCallback(() => {
     setTitleCandidates({})
@@ -205,6 +220,7 @@ export function useAiDrafts(inputs: DraftInputs, onError: (message: string | nul
     runSectionCopies,
     runSectionProducts,
     discardProposals,
+    applyAuto,
   }
 }
 
