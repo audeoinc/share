@@ -9,7 +9,7 @@ import Typography from '@mui/material/Typography'
 import AddIcon from '@mui/icons-material/Add'
 import SearchIcon from '@mui/icons-material/Search'
 import type { Cr854_products } from './generated/models/Cr854_productsModel'
-import { DND_PRODUCT, scaled, yen } from './items'
+import { DND_PRODUCT, yen } from './items'
 import { productImage } from './images'
 
 interface Props {
@@ -32,8 +32,9 @@ export function Candidates({ products, usedIds, onAdd }: Props) {
   })
 
   return (
-    <Box sx={{ display: 'grid', gap: 1.5, ...scaled }}>
+    <Box sx={{ display: 'grid', gap: 1.25, minWidth: 0 }}>
       <TextField
+        fullWidth
         size="small"
         placeholder="商品名・コード・説明で検索"
         value={query}

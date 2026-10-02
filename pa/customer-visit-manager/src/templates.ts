@@ -68,3 +68,54 @@ export const templateFromValue = (v?: number): EmailTemplateId =>
 
 /** テンプレートの商品枠の合計(free は決まっていないので 0) */
 export const slotsOf = (id: EmailTemplateId) => EMAIL_TEMPLATES[id].sections.reduce((n, s) => n + s.slots, 0)
+
+// ---- セクション(商品の枠)の計算
+
+/** free のとき、AI に選ばせる商品数の既定 */
+export const FREE_DEFAULT_SLOTS = 4
+
+export interface SectionInfo {
+  index: number
+  /** 選定済みの商品の並び(items)の中での、先頭の位置 */
+  start: number
+  /** 枠の数。free は上限なし(Infinity) */
+  slots: number
+  kind: 'grid' | 'feature'
+  /** カテゴリ系: AI が見出しを付ける */
+  wantTitle: boolean
+  label: string
+}
+
+/** テンプレートのセクション一覧。free は、全体で 1 つのセクションとして扱う */
+export function sectionsOf(id: EmailTemplateId): SectionInfo[] {
+  const tpl = EMAIL_TEMPLATES[id]
+  if (id === 'free') {
+    return [{ index: 0, start: 0, slots: Infinity, kind: 'grid', wantTitle: false, label: '全体' }]
+  }
+  const gridCount = tpl.sections.filter((s) => s.kind === 'grid').length
+  return tpl.sections.map((sec, i) => {
+    const start = tpl.sections.slice(0, i).reduce((n, s) => n + s.slots, 0)
+    const gridNo = tpl.sections.slice(0, i + 1).filter((s) => s.kind === 'grid').length
+    const label = sec.categoryHeading
+      ? `セクション${i + 1}`
+      : sec.kind === 'feature'
+        ? '特集'
+        : gridCount > 1
+          ? `グリッド${gridNo}`
+          : 'グリッド'
+    return { index: i, start, slots: sec.slots, kind: sec.kind, wantTitle: !!sec.categoryHeading, label }
+  })
+}
+
+/** 選定済みの並びの位置 idx が、どのセクションに属するか(枠を超えた分は最後のセクション) */
+export function sectionIndexAt(sections: SectionInfo[], idx: number): number {
+  const found = sections.find((s) => idx >= s.start && idx < s.start + s.slots)
+  return found ? found.index : sections.length - 1
+}
+
+/** セクションが担当する選定済み商品の範囲 [開始, 終了)。最後のセクションは、枠を超えた分も含める */
+export function sectionRange(sections: SectionInfo[], sec: SectionInfo, total: number): [number, number] {
+  const last = sec.index === sections.length - 1
+  const end = last || !Number.isFinite(sec.slots) ? total : sec.start + sec.slots
+  return [sec.start, end]
+}

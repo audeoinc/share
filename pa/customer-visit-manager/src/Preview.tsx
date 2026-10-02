@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import Box from '@mui/material/Box'
 import IconButton from '@mui/material/IconButton'
 import InputBase from '@mui/material/InputBase'
@@ -15,11 +15,13 @@ import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
 import { DND_HERO, DND_ITEM, scaled, yen, type Item } from './items'
 import { heroImage, productImage } from './images'
 import { EMAIL_TEMPLATES, type EmailTemplateId } from './templates'
+import { HEADLINE_FONT } from './fonts'
 
 interface Props {
   channel: 'email' | 'push'
   subject: string
-  theme: string
+  /** メイン画像に載せる大見出し */
+  headline: string
   copy: string
   items: Item[]
   products: Cr854_products[]
@@ -33,6 +35,9 @@ interface Props {
   /** カテゴリ系テンプレートの見出し(セクションの順) */
   sectionTitles: string[]
   onSectionTitle: (index: number, text: string) => void
+  /** 各セクションのコピー(セクションの順) */
+  sectionCopies: string[]
+  onSectionCopy: (index: number, text: string) => void
   /** 設定中のメイン画像 */
   hero?: Cr854_heroimages
   onDropHero: (heroId: string) => void
@@ -71,12 +76,47 @@ function useDropTarget(onDropAt: Props['onDropAt']) {
   return { over, handlers, clear: () => setOver(null) }
 }
 
-function EmailPreview({ subject, theme, copy, items, products, selectedKey, showHeadings, template, sectionTitles, onSectionTitle, compact = false, hero, onDropHero, onClearHero, onSelect, onRemove, onMove, onDropAt }: Props) {
+/** 1 行に必ず収まる文字。はみ出すときだけ、フォントサイズを縮める(下限 minScale。それでも収まらなければ「…」で省略) */
+function FitLine({ baseSize, minScale = 0.55, sx, children }: { baseSize: string; minScale?: number; sx?: object; children: string }) {
+  const ref = useRef<HTMLDivElement>(null)
+
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const fit = () => {
+      // 実寸で測る: 縮尺 1 に戻して、はみ出し具合(表示幅 / 文字の幅)の分だけ縮める。文字の幅は、フォントサイズに比例する
+      el.style.setProperty('--fit', '1')
+      const ratio = el.scrollWidth > 0 ? el.clientWidth / el.scrollWidth : 1
+      el.style.setProperty('--fit', String(Math.max(minScale, Math.min(1, ratio))))
+    }
+    fit()
+    const ro = new ResizeObserver(fit) // 表示幅が変わったとき(ペインの幅の変更など)
+    ro.observe(el)
+    document.fonts?.ready.then(fit) // フォントの読み込みで、文字の幅が変わったとき
+    document.fonts?.addEventListener?.('loadingdone', fit)
+    return () => {
+      ro.disconnect()
+      document.fonts?.removeEventListener?.('loadingdone', fit)
+    }
+  }, [children, minScale])
+
+  return (
+    <Box
+      ref={ref}
+      sx={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontSize: `calc(${baseSize} * var(--fit, 1))`, ...sx }}
+    >
+      {children}
+    </Box>
+  )
+}
+
+function EmailPreview({ subject, headline, copy, items, products, selectedKey, showHeadings, template, sectionTitles, onSectionTitle, sectionCopies, onSectionCopy, compact = false, hero, onDropHero, onClearHero, onSelect, onRemove, onMove, onDropAt }: Props) {
   const { over, handlers, clear } = useDropTarget(onDropAt)
   const [heroOver, setHeroOver] = useState(false)
   const byId = new Map(products.map((p) => [p.cr854_productid, p]))
   const tpl = EMAIL_TEMPLATES[template]
   const offer = tpl.hero === 'offer'
+  const hf = HEADLINE_FONT
 
   // 商品にマウスを乗せたときに出る、並べ替えと削除のボタン
   const controls = (it: Item, idx: number) => (
@@ -257,6 +297,21 @@ function EmailPreview({ subject, theme, copy, items, products, selectedKey, show
     )
   }
 
+  // セクションのコピー。クリックして書き換えられる(見出しの下、商品の上に入る)
+  const sectionCopyEl = (index: number) => (
+    <Box sx={{ textAlign: 'center', mb: 1.25, px: 1 }}>
+      <InputBase
+        multiline
+        fullWidth
+        value={sectionCopies[index] ?? ''}
+        onChange={(e) => onSectionCopy(index, e.target.value)}
+        placeholder="(セクションのコピー)"
+        inputProps={{ 'aria-label': `セクション${index + 1}のコピー`, style: { textAlign: 'center' } }}
+        sx={{ fontSize: '0.85rem', color: SUB, letterSpacing: 0.5, '& textarea::placeholder': { opacity: 0.6 } }}
+      />
+    </Box>
+  )
+
   // ---- ヒーロー(メイン画像 + 見出し)。種類によって装飾が変わる
   const heroBox = (
     <Box
@@ -274,7 +329,8 @@ function EmailPreview({ subject, theme, copy, items, products, selectedKey, show
       }}
       sx={{
         position: 'relative',
-        aspectRatio: compact ? '3 / 1' : '16 / 9',
+        aspectRatio: compact ? '3 / 1' : '8 / 3',
+        containerType: 'inline-size',
         bgcolor: heroOver ? 'rgba(103,80,164,0.15)' : '#e9e9ee',
         outline: heroOver ? '3px solid #6750a4' : 'none',
         outlineOffset: -3,
@@ -307,36 +363,47 @@ function EmailPreview({ subject, theme, copy, items, products, selectedKey, show
         </Box>
       )}
       {tpl.hero === 'collab' && (
-        <Box sx={{ position: 'absolute', bottom: 0, left: 0, right: 0, bgcolor: 'rgba(0,0,0,0.55)', color: '#fff', textAlign: 'center', letterSpacing: 4, fontSize: '0.7rem', py: 0.5 }}>
+        <Box sx={{ position: 'absolute', top: 0, left: 0, right: 0, bgcolor: 'rgba(0,0,0,0.55)', color: '#fff', textAlign: 'center', letterSpacing: 4, fontSize: '0.7rem', py: 0.5 }}>
           SPECIAL COLLABORATION
         </Box>
       )}
+      {/* ヘッドライン: 画像の下部に半透明の帯を敷いて、左寄せの太字で載せる */}
+      <Box
+        sx={{
+          position: 'absolute',
+          left: 0,
+          right: 0,
+          bottom: 0,
+          px: '5cqw',
+          py: compact ? '1.2cqw' : '2.2cqw',
+          bgcolor: 'rgba(0,0,0,0.42)',
+          color: '#fff',
+          textAlign: 'left',
+          pointerEvents: 'none',
+        }}
+      >
+        <Typography
+          sx={{
+            fontFamily: hf.family,
+            fontWeight: hf.weight,
+            // 日本語を含むヘッドラインは、字間を狭める(広いままだと、長いヘッドラインが折り返す)
+            letterSpacing: /[\u3000-\u9fff\uff00-\uffef]/.test(headline) ? hf.trackingJa : hf.tracking,
+            textTransform: hf.upper ? 'uppercase' : 'none',
+            fontSize: `calc(${compact ? '4.2cqw' : '5cqw'} * ${hf.scale})`,
+            lineHeight: 1.2,
+          }}
+        >
+          {headline || '(ヘッドライン未入力)'}
+        </Typography>
+        <FitLine
+          baseSize={compact ? '2.6cqw' : '2.9cqw'}
+          sx={{ mt: '0.8cqw', fontFamily: hf.family, fontWeight: 400, letterSpacing: '0.06em', lineHeight: 1.5, opacity: 0.95 }}
+        >
+          {copy || '(コピー未入力)'}
+        </FitLine>
+      </Box>
     </Box>
   )
-
-  const headline =
-    tpl.hero === 'offer' ? (
-      <Box sx={{ bgcolor: '#d32f2f', color: '#fff', px: 3, py: 2.5, textAlign: 'center' }}>
-        <Typography sx={{ fontSize: '0.75rem', letterSpacing: 4, opacity: 0.9 }}>VALUE PRICE</Typography>
-        <Typography sx={{ fontWeight: 800, fontSize: '1.25rem', mt: 0.5 }}>{theme || '(テーマ未入力)'}</Typography>
-        <Typography sx={{ mt: 1, fontSize: '0.85rem', whiteSpace: 'pre-wrap' }}>{copy || '(コピー未入力)'}</Typography>
-      </Box>
-    ) : tpl.hero === 'collab' ? (
-      <Box sx={{ px: 3, py: 2.5, textAlign: 'center' }}>
-        <Typography sx={{ fontStyle: 'italic', fontFamily: 'Georgia, serif', fontSize: '1.4rem', fontWeight: 700, color: INK }}>
-          {theme || '(テーマ未入力)'}
-        </Typography>
-        <Box sx={{ width: 48, height: 2, bgcolor: INK, mx: 'auto', my: 1 }} />
-        <Typography sx={{ color: SUB, whiteSpace: 'pre-wrap', fontSize: '0.85rem' }}>{copy || '(コピー未入力)'}</Typography>
-      </Box>
-    ) : (
-      <Box sx={{ px: 3, py: 2.5, textAlign: 'center' }}>
-        <Typography sx={{ display: 'inline-block', border: '2px solid', borderColor: INK, px: 2, py: 0.5, fontWeight: 700, fontSize: '1.05rem', color: INK }}>
-          {theme || '(テーマ未入力)'}
-        </Typography>
-        <Typography sx={{ mt: 1.5, color: SUB, whiteSpace: 'pre-wrap', fontSize: '0.85rem' }}>{copy || '(コピー未入力)'}</Typography>
-      </Box>
-    )
 
   // ---- 本文(商品)。free は連続する同カテゴリごとに見出しを付け、それ以外はテンプレートの枠に流し込む
   let body: React.ReactNode
@@ -394,6 +461,7 @@ function EmailPreview({ subject, theme, copy, items, products, selectedKey, show
           return (
             <Box key={start} sx={{ px: 2, pb: 2 }}>
               {sec.categoryHeading && editableHeading(si, category ?? `CATEGORY ${si + 1}`)}
+              {sectionCopyEl(si)}
               <Box sx={{ display: 'grid', gridTemplateColumns: feature ? '1fr' : '1fr 1fr', gap: 1.5 }}>
                 {Array.from({ length: sec.slots }, (_, j) =>
                   list[j] ? (feature ? featureTile(list[j], start + j) : gridTile(list[j], start + j)) : emptySlot(`e${start + j}`, feature),
@@ -422,7 +490,6 @@ function EmailPreview({ subject, theme, copy, items, products, selectedKey, show
       <Box sx={{ bgcolor: '#fff', color: INK, border: '1px solid #ddd', borderRadius: 2, overflow: 'hidden', mt: 0.5, ...scaled }}>
         <Box sx={{ bgcolor: '#222', color: '#fff', textAlign: 'center', py: 1.5, letterSpacing: 4, fontWeight: 700 }}>SHOP</Box>
         {heroBox}
-        {headline}
         {body}
         {!compact && <Box sx={{ bgcolor: '#f5f5f5', color: SUB, fontSize: '0.75rem', textAlign: 'center', py: 1.5 }}>配信停止はこちら</Box>}
       </Box>
@@ -431,7 +498,7 @@ function EmailPreview({ subject, theme, copy, items, products, selectedKey, show
 }
 
 function PushPreview(props: Props) {
-  const { subject, theme, copy, scheduledAt, items, products, selectedKey, hero: pickedHero, onSelect, onRemove, onMove, onDropAt } = props
+  const { subject, headline, copy, scheduledAt, items, products, selectedKey, hero: pickedHero, onSelect, onRemove, onMove, onDropAt } = props
   const { over, handlers, clear } = useDropTarget(onDropAt)
   const [style, setStyle] = useState<'ios' | 'android'>('ios')
   const byId = new Map(products.map((p) => [p.cr854_productid, p]))
@@ -443,8 +510,16 @@ function PushPreview(props: Props) {
   const when = scheduledAt ? new Date(scheduledAt) : null
   const clock = when ? `${when.getHours()}:${String(when.getMinutes()).padStart(2, '0')}` : '9:41'
   const dateText = when ? when.toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'long' }) : ''
-  const title = subject || theme || '(配信名未入力)'
+  const title = headline || subject || '(ヘッドライン未入力)'
   const bodyText = copy || '(コピー未入力)'
+  const hasJa = /[\u3000-\u9fff\uff00-\uffef]/.test(title)
+  const titleFont = {
+    fontFamily: HEADLINE_FONT.family,
+    fontWeight: HEADLINE_FONT.weight,
+    letterSpacing: hasJa ? '0.06em' : '0.14em',
+    textTransform: HEADLINE_FONT.upper ? ('uppercase' as const) : ('none' as const),
+  }
+  const bodyFont = { fontFamily: HEADLINE_FONT.family, letterSpacing: '0.04em' }
   const more = items.length > 1 ? `ほか${items.length - 1}点の商品` : ''
 
   const appIcon = (size: number) => (
@@ -471,8 +546,8 @@ function PushPreview(props: Props) {
           <Typography sx={{ flexGrow: 1, fontSize: '0.7rem', letterSpacing: 1, color: SUB }}>SHOP</Typography>
           <Typography sx={{ fontSize: '0.7rem', color: SUB }}>たった今</Typography>
         </Box>
-        <Typography sx={{ fontWeight: 700, fontSize: '0.9rem', color: INK }}>{title}</Typography>
-        <Typography sx={{ fontSize: '0.85rem', color: INK, whiteSpace: 'pre-wrap' }}>{bodyText}</Typography>
+        <Typography sx={{ ...titleFont, fontSize: '0.9rem', color: INK }}>{title}</Typography>
+        <Typography sx={{ ...bodyFont, fontSize: '0.85rem', color: INK, whiteSpace: 'pre-wrap' }}>{bodyText}</Typography>
         {image}
         {more && <Typography sx={{ fontSize: '0.7rem', color: SUB, mt: 0.75 }}>{more}</Typography>}
       </Box>
@@ -483,8 +558,8 @@ function PushPreview(props: Props) {
           <Typography sx={{ flexGrow: 1, fontSize: '0.7rem', color: SUB }}>SHOP ・ たった今</Typography>
           <Typography sx={{ fontSize: '0.8rem', color: SUB, lineHeight: 1 }}>⌃</Typography>
         </Box>
-        <Typography sx={{ fontWeight: 600, fontSize: '0.9rem', color: INK }}>{title}</Typography>
-        <Typography sx={{ fontSize: '0.85rem', color: '#444', whiteSpace: 'pre-wrap' }}>{bodyText}</Typography>
+        <Typography sx={{ ...titleFont, fontSize: '0.9rem', color: INK }}>{title}</Typography>
+        <Typography sx={{ ...bodyFont, fontSize: '0.85rem', color: '#444', whiteSpace: 'pre-wrap' }}>{bodyText}</Typography>
         {image}
         {more && <Typography sx={{ fontSize: '0.7rem', color: SUB, mt: 0.75 }}>{more}</Typography>}
       </Box>

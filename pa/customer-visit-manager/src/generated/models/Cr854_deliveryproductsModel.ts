@@ -7,6 +7,11 @@ export const Cr854_deliveryproductscr854_source = {
   588230001: '手動'
 } as const;
 export type Cr854_deliveryproductscr854_source = keyof typeof Cr854_deliveryproductscr854_source;
+export const Cr854_deliveryproductscr854_state = {
+  588230000: '選定',
+  588230001: '候補'
+} as const;
+export type Cr854_deliveryproductscr854_state = keyof typeof Cr854_deliveryproductscr854_state;
 export const Cr854_deliveryproductsstatecode = {
   0: 'アクティブ',
   1: '非アクティブ'
@@ -24,8 +29,10 @@ export interface Cr854_deliveryproductsBase {
   cr854_name: string;
   "cr854_product@odata.bind"?: string;
   cr854_reason?: string;
+  cr854_section?: number;
   cr854_sortorder?: number;
   cr854_source?: Cr854_deliveryproductscr854_source;
+  cr854_state?: Cr854_deliveryproductscr854_state;
   importsequencenumber?: number;
   overriddencreatedon?: string;
   statecode: Cr854_deliveryproductsstatecode;
@@ -36,6 +43,7 @@ export interface Cr854_deliveryproductsBase {
 
 export interface Cr854_deliveryproducts extends Cr854_deliveryproductsBase {
   cr854_sourcename?: string;
+  cr854_statename?: string;
   createdon?: string;
   modifiedon?: string;
   ownerid: string;

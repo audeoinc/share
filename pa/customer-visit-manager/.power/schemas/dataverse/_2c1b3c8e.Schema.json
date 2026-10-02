@@ -78,6 +78,13 @@
           "x-ms-schema-name": "cr854_reason",
           "maxLength": 2000
         },
+        "cr854_section": {
+          "type": "string",
+          "title": "section",
+          "x-ms-dataverse-attribute": "cr854_section",
+          "x-ms-dataverse-type": "IntegerType",
+          "x-ms-schema-name": "cr854_section"
+        },
         "cr854_sortorder": {
           "type": "string",
           "title": "sortorder",
@@ -115,6 +122,38 @@
           "x-ms-dataverse-type": "VirtualType",
           "x-ms-schema-name": "cr854_sourceName",
           "x-ms-dataverse-attribute-of": "cr854_source",
+          "x-ms-read-only": true
+        },
+        "cr854_state": {
+          "type": "string",
+          "title": "state",
+          "x-ms-dataverse-attribute": "cr854_state",
+          "x-ms-dataverse-type": "PicklistType",
+          "x-ms-schema-name": "cr854_state",
+          "enum": [
+            "選定",
+            "候補"
+          ],
+          "x-ms-enum-values": [
+            588230000,
+            588230001
+          ],
+          "Color": [
+            null,
+            null
+          ],
+          "x-ms-optionsetmetadataid": "273d65ab-aabc-f111-aaae-002248e8103d",
+          "x-ms-isGlobal": false,
+          "x-ms-optionsetdisplayname": "state",
+          "x-ms-optionSetType": "Picklist"
+        },
+        "cr854_statename": {
+          "type": "string",
+          "title": "cr854_statename",
+          "x-ms-dataverse-attribute": "cr854_statename",
+          "x-ms-dataverse-type": "VirtualType",
+          "x-ms-schema-name": "cr854_stateName",
+          "x-ms-dataverse-attribute-of": "cr854_state",
           "x-ms-read-only": true
         },
         "createdby": {

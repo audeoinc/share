@@ -171,6 +171,14 @@
           "x-ms-dataverse-attribute-of": "cr854_emailtemplate",
           "x-ms-read-only": true
         },
+        "cr854_headline": {
+          "type": "string",
+          "title": "headline",
+          "x-ms-dataverse-attribute": "cr854_headline",
+          "x-ms-dataverse-type": "StringType",
+          "x-ms-schema-name": "cr854_headline",
+          "maxLength": 200
+        },
         "cr854_heroimage": {
           "type": "string",
           "title": "heroimage",
@@ -231,6 +239,14 @@
           "x-ms-dataverse-attribute": "cr854_scheduledat",
           "x-ms-dataverse-type": "DateTimeType",
           "x-ms-schema-name": "cr854_scheduledat"
+        },
+        "cr854_sectioncopies": {
+          "type": "string",
+          "title": "sectioncopies",
+          "x-ms-dataverse-attribute": "cr854_sectioncopies",
+          "x-ms-dataverse-type": "MemoType",
+          "x-ms-schema-name": "cr854_sectioncopies",
+          "maxLength": 2000
         },
         "cr854_sectiontitles": {
           "type": "string",

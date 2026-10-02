@@ -52,12 +52,14 @@ export interface Cr854_deliverycardsBase {
   cr854_deliverycardid: string;
   cr854_department?: Cr854_deliverycardscr854_department;
   cr854_emailtemplate?: Cr854_deliverycardscr854_emailtemplate;
+  cr854_headline?: string;
   "cr854_heroimage@odata.bind"?: string;
   cr854_heroreason?: string;
   cr854_instructions?: string;
   cr854_name: string;
   cr854_products?: string;
   cr854_scheduledat?: string;
+  cr854_sectioncopies?: string;
   cr854_sectiontitles?: string;
   cr854_status?: Cr854_deliverycardscr854_status;
   cr854_theme?: string;

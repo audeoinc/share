@@ -1,38 +1,41 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import Alert from '@mui/material/Alert'
 import Box from '@mui/material/Box'
 import Button from '@mui/material/Button'
 import Chip from '@mui/material/Chip'
-import CircularProgress from '@mui/material/CircularProgress'
 import Dialog from '@mui/material/Dialog'
 import DialogActions from '@mui/material/DialogActions'
 import DialogTitle from '@mui/material/DialogTitle'
 import IconButton from '@mui/material/IconButton'
 import MenuItem from '@mui/material/MenuItem'
 import FormControlLabel from '@mui/material/FormControlLabel'
+import Slider from '@mui/material/Slider'
 import Switch from '@mui/material/Switch'
 import Tab from '@mui/material/Tab'
 import Tabs from '@mui/material/Tabs'
+import ToggleButton from '@mui/material/ToggleButton'
+import Tooltip from '@mui/material/Tooltip'
 import TextField from '@mui/material/TextField'
 import Typography from '@mui/material/Typography'
 import useMediaQuery from '@mui/material/useMediaQuery'
 import { useTheme } from '@mui/material/styles'
+import AddIcon from '@mui/icons-material/Add'
 import CloseIcon from '@mui/icons-material/Close'
+import RemoveIcon from '@mui/icons-material/Remove'
 import SaveIcon from '@mui/icons-material/Save'
-import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome'
 import { Cr854_deliverycardsService } from './generated/services/Cr854_deliverycardsService'
 import type { Cr854_deliverycards } from './generated/models/Cr854_deliverycardsModel'
 import { Cr854_deliveryproductsService } from './generated/services/Cr854_deliveryproductsService'
 import type { Cr854_products } from './generated/models/Cr854_productsModel'
 import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
-import { Candidates } from './Candidates'
-import { HeroCandidates } from './HeroCandidates'
+import { ContentPane } from './ContentPane'
 import { Preview } from './Preview'
-import { EMAIL_TEMPLATES, TEMPLATE_OPTIONS, TEMPLATE_VALUES, slotsOf, templateFromValue, type EmailTemplateId } from './templates'
+import { TEMPLATE_VALUES, sectionIndexAt, sectionsOf, templateFromValue, type EmailTemplateId } from './templates'
 import { Splitter } from './Splitter'
-import { DND_ITEM, DND_PRODUCT, SOURCE_AI, SOURCE_MANUAL, type Item } from './items'
-import { selectWithAi, type AiCard } from './aiSelect'
-import { draftCopy, suggestThemes, type ThemeSuggestion } from './aiDraft'
+import { DND_ITEM, DND_PRODUCT, SOURCE_MANUAL, STATE_CANDIDATE, STATE_SELECTED, type Candidate, type Item } from './items'
+import type { AiCard, CopyLanguage, ProposedHero } from './aiSelect'
+import { progressOf } from './progress'
+import { useAiDrafts } from './useAiDrafts'
 import { channelOptions, countryOptions, departmentOptions, statusColor, statusOptions } from './status'
 
 interface Props {
@@ -62,6 +65,7 @@ interface Form {
   department: string
   status: string
   theme: string
+  headline: string
   copy: string
   instructions: string
 }
@@ -76,6 +80,7 @@ const toForm = (c?: Cr854_deliverycards): Form => ({
   department: str(c?.cr854_department),
   status: c?.cr854_status === undefined ? String(statusOptions[0].value) : String(c.cr854_status),
   theme: c?.cr854_theme ?? '',
+  headline: c?.cr854_headline ?? '',
   copy: c?.cr854_copy ?? '',
   instructions: c?.cr854_instructions ?? '',
 })
@@ -96,7 +101,23 @@ function Select({ label, value, options, onChange }: {
   )
 }
 
-const WIDTH_KEY = 'cardDetail.paneWidths'
+const ZOOM_KEY = 'cardDetail.previewZoom'
+const ZOOM_MIN = 0.4
+const ZOOM_MAX = 1.2
+
+/** プレビューの倍率: 数値(1 = 現在のサイズ)または 'fit'(メール全体を画面の高さに収める) */
+function loadZoom(): number | 'fit' {
+  try {
+    const v = JSON.parse(localStorage.getItem(ZOOM_KEY) ?? 'null')
+    if (v === 'fit') return 'fit'
+    if (typeof v === 'number' && v >= ZOOM_MIN && v <= ZOOM_MAX) return v
+  } catch {
+    // 読めなければ既定値を使う
+  }
+  return 0.7
+}
+
+const WIDTH_KEY = 'cardDetail.paneWidths.v2'
 const MIN_W = 220
 const MAX_W = 640
 const clamp = (v: number) => Math.min(MAX_W, Math.max(MIN_W, v))
@@ -108,37 +129,63 @@ function loadWidths(): [number, number] {
   } catch {
     // 保存値が読めなければ既定値を使う
   }
-  return [300, 340]
+  return [300, 460]
 }
 
-const paneSx = { p: 2, overflow: 'auto', minHeight: 0, display: 'grid', gap: 1.5, alignContent: 'start' } as const
+/** 読み込み時点の配信商品の行(保存時の差分判定用) */
+interface RowSnap {
+  reason: string
+  source: number
+  state: number
+  section: number
+  order: number
+}
+
+/** 各セクションのコピーは、改行を含みうるので JSON の配列で保存する(古い形式の改行区切りも読む) */
+function parseCopies(v?: string): string[] {
+  if (!v) return []
+  try {
+    const a = JSON.parse(v)
+    if (Array.isArray(a)) return a.map(String)
+  } catch {
+    // JSON でなければ、改行区切りとして読む
+  }
+  return v.split('\n')
+}
+const encodeCopies = (a: string[]) => (a.some(Boolean) ? JSON.stringify(a) : '')
+
+const paneSx = { p: 2, overflow: 'auto', minHeight: 0, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 1.5, alignContent: 'start' } as const
 
 export function CardDetail({ card, products, heroes, otherThemes, onBack, onSaved }: Props) {
   const [form, setForm] = useState<Form>(() => toForm(card))
   const theme = useTheme()
   const fullScreen = useMediaQuery(theme.breakpoints.down('md'))
   const [items, setItems] = useState<Item[]>([])
+  // 選定候補(配信商品テーブルの「候補」の行。セクションごと)
+  const [candidates, setCandidates] = useState<Candidate[]>([])
   // 読み込み時点の配信商品(保存時に差分を取る)。読み込めなかったときは保存で消さないよう null のまま
-  const [original, setOriginal] = useState<Item[] | null>(card ? null : [])
+  const [original, setOriginal] = useState<Map<string, RowSnap> | null>(card ? null : new Map())
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [previewTab, setPreviewTab] = useState<'email' | 'push'>(() =>
     card?.cr854_channelname === 'プッシュ' ? 'push' : 'email',
   )
   const [showHeadings, setShowHeadings] = useState(true)
+  // プレビューの倍率(40〜120%)。'fit' は、メール全体が画面の高さに収まる倍率に自動で合わせる
+  const [zoom, setZoom] = useState<number | 'fit'>(loadZoom)
+  const [fitZoom, setFitZoom] = useState(1)
+  const previewBoxRef = useRef<HTMLDivElement>(null)
+  const previewInnerRef = useRef<HTMLDivElement>(null)
+  // コピー・ヘッドラインの言語(AI に渡す。保存はしない)
+  const [language, setLanguage] = useState<CopyLanguage>('auto')
   const [template, setTemplate] = useState<EmailTemplateId>(() => templateFromValue(card?.cr854_emailtemplate))
   // カテゴリ系テンプレートの見出し(セクションの順。保存は 1 行 1 見出し)
   const [sectionTitles, setSectionTitles] = useState<string[]>(() => (card?.cr854_sectiontitles ? card.cr854_sectiontitles.split('\n') : []))
-  const [aiBusy, setAiBusy] = useState(false)
-  const [themeBusy, setThemeBusy] = useState(false)
-  const [copyBusy, setCopyBusy] = useState(false)
-  const [themeIdeas, setThemeIdeas] = useState<ThemeSuggestion[]>([])
-  const [aiCount, setAiCount] = useState(() => {
-    const n = slotsOf(templateFromValue(card?.cr854_emailtemplate))
-    return String(n > 0 ? n : 4)
-  })
+  // 各セクションのコピー(セクションの順)
+  const [sectionCopies, setSectionCopies] = useState<string[]>(() => parseCopies(card?.cr854_sectioncopies))
+  // メイン画像の候補(AI が案を出したときの分。保存はしない)
+  const [heroCandidates, setHeroCandidates] = useState<ProposedHero[]>([])
   const [heroId, setHeroId] = useState<string | undefined>(card?._cr854_heroimage_value)
   const [heroReason, setHeroReason] = useState(card?.cr854_heroreason ?? '')
-  const [midTab, setMidTab] = useState<'products' | 'hero'>('products')
   const [widths, setWidths] = useState<[number, number]>(loadWidths)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -153,15 +200,26 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
       .then((res) => {
         if (cancelled) return
         if (!res.success) throw new Error(res.error?.message ?? '掲載商品の取得に失敗しました')
-        const loaded: Item[] = (res.data ?? []).map((r) => ({
-          key: r.cr854_deliveryproductid,
-          rowId: r.cr854_deliveryproductid,
-          productId: r._cr854_product_value ?? '',
-          reason: r.cr854_reason ?? '',
-          source: r.cr854_source ?? SOURCE_MANUAL,
-        }))
-        setItems(loaded)
-        setOriginal(loaded)
+        const sel: Item[] = []
+        const cands: Candidate[] = []
+        const snap = new Map<string, RowSnap>()
+        for (const r of res.data ?? []) {
+          const state = r.cr854_state ?? STATE_SELECTED
+          const section = r.cr854_section ?? 0
+          const base: Item = {
+            key: r.cr854_deliveryproductid,
+            rowId: r.cr854_deliveryproductid,
+            productId: r._cr854_product_value ?? '',
+            reason: r.cr854_reason ?? '',
+            source: r.cr854_source ?? SOURCE_MANUAL,
+          }
+          snap.set(base.rowId!, { reason: base.reason, source: base.source, state, section, order: r.cr854_sortorder ?? 0 })
+          if (state === STATE_CANDIDATE) cands.push({ ...base, section })
+          else sel.push(base)
+        }
+        setItems(sel)
+        setCandidates(cands)
+        setOriginal(snap)
       })
       .catch((e: unknown) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e))
@@ -177,7 +235,12 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
 
   const addProduct = (productId: string, at = items.length) => {
     if (items.some((i) => i.productId === productId)) return
-    const it: Item = { key: crypto.randomUUID(), productId, reason: '', source: SOURCE_MANUAL }
+    // 候補にあった商品なら、候補から選定へ移す(理由も引き継ぐ)
+    const cand = candidates.find((c) => c.productId === productId)
+    if (cand) setCandidates(candidates.filter((c) => c.key !== cand.key))
+    const it: Item = cand
+      ? { key: cand.key, rowId: cand.rowId, productId, reason: cand.reason, source: cand.source }
+      : { key: crypto.randomUUID(), productId, reason: '', source: SOURCE_MANUAL }
     setItems([...items.slice(0, at), it, ...items.slice(at)])
     setSelectedKey(it.key)
   }
@@ -211,6 +274,38 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
     setItems([...items].sort((a, b) => order.indexOf(cat(a)) - order.indexOf(cat(b))))
   }
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(ZOOM_KEY, JSON.stringify(zoom))
+    } catch {
+      // 保存できなくても動作には影響しない
+    }
+  }, [zoom])
+
+  // 全体表示: 倍率 1 での高さを測り、プレビューの枠に収まる倍率を求める(内容や窓の大きさが変わったら、測り直す)
+  useLayoutEffect(() => {
+    const box = previewBoxRef.current
+    const inner = previewInnerRef.current
+    if (zoom !== 'fit' || !box || !inner) return
+    const calc = () => {
+      inner.style.zoom = '1'
+      const h = inner.offsetHeight
+      const z = h > 0 ? Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, (box.clientHeight - 16) / h)) : 1
+      inner.style.zoom = String(z)
+      setFitZoom(z)
+    }
+    calc()
+    const ro = new ResizeObserver(calc)
+    ro.observe(box)
+    return () => {
+      ro.disconnect()
+      inner.style.zoom = ''
+    }
+  }, [zoom, previewTab, template, items, form.headline, form.copy, sectionTitles, sectionCopies, heroId, fullScreen])
+
+  const shownZoom = zoom === 'fit' ? fitZoom : zoom
+  const stepZoom = (d: number) => setZoom(Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.round((shownZoom + d) * 20) / 20)))
+
   const resize = (i: 0 | 1) => (dx: number) =>
     setWidths((w) => {
       const next: [number, number] = [w[0], w[1]]
@@ -235,92 +330,24 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
       channel: label(channelOptions, form.channel),
       department: label(departmentOptions, form.department),
       theme: form.theme,
+      headline: form.headline,
       copy: form.copy,
       instructions: form.instructions,
     }
   }
 
-  // 配信日・国・チャネル・部署などから、テーマ案を出させる
-  async function runThemeIdeas() {
-    if (!form.scheduledAt) {
-      setError('テーマ案を出すには、先に配信日時を入力してください')
-      return
-    }
-    setThemeBusy(true)
-    setError(null)
-    try {
-      setThemeIdeas(await suggestThemes({ card: buildAiCard(), otherThemes, products }))
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setThemeBusy(false)
-    }
-  }
+  // AI の案の状態と生成(案は採用するまで、配信カードには反映しない)
+  const drafts = useAiDrafts(
+    { buildCard: buildAiCard, products, heroes, otherThemes, template, items, candidates, sectionTitles, sectionCopies, heroId, heroReason, language },
+    setError,
+  )
 
-  // テーマ・掲載商品・メイン画像から、コピーと制作指示の案を作らせる
-  async function runCopy() {
-    if (!form.theme.trim()) {
-      setError('コピーを作るには、先にテーマを入力してください')
-      return
-    }
-    if ((form.copy || form.instructions) && !window.confirm('現在のコピーと制作指示を、AI の案で置き換えます。よろしいですか?')) return
-    setCopyBusy(true)
-    setError(null)
-    try {
-      const draft = await draftCopy({
-        card: buildAiCard(),
-        items: items.map((i) => ({ product: products.find((p) => p.cr854_productid === i.productId), reason: i.reason })),
-        hero: heroes.find((h) => h.cr854_heroimageid === heroId),
-      })
-      setForm((f) => ({ ...f, copy: draft.copy || f.copy, instructions: draft.instructions || f.instructions }))
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setCopyBusy(false)
-    }
-  }
-
-  // テーマに応じて、掲載商品とメイン画像をエージェントに選ばせる(現在の内容は置き換える)
-  async function runAi() {
-    if (!form.theme.trim()) {
-      setError('AI で選定するには、先にテーマを入力してください')
-      return
-    }
-    if ((items.length > 0 || heroId) && !window.confirm('現在の掲載商品とメイン画像を、AI の選定結果で置き換えます。よろしいですか?')) return
-    setAiBusy(true)
-    setError(null)
-    try {
-      const result = await selectWithAi({
-        card: buildAiCard(),
-        productCount: Number(aiCount),
-        products,
-        heroes,
-        // カテゴリ系テンプレートのときは、セクションごとに見出しと商品を選ばせる
-        sections: EMAIL_TEMPLATES[template].sections.some((s) => s.categoryHeading)
-          ? EMAIL_TEMPLATES[template].sections.map((s) => ({ slots: s.slots }))
-          : undefined,
-      })
-      setItems(
-        result.products.map((p) => ({ key: crypto.randomUUID(), productId: p.productId, reason: p.reason, source: SOURCE_AI })),
-      )
-      setSelectedKey(null)
-      if (result.sectionTitles) setSectionTitles(result.sectionTitles)
-      if (result.hero) {
-        setHeroId(result.hero.heroId)
-        setHeroReason(result.hero.reason)
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setAiBusy(false)
-    }
-  }
-
-  // テンプレートを変えたら、AI で選ぶ商品数も枠の数に合わせる
+  // テンプレートを変えると、セクションの構成が変わるので、候補と商品選定の案は破棄する
   const changeTemplate = (id: EmailTemplateId) => {
+    if (id === template) return
     setTemplate(id)
-    const n = slotsOf(id)
-    if (n > 0) setAiCount(String(n))
+    setCandidates([])
+    drafts.discardProposals()
   }
 
   const setSectionTitle = (i: number, text: string) =>
@@ -331,30 +358,54 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
       return next
     })
 
+  const setSectionCopy = (i: number, text: string) =>
+    setSectionCopies((prev) => {
+      const next = [...prev]
+      while (next.length <= i) next.push('')
+      next[i] = text
+      return next
+    })
+
   const removeItem = (key: string) => {
+    const idx = items.findIndex((i) => i.key === key)
+    if (idx >= 0) {
+      const section = sectionIndexAt(sectionsOf(template), idx)
+      setCandidates([{ ...items[idx], section }, ...candidates])
+    }
     setItems(items.filter((i) => i.key !== key))
     if (selectedKey === key) setSelectedKey(null)
   }
 
-  // 差分を配信商品テーブルへ反映する(削除 → 更新/追加。表示順は並び順から採番)
-  async function syncItems(cardId: string, cardName: string, before: Item[]) {
-    for (const old of before) {
-      if (!items.some((i) => i.rowId === old.rowId)) await Cr854_deliveryproductsService.delete(old.rowId!)
+  // 差分を配信商品テーブルへ反映する(選定済み + 候補。削除 → 更新/追加)
+  async function syncItems(cardId: string, cardName: string, before: Map<string, RowSnap>) {
+    const sections = sectionsOf(template)
+    const desired: { it: Item; state: typeof STATE_SELECTED | typeof STATE_CANDIDATE; section: number; order: number }[] = [
+      ...items.map((it, idx) => ({ it, state: STATE_SELECTED as typeof STATE_SELECTED, section: sectionIndexAt(sections, idx), order: idx + 1 })),
+      ...candidates.map((c, i) => ({ it: c as Item, state: STATE_CANDIDATE as typeof STATE_CANDIDATE, section: c.section, order: 1000 + i })),
+    ]
+    const keep = new Set(desired.map((d) => d.it.rowId).filter((id): id is string => !!id))
+    for (const id of before.keys()) {
+      if (!keep.has(id)) await Cr854_deliveryproductsService.delete(id)
     }
-    for (const [idx, it] of items.entries()) {
-      const fields = { cr854_sortorder: idx + 1, cr854_reason: it.reason, cr854_source: it.source }
+    for (const d of desired) {
+      const fields = {
+        cr854_sortorder: d.order,
+        cr854_reason: d.it.reason,
+        cr854_source: d.it.source,
+        cr854_state: d.state,
+        cr854_section: d.section,
+      }
       let res
-      if (it.rowId) {
-        const old = before.find((b) => b.rowId === it.rowId)
-        const same = old && old.reason === it.reason && old.source === it.source && before.indexOf(old) === idx
-        if (same) continue
-        res = await Cr854_deliveryproductsService.update(it.rowId, fields)
+      if (d.it.rowId) {
+        const old = before.get(d.it.rowId)
+        if (old && old.reason === d.it.reason && old.source === d.it.source && old.state === d.state && old.section === d.section && old.order === d.order) continue
+        res = await Cr854_deliveryproductsService.update(d.it.rowId, fields)
       } else {
         res = await Cr854_deliveryproductsService.create({
           ...fields,
-          cr854_name: `${cardName} / ${productName(it.productId)}`,
+          cr854_name: `${cardName} / ${productName(d.it.productId)}`,
           'cr854_deliverycard@odata.bind': `/cr854_deliverycards(${cardId})`,
-          'cr854_product@odata.bind': `/cr854_products(${it.productId})`,
+          'cr854_product@odata.bind': `/cr854_products(${d.it.productId})`,
           statecode: 0,
         })
       }
@@ -375,12 +426,14 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
         cr854_department: num(form.department),
         cr854_status: num(form.status),
         cr854_theme: form.theme,
+        cr854_headline: form.headline,
         cr854_products: items.map((i) => productName(i.productId)).filter(Boolean).join(' / '),
         cr854_copy: form.copy,
         cr854_instructions: form.instructions,
         cr854_heroreason: heroReason,
         cr854_emailtemplate: TEMPLATE_VALUES[template],
         cr854_sectiontitles: sectionTitles.join('\n').replace(/\n+$/, ''),
+        cr854_sectioncopies: encodeCopies(sectionCopies),
         // 外したときは null を送ってルックアップを空にする
         'cr854_heroimage@odata.bind': heroId
           ? `/cr854_heroimages(${heroId})`
@@ -404,10 +457,7 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
     }
   }
 
-  const selected = items.find((i) => i.key === selectedKey)
-  const selectedProduct = selected && products.find((p) => p.cr854_productid === selected.productId)
-  const layersFilled = [form.theme, items.length > 0, form.copy, form.instructions].filter(Boolean).length
-  const usedIds = new Set(items.map((i) => i.productId))
+  const progress = progressOf({ theme: form.theme, template, heroId, headline: form.headline, items, instructions: form.instructions })
   const hero = heroes.find((h) => h.cr854_heroimageid === heroId)
 
   return (
@@ -428,28 +478,9 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
     >
       <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1, pr: 1 }}>
         <Box component="span" sx={{ flexGrow: 1 }}>{card ? card.cr854_name : '配信カードの新規作成'}</Box>
-        <TextField
-          select
-          size="small"
-          label="商品数"
-          value={aiCount}
-          onChange={(e) => setAiCount(e.target.value)}
-          sx={{ width: 84 }}
-          disabled={aiBusy || saving}
-        >
-          {[2, 3, 4, 5, 6, 8].map((n) => (
-            <MenuItem key={n} value={String(n)}>{n}件</MenuItem>
-          ))}
-        </TextField>
-        <Button
-          variant="outlined"
-          onClick={runAi}
-          disabled={aiBusy || saving}
-          startIcon={aiBusy ? <CircularProgress size={16} /> : <AutoAwesomeIcon fontSize="small" />}
-        >
-          {aiBusy ? '選定中...' : 'AIで選定'}
-        </Button>
-        <Chip size="small" label={`工程 ${layersFilled} / 4`} color={layersFilled === 4 ? 'success' : 'default'} />
+        <Tooltip title={progress.remaining.length ? `未完了: ${progress.remaining.join('、')}` : 'すべての工程が完了しています'}>
+          <Chip size="small" label={`工程 ${progress.done} / ${progress.total}`} color={progress.done === progress.total ? 'success' : 'default'} />
+        </Tooltip>
         <IconButton onClick={onBack} aria-label="閉じる"><CloseIcon /></IconButton>
       </DialogTitle>
 
@@ -499,41 +530,30 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
             multiline
             minRows={2}
             size="small"
-            label="① テーマ"
+            label="テーマ(配信全体の前提。メールには出ません)"
             value={form.theme}
             onChange={(e) => set('theme')(e.target.value)}
             color={form.theme ? 'success' : 'primary'}
           />
-          <Button
-            onClick={runThemeIdeas}
-            disabled={themeBusy || saving}
-            startIcon={themeBusy ? <CircularProgress size={14} /> : <AutoAwesomeIcon fontSize="small" />}
-            sx={{ justifySelf: 'start' }}
-          >
-            {themeBusy ? '考え中...' : 'AIでテーマ案'}
-          </Button>
-          {themeIdeas.map((t) => (
-            <Box
-              key={t.theme}
-              onClick={() => {
-                set('theme')(t.theme)
-                setThemeIdeas([])
-              }}
-              sx={{ cursor: 'pointer', p: 1, border: 1, borderColor: 'divider', borderRadius: 1.5, '&:hover': { borderColor: 'primary.main', bgcolor: 'action.hover' } }}
-            >
-              <Typography sx={{ fontWeight: 600, fontSize: '0.9rem' }}>{t.theme}</Typography>
-              <Typography variant="caption" color="text.secondary">{t.reason}</Typography>
-            </Box>
-          ))}
           <Typography variant="caption" color={items.length ? 'success.main' : 'text.secondary'}>
-            ② 掲載商品: {items.length}件(中央の候補から右のプレビューへドラッグ)
+            掲載商品: {items.length}件(中央の「商品選定」タブで選びます)
           </Typography>
+          <TextField
+            fullWidth
+            multiline
+            minRows={1}
+            size="small"
+            label="ヘッドライン(メイン画像に載せる大見出し)"
+            value={form.headline}
+            onChange={(e) => set('headline')(e.target.value)}
+            color={form.headline ? 'success' : 'primary'}
+          />
           <TextField
             fullWidth
             multiline
             minRows={2}
             size="small"
-            label="③ コピー"
+            label="コピー(ヘッドラインの下の導入文)"
             value={form.copy}
             onChange={(e) => set('copy')(e.target.value)}
             color={form.copy ? 'success' : 'primary'}
@@ -543,58 +563,75 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
             multiline
             minRows={2}
             size="small"
-            label="④ 制作指示"
+            label="制作指示"
             value={form.instructions}
             onChange={(e) => set('instructions')(e.target.value)}
             color={form.instructions ? 'success' : 'primary'}
           />
-          <Button
-            onClick={runCopy}
-            disabled={copyBusy || saving}
-            startIcon={copyBusy ? <CircularProgress size={14} /> : <AutoAwesomeIcon fontSize="small" />}
-            sx={{ justifySelf: 'start' }}
-          >
-            {copyBusy ? '作成中...' : 'AIでコピー・制作指示'}
-          </Button>
         </Box>
 
         <Splitter onDrag={resize(0)} onDone={saveWidths} />
 
-        {/* 中: 商品の候補 */}
+        {/* 中: コンテンツ生成(テーマ・商品選定・コピー・制作指示) */}
         <Box sx={{ ...paneSx, bgcolor: 'action.hover' }}>
-          <Tabs value={midTab} onChange={(_, v) => setMidTab(v)} sx={{ minHeight: 36 }}>
-            <Tab value="products" label={`商品(${products.length})`} sx={{ minHeight: 36 }} />
-            <Tab value="hero" label={`メイン画像(${heroes.length})`} sx={{ minHeight: 36 }} />
-          </Tabs>
-          {midTab === 'products' ? (
-            <Candidates products={products} usedIds={usedIds} onAdd={(id) => addProduct(id)} />
-          ) : (
-            <HeroCandidates heroes={heroes} selectedId={heroId} onSelect={setHeroId} />
-          )}
+          <ContentPane
+            theme={form.theme}
+            headline={form.headline}
+            copy={form.copy}
+            instructions={form.instructions}
+            onField={(key, value) => setForm((f) => ({ ...f, [key]: value }))}
+            template={template}
+            onTemplate={changeTemplate}
+            sectionTitles={sectionTitles}
+            onSectionTitle={setSectionTitle}
+            sectionCopies={sectionCopies}
+            onSectionCopy={setSectionCopy}
+            products={products}
+            heroes={heroes}
+            items={items}
+            setItems={setItems}
+            candidates={candidates}
+            setCandidates={setCandidates}
+            heroId={heroId}
+            setHeroId={setHeroId}
+            heroReason={heroReason}
+            setHeroReason={setHeroReason}
+            heroCandidates={heroCandidates}
+            setHeroCandidates={setHeroCandidates}
+            language={language}
+            onLanguage={setLanguage}
+            drafts={drafts}
+            disabled={saving}
+          />
         </Box>
 
         <Splitter onDrag={resize(1)} onDone={saveWidths} />
 
         {/* 右: プレビュー */}
-        <Box sx={{ ...paneSx, gridTemplateRows: 'auto minmax(0, 1fr) auto' }}>
+        <Box sx={{ ...paneSx, gridTemplateRows: 'auto minmax(0, 1fr)' }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
             <Tabs value={previewTab} onChange={(_, v) => setPreviewTab(v)} sx={{ minHeight: 40, flexGrow: 1 }}>
               <Tab value="email" label="メール" sx={{ minHeight: 40 }} />
               <Tab value="push" label="プッシュ" sx={{ minHeight: 40 }} />
             </Tabs>
-            {previewTab === 'email' && (
-              <TextField
-                select
-                label="テンプレート"
-                value={template}
-                onChange={(e) => changeTemplate(e.target.value as EmailTemplateId)}
-                sx={{ minWidth: 250 }}
-              >
-                {TEMPLATE_OPTIONS.map((o) => (
-                  <MenuItem key={o.id} value={o.id}>{o.label}</MenuItem>
-                ))}
-              </TextField>
-            )}
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <IconButton size="small" onClick={() => stepZoom(-0.1)} aria-label="縮小"><RemoveIcon fontSize="small" /></IconButton>
+              <Slider
+                size="small"
+                min={ZOOM_MIN * 100}
+                max={ZOOM_MAX * 100}
+                step={5}
+                value={Math.round(shownZoom * 100)}
+                onChange={(_, v) => setZoom((v as number) / 100)}
+                sx={{ width: 90, mx: 0.5 }}
+                aria-label="プレビューの倍率"
+              />
+              <IconButton size="small" onClick={() => stepZoom(0.1)} aria-label="拡大"><AddIcon fontSize="small" /></IconButton>
+              <Typography variant="caption" sx={{ width: 34, textAlign: 'right' }}>{Math.round(shownZoom * 100)}%</Typography>
+              <ToggleButton size="small" value="fit" selected={zoom === 'fit'} onChange={() => setZoom(zoom === 'fit' ? shownZoom : 'fit')} sx={{ py: 0.25, ml: 0.5 }}>
+                全体
+              </ToggleButton>
+            </Box>
             {previewTab === 'email' && template === 'free' && (
               <>
                 <FormControlLabel
@@ -605,11 +642,12 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
               </>
             )}
           </Box>
-          <Box sx={{ overflow: 'auto', minHeight: 0, py: 1 }}>
+          <Box ref={previewBoxRef} sx={{ overflow: 'auto', minHeight: 0, py: 1 }}>
+            <Box ref={previewInnerRef} sx={{ zoom: zoom === 'fit' ? undefined : zoom }}>
             <Preview
               channel={previewTab}
               subject={form.name}
-              theme={form.theme}
+              headline={form.headline}
               copy={form.copy}
               items={items}
               products={products}
@@ -619,6 +657,8 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
               scheduledAt={form.scheduledAt}
               sectionTitles={sectionTitles}
               onSectionTitle={setSectionTitle}
+              sectionCopies={sectionCopies}
+              onSectionCopy={setSectionCopy}
               hero={hero}
               onDropHero={setHeroId}
               onClearHero={() => setHeroId(undefined)}
@@ -630,37 +670,7 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
               }}
               onDropAt={dropAt}
             />
-          </Box>
-          <Box sx={{ borderTop: 1, borderColor: 'divider', pt: 1.5, minHeight: 96, display: 'grid', gap: 1.5 }}>
-            {hero && (
-              <TextField
-                fullWidth
-                multiline
-                label={`メイン画像「${hero.cr854_name}」の選定理由`}
-                value={heroReason}
-                onChange={(e) => setHeroReason(e.target.value)}
-              />
-            )}
-            {selected && selectedProduct ? (
-              <Box sx={{ display: 'grid', gap: 1 }}>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  <Typography sx={{ fontWeight: 600 }}>{selectedProduct.cr854_name}</Typography>
-                  <Chip size="small" label={selected.source === SOURCE_AI ? 'AI' : '手動'} color={selected.source === SOURCE_AI ? 'secondary' : 'default'} />
-                </Box>
-                <TextField
-                  size="small"
-                  fullWidth
-                  multiline
-                  label="選定理由"
-                  value={selected.reason}
-                  onChange={(e) => setItems(items.map((i) => (i.key === selected.key ? { ...i, reason: e.target.value } : i)))}
-                />
-              </Box>
-            ) : (
-              <Typography variant="body2" color="text.secondary">
-                プレビューの商品をクリックすると、選定理由を編集できます。
-              </Typography>
-            )}
+            </Box>
           </Box>
         </Box>
       </Box>

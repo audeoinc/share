@@ -24,3 +24,13 @@ export const scaled = { zoom: CARD_SCALE, width: `${100 / CARD_SCALE}%` } as con
 
 export const yen = (v?: number) => (v === undefined ? '-' : `¥${v.toLocaleString('ja-JP')}`)
 export const DND_HERO = 'application/x-hero' // 候補 → プレビューのメインビジュアル枠(値はメイン画像ID)
+
+/** 選定候補(配信商品テーブルの「候補」の行)。どのセクションの候補かを持つ */
+export interface Candidate extends Item {
+  section: number
+}
+
+// 配信商品テーブルの「state」列(選択肢)の値
+export const STATE_SELECTED = 588230000
+export const STATE_CANDIDATE = 588230001
+export const DND_CAND = 'application/x-candidate' // 中ペインの候補の行(値は Candidate.key)
