@@ -1,9 +1,13 @@
-import { MicrosoftCopilotStudioService } from './generated/services/MicrosoftCopilotStudioService'
+import { Cr854_airequestsService } from './generated/services/Cr854_airequestsService'
 import type { Cr854_products } from './generated/models/Cr854_productsModel'
 import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
 
-// 公開済みの Copilot Studio エージェント(スキーマ名)。仕様は docs/copilot-agent.md
-export const COPILOT_AGENT_NAME = 'new_cr854_deliveryagent'
+// AI要求テーブルの状態(選択肢の値)。エージェントは、フロー「AI要求の処理」が呼ぶ。仕様は docs/ai-queue.md、docs/copilot-agent.md
+const STATUS_WAITING = 588230000
+const STATUS_DONE = 588230001
+const STATUS_ERROR = 588230002
+const POLL_INTERVAL_MS = 2000
+const POLL_TIMEOUT_MS = 180000
 
 /** コピーの言語: auto = 配信の国に合わせる(US は英語、JP は日本語) */
 export type CopyLanguage = 'auto' | 'ja' | 'en'
@@ -177,28 +181,35 @@ export function extractJson(text: string): unknown {
   return JSON.parse(text.slice(start, end + 1))
 }
 
-/** 応答オブジェクトから最終応答テキストを取り出す(プロパティの大文字小文字の揺れに対応) */
-function responseText(data: unknown): string {
-  const d = (data ?? {}) as Record<string, unknown>
-  const last = d.lastResponse ?? d.LastResponse
-  if (typeof last === 'string' && last) return last
-  const list = (d.responses ?? d.Responses) as unknown
-  if (Array.isArray(list) && list.length > 0) return String(list[list.length - 1])
-  const completed = d.completed ?? d.Completed
-  if (completed === false) throw new Error('エージェントの処理が完了しませんでした(応答なし)')
-  throw new Error('エージェントから応答がありませんでした')
-}
-
 /** プロンプトと入力 JSON をエージェントへ送り、応答の JSON オブジェクトを返す */
 export async function askAgent(prompt: string, payload: unknown): Promise<Record<string, unknown>> {
-  const res = await MicrosoftCopilotStudioService.ExecuteCopilotAsyncV2(COPILOT_AGENT_NAME, {
-    message: prompt + JSON.stringify(payload),
-    notificationUrl: 'https://notificationurlplaceholder',
+  // ゲストでも使えるよう、Copilot Studio は直接呼ばない。依頼を AI要求テーブルに書き、フロー(Power Automate)の返答を待つ
+  const created = await Cr854_airequestsService.create({
+    cr854_name: `req-${new Date().toISOString()}`,
+    cr854_prompt: prompt + JSON.stringify(payload),
+    cr854_status: STATUS_WAITING,
+    statecode: 0,
   })
-  if (!res.success) throw new Error(res.error?.message ?? 'エージェントの呼び出しに失敗しました')
-  const parsed = extractJson(responseText(res.data)) as Record<string, unknown>
-  if (typeof parsed.error === 'string') throw new Error(`エージェントからのエラー: ${parsed.error}`)
-  return parsed
+  const id = created.data?.cr854_airequestid
+  if (!created.success || !id) throw new Error(created.error?.message ?? 'AI の依頼を登録できませんでした')
+  try {
+    const deadline = Date.now() + POLL_TIMEOUT_MS
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS))
+      const got = await Cr854_airequestsService.get(id)
+      if (!got.success || !got.data) continue
+      const status = got.data.cr854_status
+      if (status === STATUS_ERROR) throw new Error(got.data.cr854_response || 'エージェントの呼び出しに失敗しました')
+      if (status !== STATUS_DONE) continue
+      const parsed = extractJson(got.data.cr854_response ?? '') as Record<string, unknown>
+      if (typeof parsed.error === 'string') throw new Error(`エージェントからのエラー: ${parsed.error}`)
+      return parsed
+    }
+    throw new Error('AI の返答がタイムアウトしました。フロー「AI要求の処理」がオンか確認してください')
+  } finally {
+    // 読み取ったあと(失敗時も)、依頼の行は消す
+    void Cr854_airequestsService.delete(id).catch(() => undefined)
+  }
 }
 
 const today = () => new Date().toISOString().slice(0, 10)

@@ -1,7 +1,7 @@
 {
   "version": "1.0",
-  "appId": null,
-  "appDisplayName": "test_app",
+  "appId": "cceaa26e-616d-4d4f-8a2b-8329eae1fc50",
+  "appDisplayName": "配信コンテンツプランナー",
   "region": "prod",
   "appType": "CodeApp",
   "environmentId": "b6b84b0a-d553-ed76-9c1c-970175f9d1be",
@@ -10,17 +10,7 @@
   "buildEntryPoint": "index.html",
   "localAppUrl": "http://localhost:3000",
   "logoPath": "Default",
-  "connectionReferences": {
-    "3efd360f-ae1d-4196-8b07-4d18b7b97739": {
-      "id": "/providers/Microsoft.PowerApps/apis/shared_microsoftcopilotstudio",
-      "displayName": "Microsoft Copilot Studio",
-      "dataSources": [
-        "microsoftcopilotstudio"
-      ],
-      "authenticationType": "oauthDefault",
-      "dataSets": {}
-    }
-  },
+  "connectionReferences": {},
   "databaseReferences": {
     "default.cds": {
       "dataSources": {
@@ -57,6 +47,11 @@
         "_b1347637": {
           "entitySetName": "cr854_deliverycards",
           "logicalName": "cr854_deliverycard",
+          "isHidden": false
+        },
+        "airequest": {
+          "entitySetName": "cr854_airequests",
+          "logicalName": "cr854_airequest",
           "isHidden": false
         }
       },

@@ -5,6 +5,13 @@
  */
 
 export const dataSourcesInfo = {
+  "cr854_airequests": {
+    "tableId": "",
+    "version": "",
+    "primaryKey": "cr854_airequestid",
+    "dataSourceType": "Dataverse",
+    "apis": {}
+  },
   "cr854_deliverycards": {
     "tableId": "",
     "version": "",
