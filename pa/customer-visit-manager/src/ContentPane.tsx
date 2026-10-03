@@ -1,4 +1,4 @@
-import { useState, type Dispatch, type ReactNode, type SetStateAction } from 'react'
+import { useCallback, useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react'
 import {
   Accordion,
   AccordionHeader,
@@ -28,6 +28,7 @@ import {
   ReOrderDotsVerticalRegular,
 } from '@fluentui/react-icons'
 import { AiIcon } from './AiMark'
+import { ChatPanel, type ChatMsg } from './ChatPanel'
 import { AutoTextarea } from './AutoTextarea'
 import type { Cr854_products } from './generated/models/Cr854_productsModel'
 import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
@@ -36,7 +37,7 @@ import { HeroCandidates } from './HeroCandidates'
 import { heroImage, productImage } from './images'
 import { productMarket } from './market'
 import { DND_CAND, DND_HERO, DND_ITEM, DND_PRODUCT, SOURCE_AI, SOURCE_MANUAL, yen, type Candidate, type Item } from './items'
-import type { CopyLanguage, ProposedHero } from './aiSelect'
+import { withChat, type CopyLanguage, type ProposedHero } from './aiSelect'
 import { optionLabel, tr, useT } from './i18n'
 import { progressOf } from './progress'
 import { EMAIL_TEMPLATES, TEMPLATE_OPTIONS, sectionRange, sectionsOf, type EmailTemplateId, type SectionInfo } from './templates'
@@ -87,6 +88,9 @@ interface Props {
 
 const useStyles = makeStyles({
   // グリッドの子は、中身が長くても列を押し広げない(帯や長い文がペインからはみ出さないように)
+  // 中ペイン全体: 上は内容(スクロール)、下は AI チャット(固定)
+  shell: { flexGrow: 1, minHeight: 0, minWidth: 0, display: 'flex', flexDirection: 'column' },
+  scroll: { flexGrow: 1, minHeight: 0, overflowY: 'auto', padding: '16px' },
   grid12: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', rowGap: '12px', minWidth: 0 },
   grid8: { display: 'grid', rowGap: '8px', minWidth: 0 },
   grid4: { display: 'grid', rowGap: '4px', minWidth: 0 },
@@ -633,7 +637,10 @@ function TemplateTab({ template, onTemplate, hasCandidates }: { template: EmailT
 // ------------------------------------------------------------------ 商品選定タブ(メイン画像 + セクション)
 
 /** mode = hero: メイン画像 / ヘッドライン・コピー。mode = sections: セクション(見出し・コピー・商品) */
-function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
+type ChatTargetInfo = { key: string; title: string }
+type RegisterChat = (target: ChatTargetInfo | null, run?: () => Promise<unknown>) => void
+
+function ProductsTab(p: Props & { mode: 'hero' | 'sections'; registerChat: RegisterChat }) {
   const s = useStyles()
   const t = useT()
   const { template, sectionTitles, products, heroes, items, setItems, candidates, setCandidates, drafts, disabled } = p
@@ -782,7 +789,7 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
     const prevTitle = sectionTitles[sec.index] ?? ''
     const prevCopy = p.sectionCopies[sec.index] ?? ''
     const result = await drafts.runSection(sec.index)
-    if (!result) return
+    if (!result) return false
     const [from, to] = sectionRange(sections, sec, prevItems.length)
     setItems([...prevItems.slice(0, from), ...toItems(result.selected), ...prevItems.slice(to)])
     setCandidates([...prevCands.filter((c) => c.section !== sec.index), ...toItems(result.candidates).map((c) => ({ ...c, section: sec.index }))])
@@ -798,6 +805,7 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
         p.onSectionCopy(sec.index, prevCopy)
       },
     })
+    return true
   }
 
   /** 見出しだけ作り直す(第 1 候補を設定) */
@@ -839,7 +847,7 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
   const selectHero = async () => {
     const prev = { id: p.heroId, reason: p.heroReason, cands: p.heroCandidates }
     const result = await drafts.runHero()
-    if (!result) return
+    if (!result) return false
     if (result.hero) {
       p.setHeroId(result.hero.heroId)
       p.setHeroReason(result.hero.reason)
@@ -853,7 +861,19 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
         p.setHeroCandidates(prev.cands)
       },
     })
+    return true
   }
+
+  // チャットの対象: 開いているサブタブ(メイン画像 / ヘッドライン・コピー / 各セクション)
+  useEffect(() => {
+    if (p.mode === 'hero') {
+      if (active === 'copy') p.registerChat({ key: 'hero-copy', title: tr('ヘッドライン・コピー', 'Headline & copy') }, () => drafts.runCopy())
+      else p.registerChat({ key: 'hero-image', title: tr('メイン画像', 'Main image') }, selectHero)
+    } else {
+      const sec = sections[active as number]
+      if (sec) p.registerChat({ key: `section-${sec.index}`, title: sectionLabel(sec) }, () => selectSection(sec))
+    }
+  })
 
   const undoAlert = undo && (
     <MessageBar layout="multiline" intent="success">
@@ -1261,17 +1281,69 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
 
 // ------------------------------------------------------------------ 中ペイン全体
 
+/** チャットの入力欄の上に出す、よく使う頼み方(対象ごと)。押すと入力欄に入る */
+function chatSuggestions(key?: string): string[] {
+  if (!key) return []
+  if (key === 'theme') return [tr('もっとカジュアルな切り口で', 'Make it more casual'), tr('季節感を強めて', 'Lean harder on the season'), tr('売れ筋の商品を主役にして', 'Center it on best-selling products')]
+  if (key === 'hero-image') return [tr('もっと明るい雰囲気の画像に', 'Pick a brighter, lighter image'), tr('商品が目立つ画像に', 'Pick an image where the products stand out')]
+  if (key === 'hero-copy') return [tr('もっと短く', 'Make it shorter'), tr('行動を促す言い方に', 'Use a stronger call to action'), tr('上品で落ち着いた言い方に', 'Make the tone calmer and more refined')]
+  if (key === 'instructions') return [tr('もっと簡潔に', 'Make it more concise'), tr('色味の指定を足して', 'Add color direction'), tr('CTAを目立たせて', 'Make the call to action stand out')]
+  return [tr('必ず入れたい商品: ', 'Must include this product: '), tr('もっと手頃な価格の商品で', 'Use more affordable products'), tr('新作を優先して', 'Prioritize new arrivals')]
+}
+
 export function ContentPane(props: Props) {
   const s = useStyles()
   const t = useT()
   const { theme, headline, instructions, onField, drafts, template, onTemplate, candidates } = props
   const [tab, setTab] = useState<TopTab>('theme')
+
+  // ---- AI チャット(開いているタブの案づくりに、指示と対話を加える)。会話は、タブ(対象)ごとに持つ。保存はしない
+  const [chats, setChats] = useState<Record<string, ChatMsg[]>>({})
+  const [chatTarget, setChatTarget] = useState<{ key: string; title: string } | null>(null)
+  const [chatBusy, setChatBusy] = useState(false)
+  const chatRun = useRef<(() => Promise<unknown>) | null>(null)
+  const registerChat = useCallback<RegisterChat>((target, run) => {
+    chatRun.current = run ?? null
+    setChatTarget((prev) => (prev?.key === target?.key && prev?.title === target?.title ? prev : target))
+  }, [])
   const pr = progressOf({ theme, template, heroId: props.heroId, headline, items: props.items, instructions })
 
   const mark = (filled: boolean, hasIdeas: boolean) => `${filled ? '✓ ' : ''}${hasIdeas ? '● ' : ''}`
   const needTheme = theme.trim() ? undefined : t('先にテーマを決めてください', 'Set a theme first')
 
+  // テーマ・テンプレート・制作指示のタブの対象(ヒーロー・セクションは、各タブ(ProductsTab)が知らせる)
+  useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect */
+    if (tab === 'theme') registerChat({ key: 'theme', title: t('テーマ', 'Theme') }, () => drafts.runTheme())
+    else if (tab === 'instructions') registerChat({ key: 'instructions', title: t('制作指示', 'Production notes') }, () => drafts.runInstructions())
+    else if (tab === 'template') registerChat(null)
+    /* eslint-enable react-hooks/set-state-in-effect */
+  })
+
+  const sendChat = async (text: string) => {
+    const run = chatRun.current
+    if (!chatTarget || !run || chatBusy) return
+    const key = chatTarget.key
+    const turns: ChatMsg[] = [...(chats[key] ?? []), { role: 'user', text }]
+    setChats((prev) => ({ ...prev, [key]: turns }))
+    setChatBusy(true)
+    let reply = ''
+    try {
+      const out = await withChat(turns, () => run())
+      reply = out.value === true ? out.reply || tr('反映しました', 'Done.') : tr('うまくいきませんでした。画面下のメッセージを確認してください', "That didn't work. Check the message at the bottom of the screen.")
+    } catch (e) {
+      reply = e instanceof Error ? e.message : String(e)
+    } finally {
+      setChatBusy(false)
+    }
+    setChats((prev) => ({ ...prev, [key]: [...turns, { role: 'assistant', text: reply }] }))
+  }
+
+  const suggestions = chatSuggestions(chatTarget?.key)
+
   return (
+    <div className={s.shell}>
+    <div className={s.scroll}>
     <div className={s.grid12}>
       <Text weight="semibold" size={300}>{t('コンテンツ生成', 'Content generation')}</Text>
       <TabList size="small" className={s.tabs} selectedValue={tab} onTabSelect={(_, d) => setTab(d.value as TopTab)}>
@@ -1301,8 +1373,8 @@ export function ContentPane(props: Props) {
         />
       )}
       {tab === 'template' && <TemplateTab template={template} onTemplate={onTemplate} hasCandidates={candidates.length > 0} />}
-      {tab === 'hero' && <ProductsTab {...props} mode="hero" />}
-      {tab === 'sections' && <ProductsTab {...props} mode="sections" />}
+      {tab === 'hero' && <ProductsTab {...props} mode="hero" registerChat={registerChat} />}
+      {tab === 'sections' && <ProductsTab {...props} mode="sections" registerChat={registerChat} />}
       {tab === 'instructions' && (
         <IdeaTab
           label={t('制作指示', 'Production notes')}
@@ -1322,6 +1394,17 @@ export function ContentPane(props: Props) {
           onGenerate={drafts.runInstructions}
         />
       )}
+    </div>
+    </div>
+    <ChatPanel
+      title={chatTarget?.title ?? null}
+      messages={chatTarget ? (chats[chatTarget.key] ?? []) : []}
+      busy={chatBusy}
+      suggestions={suggestions}
+      idleHint={t('テンプレートは、AIチャットの対象ではありません。他のタブを開いてください', 'The template is not an AI chat target. Open another tab.')}
+      onSend={(text) => void sendChat(text)}
+      onClear={() => chatTarget && setChats((prev) => ({ ...prev, [chatTarget.key]: [] }))}
+    />
     </div>
   )
 }

@@ -198,6 +198,38 @@ const JSON_NOTE = '【重要】返答の JSON は、文字列の中に半角の�
 const EN_NOTE = '【重要】画面に表示する文章(テーマ、見出し、理由、切り口、制作指示など)は、すべて自然な英語で書くこと。以下の指示にある日本語の例は、書式の参考であり、出力は英語にする。\n\n'
 const PARSE_ATTEMPTS = 3
 
+// ---- チャット: 案づくりに、ユーザーの指示と、これまでの対話を加える ----
+export interface ChatTurn {
+  role: 'user' | 'assistant'
+  text: string
+}
+
+// withChat の実行中だけ有効な、対話の履歴。askAgent が、依頼に加える
+let activeChat: ChatTurn[] | null = null
+let lastReply = ''
+const CHAT_HISTORY_LIMIT = 12
+
+const chatNote = () =>
+  `【ユーザーとの対話】入力の chat は、ユーザーとあなたのこれまでの対話(古い順)。最後の user の発言が、最新の依頼。` +
+  `その依頼を最優先で反映する。「必ず含める」「〜しない」のような条件は厳守し、前の user の発言にある条件も引き継ぐ。` +
+  `以下の通常のルールと矛盾する場合は、ユーザーの依頼を優先する(ただし、出力の形式と、商品は products の中からだけ選ぶ、というルールは守る)。` +
+  `返答の JSON のトップレベルに、reply(依頼にどう応えたかを、1〜2 文で。${getLang() === 'en' ? '英語' : '日本語'}で)を加える。\n\n`
+
+/**
+ * fn の中の AI への依頼に、対話の履歴(chat)を加える。AI が添えた reply(依頼にどう応えたかの一言)も返す。
+ * 同時に複数の依頼を流すと混ざるので、チャットの送信中は、呼び出し側で 1 件ずつにすること。
+ */
+export async function withChat<T>(turns: ChatTurn[], fn: () => Promise<T>): Promise<{ value: T; reply: string }> {
+  activeChat = turns.slice(-CHAT_HISTORY_LIMIT)
+  lastReply = ''
+  try {
+    const value = await fn()
+    return { value, reply: lastReply }
+  } finally {
+    activeChat = null
+  }
+}
+
 /**
  * 画面が英語のとき、指示文の「日本語で書く」という指定を「英語で書く」に直し、文字数の上限を英語の長さに合わせる。
  * コピーの言語の指定('ja' は日本語、'en' は英語)など、出力の言語を決めない箇所は変えない。
@@ -216,10 +248,13 @@ function localizePrompt(prompt: string): string {
 export async function askAgent(prompt: string, payload: unknown): Promise<Record<string, unknown>> {
   let lastError: unknown
   for (let attempt = 0; attempt < PARSE_ATTEMPTS; attempt++) {
-    const text = await askText((getLang() === 'en' ? EN_NOTE : '') + JSON_NOTE + localizePrompt(prompt) + JSON.stringify(payload))
+    const chat = activeChat
+    const body = chat && chat.length > 0 ? { ...(payload as object), chat } : payload
+    const text = await askText((getLang() === 'en' ? EN_NOTE : '') + JSON_NOTE + (chat && chat.length > 0 ? chatNote() : '') + localizePrompt(prompt) + JSON.stringify(body))
     try {
       const parsed = extractJson(text) as Record<string, unknown>
       if (typeof parsed.error === 'string') throw new Error(tr(`エージェントからのエラー: ${parsed.error}`, `Error from the agent: ${parsed.error}`))
+      if (chat && chat.length > 0) lastReply = typeof parsed.reply === 'string' ? parsed.reply.trim() : ''
       return parsed
     } catch (e) {
       if (!(e instanceof SyntaxError)) throw e

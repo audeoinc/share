@@ -136,7 +136,7 @@ function loadZoom(): number | 'fit' {
 /** 自動下書きを済ませたカード(同じカードを開き直しても、再実行しない) */
 const autoDrafted = new Set<string>()
 
-const WIDTH_KEY = 'cardDetail.paneWidths.v2'
+const WIDTH_KEY = 'cardDetail.paneWidths.v3'
 const MIN_W = 220
 const MAX_W = 640
 const clamp = (v: number) => Math.min(MAX_W, Math.max(MIN_W, v))
@@ -148,7 +148,9 @@ function loadWidths(): [number, number] {
   } catch {
     // 保存値が読めなければ既定値を使う
   }
-  return [300, 460]
+  // 既定値: ダイアログの幅(最大 1800px)に合わせる。左 26%・中 36%・右(プレビュー)は残り。AIチャットが使いやすいよう、中ペインを広めにする
+  const total = Math.min(1800, window.innerWidth * 0.98)
+  return [clamp(Math.round(total * 0.26)), clamp(Math.round(total * 0.36))]
 }
 
 /** 読み込み時点の配信商品の行(保存時の差分判定用) */
@@ -230,7 +232,8 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground1,
     alignContent: 'start',
   },
-  paneMid: { backgroundColor: tokens.colorNeutralBackground1 },
+  // 中ペインは、余白と、スクロールを内側(ContentPane)に任せる: 上に内容、下にチャットを固定する
+  paneMid: { backgroundColor: tokens.colorNeutralBackground1, padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' },
   panePreview: { gridTemplateRows: 'auto minmax(0, 1fr)' },
   caption: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200, fontWeight: tokens.fontWeightRegular },
   lead: { fontWeight: tokens.fontWeightSemibold },

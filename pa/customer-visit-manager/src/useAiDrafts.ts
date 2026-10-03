@@ -88,6 +88,7 @@ export function useAiDrafts(inputs: DraftInputs, onError: (message: string | nul
       const card = inputs.buildCard()
       if (!card.scheduledAt) throw new Error(tr('テーマ案を出すには、先に配信日時を入力してください', 'Enter the send date and time before requesting theme ideas'))
       setThemeIdeas(await suggestThemes({ card, otherThemes: inputs.otherThemes, products: inputs.products }))
+      return true
     })
 
   const runCopy = () =>
@@ -95,6 +96,7 @@ export function useAiDrafts(inputs: DraftInputs, onError: (message: string | nul
       const ctx = context()
       if (!ctx.card.theme.trim()) throw new Error(tr('コピー案を出すには、先にテーマを決めてください', 'Set a theme before requesting copy ideas'))
       setCopyIdeas(await suggestCopies(ctx))
+      return true
     })
 
   const runInstructions = () =>
@@ -102,6 +104,7 @@ export function useAiDrafts(inputs: DraftInputs, onError: (message: string | nul
       const ctx = context()
       if (!ctx.card.theme.trim()) throw new Error(tr('制作指示の案を出すには、先にテーマを決めてください', 'Set a theme before requesting production instruction ideas'))
       setInstructionIdeas(await suggestInstructions(ctx))
+      return true
     })
 
   /** メイン画像を選ばせる(結果を返す。設定は呼び出し側が行う) */
