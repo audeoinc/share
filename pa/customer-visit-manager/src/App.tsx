@@ -24,6 +24,7 @@ import type { Cr854_products } from './generated/models/Cr854_productsModel'
 import { Cr854_heroimagesService } from './generated/services/Cr854_heroimagesService'
 import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
 import { Calendar } from './Calendar'
+import { withHeroLabels, withProductLabels } from './labels'
 import { CardDetail } from './CardDetail'
 import { loadAutoDraft, saveAutoDraft } from './settings'
 import { locale, optionLabel, setLang, tr, useLang, useT } from './i18n'
@@ -244,13 +245,13 @@ function App() {
     void load()
     Cr854_productsService.getAll({ orderBy: ['cr854_productcode asc'] })
       .then((res) => {
-        if (res.success) setProducts(res.data ?? [])
+        if (res.success) setProducts((res.data ?? []).map(withProductLabels))
         else setError(res.error?.message ?? tr('商品の取得に失敗しました', 'Failed to load products'))
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
     Cr854_heroimagesService.getAll({ orderBy: ['cr854_imagecode asc'] })
       .then((res) => {
-        if (res.success) setHeroes(res.data ?? [])
+        if (res.success) setHeroes((res.data ?? []).map(withHeroLabels))
         else setError(res.error?.message ?? tr('メイン画像の取得に失敗しました', 'Failed to load hero images'))
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))

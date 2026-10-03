@@ -4,7 +4,6 @@ import {
   AccordionHeader,
   AccordionItem,
   AccordionPanel,
-  Avatar,
   Badge,
   Button,
   Divider,
@@ -25,7 +24,6 @@ import {
   ArrowUpRegular,
   ChevronDownRegular,
   DismissRegular,
-  ReOrderDotsVerticalRegular,
 } from '@fluentui/react-icons'
 import { AiIcon } from './AiMark'
 import { ChatPanel, type ChatMsg } from './ChatPanel'
@@ -35,12 +33,13 @@ import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
 import { Candidates } from './Candidates'
 import { HeroCandidates } from './HeroCandidates'
 import { heroImage, productImage } from './images'
-import { productMarket } from './market'
-import { DND_CAND, DND_HERO, DND_ITEM, DND_PRODUCT, SOURCE_AI, SOURCE_MANUAL, yen, type Candidate, type Item } from './items'
+import { DND_HERO, SOURCE_AI, type Candidate, type Item } from './items'
 import { withChat, type CopyLanguage, type ProposedHero } from './aiSelect'
 import { optionLabel, tr, useT } from './i18n'
+import { Row, productMeta } from './ProductRow'
+import { useSelection } from './useSelection'
 import { progressOf } from './progress'
-import { EMAIL_TEMPLATES, TEMPLATE_OPTIONS, sectionRange, sectionsOf, type EmailTemplateId, type SectionInfo } from './templates'
+import { EMAIL_TEMPLATES, TEMPLATE_OPTIONS, sectionRange, type EmailTemplateId, type SectionInfo } from './templates'
 import type { AiDrafts } from './useAiDrafts'
 
 type TopTab = 'theme' | 'template' | 'hero' | 'sections' | 'instructions'
@@ -134,42 +133,6 @@ const useStyles = makeStyles({
     columnGap: '4px',
     '& button': { flexShrink: 0, whiteSpace: 'nowrap' },
   },
-  // Row
-  reason: {
-    display: '-webkit-box',
-    WebkitLineClamp: 2,
-    WebkitBoxOrient: 'vertical',
-    overflow: 'hidden',
-    fontSize: tokens.fontSizeBase200,
-    lineHeight: tokens.lineHeightBase200,
-  },
-  reasonEditable: {
-    cursor: 'text',
-    ':hover': { backgroundColor: tokens.colorSubtleBackgroundHover },
-  },
-  reasonPlain: { cursor: 'default' },
-  row: {
-    display: 'flex',
-    columnGap: '8px',
-    padding: '8px',
-    borderRadius: tokens.borderRadiusLarge,
-    border: `1px solid ${tokens.colorNeutralStroke2}`,
-    backgroundColor: tokens.colorNeutralBackground1,
-    minWidth: 0,
-    ':hover': { backgroundColor: tokens.colorNeutralBackground1Hover },
-  },
-  rowHighlight: {
-    border: `1px solid ${tokens.colorBrandStroke1}`,
-    backgroundColor: tokens.colorBrandBackground2,
-  },
-  rowDim: { opacity: 0.8 },
-  rowDraggable: { cursor: 'grab' },
-  dragIcon: { alignSelf: 'center', marginLeft: '-4px', marginRight: '-4px', color: tokens.colorNeutralForegroundDisabled, flexShrink: 0 },
-  avatar: { flexShrink: 0, height: '44px', width: '44px', borderRadius: tokens.borderRadiusMedium },
-  avatarWide: { width: '72px', height: '40px' },
-  rowBody: { flexGrow: 1, minWidth: 0, display: 'grid', rowGap: '2px' },
-  noWrap: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: tokens.fontSizeBase200, color: tokens.colorNeutralForeground3 },
-  rowActions: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', justifyContent: 'center', flexShrink: 0 },
   // Block
   block: {
     display: 'grid',
@@ -276,88 +239,6 @@ function AiButton({ busy, disabled, onClick, children }: { busy: boolean; disabl
     </Button>
   )
 }
-
-/** 理由の表示。2 行で省略し、クリックすると全文を編集できる(onChange なしなら読み取り専用) */
-function ReasonText({ value, onChange }: { value: string; onChange?: (v: string) => void }) {
-  const s = useStyles()
-  const t = useT()
-  const [editing, setEditing] = useState(false)
-  if (onChange && editing) {
-    return (
-      <Field label={t('選定理由', 'Selection reason')} size="small">
-        <AutoTextarea
-          autoFocus
-          size="small"
-                    value={value}
-          onChange={(_, d) => onChange(d.value)}
-          onBlur={() => setEditing(false)}
-        />
-      </Field>
-    )
-  }
-  return (
-    <span
-      className={mergeClasses(s.reason, onChange ? s.reasonEditable : s.reasonPlain)}
-      style={{ color: value ? tokens.colorNeutralForeground3 : tokens.colorNeutralForegroundDisabled }}
-      onClick={onChange ? () => setEditing(true) : undefined}
-      title={onChange ? t('クリックして編集', 'Click to edit') : undefined}
-    >
-      {value || (onChange ? t('(理由を入力)', '(Enter a reason)') : t('(理由なし)', '(No reason)'))}
-    </span>
-  )
-}
-
-interface RowProps {
-  image?: string
-  wide?: boolean
-  title: string
-  meta: string
-  reason: string
-  onReason?: (v: string) => void
-  source?: number
-  badge?: string
-  actions?: ReactNode
-  dim?: boolean
-  /** ドラッグ&ドロップ(ドラッグ元・ドロップ先) */
-  drag?: {
-    draggable?: boolean
-    onDragStart?: (e: React.DragEvent) => void
-    onDragOver?: (e: React.DragEvent) => void
-    onDragLeave?: (e: React.DragEvent) => void
-    onDrop?: (e: React.DragEvent) => void
-  }
-  /** ドロップ先として強調する */
-  highlight?: boolean
-}
-
-function Row({ image, wide, title, meta, reason, onReason, source, badge, actions, dim, drag, highlight }: RowProps) {
-  const s = useStyles()
-  const t = useT()
-  return (
-    <div
-      {...drag}
-      className={mergeClasses(s.row, highlight && s.rowHighlight, dim && s.rowDim, drag?.draggable && s.rowDraggable)}
-    >
-      {drag?.draggable && <ReOrderDotsVerticalRegular className={s.dragIcon} />}
-      <Avatar shape="square" image={{ src: image, alt: title }} name={title} className={mergeClasses(s.avatar, wide && s.avatarWide)} />
-      <div className={s.rowBody}>
-        <div className={s.flexRowTight}>
-          <Text weight="semibold" size={300}>{title}</Text>
-          {source !== undefined && (
-            <Badge size="small" appearance="tint" color={source === SOURCE_AI ? 'brand' : 'informative'}>{source === SOURCE_AI ? 'AI' : t('手動', 'Manual')}</Badge>
-          )}
-          {badge && <Badge size="small" appearance="tint" color="warning">{badge}</Badge>}
-        </div>
-        <span className={s.noWrap}>{meta}</span>
-        <ReasonText value={reason} onChange={onReason} />
-      </div>
-      {actions && <div className={s.rowActions}>{actions}</div>}
-    </div>
-  )
-}
-
-const productMeta = (p?: Cr854_products) =>
-  p ? `${p.cr854_productcode} ・ ${yen(p.cr854_price, productMarket(p))} ・ ${tr('在庫', 'Stock ')}${p.cr854_stock ?? '-'} ・ ${optionLabel(p.cr854_salestrendname)} ・ ★${p.cr854_rating ?? '-'}` : ''
 
 const heroMeta = (h?: Cr854_heroimages) => (h ? `${h.cr854_imagecode} ・ ${optionLabel(h.cr854_purposename)} ・ ${optionLabel(h.cr854_seasonname)} ・ ${h.cr854_tags ?? ''}` : '')
 
@@ -644,7 +525,7 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections'; registerChat: Regis
   const s = useStyles()
   const t = useT()
   const { template, sectionTitles, products, heroes, items, setItems, candidates, setCandidates, drafts, disabled } = p
-  const sections = sectionsOf(template)
+  const { sections, listOf, isFull, moveInSection, demote, dropKey, setDropKey, startDrag, overTarget, leaveTarget, dropOnSelected, dropOnSelectedArea, dropOnCandidates, promote, addManual, setItemReason, setCandReason, toItems } = useSelection({ template, items, setItems, candidates, setCandidates })
   const [sub, setSub] = useState<number | 'hero' | 'copy'>(p.mode === 'hero' ? 'hero' : 0)
   const active: number | 'hero' | 'copy' =
     p.mode === 'hero' ? (sub === 'copy' ? 'copy' : 'hero') : typeof sub === 'number' ? Math.min(sub, sections.length - 1) : 0
@@ -652,126 +533,8 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections'; registerChat: Regis
   const heroById = new Map(heroes.map((x) => [x.cr854_heroimageid, x]))
   const noTheme = !p.theme.trim()
 
-  /** そのセクションの選定済み商品(最後のセクションは、枠を超えた分も含める) */
-  const listOf = (sec: SectionInfo) => {
-    const [from, to] = sectionRange(sections, sec, items.length)
-    return items.slice(from, to)
-  }
-  const isFull = (sec: SectionInfo) => Number.isFinite(sec.slots) && listOf(sec).length >= sec.slots
-
-  const moveInSection = (sec: SectionInfo, key: string, delta: number) =>
-    setItems((prev) => {
-      const [from, to] = sectionRange(sections, sec, prev.length)
-      const i = prev.findIndex((x) => x.key === key)
-      const j = i + delta
-      if (i < 0 || j < from || j >= to) return prev
-      const next = [...prev]
-      ;[next[i], next[j]] = [next[j], next[i]]
-      return next
-    })
-
-  const demote = (sec: SectionInfo, item: Item) => {
-    setItems((prev) => prev.filter((x) => x.key !== item.key))
-    setCandidates((prev) => [{ ...item, section: sec.index }, ...prev])
-  }
-
-  /** 候補を選定済みへ。枠がいっぱいなら、そのセクションの最後の商品を候補へ下げる */
-  const promote = (sec: SectionInfo, cand: Candidate) => {
-    const list = listOf(sec)
-    const full = isFull(sec)
-    let nextItems = [...items]
-    let nextCands = candidates.filter((c) => c.key !== cand.key)
-    if (full) {
-      const last = list[list.length - 1]
-      nextItems = nextItems.filter((x) => x.key !== last.key)
-      nextCands = [{ ...last, section: sec.index }, ...nextCands]
-    }
-    const insertAt = sec.start + (full ? sec.slots - 1 : list.length)
-    nextItems.splice(insertAt, 0, { key: cand.key, rowId: cand.rowId, productId: cand.productId, reason: cand.reason, source: cand.source })
-    setItems(nextItems)
-    setCandidates(nextCands)
-  }
-
-  const addManual = (sec: SectionInfo, productId: string) => {
-    if (items.some((x) => x.productId === productId)) return
-    const existing = candidates.find((c) => c.productId === productId)
-    promote(sec, existing ?? { key: crypto.randomUUID(), productId, reason: '', source: SOURCE_MANUAL, section: sec.index })
-  }
-
-  // ---- ドラッグ&ドロップ
-  const [dropKey, setDropKey] = useState<string | null>(null)
-  const startDrag = (kind: 'item' | 'cand', key: string, productId: string) => (e: React.DragEvent) => {
-    if (kind === 'item') e.dataTransfer.setData(DND_ITEM, key)
-    else {
-      e.dataTransfer.setData(DND_CAND, key)
-      e.dataTransfer.setData(DND_PRODUCT, productId) // 右のプレビューへも落とせる
-    }
-    e.dataTransfer.effectAllowed = 'move'
-  }
-  const overTarget = (id: string) => (e: React.DragEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
-    setDropKey(id)
-  }
-  const leaveTarget = (id: string) => () => setDropKey((k) => (k === id ? null : k))
-
-  /** 候補(または商品一覧の商品)を、選定済みの target と入れ替える */
-  const swapIn = (sec: SectionInfo, target: Item, incoming: Candidate) => {
-    setItems((prev) => prev.map((x) => (x.key === target.key ? { key: incoming.key, rowId: incoming.rowId, productId: incoming.productId, reason: incoming.reason, source: incoming.source } : x)))
-    setCandidates((prev) => [{ ...target, section: sec.index }, ...prev.filter((c) => c.key !== incoming.key)])
-  }
-
-  /** 選定済みの行へのドロップ: 選定済みどうしは並べ替え、候補・商品一覧からは入れ替え */
-  const dropOnSelected = (sec: SectionInfo, target: Item, dt: DataTransfer) => {
-    const itemKey = dt.getData(DND_ITEM)
-    const candKey = dt.getData(DND_CAND)
-    const productId = dt.getData(DND_PRODUCT)
-    if (itemKey) {
-      if (itemKey === target.key) return
-      setItems((prev) => {
-        const [from, to] = sectionRange(sections, sec, prev.length)
-        const a = prev.findIndex((x) => x.key === itemKey)
-        const b = prev.findIndex((x) => x.key === target.key)
-        if (a < from || a >= to || b < from || b >= to) return prev
-        const next = [...prev]
-        const [moved] = next.splice(a, 1)
-        next.splice(b, 0, moved)
-        return next
-      })
-    } else if (candKey) {
-      const c = candidates.find((x) => x.key === candKey)
-      if (c) swapIn(sec, target, c)
-    } else if (productId && !items.some((x) => x.productId === productId)) {
-      const c = candidates.find((x) => x.productId === productId) ?? { key: crypto.randomUUID(), productId, reason: '', source: SOURCE_MANUAL, section: sec.index }
-      swapIn(sec, target, c)
-    }
-  }
-
-  /** 選定済みリストの空きへのドロップ(枠に余裕があるときだけ、候補・商品一覧から追加) */
-  const dropOnSelectedArea = (sec: SectionInfo, dt: DataTransfer) => {
-    if (isFull(sec)) return
-    const candKey = dt.getData(DND_CAND)
-    const productId = dt.getData(DND_PRODUCT)
-    const c = candKey ? candidates.find((x) => x.key === candKey) : undefined
-    if (c) promote(sec, c)
-    else if (productId) addManual(sec, productId)
-  }
-
-  /** 候補の領域へのドロップ: 選定済みの商品を、候補へ戻す */
-  const dropOnCandidates = (sec: SectionInfo, dt: DataTransfer) => {
-    const itemKey = dt.getData(DND_ITEM)
-    const it = itemKey ? items.find((x) => x.key === itemKey) : undefined
-    if (it && listOf(sec).some((x) => x.key === it.key)) demote(sec, it)
-  }
-
-  const setItemReason = (key: string, reason: string) => setItems((prev) => prev.map((x) => (x.key === key ? { ...x, reason } : x)))
-  const setCandReason = (key: string, reason: string) => setCandidates((prev) => prev.map((x) => (x.key === key ? { ...x, reason } : x)))
-
   // ---- AI の選定結果は、そのまま設定する。直前の状態は「元に戻す」で復元できる
   const [undo, setUndo] = useState<{ message: string; run: () => void } | null>(null)
-
-  const toItems = (rows: { productId: string; reason: string }[]): Item[] =>
-    rows.map((r) => ({ key: crypto.randomUUID(), productId: r.productId, reason: r.reason, source: SOURCE_AI }))
 
   // 見出しを変えたら、コピー・商品の作り直しをゆるやかに促す(自動では作り直さない)
   const [hint, setHint] = useState<string | null>(null)

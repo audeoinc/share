@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Button, Input, ToggleButton, makeStyles, mergeClasses, tokens } from '@fluentui/react-components'
 import {
   ArrowDownRegular,
@@ -26,6 +26,8 @@ interface Props {
   items: Item[]
   products: Cr854_products[]
   selectedKey: string | null
+  /** 商品リストの行にマウスが乗っている商品(該当商品を光らせる) */
+  hoverKey?: string | null
   showHeadings: boolean
   template: EmailTemplateId
   /** 配信日時(ロック画面の時計に使う) */
@@ -202,11 +204,17 @@ function FitLine({ baseSize, minScale = 0.55, style, children }: { baseSize: str
   )
 }
 
-function EmailPreview({ subject, headline, copy, items, products, selectedKey, showHeadings, template, sectionTitles, onSectionTitle, sectionCopies, onSectionCopy, compact = false, hero, onDropHero, onClearHero, onSelect, onRemove, onMove, onDropAt }: Props) {
+function EmailPreview({ subject, headline, copy, items, products, selectedKey, hoverKey, showHeadings, template, sectionTitles, onSectionTitle, sectionCopies, onSectionCopy, compact = false, hero, onDropHero, onClearHero, onSelect, onRemove, onMove, onDropAt }: Props) {
   const t = useT()
   const classes = useStyles()
   const { over, handlers, clear } = useDropTarget(onDropAt)
   const [heroOver, setHeroOver] = useState(false)
+
+  // 商品リストで選ばれた商品が、見える位置に来るようにスクロールする
+  useEffect(() => {
+    if (!selectedKey) return
+    document.querySelector(`[data-item-key="${selectedKey}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }, [selectedKey])
   const byId = new Map(products.map((p) => [p.cr854_productid, p]))
   const tpl = EMAIL_TEMPLATES[template]
   const offer = tpl.hero === 'offer'
@@ -263,11 +271,12 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
     },
     onDragEnd: clear,
     onClick: () => onSelect(it.key),
+    'data-item-key': it.key,
     ...handlers(idx),
   })
 
   const frameStyle = (it: Item, idx: number): React.CSSProperties => ({
-    borderColor: over === idx ? tokens.colorBrandForeground1 : it.key === selectedKey ? ACCENT : 'transparent',
+    borderColor: over === idx ? tokens.colorBrandForeground1 : it.key === selectedKey || it.key === hoverKey ? ACCENT : 'transparent',
     backgroundColor: over === idx ? 'rgba(103,80,164,0.08)' : 'transparent',
   })
 

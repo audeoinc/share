@@ -22,9 +22,10 @@ import {
   mergeClasses,
   tokens,
 } from '@fluentui/react-components'
-import { AddRegular, DismissRegular, SaveRegular, SubtractRegular } from '@fluentui/react-icons'
+import { AddRegular, ChevronLeftRegular, ChevronRightRegular, DismissRegular, SaveRegular, SubtractRegular } from '@fluentui/react-icons'
 import { optionLabel, tr, useT } from './i18n'
 import { AiIcon } from './AiMark'
+import { ProductInfoPane } from './ProductInfoPane'
 import { cardMarket, heroMarket, productMarket } from './market'
 import { AutoTextarea } from './AutoTextarea'
 import { Cr854_deliverycardsService } from './generated/services/Cr854_deliverycardsService'
@@ -136,21 +137,35 @@ function loadZoom(): number | 'fit' {
 /** 自動下書きを済ませたカード(同じカードを開き直しても、再実行しない) */
 const autoDrafted = new Set<string>()
 
-const WIDTH_KEY = 'cardDetail.paneWidths.v3'
+const WIDTH_KEY = 'cardDetail.paneWidths.v5'
+const INFO_KEY = 'cardDetail.infoOpen'
+const RAIL_W = 32
+
+/** 商品情報ペインを開くか。保存がなければ、折りたたんでおく */
+function loadInfoOpen(): boolean {
+  try {
+    const v = localStorage.getItem(INFO_KEY)
+    if (v === 'open') return true
+    if (v === 'closed') return false
+  } catch {
+    // 保存を読めないときは、既定(折りたたみ)にする
+  }
+  return false // 既定では折りたたむ
+}
 const MIN_W = 220
 const MAX_W = 640
 const clamp = (v: number) => Math.min(MAX_W, Math.max(MIN_W, v))
 
-function loadWidths(): [number, number] {
+function loadWidths(): [number, number, number] {
   try {
     const v = JSON.parse(localStorage.getItem(WIDTH_KEY) ?? 'null')
-    if (Array.isArray(v) && v.length === 2) return [clamp(Number(v[0])), clamp(Number(v[1]))]
+    if (Array.isArray(v) && v.length === 3) return [clamp(Number(v[0])), clamp(Number(v[1])), clamp(Number(v[2]))]
   } catch {
     // 保存値が読めなければ既定値を使う
   }
-  // 既定値: ダイアログの幅(最大 1800px)に合わせる。左 26%・中 36%・右(プレビュー)は残り。AIチャットが使いやすいよう、中ペインを広めにする
+  // 既定値: ダイアログの幅(最大 1800px)に合わせる。左 22%・中 30%・商品情報(右端)19%・プレビューは残り
   const total = Math.min(1800, window.innerWidth * 0.98)
-  return [clamp(Math.round(total * 0.26)), clamp(Math.round(total * 0.36))]
+  return [clamp(Math.round(total * 0.22)), clamp(Math.round(total * 0.3)), clamp(Math.round(total * 0.19))]
 }
 
 /** 読み込み時点の配信商品の行(保存時の差分判定用) */
@@ -217,7 +232,7 @@ const useStyles = makeStyles({
     borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
     overflow: 'auto',
     '@media (min-width: 900px)': {
-      gridTemplateColumns: 'var(--w0) 1px var(--w1) 1px minmax(0, 1fr)',
+      gridTemplateColumns: 'var(--w0) 1px var(--w1) 1px minmax(0, 1fr) 1px var(--w2)',
       gridTemplateRows: 'minmax(0, 1fr)',
       overflow: 'hidden',
     },
@@ -235,6 +250,18 @@ const useStyles = makeStyles({
   // 中ペインは、余白と、スクロールを内側(ContentPane)に任せる: 上に内容、下にチャットを固定する
   paneMid: { backgroundColor: tokens.colorNeutralBackground1, padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' },
   panePreview: { gridTemplateRows: 'auto minmax(0, 1fr)' },
+  infoToolbar: { display: 'flex', justifyContent: 'flex-end', marginBottom: '-8px' },
+  // 商品情報ペインを閉じたときの、細い帯(押すと開く)
+  rail: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    rowGap: '10px',
+    paddingTop: '10px',
+    minHeight: 0,
+    backgroundColor: tokens.colorNeutralBackground2,
+  },
+  railLabel: { writingMode: 'vertical-rl', color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200, letterSpacing: '0.1em' },
   caption: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200, fontWeight: tokens.fontWeightRegular },
   lead: { fontWeight: tokens.fontWeightSemibold },
   captionTight: { marginTop: '-4px' },
@@ -290,7 +317,19 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
   const [heroCandidates, setHeroCandidates] = useState<ProposedHero[]>([])
   const [heroId, setHeroId] = useState<string | undefined>(card?._cr854_heroimage_value)
   const [heroReason, setHeroReason] = useState(card?.cr854_heroreason ?? '')
-  const [widths, setWidths] = useState<[number, number]>(loadWidths)
+  const [widths, setWidths] = useState<[number, number, number]>(loadWidths)
+  // 商品情報の行にマウスが乗っている商品(プレビューで光らせる)と、商品情報ペインの開閉
+  const [hoverKey, setHoverKey] = useState<string | null>(null)
+  const [infoOpen, setInfoOpen] = useState<boolean>(loadInfoOpen)
+  const toggleInfo = () =>
+    setInfoOpen((open) => {
+      try {
+        localStorage.setItem(INFO_KEY, open ? 'closed' : 'open')
+      } catch {
+        // 保存できなくても動作には影響しない
+      }
+      return !open
+    })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -419,12 +458,13 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
   const shownZoom = zoom === 'fit' ? fitZoom : zoom
   const stepZoom = (d: number) => setZoom(Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.round((shownZoom + d) * 20) / 20)))
 
-  const resize = (i: 0 | 1) => (dx: number) =>
+  const resize = (i: 0 | 1 | 2) => (dx: number) =>
     setWidths((w) => {
-      const next: [number, number] = [w[0], w[1]]
+      const next: [number, number, number] = [w[0], w[1], w[2]]
       next[i] = clamp(next[i] + dx)
       return next
     })
+  const resizeInfo = (dx: number) => setWidths((w) => [w[0], w[1], clamp(w[2] - dx)])
   const saveWidths = () => {
     try {
       localStorage.setItem(WIDTH_KEY, JSON.stringify(widths))
@@ -701,7 +741,7 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
             <Button type="button" appearance="subtle" icon={<DismissRegular />} onClick={onBack} aria-label={t('閉じる', 'Close')} />
           </div>
 
-          <div className={styles.panes} style={{ '--w0': `${widths[0]}px`, '--w1': `${widths[1]}px` } as React.CSSProperties}>
+          <div className={styles.panes} style={{ '--w0': `${widths[0]}px`, '--w1': `${widths[1]}px`, '--w2': `${infoOpen ? widths[2] : RAIL_W}px` } as React.CSSProperties}>
             {/* 左: 配信の情報 */}
             <div className={styles.pane}>
               <Button
@@ -879,6 +919,7 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
                     items={items}
                     products={products}
                     selectedKey={selectedKey}
+                    hoverKey={hoverKey}
                     showHeadings={showHeadings}
                     template={template}
                     scheduledAt={form.scheduledAt}
@@ -900,6 +941,23 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
                 </div>
               </div>
             </div>
+
+            <Splitter onDrag={infoOpen ? resizeInfo : () => undefined} onDone={saveWidths} />
+
+            {/* 右端: 商品情報(参照用。操作はしない) */}
+            {infoOpen ? (
+              <div className={styles.pane}>
+                <div className={styles.infoToolbar}>
+                  <Button type="button" size="small" appearance="subtle" icon={<ChevronRightRegular />} onClick={toggleInfo} aria-label={t('商品情報を閉じる', 'Collapse product info')} />
+                </div>
+                <ProductInfoPane template={template} sectionTitles={sectionTitles} items={items} products={products} onHover={setHoverKey} />
+              </div>
+            ) : (
+              <div className={styles.rail}>
+                <Button type="button" size="small" appearance="subtle" icon={<ChevronLeftRegular />} onClick={toggleInfo} aria-label={t('商品情報を開く', 'Open product info')} />
+                <span className={styles.railLabel}>{t('商品情報', 'Product info')}</span>
+              </div>
+            )}
           </div>
 
           {error && (
