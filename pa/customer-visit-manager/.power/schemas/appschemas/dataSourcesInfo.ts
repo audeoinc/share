@@ -33,6 +33,13 @@ export const dataSourcesInfo = {
     "dataSourceType": "Dataverse",
     "apis": {}
   },
+  "cr854_productpolicies": {
+    "tableId": "",
+    "version": "",
+    "primaryKey": "cr854_productpolicyid",
+    "dataSourceType": "Dataverse",
+    "apis": {}
+  },
   "cr854_products": {
     "tableId": "",
     "version": "",
@@ -65,6 +72,13 @@ export const dataSourcesInfo = {
     "tableId": "",
     "version": "",
     "primaryKey": "cr854_table_a2287751id",
+    "dataSourceType": "Dataverse",
+    "apis": {}
+  },
+  "cr854_weeklyperformances": {
+    "tableId": "",
+    "version": "",
+    "primaryKey": "cr854_weeklyperformanceid",
     "dataSourceType": "Dataverse",
     "apis": {}
   },

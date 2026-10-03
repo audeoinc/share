@@ -207,24 +207,32 @@ export interface ChatTurn {
 // withChat の実行中だけ有効な、対話の履歴。askAgent が、依頼に加える
 let activeChat: ChatTurn[] | null = null
 let lastReply = ''
+let lastAnswered = false
+
+/** チャットでの質問・相談に、案を変えずに答えた(呼び出し側は、案を更新しない) */
+export class ChatAnswer extends Error {}
 const CHAT_HISTORY_LIMIT = 12
 
 const chatNote = () =>
   `【ユーザーとの対話】入力の chat は、ユーザーとあなたのこれまでの対話(古い順)。最後の user の発言が、最新の依頼。` +
   `その依頼を最優先で反映する。「必ず含める」「〜しない」のような条件は厳守し、前の user の発言にある条件も引き継ぐ。` +
   `以下の通常のルールと矛盾する場合は、ユーザーの依頼を優先する(ただし、出力の形式と、商品は products の中からだけ選ぶ、というルールは守る)。` +
-  `返答の JSON のトップレベルに、reply(依頼にどう応えたかを、1〜2 文で。${getLang() === 'en' ? '英語' : '日本語'}で)を加える。\n\n`
+  `ユーザーの最新の発言が、質問・相談・意見を求めるもの(例:「どう思う?」「なぜこれを選んだ?」)で、案の作り直しを求めていないときは、` +
+  `JSON のトップレベルに mode:"answer" と reply(質問への答え。3 文以内)だけを返す(他のキーは不要。案は作らない)。` +
+  `案の作り直しを求めているときは、mode:"update" を加え、通常どおりの出力に reply(依頼にどう応えたかを、1〜2 文で)も加える。` +
+  `reply は、ユーザーの最新の発言と同じ言語で書く(日本語の発言には日本語、英語の発言には英語)。\n\n`
 
 /**
  * fn の中の AI への依頼に、対話の履歴(chat)を加える。AI が添えた reply(依頼にどう応えたかの一言)も返す。
  * 同時に複数の依頼を流すと混ざるので、チャットの送信中は、呼び出し側で 1 件ずつにすること。
  */
-export async function withChat<T>(turns: ChatTurn[], fn: () => Promise<T>): Promise<{ value: T; reply: string }> {
+export async function withChat<T>(turns: ChatTurn[], fn: () => Promise<T>): Promise<{ value: T; reply: string; answered: boolean }> {
   activeChat = turns.slice(-CHAT_HISTORY_LIMIT)
   lastReply = ''
+  lastAnswered = false
   try {
     const value = await fn()
-    return { value, reply: lastReply }
+    return { value, reply: lastReply, answered: lastAnswered }
   } finally {
     activeChat = null
   }
@@ -254,7 +262,13 @@ export async function askAgent(prompt: string, payload: unknown): Promise<Record
     try {
       const parsed = extractJson(text) as Record<string, unknown>
       if (typeof parsed.error === 'string') throw new Error(tr(`エージェントからのエラー: ${parsed.error}`, `Error from the agent: ${parsed.error}`))
-      if (chat && chat.length > 0) lastReply = typeof parsed.reply === 'string' ? parsed.reply.trim() : ''
+      if (chat && chat.length > 0) {
+        lastReply = typeof parsed.reply === 'string' ? parsed.reply.trim() : ''
+        if (parsed.mode === 'answer') {
+          lastAnswered = true
+          throw new ChatAnswer(lastReply)
+        }
+      }
       return parsed
     } catch (e) {
       if (!(e instanceof SyntaxError)) throw e

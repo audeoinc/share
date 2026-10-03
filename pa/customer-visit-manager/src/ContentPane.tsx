@@ -777,7 +777,7 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections'; registerChat: Regis
                   {c.angle && <Badge size="small" appearance="tint" color="informative">{c.angle}</Badge>}
                   {current && <Badge size="small" appearance="filled" color="brand">{t('設定中', 'Current')}</Badge>}
                 </div>
-                <span style={{ fontSize: tokens.fontSizeBase300 }}>{c.copy}</span>
+                <span style={{ fontSize: tokens.fontSizeBase200, lineHeight: tokens.lineHeightBase200 }}>{c.copy}</span>
               </div>
             )
           })}
@@ -1093,7 +1093,11 @@ export function ContentPane(props: Props) {
     let reply = ''
     try {
       const out = await withChat(turns, () => run())
-      reply = out.value === true ? out.reply || tr('反映しました', 'Done.') : tr('うまくいきませんでした。画面下のメッセージを確認してください', "That didn't work. Check the message at the bottom of the screen.")
+      reply = out.answered
+        ? out.reply || tr('(回答がありませんでした)', '(No answer)')
+        : out.value === true
+          ? out.reply || tr('反映しました', 'Done.')
+          : tr('うまくいきませんでした。画面下のメッセージを確認してください', "That didn't work. Check the message at the bottom of the screen.")
     } catch (e) {
       reply = e instanceof Error ? e.message : String(e)
     } finally {

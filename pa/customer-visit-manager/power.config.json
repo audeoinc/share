@@ -53,6 +53,16 @@
           "entitySetName": "cr854_airequests",
           "logicalName": "cr854_airequest",
           "isHidden": false
+        },
+        "weeklyperformance": {
+          "entitySetName": "cr854_weeklyperformances",
+          "logicalName": "cr854_weeklyperformance",
+          "isHidden": false
+        },
+        "productpolicy": {
+          "entitySetName": "cr854_productpolicies",
+          "logicalName": "cr854_productpolicy",
+          "isHidden": false
         }
       },
       "environmentVariableName": ""

@@ -4,6 +4,7 @@ import { productImage } from './images'
 import { yen, type Item } from './items'
 import { optionLabel, useT } from './i18n'
 import { productMarket } from './market'
+import { ProductDetail } from './ProductDetail'
 import { sectionRange, sectionsOf, type EmailTemplateId } from './templates'
 
 interface Props {
@@ -116,7 +117,7 @@ function ProductItem({ product: p, itemKey, onHover }: { product: Cr854_products
   const trend = trendMark(p.cr854_salestrendname)
   const low = p.cr854_stock !== undefined && p.cr854_stock < LOW_STOCK
   return (
-    <Popover positioning="before" withArrow openOnHover={false}>
+    <Popover positioning={{ position: 'before', align: 'top', pinned: true, overflowBoundaryPadding: 8 }} openOnHover={false}>
       <PopoverTrigger disableButtonEnhancement>
         <div className={mergeClasses(s.item)} onMouseEnter={() => onHover(itemKey)} onMouseLeave={() => onHover(null)} role="button" tabIndex={0}>
           <Avatar shape="square" image={{ src: productImage(p), alt: p.cr854_name }} name={p.cr854_name} className={s.avatar} />
@@ -131,33 +132,7 @@ function ProductItem({ product: p, itemKey, onHover }: { product: Cr854_products
         </div>
       </PopoverTrigger>
       <PopoverSurface>
-        <div className={s.float}>
-          <div className={s.floatHead}>
-            <Avatar shape="square" image={{ src: productImage(p), alt: p.cr854_name }} name={p.cr854_name} className={s.floatAvatar} />
-            <div className={s.main}>
-              <Text weight="semibold" size={300}>{p.cr854_name}</Text>
-              <span className={s.sub}>{p.cr854_productcode}</span>
-            </div>
-          </div>
-          <dl className={s.facts}>
-            <dt className={s.label}>{t('カテゴリ', 'Category')}</dt>
-            <dd className={s.value}>{optionLabel(p.cr854_categoryname) || '-'}</dd>
-            <dt className={s.label}>{t('価格', 'Price')}</dt>
-            <dd className={s.value}>{yen(p.cr854_price, market)}</dd>
-            <dt className={s.label}>{t('在庫', 'Stock')}</dt>
-            <dd className={s.value}>{p.cr854_stock ?? '-'}</dd>
-            <dt className={s.label}>{t('売上トレンド', 'Sales trend')}</dt>
-            <dd className={s.value}>{optionLabel(p.cr854_salestrendname) || '-'}</dd>
-            <dt className={s.label}>{t('評価', 'Rating')}</dt>
-            <dd className={s.value}>{p.cr854_rating !== undefined ? `★${p.cr854_rating}` : '-'}</dd>
-            <dt className={s.label}>{t('季節', 'Season')}</dt>
-            <dd className={s.value}>{optionLabel(p.cr854_seasonname) || '-'}</dd>
-            <dt className={s.label}>{t('天候適性', 'Weather')}</dt>
-            <dd className={s.value}>{optionLabel(p.cr854_weathername) || '-'}</dd>
-            <dt className={s.label}>{t('説明', 'Description')}</dt>
-            <dd className={s.value}>{p.cr854_description || '-'}</dd>
-          </dl>
-        </div>
+        <ProductDetail product={p} />
       </PopoverSurface>
     </Popover>
   )

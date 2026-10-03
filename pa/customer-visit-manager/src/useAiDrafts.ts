@@ -3,6 +3,7 @@ import type { Cr854_products } from './generated/models/Cr854_productsModel'
 import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
 import { FREE_DEFAULT_SLOTS, sectionRange, sectionsOf, type EmailTemplateId } from './templates'
 import {
+  ChatAnswer,
   proposeHero,
   proposeSection,
   proposeSectionCopies,
@@ -65,7 +66,8 @@ export function useAiDrafts(inputs: DraftInputs, onError: (message: string | nul
       try {
         return await fn()
       } catch (e) {
-        onError(e instanceof Error ? e.message : String(e))
+        // チャットの質問への答えは、エラーではない(案は変えない)
+        if (!(e instanceof ChatAnswer)) onError(e instanceof Error ? e.message : String(e))
         return undefined
       } finally {
         setBusy((b) => ({ ...b, [key]: false }))
