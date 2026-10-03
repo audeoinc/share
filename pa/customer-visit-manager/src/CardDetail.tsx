@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   Badge,
   Button,
@@ -24,7 +24,9 @@ import {
   tokens,
 } from '@fluentui/react-components'
 import { AddRegular, DismissRegular, SaveRegular, SubtractRegular } from '@fluentui/react-icons'
+import { optionLabel, tr, useT } from './i18n'
 import { AiIcon } from './AiMark'
+import { cardMarket, heroMarket, productMarket } from './market'
 import { AutoTextarea } from './AutoTextarea'
 import { Cr854_deliverycardsService } from './generated/services/Cr854_deliverycardsService'
 import type { Cr854_deliverycards } from './generated/models/Cr854_deliverycardsModel'
@@ -103,12 +105,13 @@ function OptionSelect({ label, value, options, onChange }: {
   options: { value: number; label: string }[]
   onChange: (v: string) => void
 }) {
+  const t = useT()
   return (
     <Field label={label}>
       <Select size="small" value={value} onChange={(_, d) => onChange(d.value)}>
-        <option value="">未設定</option>
+        <option value="">{t('未設定', 'Not set')}</option>
         {options.map((o) => (
-          <option key={o.value} value={String(o.value)}>{o.label}</option>
+          <option key={o.value} value={String(o.value)}>{optionLabel(o.label)}</option>
         ))}
       </Select>
     </Field>
@@ -251,6 +254,7 @@ const useStyles = makeStyles({
 })
 
 export function CardDetail({ card, products, heroes, otherThemes, onBack, onSaved }: Props) {
+  const t = useT()
   const styles = useStyles()
   const [form, setForm] = useState<Form>(() => toForm(card))
   const [items, setItems] = useState<Item[]>([])
@@ -297,7 +301,7 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
     })
       .then((res) => {
         if (cancelled) return
-        if (!res.success) throw new Error(res.error?.message ?? '掲載商品の取得に失敗しました')
+        if (!res.success) throw new Error(res.error?.message ?? tr('掲載商品の取得に失敗しました', 'Failed to load the products in this delivery'))
         const sel: Item[] = []
         const cands: Candidate[] = []
         const snap = new Map<string, RowSnap>()
@@ -439,9 +443,14 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
     }
   }
 
+  // 商品・メイン画像は、配信カードの国に合う市場のものだけを、選定の対象にする(すでに載せた他の市場の商品は、表示のために残す)
+  const market = cardMarket(form.country)
+  const poolProducts = useMemo(() => (market ? products.filter((p) => productMarket(p) === market) : products), [products, market])
+  const poolHeroes = useMemo(() => (market ? heroes.filter((h) => heroMarket(h) === market) : heroes), [heroes, market])
+
   // AI の案の状態と生成(案は採用するまで、配信カードには反映しない)
   const drafts = useAiDrafts(
-    { buildCard: buildAiCard, products, heroes, otherThemes, template, items, candidates, sectionTitles, sectionCopies, heroId, heroReason, language },
+    { buildCard: buildAiCard, products: poolProducts, heroes: poolHeroes, otherThemes, template, items, candidates, sectionTitles, sectionCopies, heroId, heroReason, language },
     setError,
   )
 
@@ -482,19 +491,19 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
       sectionCopyCandidates: Object.fromEntries(res.sections.map((sec, i) => [i, sec.copies])),
     })
     setSelectedKey(null)
-    if (res.errors.length > 0) setError(`一部の工程で失敗しました: ${res.errors.join(' / ')}`)
+    if (res.errors.length > 0) setError(t(`一部の工程で失敗しました: ${res.errors.join(' / ')}`, `Some steps failed: ${res.errors.join(' / ')}`))
   }
 
   async function startAutoDraft() {
     if (!form.scheduledAt) {
-      setError('すべてAIで下書きするには、先に配信日時を入力してください')
+      setError(t('すべてAIで下書きするには、先に配信日時を入力してください', 'Enter the send date & time first to draft everything with AI'))
       return
     }
     cancelRef.current = false
     setError(null)
-    setAuto({ label: '準備しています', done: 0, total: 7 })
+    setAuto({ label: t('準備しています', 'Getting ready'), done: 0, total: 7 })
     const res = await runAutoDraft(
-      { card: buildAiCard(), language, otherThemes, products, heroes },
+      { card: buildAiCard(), language, otherThemes, products: poolProducts, heroes: poolHeroes },
       (label, done, total) => setAuto({ label, done, total }),
       () => cancelRef.current || !aliveRef.current,
     )
@@ -505,7 +514,7 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
   const hasContent = !!(form.theme.trim() || form.headline.trim() || form.copy.trim() || form.instructions.trim() || items.length > 0 || heroId)
 
   function runAllManual() {
-    if (hasContent && !window.confirm('現在のテーマ・ヘッドライン・コピー・商品・メイン画像・制作指示を、AIの下書きで置き換えます。よろしいですか?')) return
+    if (hasContent && !window.confirm(t('現在のテーマ・ヘッドライン・コピー・商品・メイン画像・制作指示を、AIの下書きで置き換えます。よろしいですか?', 'This replaces the current theme, headline, copy, products, hero image, and production notes with an AI draft. Continue?'))) return
     void startAutoDraft()
   }
 
@@ -594,7 +603,7 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
           statecode: 0,
         })
       }
-      if (!res.success) throw new Error(res.error?.message ?? '掲載商品の保存に失敗しました')
+      if (!res.success) throw new Error(res.error?.message ?? tr('掲載商品の保存に失敗しました', 'Failed to save the products in this delivery'))
     }
   }
 
@@ -632,9 +641,9 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
       const res = card
         ? await Cr854_deliverycardsService.update(card.cr854_deliverycardid, fields)
         : await Cr854_deliverycardsService.create({ ...fields, statecode: 0 })
-      if (!res.success) throw new Error(res.error?.message ?? '保存に失敗しました')
+      if (!res.success) throw new Error(res.error?.message ?? tr('保存に失敗しました', 'Failed to save'))
       const cardId = card?.cr854_deliverycardid ?? res.data?.cr854_deliverycardid
-      if (!cardId) throw new Error('配信カードのIDを取得できませんでした')
+      if (!cardId) throw new Error(tr('配信カードのIDを取得できませんでした', 'Could not get the delivery card ID'))
       if (original) await syncItems(cardId, form.name, original)
       await onSaved()
       onBack()
@@ -650,16 +659,16 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
 
   return (
     <Dialog open onOpenChange={(_, d) => { if (!d.open && !saving) onBack() }}>
-      <DialogSurface className={styles.surface} aria-label={card ? card.cr854_name : '配信カードの新規作成'}>
+      <DialogSurface className={styles.surface} aria-label={card ? card.cr854_name : t('配信カードの新規作成', 'New delivery card')}>
         <form onSubmit={submit} className={styles.form}>
           {auto && (
             <div className={styles.overlay}>
               <Spinner size="large" />
-              <Text as="h2" size={500} weight="semibold">AIが下書きを作っています</Text>
+              <Text as="h2" size={500} weight="semibold">{t('AIが下書きを作っています', 'AI is drafting')}</Text>
               <Text>{auto.label}({Math.min(auto.done + 1, auto.total)} / {auto.total})</Text>
               <ProgressBar className={styles.overlayBar} value={Math.min(1, auto.done / auto.total)} />
               <Caption1 className={styles.caption}>
-                結果は画面に反映されるだけで、保存はされません。気に入らなければ、保存せずに閉じられます。
+                {t('結果は画面に反映されるだけで、保存はされません。気に入らなければ、保存せずに閉じられます。', 'Results are only applied on screen and are not saved. If you do not like them, close without saving.')}
               </Caption1>
               <Button
                 type="button"
@@ -669,21 +678,21 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
                   setAuto(null)
                 }}
               >
-                スキップして開く
+                {t('スキップして開く', 'Skip and open')}
               </Button>
             </div>
           )}
           <div className={styles.titleRow}>
-            <Text as="h2" size={500} weight="semibold" className={styles.titleText}>{card ? card.cr854_name : '配信カードの新規作成'}</Text>
+            <Text as="h2" size={500} weight="semibold" className={styles.titleText}>{card ? card.cr854_name : t('配信カードの新規作成', 'New delivery card')}</Text>
             <Tooltip
               relationship="description"
-              content={progress.remaining.length ? `未完了: ${progress.remaining.join('、')}` : 'すべての工程が完了しています'}
+              content={progress.remaining.length ? t(`未完了: ${progress.remaining.join('、')}`, `Incomplete: ${progress.remaining.join(', ')}`) : t('すべての工程が完了しています', 'All steps are complete')}
             >
               <Badge appearance="tint" color={progress.done === progress.total ? 'success' : 'informative'} size="large">
-                {`工程 ${progress.done} / ${progress.total}`}
+                {t(`工程 ${progress.done} / ${progress.total}`, `Steps ${progress.done} / ${progress.total}`)}
               </Badge>
             </Tooltip>
-            <Button type="button" appearance="subtle" icon={<DismissRegular />} onClick={onBack} aria-label="閉じる" />
+            <Button type="button" appearance="subtle" icon={<DismissRegular />} onClick={onBack} aria-label={t('閉じる', 'Close')} />
           </div>
 
           <div className={styles.panes} style={{ '--w0': `${widths[0]}px`, '--w1': `${widths[1]}px` } as React.CSSProperties}>
@@ -696,35 +705,35 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
                 disabled={!!auto || saving}
                 className={styles.fullWidth}
               >
-                すべてAIで下書き
+                {t('すべてAIで下書き', 'Draft everything with AI')}
               </Button>
               <Caption1 className={mergeClasses(styles.caption, styles.captionTight)}>
-                テーマ・メイン画像・ヘッドライン・セクション・制作指示を、まとめてAIが下書きします
+                {t('テーマ・メイン画像・ヘッドライン・セクション・制作指示を、まとめてAIが下書きします', 'AI drafts the theme, hero image, headline, sections, and production notes all at once')}
               </Caption1>
-              <Text weight="semibold" size={300}>配信情報</Text>
-              <Field label="配信名" required>
+              <Text weight="semibold" size={300}>{t('配信情報', 'Delivery info')}</Text>
+              <Field label={t('配信名', 'Delivery name')} required>
                 <Input size="small" required value={form.name} onChange={(_, d) => set('name')(d.value)} />
               </Field>
-              <Field label="配信日時" required>
+              <Field label={t('配信日時', 'Send date & time')} required>
                 <Input size="small" required type="datetime-local" value={form.scheduledAt} onChange={(_, d) => set('scheduledAt')(d.value)} />
               </Field>
               <div className={styles.twoCol}>
-                <OptionSelect label="国" value={form.country} options={countryOptions} onChange={set('country')} />
-                <OptionSelect label="チャネル" value={form.channel} options={channelOptions} onChange={set('channel')} />
-                <OptionSelect label="部署" value={form.department} options={departmentOptions} onChange={set('department')} />
-                <Field label="ステータス">
+                <OptionSelect label={t('国', 'Country')} value={form.country} options={countryOptions} onChange={set('country')} />
+                <OptionSelect label={t('チャネル', 'Channel')} value={form.channel} options={channelOptions} onChange={set('channel')} />
+                <OptionSelect label={t('部署', 'Department')} value={form.department} options={departmentOptions} onChange={set('department')} />
+                <Field label={t('ステータス', 'Status')}>
                   <div className={styles.statusRow}>
                     <span className={styles.dot} style={{ backgroundColor: statusColor(Number(form.status)) }} />
                     <Select size="small" className={styles.grow} value={form.status} onChange={(_, d) => set('status')(d.value)}>
                       {statusOptions.map((o) => (
-                        <option key={o.value} value={String(o.value)}>{o.label}</option>
+                        <option key={o.value} value={String(o.value)}>{optionLabel(o.label)}</option>
                       ))}
                     </Select>
                   </div>
                 </Field>
               </div>
-              <Text weight="semibold" size={300} className={styles.sectionHead}>工程</Text>
-              <Field label="テーマ(配信全体の前提。メールには出ません)">
+              <Text weight="semibold" size={300} className={styles.sectionHead}>{t('工程', 'Steps')}</Text>
+              <Field label={t('テーマ(配信全体の前提。メールには出ません)', 'Theme (premise for the whole delivery; not shown in the email)')}>
                 <AutoTextarea
                   size="small"
                   rows={2}
@@ -733,11 +742,11 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
                   onChange={(_, d) => set('theme')(d.value)}
                 />
               </Field>
-              {form.theme && form.themeReason && <Caption1 className={styles.caption}><span className={styles.lead}>AIの理由:</span>{` ${form.themeReason}`}</Caption1>}
+              {form.theme && form.themeReason && <Caption1 className={styles.caption}><span className={styles.lead}>{t('AIの理由:', 'AI rationale:')}</span>{` ${form.themeReason}`}</Caption1>}
               <Caption1 className={items.length ? styles.success : styles.caption}>
-                掲載商品: {items.length}件(中央の「商品選定」タブで選びます)
+                {t(`掲載商品: ${items.length}件(中央の「セクション」タブで選びます)`, `Products in this delivery: ${items.length} (choose them in the Sections tab in the middle)`)}
               </Caption1>
-              <Field label="ヘッドライン(メイン画像に載せる大見出し)">
+              <Field label={t('ヘッドライン(メイン画像に載せる大見出し)', 'Headline (the large heading on the hero image)')}>
                 <AutoTextarea
                   size="small"
                   rows={1}
@@ -746,7 +755,7 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
                   onChange={(_, d) => set('headline')(d.value)}
                 />
               </Field>
-              <Field label="コピー(ヘッドラインの下の導入文)">
+              <Field label={t('コピー(ヘッドラインの下の導入文)', 'Copy (intro text below the headline)')}>
                 <AutoTextarea
                   size="small"
                   rows={2}
@@ -755,8 +764,8 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
                   onChange={(_, d) => set('copy')(d.value)}
                 />
               </Field>
-              {(form.headline || form.copy) && form.copyAngle && <Caption1 className={styles.caption}><span className={styles.lead}>切り口:</span>{` ${form.copyAngle}`}</Caption1>}
-              <Field label="制作指示">
+              {(form.headline || form.copy) && form.copyAngle && <Caption1 className={styles.caption}><span className={styles.lead}>{t('切り口:', 'Angle:')}</span>{` ${form.copyAngle}`}</Caption1>}
+              <Field label={t('制作指示', 'Production notes')}>
                 <AutoTextarea
                   size="small"
                   rows={2}
@@ -765,7 +774,7 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
                   onChange={(_, d) => set('instructions')(d.value)}
                 />
               </Field>
-              {form.instructions && form.instructionsAngle && <Caption1 className={styles.caption}><span className={styles.lead}>切り口:</span>{` ${form.instructionsAngle}`}</Caption1>}
+              {form.instructions && form.instructionsAngle && <Caption1 className={styles.caption}><span className={styles.lead}>{t('切り口:', 'Angle:')}</span>{` ${form.instructionsAngle}`}</Caption1>}
             </div>
 
             <Splitter onDrag={resize(0)} onDone={saveWidths} />
@@ -789,6 +798,8 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
                 onSectionCopy={setSectionCopy}
                 products={products}
                 heroes={heroes}
+                poolProducts={poolProducts}
+                poolHeroes={poolHeroes}
                 items={items}
                 setItems={setItems}
                 candidates={candidates}
@@ -817,11 +828,11 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
                   selectedValue={previewTab}
                   onTabSelect={(_, d) => setPreviewTab(d.value as 'email' | 'push')}
                 >
-                  <Tab value="email">メール</Tab>
-                  <Tab value="push">プッシュ</Tab>
+                  <Tab value="email">{t('メール', 'Email')}</Tab>
+                  <Tab value="push">{t('プッシュ', 'Push')}</Tab>
                 </TabList>
                 <div className={styles.zoomBox}>
-                  <Button type="button" size="small" appearance="subtle" icon={<SubtractRegular />} onClick={() => stepZoom(-0.1)} aria-label="縮小" />
+                  <Button type="button" size="small" appearance="subtle" icon={<SubtractRegular />} onClick={() => stepZoom(-0.1)} aria-label={t('縮小', 'Zoom out')} />
                   <Slider
                     size="small"
                     className={styles.slider}
@@ -830,18 +841,19 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
                     step={5}
                     value={Math.round(shownZoom * 100)}
                     onChange={(_, d) => setZoom(d.value / 100)}
-                    aria-label="プレビューの倍率"
+                    aria-label={t('プレビューの倍率', 'Preview zoom')}
                   />
-                  <Button type="button" size="small" appearance="subtle" icon={<AddRegular />} onClick={() => stepZoom(0.1)} aria-label="拡大" />
+                  <Button type="button" size="small" appearance="subtle" icon={<AddRegular />} onClick={() => stepZoom(0.1)} aria-label={t('拡大', 'Zoom in')} />
                   <Caption1 className={styles.zoomLabel}>{Math.round(shownZoom * 100)}%</Caption1>
-                  <ToggleButton type="button" size="small" checked={zoom === 'fit'} onClick={() => setZoom(zoom === 'fit' ? shownZoom : 'fit')}>
-                    全体
+                  {/* 全体表示のまま、もう一度押したときは、半端な倍率にせず、100% に戻す */}
+                  <ToggleButton type="button" size="small" checked={zoom === 'fit'} onClick={() => setZoom(zoom === 'fit' ? 1 : 'fit')}>
+                    {t('全体', 'Fit')}
                   </ToggleButton>
                 </div>
                 {previewTab === 'email' && template === 'free' && (
                   <>
-                    <Switch label="カテゴリ見出し" checked={showHeadings} onChange={(_, d) => setShowHeadings(d.checked)} />
-                    <Button type="button" size="small" appearance="subtle" onClick={groupByCategory} disabled={items.length < 2}>カテゴリでまとめる</Button>
+                    <Switch label={t('カテゴリ見出し', 'Category headings')} checked={showHeadings} onChange={(_, d) => setShowHeadings(d.checked)} />
+                    <Button type="button" size="small" appearance="subtle" onClick={groupByCategory} disabled={items.length < 2}>{t('カテゴリでまとめる', 'Group by category')}</Button>
                   </>
                 )}
               </div>
@@ -884,9 +896,9 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
             </MessageBar>
           )}
           <div className={styles.actions}>
-            <Button type="button" onClick={onBack} disabled={saving}>キャンセル</Button>
+            <Button type="button" onClick={onBack} disabled={saving}>{t('キャンセル', 'Cancel')}</Button>
             <Button type="submit" appearance="primary" icon={<SaveRegular />} disabled={saving}>
-              {saving ? '保存中...' : '保存'}
+              {saving ? t('保存中...', 'Saving...') : t('保存', 'Save')}
             </Button>
           </div>
         </form>

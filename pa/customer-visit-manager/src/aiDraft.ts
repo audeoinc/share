@@ -1,6 +1,7 @@
 import type { Cr854_products } from './generated/models/Cr854_productsModel'
 import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
 import { askAgent, type AiCard, type CopyLanguage } from './aiSelect'
+import { tr } from './i18n'
 import { EMAIL_TEMPLATES, type EmailTemplateId } from './templates'
 
 // テーマ・コピー・制作指示の「案」の生成。出力形式はメッセージ内で毎回指定する(aiSelect.ts と同じ理由)
@@ -88,7 +89,7 @@ export async function suggestThemes(args: {
   const list = (parsed.themes ?? [])
     .filter((t) => t.theme)
     .map((t) => ({ theme: String(t.theme), reason: String(t.reason ?? '') }))
-  if (list.length === 0) throw new Error('テーマ案を取得できませんでした')
+  if (list.length === 0) throw new Error(tr('テーマ案を取得できませんでした', 'Could not get theme ideas'))
   return list
 }
 
@@ -127,7 +128,7 @@ export async function suggestCopies(ctx: DraftContext): Promise<CopyIdea[]> {
   const list = (parsed.copies ?? [])
     .filter((c) => c.headline)
     .map((c) => ({ headline: String(c.headline), lead: String(c.lead ?? ''), angle: String(c.angle ?? '') }))
-  if (list.length === 0) throw new Error('ヘッドラインとコピーの案を取得できませんでした')
+  if (list.length === 0) throw new Error(tr('ヘッドラインとコピーの案を取得できませんでした', 'Could not get headline and copy ideas'))
   return list
 }
 
@@ -141,7 +142,7 @@ export async function suggestInstructions(ctx: DraftContext): Promise<Instructio
     instructions?: { text?: string; angle?: string }[]
   }
   const list = (parsed.instructions ?? []).filter((c) => c.text).map((c) => ({ text: String(c.text), angle: String(c.angle ?? '') }))
-  if (list.length === 0) throw new Error('制作指示の案を取得できませんでした')
+  if (list.length === 0) throw new Error(tr('制作指示の案を取得できませんでした', 'Could not get production instruction ideas'))
   return list
 }
 

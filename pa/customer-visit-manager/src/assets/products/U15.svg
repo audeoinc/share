@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400">
+<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#eef1f4"/><stop offset="1" stop-color="#dce3ea"/></linearGradient></defs>
+<rect width="300" height="400" fill="url(#bg)"/>
+<ellipse cx="150" cy="362" rx="98" ry="8" fill="#000" opacity=".10"/>
+<g><path d="M108 66 H192 L250 352 H50 Z" fill="#3f6b52" stroke="#2d4d3b" stroke-width="3"/><rect x="108" y="66" width="84" height="14" fill="#355a45" stroke="#2d4d3b" stroke-width="2"/><line x1="116.4" y1="80" x2="70" y2="350" stroke="#2d4d3b" stroke-width="2" opacity=".5"/><line x1="125.64" y1="80" x2="92" y2="350" stroke="#2d4d3b" stroke-width="2" opacity=".5"/><line x1="134.88" y1="80" x2="114" y2="350" stroke="#2d4d3b" stroke-width="2" opacity=".5"/><line x1="144.12" y1="80" x2="136" y2="350" stroke="#2d4d3b" stroke-width="2" opacity=".5"/><line x1="153.36" y1="80" x2="158" y2="350" stroke="#2d4d3b" stroke-width="2" opacity=".5"/><line x1="162.6" y1="80" x2="180" y2="350" stroke="#2d4d3b" stroke-width="2" opacity=".5"/><line x1="171.84" y1="80" x2="202" y2="350" stroke="#2d4d3b" stroke-width="2" opacity=".5"/><line x1="181.07999999999998" y1="80" x2="224" y2="350" stroke="#2d4d3b" stroke-width="2" opacity=".5"/></g>
+<text x="150" y="390" text-anchor="middle" font-family="'Inter','Noto Sans JP','Yu Gothic UI',Meiryo,sans-serif" font-size="15" font-weight="700" fill="#4a4a4a">Midi Skirt</text>
+</svg>

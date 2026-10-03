@@ -1,3 +1,4 @@
+import { priceText } from './i18n'
 import type { Cr854_deliveryproductscr854_source as Source } from './generated/models/Cr854_deliveryproductsModel'
 
 export const SOURCE_AI: Source = 588230000
@@ -22,7 +23,7 @@ export const DND_ITEM = 'application/x-item' // プレビュー内の並べ替�
 export const CARD_SCALE = 0.8
 export const scaled = { zoom: CARD_SCALE, width: `${100 / CARD_SCALE}%` } as const
 
-export const yen = (v?: number) => (v === undefined ? '-' : `¥${v.toLocaleString('ja-JP')}`)
+export const yen = (v?: number, market: 'JP' | 'US' = 'JP') => priceText(v, market)
 export const DND_HERO = 'application/x-hero' // 候補 → プレビューのメインビジュアル枠(値はメイン画像ID)
 
 /** 選定候補(配信商品テーブルの「候補」の行)。どのセクションの候補かを持つ */

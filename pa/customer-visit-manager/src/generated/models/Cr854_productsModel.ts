@@ -12,6 +12,11 @@ export const Cr854_productscr854_category = {
   588230006: 'ホーム'
 } as const;
 export type Cr854_productscr854_category = keyof typeof Cr854_productscr854_category;
+export const Cr854_productscr854_market = {
+  588230000: 'JP',
+  588230001: 'US'
+} as const;
+export type Cr854_productscr854_market = keyof typeof Cr854_productscr854_market;
 export const Cr854_productscr854_salestrend = {
   588230000: '上昇',
   588230001: '横ばい',
@@ -46,6 +51,7 @@ export interface Cr854_productsBase {
   cr854_category?: Cr854_productscr854_category;
   cr854_description?: string;
   cr854_imageurl?: string;
+  cr854_market?: Cr854_productscr854_market;
   cr854_name: string;
   cr854_price?: number;
   cr854_productcode?: string;
@@ -65,6 +71,7 @@ export interface Cr854_productsBase {
 
 export interface Cr854_products extends Cr854_productsBase {
   cr854_categoryname?: string;
+  cr854_marketname?: string;
   cr854_salestrendname?: string;
   cr854_seasonname?: string;
   cr854_weathername?: string;

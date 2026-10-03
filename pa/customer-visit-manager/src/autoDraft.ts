@@ -18,6 +18,7 @@ import {
   type InstructionIdea,
   type ThemeSuggestion,
 } from './aiDraft'
+import { tr } from './i18n'
 import { FREE_DEFAULT_SLOTS, sectionsOf, type EmailTemplateId } from './templates'
 
 /** 「すべてAIで下書き」の入力。内容(テーマなど)は空から作るので、配信の基本情報だけを渡す */
@@ -79,7 +80,7 @@ export async function runAutoDraft(input: AutoDraftInput, onStep: AutoDraftProgr
   }
 
   // ① テーマ
-  const themes = await step('テーマを考えています', () => suggestThemes({ card: base, otherThemes: input.otherThemes, products }))
+  const themes = await step(tr('テーマを考えています', 'Thinking up themes'), () => suggestThemes({ card: base, otherThemes: input.otherThemes, products }))
   if (isCancelled()) return finish()
   if (themes?.length) {
     result.themeIdeas = themes
@@ -90,12 +91,12 @@ export async function runAutoDraft(input: AutoDraftInput, onStep: AutoDraftProgr
 
   // ② テンプレートとメイン画像(互いに独立なので、並行して実行する)
   const [tpl, hero] = await Promise.all([
-    step('テンプレートとメイン画像を選んでいます', () => suggestTemplate({ card: withTheme })),
+    step(tr('テンプレートとメイン画像を選んでいます', 'Choosing a template and hero image'), () => suggestTemplate({ card: withTheme })),
     (async () => {
       try {
         return await proposeHero({ card: withTheme, heroes, productNames: [] })
       } catch (e) {
-        result.errors.push(`メイン画像: ${e instanceof Error ? e.message : String(e)}`)
+        result.errors.push(`${tr('メイン画像', 'Hero image')}: ${e instanceof Error ? e.message : String(e)}`)
         return undefined
       }
     })(),
@@ -111,7 +112,7 @@ export async function runAutoDraft(input: AutoDraftInput, onStep: AutoDraftProgr
   total = 4 + sections.length
 
   // ③ ヘッドラインとコピー(組)
-  const copies = await step('ヘッドラインとコピーを考えています', () =>
+  const copies = await step(tr('ヘッドラインとコピーを考えています', 'Writing headline and copy'), () =>
     suggestCopies({ card: withTheme, language, items: [], hero: heroRow }),
   )
   if (isCancelled()) return finish()
@@ -127,7 +128,7 @@ export async function runAutoDraft(input: AutoDraftInput, onStep: AutoDraftProgr
   const excluded = new Set<string>()
   const productName = (id: string) => products.find((p) => p.cr854_productid === id)?.cr854_name ?? ''
   for (const sec of sections) {
-    const proposal = await step(`セクション ${sec.index + 1} / ${sections.length} を選んでいます`, () =>
+    const proposal = await step(tr(`セクション ${sec.index + 1} / ${sections.length} を選んでいます`, `Choosing section ${sec.index + 1} / ${sections.length}`), () =>
       proposeSection({
         card: withCopy,
         section: { slots: Number.isFinite(sec.slots) ? sec.slots : FREE_DEFAULT_SLOTS, wantTitle: sec.wantTitle, kind: sec.kind },
@@ -153,7 +154,7 @@ export async function runAutoDraft(input: AutoDraftInput, onStep: AutoDraftProgr
   }
 
   // ⑤ 制作指示(選ばれた商品とメイン画像を踏まえる)
-  const instructions = await step('制作指示を考えています', () =>
+  const instructions = await step(tr('制作指示を考えています', 'Writing production instructions'), () =>
     suggestInstructions({
       card: withCopy,
       language,
@@ -165,6 +166,6 @@ export async function runAutoDraft(input: AutoDraftInput, onStep: AutoDraftProgr
     result.instructionIdeas = instructions
     result.instructions = instructions[0].text
   }
-  onStep('完了', total, total)
+  onStep(tr('完了', 'Done'), total, total)
   return finish()
 }

@@ -44,6 +44,38 @@
           "x-ms-schema-name": "cr854_imageurl",
           "maxLength": 400
         },
+        "cr854_market": {
+          "type": "string",
+          "title": "market",
+          "x-ms-dataverse-attribute": "cr854_market",
+          "x-ms-dataverse-type": "PicklistType",
+          "x-ms-schema-name": "cr854_market",
+          "enum": [
+            "JP",
+            "US"
+          ],
+          "x-ms-enum-values": [
+            588230000,
+            588230001
+          ],
+          "Color": [
+            null,
+            null
+          ],
+          "x-ms-optionsetmetadataid": "29c6055d-ebbe-f111-aaaf-002248e8103d",
+          "x-ms-isGlobal": false,
+          "x-ms-optionsetdisplayname": "market",
+          "x-ms-optionSetType": "Picklist"
+        },
+        "cr854_marketname": {
+          "type": "string",
+          "title": "cr854_marketname",
+          "x-ms-dataverse-attribute": "cr854_marketname",
+          "x-ms-dataverse-type": "VirtualType",
+          "x-ms-schema-name": "cr854_marketName",
+          "x-ms-dataverse-attribute-of": "cr854_market",
+          "x-ms-read-only": true
+        },
         "cr854_name": {
           "type": "string",
           "title": "name",

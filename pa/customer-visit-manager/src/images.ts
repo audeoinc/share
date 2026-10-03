@@ -7,16 +7,19 @@ const heroAssets = import.meta.glob('./assets/heroes/*.svg', { eager: true, quer
 
 // Dataverse の画像URLが空、または仮の画像(placehold.co)のときだけ、同梱のイラストを使う。
 // 実際の画像URLを入れれば、そちらが優先される。
+// US 向けの商品(U01..)・メイン画像(UH01..)は、同じ絵柄(P01.., H01..)を使い回す
+const assetCode = (code?: string) => (code ?? '').replace(/^UH/, 'H').replace(/^U/, 'P')
+
 const isPlaceholder = (url?: string) => !url || url.includes('placehold.co')
 
 export function productImage(p?: Cr854_products): string | undefined {
   if (!p) return undefined
   if (!isPlaceholder(p.cr854_imageurl)) return p.cr854_imageurl
-  return productAssets[`./assets/products/${p.cr854_productcode}.svg`] ?? p.cr854_imageurl
+  return (productAssets[`./assets/products/${p.cr854_productcode}.svg`] ?? productAssets[`./assets/products/${assetCode(p.cr854_productcode)}.svg`]) ?? p.cr854_imageurl
 }
 
 export function heroImage(h?: Cr854_heroimages): string | undefined {
   if (!h) return undefined
   if (!isPlaceholder(h.cr854_imageurl)) return h.cr854_imageurl
-  return heroAssets[`./assets/heroes/${h.cr854_imagecode}.svg`] ?? h.cr854_imageurl
+  return heroAssets[`./assets/heroes/${assetCode(h.cr854_imagecode)}.svg`] ?? h.cr854_imageurl
 }

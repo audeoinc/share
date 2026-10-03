@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400">
+<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f4efe8"/><stop offset="1" stop-color="#e6dccd"/></linearGradient></defs>
+<rect width="300" height="400" fill="url(#bg)"/>
+<ellipse cx="150" cy="362" rx="98" ry="8" fill="#000" opacity=".10"/>
+<g><path d="M100 96 Q100 30 150 30 Q200 30 200 96 Q150 130 100 96 Z" fill="#cfa500" stroke="#a58400" stroke-width="3"/><path d="M105 82 Q150 106 195 82 L255 112 L275 232 L238 242 L228 182 L228 320 L72 320 L72 182 L62 242 L25 232 L45 112 Z" fill="#e6b800" stroke="#b38f00" stroke-width="3" stroke-linejoin="round"/><path d="M105 88 Q150 128 195 88" fill="none" stroke="#a58400" stroke-width="4"/><line x1="150" y1="118" x2="150" y2="320" stroke="#a58400" stroke-width="3"/><line x1="132" y1="110" x2="132" y2="150" stroke="#a58400" stroke-width="2"/><line x1="168" y1="110" x2="168" y2="150" stroke="#a58400" stroke-width="2"/></g>
+<text x="150" y="390" text-anchor="middle" font-family="'Inter','Noto Sans JP','Yu Gothic UI',Meiryo,sans-serif" font-size="15" font-weight="700" fill="#4a4a4a">Rain Parka</text>
+</svg>

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400">
+<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f4f1ec"/><stop offset="1" stop-color="#e6dfd3"/></linearGradient></defs>
+<rect width="300" height="400" fill="url(#bg)"/>
+<ellipse cx="150" cy="362" rx="98" ry="8" fill="#000" opacity=".10"/>
+<g><path d="M105 140 Q105 50 150 50 Q195 50 195 140" fill="none" stroke="#152842" stroke-width="10" stroke-linecap="round"/><path d="M62 140 H238 L252 350 H48 Z" fill="#1f3a5f" stroke="#152842" stroke-width="3"/><rect x="62" y="140" width="176" height="20" fill="#1b3455"/><rect x="120" y="220" width="60" height="44" rx="4" fill="none" stroke="#152842" stroke-width="3"/><path d="M150 168 Q168 196 150 208 Q132 196 150 168 Z" fill="#8ecbff" stroke="#fff" stroke-width="2" transform="translate(0 -6)"/></g>
+<text x="150" y="390" text-anchor="middle" font-family="'Inter','Noto Sans JP','Yu Gothic UI',Meiryo,sans-serif" font-size="15" font-weight="700" fill="#4a4a4a">Rain Tote</text>
+</svg>

@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import { createDarkTheme, createLightTheme, type BrandVariants, type Theme } from '@fluentui/react-components'
 
-// 英数字も日本語も IBM Plex Sans JP(アプリに同梱)。読み込めないときだけ、OS のフォントになる
-const fontFamilyBase = "'IBM Plex Sans JP', 'Segoe UI', 'Yu Gothic UI', 'Meiryo UI', system-ui, -apple-system, sans-serif"
+// 英数字は Inter、日本語は Noto Sans JP(どちらもアプリに同梱)。読み込めないときだけ、OS のフォントになる
+const fontFamilyBase = "'Inter', 'Noto Sans JP', 'Segoe UI', 'Yu Gothic UI', 'Meiryo UI', system-ui, -apple-system, sans-serif"
 
 /** 色相・彩度を固定し、明度だけを変えてブランド色の 16 段階を作る(80 が基準色) */
 function ramp(hue: number, sat: number): BrandVariants {

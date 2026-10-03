@@ -1,6 +1,8 @@
 // メールのテンプレート。ヒーロー(上部)の種類と、商品を並べる枠(セクション)で定義する。
 // 掲載商品は並び順に、上のセクションの枠から順に流し込む。
 
+import { tr } from './i18n'
+
 export type EmailTemplateId = 'free' | 'standard4' | 'collab' | 'offer' | 'cat2' | 'cat3'
 
 export type HeroKind = 'standard' | 'collab' | 'offer'
@@ -20,7 +22,13 @@ export interface EmailTemplate {
 }
 
 export const EMAIL_TEMPLATES: Record<EmailTemplateId, EmailTemplate> = {
-  free: { label: '自由(カテゴリ見出しを自動)', hero: 'standard', sections: [] },
+  free: {
+    get label() {
+      return tr('自由(カテゴリ見出しを自動)', 'Free (auto category headings)')
+    },
+    hero: 'standard',
+    sections: [],
+  },
   standard4: { label: 'Standard Hero + 4 Grid Items', hero: 'standard', sections: [{ kind: 'grid', slots: 4 }] },
   collab: {
     label: 'Collaboration Hero + 2 Features + 2 Grid',
@@ -50,7 +58,12 @@ export const EMAIL_TEMPLATES: Record<EmailTemplateId, EmailTemplate> = {
   },
 }
 
-export const TEMPLATE_OPTIONS = (Object.keys(EMAIL_TEMPLATES) as EmailTemplateId[]).map((id) => ({ id, label: EMAIL_TEMPLATES[id].label }))
+export const TEMPLATE_OPTIONS = (Object.keys(EMAIL_TEMPLATES) as EmailTemplateId[]).map((id) => ({
+  id,
+  get label() {
+    return EMAIL_TEMPLATES[id].label
+  },
+}))
 
 // Dataverse の選択肢(配信カードの「emailtemplate」列)の値との対応
 export const TEMPLATE_VALUES: Record<EmailTemplateId, 588230000 | 588230001 | 588230002 | 588230003 | 588230004 | 588230005> = {
@@ -90,19 +103,19 @@ export interface SectionInfo {
 export function sectionsOf(id: EmailTemplateId): SectionInfo[] {
   const tpl = EMAIL_TEMPLATES[id]
   if (id === 'free') {
-    return [{ index: 0, start: 0, slots: Infinity, kind: 'grid', wantTitle: false, label: '全体' }]
+    return [{ index: 0, start: 0, slots: Infinity, kind: 'grid', wantTitle: false, label: tr('全体', 'All') }]
   }
   const gridCount = tpl.sections.filter((s) => s.kind === 'grid').length
   return tpl.sections.map((sec, i) => {
     const start = tpl.sections.slice(0, i).reduce((n, s) => n + s.slots, 0)
     const gridNo = tpl.sections.slice(0, i + 1).filter((s) => s.kind === 'grid').length
     const label = sec.categoryHeading
-      ? `セクション${i + 1}`
+      ? tr(`セクション${i + 1}`, `Section ${i + 1}`)
       : sec.kind === 'feature'
-        ? '特集'
+        ? tr('特集', 'Feature')
         : gridCount > 1
-          ? `グリッド${gridNo}`
-          : 'グリッド'
+          ? tr(`グリッド${gridNo}`, `Grid ${gridNo}`)
+          : tr('グリッド', 'Grid')
     return { index: i, start, slots: sec.slots, kind: sec.kind, wantTitle: !!sec.categoryHeading, label }
   })
 }

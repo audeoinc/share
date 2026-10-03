@@ -26,6 +26,7 @@ import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
 import { Calendar } from './Calendar'
 import { CardDetail } from './CardDetail'
 import { loadAutoDraft, saveAutoDraft } from './settings'
+import { locale, optionLabel, setLang, tr, useLang, useT } from './i18n'
 import { channelOptions, countryOptions, departmentOptions, statusColor, statusOptions } from './status'
 
 interface Filters {
@@ -99,6 +100,32 @@ const useStyles = makeStyles({
     transitionDuration: tokens.durationFast,
   },
   thumbOn: { left: '16px', backgroundColor: tokens.colorNeutralForegroundOnBrand },
+  langSwitch: {
+    display: 'inline-flex',
+    padding: '2px',
+    columnGap: '2px',
+    borderRadius: tokens.borderRadiusMedium,
+    border: `1px solid ${tokens.colorNeutralStroke2}`,
+    backgroundColor: tokens.colorNeutralBackground1,
+  },
+  langBtn: {
+    border: 'none',
+    borderRadius: tokens.borderRadiusSmall,
+    padding: `2px ${tokens.spacingHorizontalS}`,
+    backgroundColor: 'transparent',
+    color: tokens.colorNeutralForeground2,
+    fontFamily: 'inherit',
+    fontSize: tokens.fontSizeBase200,
+    lineHeight: tokens.lineHeightBase200,
+    cursor: 'pointer',
+    ':hover': { backgroundColor: tokens.colorNeutralBackground2 },
+  },
+  langBtnOn: {
+    backgroundColor: tokens.colorBrandBackground,
+    color: tokens.colorNeutralForegroundOnBrand,
+    fontWeight: tokens.fontWeightSemibold,
+    ':hover': { backgroundColor: tokens.colorBrandBackground },
+  },
   autoDraftState: { fontWeight: tokens.fontWeightSemibold, minWidth: '2.2em', color: tokens.colorNeutralForeground1 },
   container: {
     width: '100%',
@@ -164,12 +191,13 @@ function FilterSelect({ label, value, options, onChange }: {
   onChange: (v: string) => void
 }) {
   const styles = useStyles()
+  const t = useT()
   return (
     <Field label={label} size="small" className={styles.filterField}>
       <Select size="small" value={value} onChange={(_, d) => onChange(d.value)}>
-        <option value="">すべて</option>
+        <option value="">{t('すべて', 'All')}</option>
         {options.map((o) => (
-          <option key={o.value} value={String(o.value)}>{o.label}</option>
+          <option key={o.value} value={String(o.value)}>{optionLabel(o.label)}</option>
         ))}
       </Select>
     </Field>
@@ -178,6 +206,8 @@ function FilterSelect({ label, value, options, onChange }: {
 
 function App() {
   const styles = useStyles()
+  const t = useT()
+  const lang = useLang()
   const [cards, setCards] = useState<Cr854_deliverycards[]>([])
   const [products, setProducts] = useState<Cr854_products[]>([])
   const [heroes, setHeroes] = useState<Cr854_heroimages[]>([])
@@ -191,7 +221,7 @@ function App() {
   const load = useCallback(async () => {
     try {
       const res = await Cr854_deliverycardsService.getAll({ orderBy: ['cr854_scheduledat asc'] })
-      if (!res.success) throw new Error(res.error?.message ?? '配信カードの取得に失敗しました')
+      if (!res.success) throw new Error(res.error?.message ?? tr('配信カードの取得に失敗しました', 'Failed to load delivery cards'))
       const data = res.data ?? []
       setCards(data)
       setError(null)
@@ -215,13 +245,13 @@ function App() {
     Cr854_productsService.getAll({ orderBy: ['cr854_productcode asc'] })
       .then((res) => {
         if (res.success) setProducts(res.data ?? [])
-        else setError(res.error?.message ?? '商品の取得に失敗しました')
+        else setError(res.error?.message ?? tr('商品の取得に失敗しました', 'Failed to load products'))
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
     Cr854_heroimagesService.getAll({ orderBy: ['cr854_imagecode asc'] })
       .then((res) => {
         if (res.success) setHeroes(res.data ?? [])
-        else setError(res.error?.message ?? 'メイン画像の取得に失敗しました')
+        else setError(res.error?.message ?? tr('メイン画像の取得に失敗しました', 'Failed to load hero images'))
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
   }, [load])
@@ -247,9 +277,23 @@ function App() {
     <>
       <header className={styles.header}>
         <CalendarLtrRegular fontSize={24} className={styles.headerIcon} />
-        <h1 className={styles.title}>配信カレンダー</h1>
+        <h1 className={styles.title}>{t('配信カレンダー', 'Delivery Calendar')}</h1>
+        <div className={styles.langSwitch} role="group" aria-label={t('言語', 'Language')}>
+          {([['ja', '日本語'], ['en', 'English']] as const).map(([l, name]) => (
+            <button
+              key={l}
+              type="button"
+              lang={l}
+              aria-pressed={lang === l}
+              className={mergeClasses(styles.langBtn, lang === l && styles.langBtnOn)}
+              onClick={() => setLang(l)}
+            >
+              {name}
+            </button>
+          ))}
+        </div>
         <Tooltip
-          content="内容が空の配信カードを開いたとき、AIが自動で下書きを作ります(同じカードでは1回だけ)"
+          content={t('内容が空の配信カードを開いたとき、AIが自動で下書きを作ります(同じカードでは1回だけ)', 'When you open an empty delivery card, AI drafts its content automatically (once per card)')}
           relationship="description"
         >
           <button
@@ -265,12 +309,12 @@ function App() {
             <span className={mergeClasses(styles.track, autoDraft && styles.trackOn)}>
               <span className={mergeClasses(styles.thumb, autoDraft && styles.thumbOn)} />
             </span>
-            開いたとき自動で下書き
-            <span className={styles.autoDraftState}>{autoDraft ? 'オン' : 'オフ'}</span>
+            {t('開いたとき自動で下書き', 'Auto-draft on open')}
+            <span className={styles.autoDraftState}>{autoDraft ? t('オン', 'On') : t('オフ', 'Off')}</span>
           </button>
         </Tooltip>
         <Button appearance="primary" size="small" icon={<AddRegular />} onClick={() => setCreating(true)}>
-          新規作成
+          {t('新規作成', 'New')}
         </Button>
       </header>
       <div className={styles.container}>
@@ -283,22 +327,22 @@ function App() {
         {!loading && !error && month && (
           <>
             <div className={styles.filterRow}>
-              <FilterSelect label="国" value={filters.country} options={countryOptions} onChange={setFilter('country')} />
-              <FilterSelect label="チャネル" value={filters.channel} options={channelOptions} onChange={setFilter('channel')} />
-              <FilterSelect label="部署" value={filters.department} options={departmentOptions} onChange={setFilter('department')} />
-              <FilterSelect label="ステータス" value={filters.status} options={statusOptions} onChange={setFilter('status')} />
-              {filtering && <Button size="small" appearance="subtle" onClick={() => setFilters(noFilter)}>クリア</Button>}
-              <span className={styles.count}>{filtered.length} / {cards.length} 件</span>
+              <FilterSelect label={t('国', 'Country')} value={filters.country} options={countryOptions} onChange={setFilter('country')} />
+              <FilterSelect label={t('チャネル', 'Channel')} value={filters.channel} options={channelOptions} onChange={setFilter('channel')} />
+              <FilterSelect label={t('部署', 'Department')} value={filters.department} options={departmentOptions} onChange={setFilter('department')} />
+              <FilterSelect label={t('ステータス', 'Status')} value={filters.status} options={statusOptions} onChange={setFilter('status')} />
+              {filtering && <Button size="small" appearance="subtle" onClick={() => setFilters(noFilter)}>{t('クリア', 'Clear')}</Button>}
+              <span className={styles.count}>{t(`${filtered.length} / ${cards.length} 件`, `${filtered.length} / ${cards.length} items`)}</span>
             </div>
             <div className={styles.monthRow}>
-              <Button appearance="subtle" size="small" icon={<ChevronLeftRegular />} onClick={() => shift(-1)} aria-label="前の月" />
-              <span className={styles.monthLabel}>{month.getFullYear()}年{month.getMonth() + 1}月</span>
-              <Button appearance="subtle" size="small" icon={<ChevronRightRegular />} onClick={() => shift(1)} aria-label="次の月" />
+              <Button appearance="subtle" size="small" icon={<ChevronLeftRegular />} onClick={() => shift(-1)} aria-label={t('前の月', 'Previous month')} />
+              <span className={styles.monthLabel}>{lang === 'ja' ? `${month.getFullYear()}年${month.getMonth() + 1}月` : month.toLocaleDateString(locale(), { month: 'long', year: 'numeric' })}</span>
+              <Button appearance="subtle" size="small" icon={<ChevronRightRegular />} onClick={() => shift(1)} aria-label={t('次の月', 'Next month')} />
               <div className={styles.legend}>
                 {statusOptions.map((o) => (
                   <span key={o.value} className={styles.legendPill}>
                     <span className={styles.legendDot} style={{ backgroundColor: statusColor(o.value) }} />
-                    {o.label}
+                    {optionLabel(o.label)}
                   </span>
                 ))}
               </div>

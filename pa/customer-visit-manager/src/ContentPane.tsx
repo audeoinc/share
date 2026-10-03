@@ -34,8 +34,10 @@ import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
 import { Candidates } from './Candidates'
 import { HeroCandidates } from './HeroCandidates'
 import { heroImage, productImage } from './images'
+import { productMarket } from './market'
 import { DND_CAND, DND_HERO, DND_ITEM, DND_PRODUCT, SOURCE_AI, SOURCE_MANUAL, yen, type Candidate, type Item } from './items'
 import type { CopyLanguage, ProposedHero } from './aiSelect'
+import { optionLabel, tr, useT } from './i18n'
 import { progressOf } from './progress'
 import { EMAIL_TEMPLATES, TEMPLATE_OPTIONS, sectionRange, sectionsOf, type EmailTemplateId, type SectionInfo } from './templates'
 import type { AiDrafts } from './useAiDrafts'
@@ -61,6 +63,9 @@ interface Props {
   onSectionCopy: (index: number, text: string) => void
   products: Cr854_products[]
   heroes: Cr854_heroimages[]
+  /** 選定の対象(配信カードの国に合う市場のもの)。products / heroes は、すでに載せたものの表示用に全件を持つ */
+  poolProducts: Cr854_products[]
+  poolHeroes: Cr854_heroimages[]
   items: Item[]
   setItems: Dispatch<SetStateAction<Item[]>>
   candidates: Candidate[]
@@ -254,6 +259,7 @@ const revealTab = (e: React.MouseEvent<HTMLElement>) => {
 }
 
 function AiButton({ busy, disabled, onClick, children }: { busy: boolean; disabled?: boolean; onClick: () => void; children: ReactNode }) {
+  const t = useT()
   return (
     <Button
       appearance="outline"
@@ -262,7 +268,7 @@ function AiButton({ busy, disabled, onClick, children }: { busy: boolean; disabl
       disabled={busy || disabled}
       icon={busy ? <Spinner size="extra-tiny" /> : <AiIcon />}
     >
-      {busy ? '考え中...' : children}
+      {busy ? t('考え中...', 'Thinking...') : children}
     </Button>
   )
 }
@@ -270,10 +276,11 @@ function AiButton({ busy, disabled, onClick, children }: { busy: boolean; disabl
 /** 理由の表示。2 行で省略し、クリックすると全文を編集できる(onChange なしなら読み取り専用) */
 function ReasonText({ value, onChange }: { value: string; onChange?: (v: string) => void }) {
   const s = useStyles()
+  const t = useT()
   const [editing, setEditing] = useState(false)
   if (onChange && editing) {
     return (
-      <Field label="選定理由" size="small">
+      <Field label={t('選定理由', 'Selection reason')} size="small">
         <AutoTextarea
           autoFocus
           size="small"
@@ -289,9 +296,9 @@ function ReasonText({ value, onChange }: { value: string; onChange?: (v: string)
       className={mergeClasses(s.reason, onChange ? s.reasonEditable : s.reasonPlain)}
       style={{ color: value ? tokens.colorNeutralForeground3 : tokens.colorNeutralForegroundDisabled }}
       onClick={onChange ? () => setEditing(true) : undefined}
-      title={onChange ? 'クリックして編集' : undefined}
+      title={onChange ? t('クリックして編集', 'Click to edit') : undefined}
     >
-      {value || (onChange ? '(理由を入力)' : '(理由なし)')}
+      {value || (onChange ? t('(理由を入力)', '(Enter a reason)') : t('(理由なし)', '(No reason)'))}
     </span>
   )
 }
@@ -321,6 +328,7 @@ interface RowProps {
 
 function Row({ image, wide, title, meta, reason, onReason, source, badge, actions, dim, drag, highlight }: RowProps) {
   const s = useStyles()
+  const t = useT()
   return (
     <div
       {...drag}
@@ -332,7 +340,7 @@ function Row({ image, wide, title, meta, reason, onReason, source, badge, action
         <div className={s.flexRowTight}>
           <Text weight="semibold" size={300}>{title}</Text>
           {source !== undefined && (
-            <Badge size="small" appearance="tint" color={source === SOURCE_AI ? 'brand' : 'informative'}>{source === SOURCE_AI ? 'AI' : '手動'}</Badge>
+            <Badge size="small" appearance="tint" color={source === SOURCE_AI ? 'brand' : 'informative'}>{source === SOURCE_AI ? 'AI' : t('手動', 'Manual')}</Badge>
           )}
           {badge && <Badge size="small" appearance="tint" color="warning">{badge}</Badge>}
         </div>
@@ -345,22 +353,23 @@ function Row({ image, wide, title, meta, reason, onReason, source, badge, action
 }
 
 const productMeta = (p?: Cr854_products) =>
-  p ? `${p.cr854_productcode} ・ ${yen(p.cr854_price)} ・ 在庫${p.cr854_stock ?? '-'} ・ ${p.cr854_salestrendname ?? ''} ・ ★${p.cr854_rating ?? '-'}` : ''
+  p ? `${p.cr854_productcode} ・ ${yen(p.cr854_price, productMarket(p))} ・ ${tr('在庫', 'Stock ')}${p.cr854_stock ?? '-'} ・ ${optionLabel(p.cr854_salestrendname)} ・ ★${p.cr854_rating ?? '-'}` : ''
 
-const heroMeta = (h?: Cr854_heroimages) => (h ? `${h.cr854_imagecode} ・ ${h.cr854_purposename ?? ''} ・ ${h.cr854_seasonname ?? ''} ・ ${h.cr854_tags ?? ''}` : '')
+const heroMeta = (h?: Cr854_heroimages) => (h ? `${h.cr854_imagecode} ・ ${optionLabel(h.cr854_purposename)} ・ ${optionLabel(h.cr854_seasonname)} ・ ${h.cr854_tags ?? ''}` : '')
 
 /** コピー・ヘッドラインの言語の切り替え(auto は、配信の国に合わせる) */
 function LanguageToggle({ value, onChange }: { value: CopyLanguage; onChange: (v: CopyLanguage) => void }) {
   const s = useStyles()
+  const t = useT()
   const opts: { v: CopyLanguage; label: string }[] = [
-    { v: 'auto', label: '国に合わせる' },
-    { v: 'ja', label: '日本語' },
+    { v: 'auto', label: t('国に合わせる', 'Match country') },
+    { v: 'ja', label: t('日本語', 'Japanese') },
     { v: 'en', label: 'English' },
   ]
   return (
     <div className={s.flexRow}>
-      <span className={s.caption}>言語</span>
-      <div role="group" aria-label="コピーの言語" style={{ display: 'inline-flex' }}>
+      <span className={s.caption}>{t('言語', 'Language')}</span>
+      <div role="group" aria-label={t('コピーの言語', 'Copy language')} style={{ display: 'inline-flex' }}>
         {opts.map((o) => (
           <Button
             key={o.v}
@@ -412,6 +421,7 @@ function IdeaTab(props: {
   onGenerate: () => void
 }) {
   const s = useStyles()
+  const t = useT()
   const { label, value, onChange, ideas, savedNote, savedChip, onAdopt, busy, blocked, onGenerate } = props
   const current = ideas.find((i) => i.text === value)
   const note = savedNote || current?.note
@@ -420,7 +430,7 @@ function IdeaTab(props: {
     <div className={s.grid12}>
       <div className={s.flexRow}>
         <AiButton busy={busy} disabled={!!blocked} onClick={onGenerate}>
-          {ideas.length ? '案を作り直す' : 'AIで案を出す'}
+          {ideas.length ? t('案を作り直す', 'Regenerate ideas') : t('AIで案を出す', 'Suggest with AI')}
         </AiButton>
         {blocked && <span className={s.warn}>{blocked}</span>}
       </div>
@@ -428,8 +438,8 @@ function IdeaTab(props: {
         <Field
           label={
             <span className={s.flexRowTight}>
-              {`現在の${label}`}
-              <Badge size="small" appearance="filled" color="success">採用中</Badge>
+              {t(`現在の${label}`, `Current ${label}`)}
+              <Badge size="small" appearance="filled" color="success">{t('採用中', 'In use')}</Badge>
             </span>
           }
           size="small"
@@ -439,11 +449,11 @@ function IdeaTab(props: {
         {(note || chip) && value && (
           <div className={s.noteBox}>
             {chip && <Badge size="small" appearance="tint" color="informative">{chip}</Badge>}
-            {note && <span><span className={s.lead}>AIの理由:</span>{` ${note}`}</span>}
+            {note && <span><span className={s.lead}>{t('AIの理由:', 'AI rationale:')}</span>{` ${note}`}</span>}
           </div>
         )}
       </div>
-      {ideas.length > 0 && <span className={s.listHead}><span className={s.lead}>AIの案(未採用):</span> 「採用」を押すと、上の内容に反映されます</span>}
+      {ideas.length > 0 && <span className={s.listHead}><span className={s.lead}>{t('AIの案(未採用):', 'AI ideas (not adopted):')}</span> {t('「採用」を押すと、上の内容に反映されます', 'Press "Adopt" to apply it above')}</span>}
       {ideas.map((idea) => {
         const adopted = idea.text === value
         return (
@@ -453,9 +463,9 @@ function IdeaTab(props: {
             {idea.note && <span className={s.caption}>{idea.note}</span>}
             <div className={s.flexEnd}>
               {adopted ? (
-                <Badge size="small" appearance="filled" color="success">採用中</Badge>
+                <Badge size="small" appearance="filled" color="success">{t('採用中', 'In use')}</Badge>
               ) : (
-                <Button size="small" appearance="primary" onClick={() => onAdopt(idea)}>採用</Button>
+                <Button size="small" appearance="primary" onClick={() => onAdopt(idea)}>{t('採用', 'Adopt')}</Button>
               )}
             </div>
           </div>
@@ -483,12 +493,13 @@ function CopyTab(props: {
   onGenerate: () => void
 }) {
   const s = useStyles()
+  const t = useT()
   const { headline, lead, onHeadline, onLead, ideas, savedAngle, onAdopt, busy, blocked, language, onLanguage, onGenerate } = props
   return (
     <div className={s.grid12}>
       <div className={s.flexRow}>
         <AiButton busy={busy} disabled={!!blocked} onClick={onGenerate}>
-          {ideas.length ? '案を作り直す' : 'AIで案を出す'}
+          {ideas.length ? t('案を作り直す', 'Regenerate ideas') : t('AIで案を出す', 'Suggest with AI')}
         </AiButton>
         {blocked && <span className={s.warn}>{blocked}</span>}
         <LanguageToggle value={language} onChange={onLanguage} />
@@ -497,8 +508,8 @@ function CopyTab(props: {
       <Field
         label={
           <span className={s.flexRowTight}>
-            現在のヘッドライン(メイン画像に載ります)
-            <Badge size="small" appearance="filled" color="success">採用中</Badge>
+            {t('現在のヘッドライン(メイン画像に載ります)', 'Current headline (shown on the main image)')}
+            <Badge size="small" appearance="filled" color="success">{t('採用中', 'In use')}</Badge>
           </span>
         }
         size="small"
@@ -508,8 +519,8 @@ function CopyTab(props: {
       <Field
         label={
           <span className={s.flexRowTight}>
-            現在のコピー(ヘッドラインの下に入ります)
-            <Badge size="small" appearance="filled" color="success">採用中</Badge>
+            {t('現在のコピー(ヘッドラインの下に入ります)', 'Current copy (placed below the headline)')}
+            <Badge size="small" appearance="filled" color="success">{t('採用中', 'In use')}</Badge>
           </span>
         }
         size="small"
@@ -518,11 +529,11 @@ function CopyTab(props: {
       </Field>
       {savedAngle && (headline || lead) && (
         <div className={s.noteBox}>
-          <span><span className={s.lead}>切り口:</span>{` ${savedAngle}`}</span>
+          <span><span className={s.lead}>{t('切り口:', 'Angle:')}</span>{` ${savedAngle}`}</span>
         </div>
       )}
       </div>
-      {ideas.length > 0 && <span className={s.listHead}><span className={s.lead}>AIの案(未採用):</span> 「採用」を押すと、ヘッドラインとコピーの両方が反映されます</span>}
+      {ideas.length > 0 && <span className={s.listHead}><span className={s.lead}>{t('AIの案(未採用):', 'AI ideas (not adopted):')}</span> {t('「採用」を押すと、ヘッドラインとコピーの両方が反映されます', 'Press "Adopt" to apply both the headline and the copy')}</span>}
       {ideas.map((idea) => {
         const adopted = idea.headline === headline && idea.lead === lead
         return (
@@ -532,14 +543,14 @@ function CopyTab(props: {
             <span className={s.caption}>{idea.lead}</span>
             <div className={s.flexEnd}>
               {adopted ? (
-                <Badge size="small" appearance="filled" color="success">採用中</Badge>
+                <Badge size="small" appearance="filled" color="success">{t('採用中', 'In use')}</Badge>
               ) : (
                 <Button
                   size="small"
                   appearance="primary"
                   onClick={() => onAdopt(idea)}
                 >
-                  採用
+                  {t('採用', 'Adopt')}
                 </Button>
               )}
             </div>
@@ -552,27 +563,29 @@ function CopyTab(props: {
 
 // ------------------------------------------------------------------ テンプレート
 
-const TEMPLATE_DESC: Record<EmailTemplateId, string> = {
-  free: 'カテゴリ見出しを自動で付ける、自由な並び。商品の数に決まりはありません。',
-  standard4: 'メイン画像 + 2×2 の商品グリッド(4 点)。基本の構成です。',
-  collab: 'コラボ用のヒーロー + 特集の商品 2 点 + グリッド 2 点(計 4 点)。',
-  offer: '期間限定・お得感を打ち出す赤基調のヒーロー + 価格を強調した 4 点。',
-  cat2: 'メイン画像 + カテゴリ 2 つ(各 2 点、計 4 点)。カテゴリごとに見出しが付きます。',
-  cat3: 'メイン画像 + カテゴリ 3 つ(各 2 点、計 6 点)。カテゴリごとに見出しが付きます。',
-}
+const templateDesc = (id: EmailTemplateId): string =>
+  ({
+    free: tr('カテゴリ見出しを自動で付ける、自由な並び。商品の数に決まりはありません。', 'A free-form layout with category headings added automatically. No fixed number of products.'),
+    standard4: tr('メイン画像 + 2×2 の商品グリッド(4 点)。基本の構成です。', 'Main image + a 2x2 product grid (4 items). The basic layout.'),
+    collab: tr('コラボ用のヒーロー + 特集の商品 2 点 + グリッド 2 点(計 4 点)。', 'Collab hero + 2 featured products + 2 grid items (4 in total).'),
+    offer: tr('期間限定・お得感を打ち出す赤基調のヒーロー + 価格を強調した 4 点。', 'A red-toned hero for limited-time deals + 4 items with emphasized prices.'),
+    cat2: tr('メイン画像 + カテゴリ 2 つ(各 2 点、計 4 点)。カテゴリごとに見出しが付きます。', 'Main image + 2 categories (2 items each, 4 in total). Each category gets a heading.'),
+    cat3: tr('メイン画像 + カテゴリ 3 つ(各 2 点、計 6 点)。カテゴリごとに見出しが付きます。', 'Main image + 3 categories (2 items each, 6 in total). Each category gets a heading.'),
+  })[id]
 
 const HERO_COLOR = { standard: '#cfd2dc', collab: '#b9a9d6', offer: '#f0a5a0' } as const
 
 /** 構成の見取り図(ヒーロー、見出し、商品の枠) */
 function TemplateThumb({ id }: { id: EmailTemplateId }) {
   const s = useStyles()
+  const t = useT()
   const tpl = EMAIL_TEMPLATES[id]
   return (
     <div className={s.thumb}>
       <div style={{ height: 24, background: HERO_COLOR[tpl.hero] }} />
       <div style={{ height: 4, width: '60%', margin: '0 auto', background: '#8a8f98' }} />
       {id === 'free' ? (
-        <span className={s.thumbFree}>自由</span>
+        <span className={s.thumbFree}>{t('自由', 'Free')}</span>
       ) : (
         tpl.sections.map((sec, i) => (
           <div key={i}>
@@ -591,11 +604,12 @@ function TemplateThumb({ id }: { id: EmailTemplateId }) {
 
 function TemplateTab({ template, onTemplate, hasCandidates }: { template: EmailTemplateId; onTemplate: (id: EmailTemplateId) => void; hasCandidates: boolean }) {
   const s = useStyles()
+  const t = useT()
   return (
     <div className={s.grid12}>
       <span className={s.caption}>
-        メールの構成を選びます。選んだテンプレートの枠に、商品が順に入ります。
-        {hasCandidates && ' テンプレートを変えると、セクションの構成が変わるため、選定候補は破棄されます(選定済みの商品は残ります)。'}
+        {t('メールの構成を選びます。選んだテンプレートの枠に、商品が順に入ります。', 'Choose the email layout. Products fill the slots of the chosen template in order.')}
+        {hasCandidates && t(' テンプレートを変えると、セクションの構成が変わるため、選定候補は破棄されます(選定済みの商品は残ります)。', ' Changing the template changes the section layout, so the candidates will be discarded (selected products are kept).')}
       </span>
       {TEMPLATE_OPTIONS.map((o) => {
         const selected = o.id === template
@@ -605,9 +619,9 @@ function TemplateTab({ template, onTemplate, hasCandidates }: { template: EmailT
             <div style={{ minWidth: 0 }}>
               <div className={s.flexRowTight}>
                 <span className={s.bold}>{o.label}</span>
-                {selected && <Badge size="small" appearance="filled" color="brand">選択中</Badge>}
+                {selected && <Badge size="small" appearance="filled" color="brand">{t('選択中', 'Selected')}</Badge>}
               </div>
-              <span className={s.caption}>{TEMPLATE_DESC[o.id]}</span>
+              <span className={s.caption}>{templateDesc(o.id)}</span>
             </div>
           </div>
         )
@@ -621,6 +635,7 @@ function TemplateTab({ template, onTemplate, hasCandidates }: { template: EmailT
 /** mode = hero: メイン画像 / ヘッドライン・コピー。mode = sections: セクション(見出し・コピー・商品) */
 function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
   const s = useStyles()
+  const t = useT()
   const { template, sectionTitles, products, heroes, items, setItems, candidates, setCandidates, drafts, disabled } = p
   const sections = sectionsOf(template)
   const [sub, setSub] = useState<number | 'hero' | 'copy'>(p.mode === 'hero' ? 'hero' : 0)
@@ -746,7 +761,7 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
   const setCandReason = (key: string, reason: string) => setCandidates((prev) => prev.map((x) => (x.key === key ? { ...x, reason } : x)))
 
   // ---- AI の選定結果は、そのまま設定する。直前の状態は「元に戻す」で復元できる
-  const [undo, setUndo] = useState<{ label: string; run: () => void } | null>(null)
+  const [undo, setUndo] = useState<{ message: string; run: () => void } | null>(null)
 
   const toItems = (rows: { productId: string; reason: string }[]): Item[] =>
     rows.map((r) => ({ key: crypto.randomUUID(), productId: r.productId, reason: r.reason, source: SOURCE_AI }))
@@ -755,7 +770,7 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
   const [hint, setHint] = useState<string | null>(null)
   const changeTitle = (sec: SectionInfo, title: string) => {
     p.onSectionTitle(sec.index, title)
-    if ((p.sectionCopies[sec.index] ?? '') || listOf(sec).length > 0) setHint('見出しを変更しました。必要なら、② コピー・③ 商品を作り直してください。')
+    if ((p.sectionCopies[sec.index] ?? '') || listOf(sec).length > 0) setHint(t('見出しを変更しました。必要なら、② コピー・③ 商品を作り直してください。', 'The heading was changed. If needed, regenerate (2) Copy and (3) Products.'))
   }
 
   const sectionLabel = (sec: SectionInfo) => (sec.wantTitle ? sectionTitles[sec.index] || sec.label : sec.label)
@@ -775,7 +790,7 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
     if (result.copy.trim()) p.onSectionCopy(sec.index, result.copy.trim())
     setHint(null)
     setUndo({
-      label: `${sectionLabel(sec)}の選定`,
+      message: tr(`AIが${sectionLabel(sec)}の選定をしました(直す場合は、ドラッグ&ドロップで入れ替えられます)`, `AI re-selected ${sectionLabel(sec)} (to adjust, swap items by drag & drop)`),
       run: () => {
         setItems(prevItems)
         setCandidates(prevCands)
@@ -791,7 +806,7 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
     const titles = await drafts.runSectionTitles(sec.index)
     if (!titles?.[0]) return
     changeTitle(sec, titles[0].title)
-    setUndo({ label: `${sectionLabel(sec)}の見出しの作り直し`, run: () => p.onSectionTitle(sec.index, prevTitle) })
+    setUndo({ message: tr(`AIが${sectionLabel(sec)}の見出しの作り直しをしました(直す場合は、ドラッグ&ドロップで入れ替えられます)`, `AI regenerated the heading for ${sectionLabel(sec)} (to adjust, swap items by drag & drop)`), run: () => p.onSectionTitle(sec.index, prevTitle) })
   }
 
   /** コピーだけ作り直す(第 1 候補を設定。現在の見出しと、選ばれた商品を踏まえる) */
@@ -800,7 +815,7 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
     const copies = await drafts.runSectionCopies(sec.index)
     if (!copies?.[0]) return
     p.onSectionCopy(sec.index, copies[0].copy)
-    setUndo({ label: `${sectionLabel(sec)}のコピーの作り直し`, run: () => p.onSectionCopy(sec.index, prevCopy) })
+    setUndo({ message: tr(`AIが${sectionLabel(sec)}のコピーの作り直しをしました(直す場合は、ドラッグ&ドロップで入れ替えられます)`, `AI regenerated the copy for ${sectionLabel(sec)} (to adjust, swap items by drag & drop)`), run: () => p.onSectionCopy(sec.index, prevCopy) })
   }
 
   /** 商品だけ選び直す(現在の見出しとコピーを踏まえる) */
@@ -813,7 +828,7 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
     setItems([...prevItems.slice(0, from), ...toItems(result.selected), ...prevItems.slice(to)])
     setCandidates([...prevCands.filter((c) => c.section !== sec.index), ...toItems(result.candidates).map((c) => ({ ...c, section: sec.index }))])
     setUndo({
-      label: `${sectionLabel(sec)}の商品の選び直し`,
+      message: tr(`AIが${sectionLabel(sec)}の商品の選び直しをしました(直す場合は、ドラッグ&ドロップで入れ替えられます)`, `AI re-selected the products for ${sectionLabel(sec)} (to adjust, swap items by drag & drop)`),
       run: () => {
         setItems(prevItems)
         setCandidates(prevCands)
@@ -831,7 +846,7 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
     }
     p.setHeroCandidates(result.candidates)
     setUndo({
-      label: 'メイン画像の選定',
+      message: tr('AIがメイン画像の選定をしました(直す場合は、ドラッグ&ドロップで入れ替えられます)', 'AI selected the main image (to adjust, swap items by drag & drop)'),
       run: () => {
         p.setHeroId(prev.id)
         p.setHeroReason(prev.reason)
@@ -842,9 +857,9 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
 
   const undoAlert = undo && (
     <MessageBar layout="multiline" intent="success">
-      <MessageBarBody>AIが{undo.label}をしました(直す場合は、ドラッグ&ドロップで入れ替えられます)</MessageBarBody>
+      <MessageBarBody>{undo.message}</MessageBarBody>
       <MessageBarActions
-        containerAction={<Button appearance="transparent" size="small" aria-label="閉じる" icon={<DismissRegular />} onClick={() => setUndo(null)} />}
+        containerAction={<Button appearance="transparent" size="small" aria-label={t('閉じる', 'Close')} icon={<DismissRegular />} onClick={() => setUndo(null)} />}
       >
         <Button
           size="small"
@@ -853,7 +868,7 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
             setUndo(null)
           }}
         >
-          元に戻す
+          {t('元に戻す', 'Undo')}
         </Button>
       </MessageBarActions>
     </MessageBar>
@@ -870,8 +885,8 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
         setUndo(null)
       }}
     >
-      {p.mode === 'hero' && <Tab value="hero" onClick={revealTab}>{`${p.heroId ? '✓ ' : ''}メイン画像`}</Tab>}
-      {p.mode === 'hero' && <Tab value="copy" onClick={revealTab}>{`${p.headline || p.copy ? '✓ ' : ''}${drafts.copyIdeas.length ? '● ' : ''}ヘッドライン・コピー`}</Tab>}
+      {p.mode === 'hero' && <Tab value="hero" onClick={revealTab}>{`${p.heroId ? '✓ ' : ''}${t('メイン画像', 'Main image')}`}</Tab>}
+      {p.mode === 'hero' && <Tab value="copy" onClick={revealTab}>{`${p.headline || p.copy ? '✓ ' : ''}${drafts.copyIdeas.length ? '● ' : ''}${t('ヘッドライン・コピー', 'Headline & copy')}`}</Tab>}
       {p.mode === 'sections' &&
         sections.map((sec) => {
           const title = sec.wantTitle ? sectionTitles[sec.index] || sec.label : sec.label
@@ -912,9 +927,9 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
     const header = (
       <div className={s.flexRow}>
         <AiButton busy={busyAll} disabled={noTheme || disabled || anyBusy} onClick={() => selectSection(sec)}>
-          このセクションをまとめてAIで選定
+          {t('このセクションをまとめてAIで選定', 'Select this whole section with AI')}
         </AiButton>
-        {noTheme && <span className={s.warn}>先にテーマを決めてください</span>}
+        {noTheme && <span className={s.warn}>{t('先にテーマを決めてください', 'Set a theme first')}</span>}
       </div>
     )
 
@@ -926,49 +941,49 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
           <MessageBar layout="multiline" intent="info">
             <MessageBarBody>{hint}</MessageBarBody>
             <MessageBarActions
-              containerAction={<Button appearance="transparent" size="small" aria-label="閉じる" icon={<DismissRegular />} onClick={() => setHint(null)} />}
+              containerAction={<Button appearance="transparent" size="small" aria-label={t('閉じる', 'Close')} icon={<DismissRegular />} onClick={() => setHint(null)} />}
             />
           </MessageBar>
         )}
 
         {sec.wantTitle && (
           <Block
-            title="① 見出し(切り口)"
+            title={t('① 見出し(切り口)', '1. Heading (angle)')}
             right={
               <AiButton busy={busyTitle} disabled={noTheme || disabled || anyBusy} onClick={() => selectTitles(sec)}>
-                {titles.length ? '作り直す' : 'AIで作る'}
+                {titles.length ? t('作り直す', 'Regenerate') : t('AIで作る', 'Generate with AI')}
               </AiButton>
             }
           >
-            <span className={s.value}>{currentTitle || '(未設定)'}</span>
-            {titles.map((t) => {
-              const current = currentTitle === t.title
+            <span className={s.value}>{currentTitle || t('(未設定)', '(Not set)')}</span>
+            {titles.map((ti) => {
+              const current = currentTitle === ti.title
               return (
-                <div key={t.title} onClick={() => changeTitle(sec, t.title)} className={mergeClasses(s.pick, current && s.pickCurrent)}>
+                <div key={ti.title} onClick={() => changeTitle(sec, ti.title)} className={mergeClasses(s.pick, current && s.pickCurrent)}>
                   <div className={s.flexRowTight}>
-                    <span className={s.semibold}>{t.title}</span>
-                    {current && <Badge size="small" appearance="filled" color="brand">設定中</Badge>}
+                    <span className={s.semibold}>{ti.title}</span>
+                    {current && <Badge size="small" appearance="filled" color="brand">{t('設定中', 'Current')}</Badge>}
                   </div>
-                  <span className={s.caption}>{t.reason}</span>
+                  <span className={s.caption}>{ti.reason}</span>
                 </div>
               )
             })}
-            {titles.length > 0 && <span className={s.caption}>クリックで差し替えます。書き換えは、プレビューの見出しから。</span>}
+            {titles.length > 0 && <span className={s.caption}>{t('クリックで差し替えます。書き換えは、プレビューの見出しから。', 'Click to swap. To rewrite it, edit the heading in the preview.')}</span>}
           </Block>
         )}
 
         <Block
-          title={`${sec.wantTitle ? '② ' : '① '}コピー`}
+          title={`${sec.wantTitle ? '② ' : '① '}${t('コピー', 'Copy')}`}
           right={
             <>
               <AiButton busy={busyCopy} disabled={noTheme || disabled || anyBusy} onClick={() => selectCopies(sec)}>
-                {copies.length ? '作り直す' : 'AIで作る'}
+                {copies.length ? t('作り直す', 'Regenerate') : t('AIで作る', 'Generate with AI')}
               </AiButton>
               <LanguageToggle value={p.language} onChange={p.onLanguage} />
             </>
           }
         >
-          <Field label="セクションのコピー(見出しの下に入ります)" size="small">
+          <Field label={t('セクションのコピー(見出しの下に入ります)', 'Section copy (placed below the heading)')} size="small">
             <AutoTextarea rows={2} size="small" value={currentCopy} onChange={(_, d) => p.onSectionCopy(i, d.value)} />
           </Field>
           {copies.map((c) => {
@@ -977,25 +992,25 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
               <div key={c.copy} onClick={() => p.onSectionCopy(i, c.copy)} className={mergeClasses(s.pick, current && s.pickCurrent)}>
                 <div className={s.flexRowTight}>
                   {c.angle && <Badge size="small" appearance="tint" color="informative">{c.angle}</Badge>}
-                  {current && <Badge size="small" appearance="filled" color="brand">設定中</Badge>}
+                  {current && <Badge size="small" appearance="filled" color="brand">{t('設定中', 'Current')}</Badge>}
                 </div>
                 <span style={{ fontSize: tokens.fontSizeBase300 }}>{c.copy}</span>
               </div>
             )
           })}
-          {copies.length > 0 && <span className={s.caption}>クリックで差し替えます。商品を選んだあとに「作り直す」と、商品を踏まえたコピーになります。</span>}
+          {copies.length > 0 && <span className={s.caption}>{t('クリックで差し替えます。商品を選んだあとに「作り直す」と、商品を踏まえたコピーになります。', 'Click to swap. After selecting products, press "Regenerate" to get copy based on them.')}</span>}
         </Block>
 
         <Block
-          title={`${sec.wantTitle ? '③ ' : '② '}商品`}
+          title={`${sec.wantTitle ? '③ ' : '② '}${t('商品', 'Products')}`}
           right={
             <AiButton busy={busyProducts} disabled={noTheme || disabled || anyBusy} onClick={() => selectProducts(sec)}>
-              {list.length ? '選び直す' : 'AIで選ぶ'}
+              {list.length ? t('選び直す', 'Re-select') : t('AIで選ぶ', 'Select with AI')}
             </AiButton>
           }
         >
           <span className={s.semibold} style={{ fontSize: tokens.fontSizeBase200 }}>
-            選定済み({list.length}{Number.isFinite(sec.slots) ? ` / ${sec.slots}` : ''}件)
+            {t(`選定済み(${list.length}${Number.isFinite(sec.slots) ? ` / ${sec.slots}` : ''}件)`, `Selected (${list.length}${Number.isFinite(sec.slots) ? ` / ${sec.slots}` : ''})`)}
           </span>
           <div
             onDragOver={overTarget('sel')}
@@ -1007,7 +1022,7 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
             }}
             className={mergeClasses(s.dropZone, dropKey === 'sel' && !isFull(sec) && s.dropActive)}
           >
-            {list.length === 0 && <span className={s.caption}>まだ選定されていません。「AIで案出し」か、下の候補・一覧から選んでください(ドラッグでも追加できます)。</span>}
+            {list.length === 0 && <span className={s.caption}>{t('まだ選定されていません。「AIで案出し」か、下の候補・一覧から選んでください(ドラッグでも追加できます)。', 'Nothing selected yet. Use AI suggestions or pick from the candidates and list below (you can also drag to add).')}</span>}
             {list.map((it, k) => {
               const prod = productById.get(it.productId)
               const outside = Number.isFinite(sec.slots) && k >= sec.slots
@@ -1033,14 +1048,14 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
                   reason={it.reason}
                   onReason={(v) => setItemReason(it.key, v)}
                   source={it.source}
-                  badge={outside ? '枠外' : undefined}
+                  badge={outside ? t('枠外', 'Outside slots') : undefined}
                   actions={
                     <>
                       <div>
-                        <Button appearance="subtle" size="small" icon={<ArrowUpRegular />} disabled={k === 0} onClick={() => moveInSection(sec, it.key, -1)} aria-label="上へ" />
-                        <Button appearance="subtle" size="small" icon={<ArrowDownRegular />} disabled={k === list.length - 1} onClick={() => moveInSection(sec, it.key, 1)} aria-label="下へ" />
+                        <Button appearance="subtle" size="small" icon={<ArrowUpRegular />} disabled={k === 0} onClick={() => moveInSection(sec, it.key, -1)} aria-label={t('上へ', 'Move up')} />
+                        <Button appearance="subtle" size="small" icon={<ArrowDownRegular />} disabled={k === list.length - 1} onClick={() => moveInSection(sec, it.key, 1)} aria-label={t('下へ', 'Move down')} />
                       </div>
-                      <Button appearance="subtle" size="small" onClick={() => demote(sec, it)}>外す</Button>
+                      <Button appearance="subtle" size="small" onClick={() => demote(sec, it)}>{t('外す', 'Remove')}</Button>
                     </>
                   }
                 />
@@ -1057,8 +1072,8 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
             }}
             className={mergeClasses(s.dropZone, dropKey === 'cands' && s.dropActive)}
           >
-            <Divider alignContent="start"><span className={s.caption}>残りの候補({cands.length}件)</span></Divider>
-            {cands.length === 0 && <span className={s.caption}>候補はありません(選定済みの行をここへドラッグすると、候補へ戻せます)。</span>}
+            <Divider alignContent="start"><span className={s.caption}>{t(`残りの候補(${cands.length}件)`, `Remaining candidates (${cands.length})`)}</span></Divider>
+            {cands.length === 0 && <span className={s.caption}>{t('候補はありません(選定済みの行をここへドラッグすると、候補へ戻せます)。', 'No candidates (drag a selected row here to move it back to candidates).')}</span>}
             {cands.map((c) => {
               const prod = productById.get(c.productId)
               return (
@@ -1072,12 +1087,12 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
                   reason={c.reason}
                   onReason={(v) => setCandReason(c.key, v)}
                   source={c.source}
-                  actions={<Button size="small" appearance="outline" onClick={() => promote(sec, c)}>選ぶ</Button>}
+                  actions={<Button size="small" appearance="outline" onClick={() => promote(sec, c)}>{t('選ぶ', 'Select')}</Button>}
                 />
               )
             })}
           </div>
-          {finder('すべての商品から探す', <Candidates products={products} usedIds={usedIds} onAdd={(id) => addManual(sec, id)} />)}
+          {finder(t('すべての商品から探す', 'Browse all products'), <Candidates products={p.poolProducts} usedIds={usedIds} onAdd={(id) => addManual(sec, id)} />)}
         </Block>
       </div>
     )
@@ -1120,9 +1135,9 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
     const header = (
       <div className={s.flexRow}>
         <AiButton busy={busy} disabled={noTheme || disabled} onClick={selectHero}>
-          メイン画像をAIで選定
+          {t('メイン画像をAIで選定', 'Select main image with AI')}
         </AiButton>
-        {noTheme && <span className={s.warn}>先にテーマを決めてください</span>}
+        {noTheme && <span className={s.warn}>{t('先にテーマを決めてください', 'Set a theme first')}</span>}
       </div>
     )
 
@@ -1131,7 +1146,7 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
       <div className={s.grid8}>
         {header}
         {undoAlert}
-        <span className={s.semibold} style={{ fontSize: tokens.fontSizeBase200 }}>選定済み(メイン画像)</span>
+        <span className={s.semibold} style={{ fontSize: tokens.fontSizeBase200 }}>{t('選定済み(メイン画像)', 'Selected (main image)')}</span>
         {current ? (
           <Row
             wide
@@ -1161,7 +1176,7 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
                   p.setHeroReason('')
                 }}
               >
-                外す
+                {t('外す', 'Remove')}
               </Button>
             }
           />
@@ -1172,7 +1187,7 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
             onDrop={dropHero((id) => setHero(id, p.heroCandidates.find((c) => c.heroId === id)?.reason ?? ''))}
             className={mergeClasses(s.heroEmpty, dropKey === 'hero-sel' && s.heroEmptyActive)}
           >
-            <span className={s.caption}>まだ選定されていません。「AIで案出し」か、下の候補・一覧から選んでください(ドラッグでも設定できます)。</span>
+            <span className={s.caption}>{t('まだ選定されていません。「AIで案出し」か、下の候補・一覧から選んでください(ドラッグでも設定できます)。', 'Nothing selected yet. Use AI suggestions or pick from the candidates and list below (you can also drag to set).')}</span>
           </div>
         )}
         <div
@@ -1183,8 +1198,8 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
           })}
           className={mergeClasses(s.dropZone, dropKey === 'hero-cands' && s.dropActive)}
         >
-          <Divider alignContent="start"><span className={s.caption}>残りの候補({p.heroCandidates.length}件)</span></Divider>
-          {p.heroCandidates.length === 0 && <span className={s.caption}>候補はありません(候補は、AIが案を出したときだけ表示されます。保存はされません。選定中の画像をここへドラッグすると、候補へ戻せます)。</span>}
+          <Divider alignContent="start"><span className={s.caption}>{t(`残りの候補(${p.heroCandidates.length}件)`, `Remaining candidates (${p.heroCandidates.length})`)}</span></Divider>
+          {p.heroCandidates.length === 0 && <span className={s.caption}>{t('候補はありません(候補は、AIが案を出したときだけ表示されます。保存はされません。選定中の画像をここへドラッグすると、候補へ戻せます)。', 'No candidates (candidates appear only when AI suggests them and are not saved. Drag the selected image here to move it back to candidates).')}</span>}
           {p.heroCandidates.map((c) => {
             const h = heroById.get(c.heroId)
             return (
@@ -1198,12 +1213,12 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
                 meta={heroMeta(h)}
                 reason={c.reason}
                 source={SOURCE_AI}
-                actions={<Button size="small" appearance="outline" onClick={() => setHero(c.heroId, c.reason)}>選ぶ</Button>}
+                actions={<Button size="small" appearance="outline" onClick={() => setHero(c.heroId, c.reason)}>{t('選ぶ', 'Select')}</Button>}
               />
             )
           })}
         </div>
-        {finder('すべての画像から探す', <HeroCandidates heroes={heroes} selectedId={p.heroId} onSelect={(id) => setHero(id, '')} />)}
+        {finder(t('すべての画像から探す', 'Browse all images'), <HeroCandidates heroes={p.poolHeroes} selectedId={p.heroId} onSelect={(id) => setHero(id, '')} />)}
       </div>
     )
   }
@@ -1229,7 +1244,7 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
         p.onField('copyAngle', idea.angle)
       }}
       busy={!!drafts.busy.copy}
-      blocked={noTheme ? '先にテーマを決めてください' : undefined}
+      blocked={noTheme ? t('先にテーマを決めてください', 'Set a theme first') : undefined}
       language={p.language}
       onLanguage={p.onLanguage}
       onGenerate={drafts.runCopy}
@@ -1248,33 +1263,34 @@ function ProductsTab(p: Props & { mode: 'hero' | 'sections' }) {
 
 export function ContentPane(props: Props) {
   const s = useStyles()
+  const t = useT()
   const { theme, headline, instructions, onField, drafts, template, onTemplate, candidates } = props
   const [tab, setTab] = useState<TopTab>('theme')
   const pr = progressOf({ theme, template, heroId: props.heroId, headline, items: props.items, instructions })
 
   const mark = (filled: boolean, hasIdeas: boolean) => `${filled ? '✓ ' : ''}${hasIdeas ? '● ' : ''}`
-  const needTheme = theme.trim() ? undefined : '先にテーマを決めてください'
+  const needTheme = theme.trim() ? undefined : t('先にテーマを決めてください', 'Set a theme first')
 
   return (
     <div className={s.grid12}>
-      <Text weight="semibold" size={300}>コンテンツ生成</Text>
+      <Text weight="semibold" size={300}>{t('コンテンツ生成', 'Content generation')}</Text>
       <TabList size="small" className={s.tabs} selectedValue={tab} onTabSelect={(_, d) => setTab(d.value as TopTab)}>
-        <Tab value="theme" onClick={revealTab}>{`${mark(pr.theme, drafts.themeIdeas.length > 0)}① テーマ`}</Tab>
-        <Tab value="template" onClick={revealTab}>{`${mark(pr.template, false)}② テンプレート`}</Tab>
-        <Tab value="hero" onClick={revealTab}>{`${mark(pr.hero, drafts.copyIdeas.length > 0)}③ ヒーロー`}</Tab>
-        <Tab value="sections" onClick={revealTab}>{`${mark(pr.sections, false)}④ セクション`}</Tab>
-        <Tab value="instructions" onClick={revealTab}>{`${mark(pr.instructions, drafts.instructionIdeas.length > 0)}⑤ 制作指示`}</Tab>
+        <Tab value="theme" onClick={revealTab}>{`${mark(pr.theme, drafts.themeIdeas.length > 0)}${t('① テーマ', '1. Theme')}`}</Tab>
+        <Tab value="template" onClick={revealTab}>{`${mark(pr.template, false)}${t('② テンプレート', '2. Template')}`}</Tab>
+        <Tab value="hero" onClick={revealTab}>{`${mark(pr.hero, drafts.copyIdeas.length > 0)}${t('③ ヒーロー', '3. Hero')}`}</Tab>
+        <Tab value="sections" onClick={revealTab}>{`${mark(pr.sections, false)}${t('④ セクション', '4. Sections')}`}</Tab>
+        <Tab value="instructions" onClick={revealTab}>{`${mark(pr.instructions, drafts.instructionIdeas.length > 0)}${t('⑤ 制作指示', '5. Production notes')}`}</Tab>
       </TabList>
 
       {tab === 'theme' && (
         <IdeaTab
-          label="テーマ(配信全体の前提。メールには出ません)"
+          label={t('テーマ(配信全体の前提。メールには出ません)', 'Theme (premise for the whole delivery. Not shown in the email)')}
           value={theme}
           onChange={(v) => {
             onField('theme', v)
             onField('themeReason', '')
           }}
-          ideas={drafts.themeIdeas.map((t) => ({ text: t.theme, note: t.reason }))}
+          ideas={drafts.themeIdeas.map((th) => ({ text: th.theme, note: th.reason }))}
           savedNote={props.themeReason}
           onAdopt={(idea) => {
             onField('theme', idea.text)
@@ -1289,7 +1305,7 @@ export function ContentPane(props: Props) {
       {tab === 'sections' && <ProductsTab {...props} mode="sections" />}
       {tab === 'instructions' && (
         <IdeaTab
-          label="制作指示"
+          label={t('制作指示', 'Production notes')}
           value={instructions}
           onChange={(v) => {
             onField('instructions', v)

@@ -3,6 +3,7 @@ import { Badge, Button, Caption1, Input, Text, makeStyles, mergeClasses, shortha
 import { SearchRegular } from '@fluentui/react-icons'
 import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
 import { DND_HERO } from './items'
+import { optionLabel, useT } from './i18n'
 import { heroImage } from './images'
 
 interface Props {
@@ -48,6 +49,7 @@ const useStyles = makeStyles({
 
 /** すべてのメイン画像から探す。サムネイルの一覧で、クリックするだけで設定できる(ドラッグ&ドロップでも設定できる) */
 export function HeroCandidates({ heroes, selectedId, onSelect }: Props) {
+  const t = useT()
   const styles = useStyles()
   const [query, setQuery] = useState('')
   const [purpose, setPurpose] = useState('')
@@ -63,21 +65,21 @@ export function HeroCandidates({ heroes, selectedId, onSelect }: Props) {
     <div className={styles.root}>
       <Input
         size="small"
-        placeholder="画像名・タグ・説明で検索"
+        placeholder={t('画像名・タグ・説明で検索', 'Search by name, tag or description')}
         value={query}
         onChange={(_, d) => setQuery(d.value)}
         contentBefore={<SearchRegular />}
       />
       <div className={styles.chips}>
-        <Button size="small" shape="circular" appearance={purpose === '' ? 'primary' : 'outline'} onClick={() => setPurpose('')}>すべて</Button>
+        <Button size="small" shape="circular" appearance={purpose === '' ? 'primary' : 'outline'} onClick={() => setPurpose('')}>{t('すべて', 'All')}</Button>
         {purposes.map((c) => (
           <Button key={c} size="small" shape="circular" appearance={purpose === c ? 'primary' : 'outline'} onClick={() => setPurpose(c === purpose ? '' : c)}>
-            {c}
+            {optionLabel(c)}
           </Button>
         ))}
       </div>
       <Caption1 className={styles.caption}>
-        {shown.length}件 ・ クリックで設定(ドラッグ&ドロップでも設定できます)
+        {t(`${shown.length}件`, `${shown.length} items`)} ・ {t('クリックで設定(ドラッグ&ドロップでも設定できます)', 'Click to set (drag and drop also works)')}
       </Caption1>
       <div className={styles.grid}>
         {shown.map((h) => {
@@ -106,11 +108,11 @@ export function HeroCandidates({ heroes, selectedId, onSelect }: Props) {
               className={mergeClasses(styles.card, used && styles.cardUsed)}
             >
               <img draggable={false} src={heroImage(h)} alt={h.cr854_name} className={styles.img} />
-              {used && <Badge appearance="filled" color="brand" className={styles.badge}>設定中</Badge>}
+              {used && <Badge appearance="filled" color="brand" className={styles.badge}>{t('設定中', 'In use')}</Badge>}
               <div className={styles.info}>
                 <Text weight="semibold" size={300} truncate wrap={false} block>{h.cr854_name}</Text>
                 <Caption1 className={styles.line}>
-                  {h.cr854_imagecode} ・ {h.cr854_purposename} ・ {h.cr854_seasonname}
+                  {h.cr854_imagecode} ・ {optionLabel(h.cr854_purposename)} ・ {optionLabel(h.cr854_seasonname)}
                 </Caption1>
               </div>
             </div>

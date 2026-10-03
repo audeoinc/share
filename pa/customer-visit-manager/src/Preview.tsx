@@ -12,8 +12,10 @@ import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
 import { AutoTextarea } from './AutoTextarea'
 import { DND_HERO, DND_ITEM, scaled, yen, type Item } from './items'
 import { heroImage, productImage } from './images'
+import { productMarket } from './market'
 import { EMAIL_TEMPLATES, type EmailTemplateId } from './templates'
 import { HEADLINE_FONT } from './fonts'
+import { locale, optionLabel, useT } from './i18n'
 
 interface Props {
   channel: 'email' | 'push'
@@ -165,20 +167,27 @@ function useDropTarget(onDropAt: Props['onDropAt']) {
 function FitLine({ baseSize, minScale = 0.55, style, children }: { baseSize: string; minScale?: number; style?: React.CSSProperties; children: string }) {
   const classes = useStyles()
   const ref = useRef<HTMLDivElement>(null)
+  const textRef = useRef<HTMLSpanElement>(null)
 
   useLayoutEffect(() => {
     const el = ref.current
-    if (!el) return
+    const text = textRef.current
+    if (!el || !text) return
     const fit = () => {
-      // 実寸で測る: 縮尺 1 に戻して、はみ出し具合(表示幅 / 文字の幅)の分だけ縮める。文字の幅は、フォントサイズに比例する
-      el.style.setProperty('--fit', '1')
-      const ratio = el.scrollWidth > 0 ? el.clientWidth / el.scrollWidth : 1
-      el.style.setProperty('--fit', String(Math.max(minScale, Math.min(1, ratio))))
+      // 文字そのものの幅(text)と、表示できる幅(el)を比べて、倍率を決める。
+      // 文字の幅は、現在の倍率に比例するので、「現在の倍率 × 表示幅 / 文字の幅」が、ちょうど収まる倍率になる
+      const current = parseFloat(el.style.getPropertyValue('--fit')) || 1
+      const width = text.offsetWidth
+      if (width <= 0 || el.clientWidth <= 0) return
+      const next = Math.max(minScale, Math.min(1, (current * el.clientWidth) / width))
+      if (Math.abs(next - current) > 0.004) el.style.setProperty('--fit', String(next))
     }
     fit()
-    const ro = new ResizeObserver(fit) // 表示幅が変わったとき(ペインの幅の変更など)
+    // 表示幅が変わったとき(ペインの幅の変更など)と、文字の幅が変わったとき(フォントの読み込み、文の変更)の、どちらも検知する
+    const ro = new ResizeObserver(fit)
     ro.observe(el)
-    document.fonts?.ready.then(fit) // フォントの読み込みで、文字の幅が変わったとき
+    ro.observe(text)
+    document.fonts?.ready.then(fit)
     document.fonts?.addEventListener?.('loadingdone', fit)
     return () => {
       ro.disconnect()
@@ -188,12 +197,13 @@ function FitLine({ baseSize, minScale = 0.55, style, children }: { baseSize: str
 
   return (
     <div ref={ref} className={classes.fit} style={{ fontSize: `calc(${baseSize} * var(--fit, 1))`, ...style }}>
-      {children}
+      <span ref={textRef} style={{ display: 'inline-block' }}>{children}</span>
     </div>
   )
 }
 
 function EmailPreview({ subject, headline, copy, items, products, selectedKey, showHeadings, template, sectionTitles, onSectionTitle, sectionCopies, onSectionCopy, compact = false, hero, onDropHero, onClearHero, onSelect, onRemove, onMove, onDropAt }: Props) {
+  const t = useT()
   const classes = useStyles()
   const { over, handlers, clear } = useDropTarget(onDropAt)
   const [heroOver, setHeroOver] = useState(false)
@@ -216,7 +226,7 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
             e.stopPropagation()
             onMove(it.key, -1)
           }}
-          aria-label="前へ"
+          aria-label={t('前へ', 'Previous')}
         />
         <Button
           className={classes.ctl}
@@ -228,7 +238,7 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
             e.stopPropagation()
             onMove(it.key, 1)
           }}
-          aria-label="後ろへ"
+          aria-label={t('後ろへ', 'Next')}
         />
       </div>
       <Button
@@ -240,7 +250,7 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
           e.stopPropagation()
           onRemove(it.key)
         }}
-        aria-label="外す"
+        aria-label={t('外す', 'Remove')}
       />
     </div>
   )
@@ -261,21 +271,21 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
     backgroundColor: over === idx ? 'rgba(103,80,164,0.08)' : 'transparent',
   })
 
-  const priceEl = (price?: number) =>
+  const priceEl = (price?: number, market?: 'JP' | 'US') =>
     offer ? (
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap' }}>
-        <span style={{ fontSize: '1.05rem', fontWeight: 800, color: '#d32f2f' }}>{yen(price)}</span>
+        <span style={{ fontSize: '1.05rem', fontWeight: 800, color: '#d32f2f' }}>{yen(price, market)}</span>
         <span style={{ fontSize: '0.65rem', fontWeight: 700, color: '#fff', backgroundColor: '#d32f2f', padding: '0 6px', borderRadius: 4 }}>
-          期間限定
+          {t('期間限定', 'LIMITED TIME')}
         </span>
       </div>
     ) : (
-      <div style={{ fontSize: '0.8rem', fontWeight: 700, color: INK }}>{yen(price)}</div>
+      <div style={{ fontSize: '0.8rem', fontWeight: 700, color: INK }}>{yen(price, market)}</div>
     )
 
   const cta = (
     <div style={{ marginTop: 6, padding: '4px 0', textAlign: 'center', backgroundColor: offer ? '#d32f2f' : '#222', color: '#fff', fontSize: '0.75rem', borderRadius: 4 }}>
-      詳細はこちら
+      {t('詳細はこちら', 'View details')}
     </div>
   )
 
@@ -285,7 +295,7 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
       <div key={it.key} {...dragProps(it, idx)} className={classes.frame} style={frameStyle(it, idx)}>
         <img className={classes.img} draggable={false} src={productImage(p)} alt={p?.cr854_name} style={{ width: '100%', aspectRatio: compact ? '1 / 1' : '3 / 4' }} />
         <div className={classes.noWrap} style={{ fontSize: '0.85rem', fontWeight: 600, marginTop: 4, color: INK }}>{p?.cr854_name}</div>
-        {priceEl(p?.cr854_price)}
+        {priceEl(p?.cr854_price, productMarket(p))}
         {cta}
         {controls(it, idx)}
       </div>
@@ -302,7 +312,7 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
           <div style={{ fontSize: '0.7rem', letterSpacing: 2, color: SUB }}>FEATURE</div>
           <div style={{ fontSize: '1rem', fontWeight: 700, color: INK }}>{p?.cr854_name}</div>
           <div style={{ fontSize: '0.8rem', color: SUB }}>{p?.cr854_description}</div>
-          {priceEl(p?.cr854_price)}
+          {priceEl(p?.cr854_price, productMarket(p))}
           {cta}
         </div>
         {controls(it, idx)}
@@ -325,7 +335,7 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
         padding: 8,
       }}
     >
-      ここに商品をドロップ
+      {t('ここに商品をドロップ', 'Drop a product here')}
     </div>
   )
 
@@ -339,7 +349,7 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
 
   // カテゴリ系テンプレートの見出し。クリックして書き換えられる(未設定なら商品カテゴリ名を出す)
   const editableHeading = (index: number, fallback: string) => {
-    const value = sectionTitles[index] !== undefined ? sectionTitles[index] : fallback
+    const value = sectionTitles[index] ? sectionTitles[index] : fallback
     return (
       <div style={{ textAlign: 'center', margin: '12px 0' }}>
         <Input
@@ -347,7 +357,7 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
           appearance="outline"
           value={value}
           onChange={(_, d) => onSectionTitle(index, d.value)}
-          input={{ 'aria-label': `セクション${index + 1}の見出し`, style: { textAlign: 'center', fontWeight: 700, fontSize: '0.95rem', letterSpacing: 2, color: INK } }}
+          input={{ 'aria-label': t(`セクション${index + 1}の見出し`, `Section ${index + 1} heading`), style: { textAlign: 'center', fontWeight: 700, fontSize: '0.95rem', letterSpacing: 2, color: INK } }}
           style={{ width: `${Math.max(10, value.length * 2 + 4)}ch` }}
         />
       </div>
@@ -366,8 +376,8 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
           rows={Math.max(1, text.split('\n').length)}
           value={text}
           onChange={(_, d) => onSectionCopy(index, d.value)}
-          placeholder="(セクションのコピー)"
-          textarea={{ 'aria-label': `セクション${index + 1}のコピー`, style: { textAlign: 'center', fontSize: '0.85rem', color: SUB, letterSpacing: 0.5, paddingTop: 2, paddingBottom: 2, minHeight: 0 } }}
+          placeholder={t('(セクションのコピー)', '(Section copy)')}
+          textarea={{ 'aria-label': t(`セクション${index + 1}のコピー`, `Section ${index + 1} copy`), style: { textAlign: 'center', fontSize: '0.85rem', color: SUB, letterSpacing: 0.5, paddingTop: 2, paddingBottom: 2, minHeight: 0 } }}
         />
       </div>
     )
@@ -405,11 +415,11 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
             size="small"
             icon={<DismissRegular />}
             onClick={onClearHero}
-            aria-label="メイン画像を外す"
+            aria-label={t('メイン画像を外す', 'Remove main image')}
           />
         </>
       ) : (
-        'メインビジュアル(候補から画像をドロップ)'
+        t('メインビジュアル(候補から画像をドロップ)', 'Main visual (drop an image from the candidates)')
       )}
       {tpl.hero === 'offer' && (
         <div style={{ position: 'absolute', top: 12, left: 12, backgroundColor: '#d32f2f', color: '#fff', fontWeight: 800, letterSpacing: 2, fontSize: '0.75rem', padding: '4px 10px', borderRadius: 4 }}>
@@ -448,13 +458,13 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
             lineHeight: 1.2,
           }}
         >
-          {headline || '(ヘッドライン未入力)'}
+          {headline || t('(ヘッドライン未入力)', '(No headline)')}
         </FitLine>
         <FitLine
           baseSize={compact ? '2.6cqw' : '2.9cqw'}
           style={{ marginTop: '0.8cqw', fontFamily: hf.family, fontWeight: 400, letterSpacing: '0.06em', lineHeight: 1.5, opacity: 0.95 }}
         >
-          {copy || '(コピー未入力)'}
+          {copy || t('(コピー未入力)', '(No copy)')}
         </FitLine>
       </div>
     </div>
@@ -474,7 +484,7 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
       <>
         {runs.map((run) => (
           <div key={run.start} style={{ padding: '0 16px 16px' }}>
-            {showHeadings && run.category && headingEl(run.category)}
+            {showHeadings && run.category && headingEl(optionLabel(run.category))}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>{run.items.map((it, j) => gridTile(it, run.start + j))}</div>
           </div>
         ))}
@@ -489,7 +499,7 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
               fontSize: '0.85rem',
             }}
           >
-            {items.length === 0 ? 'ここに商品をドロップ' : '＋ ここにドロップで末尾に追加'}
+            {items.length === 0 ? t('ここに商品をドロップ', 'Drop a product here') : t('＋ ここにドロップで末尾に追加', '+ Drop here to add to the end')}
           </div>
         </div>
       </>
@@ -509,7 +519,7 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
           const feature = sec.kind === 'feature'
           return (
             <div key={start} style={{ padding: '0 16px 16px' }}>
-              {sec.categoryHeading && editableHeading(si, category ?? `CATEGORY ${si + 1}`)}
+              {sec.categoryHeading && editableHeading(si, category ? optionLabel(category) : `CATEGORY ${si + 1}`)}
               {sectionCopyEl(si, !!sec.categoryHeading)}
               <div style={{ display: 'grid', gridTemplateColumns: feature ? '1fr' : '1fr 1fr', gap: 12 }}>
                 {Array.from({ length: sec.slots }, (_, j) =>
@@ -522,7 +532,7 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
         {overflow.length > 0 && (
           <div style={{ padding: '0 16px 24px' }}>
             <div style={{ fontSize: '0.75rem', color: '#b26a00', backgroundColor: '#fff4e0', borderRadius: 8, padding: '4px 8px', marginBottom: 8 }}>
-              枠外({overflow.length}件): このテンプレートの枠を超えているため、メールには載りません
+              {t(`枠外(${overflow.length}件): このテンプレートの枠を超えているため、メールには載りません`, `Out of slots (${overflow.length}): these exceed the template's slots and won't appear in the email`)}
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, opacity: 0.55 }}>
               {overflow.map((it, j) => gridTile(it, offset + j))}
@@ -535,12 +545,12 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
 
   return (
     <div style={{ maxWidth: 440, margin: '0 auto' }}>
-      {!compact && <span style={{ fontSize: 12, color: tokens.colorNeutralForeground2 }}>件名: {subject || '(配信名未入力)'}</span>}
+      {!compact && <span style={{ fontSize: 12, color: tokens.colorNeutralForeground2 }}>{t('件名', 'Subject')}: {subject || t('(配信名未入力)', '(No name)')}</span>}
       <div style={{ backgroundColor: '#fff', color: INK, border: '1px solid #ddd', borderRadius: 16, overflow: 'hidden', marginTop: 4, ...scaled }}>
         <div style={{ backgroundColor: '#222', color: '#fff', textAlign: 'center', padding: '12px 0', letterSpacing: 4, fontWeight: 700 }}>SHOP</div>
         {heroBox}
         {body}
-        {!compact && <div style={{ backgroundColor: '#f5f5f5', color: SUB, fontSize: '0.75rem', textAlign: 'center', padding: '12px 0' }}>配信停止はこちら</div>}
+        {!compact && <div style={{ backgroundColor: '#f5f5f5', color: SUB, fontSize: '0.75rem', textAlign: 'center', padding: '12px 0' }}>{t('配信停止はこちら', 'Unsubscribe')}</div>}
       </div>
     </div>
   )
@@ -548,6 +558,7 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
 
 function PushPreview(props: Props) {
   const { subject, headline, copy, scheduledAt, items, products, selectedKey, hero: pickedHero, onSelect, onRemove, onMove, onDropAt } = props
+  const t = useT()
   const classes = useStyles()
   const { over, handlers, clear } = useDropTarget(onDropAt)
   const [style, setStyle] = useState<'ios' | 'android'>('ios')
@@ -559,9 +570,9 @@ function PushPreview(props: Props) {
 
   const when = scheduledAt ? new Date(scheduledAt) : null
   const clock = when ? `${when.getHours()}:${String(when.getMinutes()).padStart(2, '0')}` : '9:41'
-  const dateText = when ? when.toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'long' }) : ''
-  const title = headline || subject || '(ヘッドライン未入力)'
-  const bodyText = copy || '(コピー未入力)'
+  const dateText = when ? when.toLocaleDateString(locale(), { month: 'long', day: 'numeric', weekday: 'long' }) : ''
+  const title = headline || subject || t('(ヘッドライン未入力)', '(No headline)')
+  const bodyText = copy || t('(コピー未入力)', '(No copy)')
   const hasJa = /[\u3000-\u9fff\uff00-\uffef]/.test(title)
   const titleFont = {
     fontFamily: HEADLINE_FONT.family,
@@ -570,7 +581,7 @@ function PushPreview(props: Props) {
     textTransform: HEADLINE_FONT.upper ? ('uppercase' as const) : ('none' as const),
   }
   const bodyFont = { fontFamily: HEADLINE_FONT.family, letterSpacing: '0.04em' }
-  const more = items.length > 1 ? `ほか${items.length - 1}点の商品` : ''
+  const more = items.length > 1 ? t(`ほか${items.length - 1}点の商品`, `+${items.length - 1} more products`) : ''
 
   const appIcon = (size: number) => (
     <div style={{ width: size, height: size, borderRadius: style === 'ios' ? '22%' : '50%', backgroundColor: '#222', color: '#fff', display: 'grid', placeItems: 'center', fontSize: size * 0.5, fontWeight: 800, flexShrink: 0 }}>
@@ -593,7 +604,7 @@ function PushPreview(props: Props) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
           {appIcon(20)}
           <div style={{ flexGrow: 1, fontSize: '0.7rem', letterSpacing: 1, color: SUB }}>SHOP</div>
-          <div style={{ fontSize: '0.7rem', color: SUB }}>たった今</div>
+          <div style={{ fontSize: '0.7rem', color: SUB }}>{t('たった今', 'now')}</div>
         </div>
         <div style={{ ...titleFont, fontSize: '0.9rem', color: INK }}>{title}</div>
         <div style={{ ...bodyFont, fontSize: '0.85rem', color: INK, whiteSpace: 'pre-wrap' }}>{bodyText}</div>
@@ -604,7 +615,7 @@ function PushPreview(props: Props) {
       <div style={{ backgroundColor: '#f3edf7', color: INK, borderRadius: 24, padding: 12, boxShadow: '0 2px 10px rgba(0,0,0,0.3)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
           {appIcon(18)}
-          <div style={{ flexGrow: 1, fontSize: '0.7rem', color: SUB }}>SHOP ・ たった今</div>
+          <div style={{ flexGrow: 1, fontSize: '0.7rem', color: SUB }}>SHOP ・ {t('たった今', 'now')}</div>
           <div style={{ fontSize: '0.8rem', color: SUB, lineHeight: 1 }}>⌃</div>
         </div>
         <div style={{ ...titleFont, fontSize: '0.9rem', color: INK }}>{title}</div>
@@ -618,10 +629,10 @@ function PushPreview(props: Props) {
     <div style={{ maxWidth: 380, margin: '0 auto', display: 'grid', gap: 16 }}>
       <div style={{ justifySelf: 'center', display: 'flex' }}>
         <ToggleButton size="small" checked={style === 'ios'} onClick={() => setStyle('ios')} style={{ borderTopRightRadius: 0, borderBottomRightRadius: 0 }}>
-          iOS風
+          {t('iOS風', 'iOS style')}
         </ToggleButton>
         <ToggleButton size="small" checked={style === 'android'} onClick={() => setStyle('android')} style={{ borderTopLeftRadius: 0, borderBottomLeftRadius: 0, marginLeft: -1 }}>
-          Android風
+          {t('Android風', 'Android style')}
         </ToggleButton>
       </div>
       {/* スマホのロック画面 */}
@@ -644,10 +655,10 @@ function PushPreview(props: Props) {
         <div style={{ width: 96, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.55)', margin: '24px auto 0' }} />
       </div>
       <span style={{ fontSize: 12, color: tokens.colorNeutralForeground2 }}>
-        通知の画像には、メイン画像(なければ先頭の商品)を使います。下のリストで、商品の順序を入れ替えられます。
+        {t('通知の画像には、メイン画像(なければ先頭の商品)を使います。下のリストで、商品の順序を入れ替えられます。', 'The notification image uses the main image (or the first product if none). You can reorder products in the list below.')}
       </span>
       {/* 通知をタップしたあとのメッセージ本文。メールと同じレイアウトで、画像を小さくしたもの */}
-      <div style={{ fontSize: 14, fontWeight: 700 }}>タップ後のメッセージ(メールと同じレイアウト)</div>
+      <div style={{ fontSize: 14, fontWeight: 700 }}>{t('タップ後のメッセージ(メールと同じレイアウト)', 'Message after tapping (same layout as the email)')}</div>
       <EmailPreview {...props} compact />
       <div style={{ display: 'grid', gap: 6 }}>
         {items.map((it, idx) => {
@@ -678,7 +689,7 @@ function PushPreview(props: Props) {
                   e.stopPropagation()
                   onMove(it.key, -1)
                 }}
-                aria-label="上へ"
+                aria-label={t('上へ', 'Move up')}
               />
               <Button
                 appearance="subtle"
@@ -689,7 +700,7 @@ function PushPreview(props: Props) {
                   e.stopPropagation()
                   onMove(it.key, 1)
                 }}
-                aria-label="下へ"
+                aria-label={t('下へ', 'Move down')}
               />
               <Button
                 appearance="subtle"
@@ -699,7 +710,7 @@ function PushPreview(props: Props) {
                   e.stopPropagation()
                   onRemove(it.key)
                 }}
-                aria-label="外す"
+                aria-label={t('外す', 'Remove')}
               />
             </div>
           )
@@ -709,7 +720,7 @@ function PushPreview(props: Props) {
           className={classes.pushDrop}
           style={{ borderColor: over === items.length ? tokens.colorBrandForeground1 : tokens.colorNeutralStroke2 }}
         >
-          {items.length === 0 ? 'ここに商品をドロップ' : '＋ ここにドロップで末尾に追加'}
+          {items.length === 0 ? t('ここに商品をドロップ', 'Drop a product here') : t('＋ ここにドロップで末尾に追加', '+ Drop here to add to the end')}
         </div>
       </div>
     </div>

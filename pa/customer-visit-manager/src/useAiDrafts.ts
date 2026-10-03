@@ -24,6 +24,7 @@ import {
   type InstructionIdea,
   type ThemeSuggestion,
 } from './aiDraft'
+import { tr } from './i18n'
 import type { Candidate, Item } from './items'
 
 export interface DraftInputs {
@@ -85,21 +86,21 @@ export function useAiDrafts(inputs: DraftInputs, onError: (message: string | nul
   const runTheme = () =>
     withBusy('theme', async () => {
       const card = inputs.buildCard()
-      if (!card.scheduledAt) throw new Error('テーマ案を出すには、先に配信日時を入力してください')
+      if (!card.scheduledAt) throw new Error(tr('テーマ案を出すには、先に配信日時を入力してください', 'Enter the send date and time before requesting theme ideas'))
       setThemeIdeas(await suggestThemes({ card, otherThemes: inputs.otherThemes, products: inputs.products }))
     })
 
   const runCopy = () =>
     withBusy('copy', async () => {
       const ctx = context()
-      if (!ctx.card.theme.trim()) throw new Error('コピー案を出すには、先にテーマを決めてください')
+      if (!ctx.card.theme.trim()) throw new Error(tr('コピー案を出すには、先にテーマを決めてください', 'Set a theme before requesting copy ideas'))
       setCopyIdeas(await suggestCopies(ctx))
     })
 
   const runInstructions = () =>
     withBusy('instructions', async () => {
       const ctx = context()
-      if (!ctx.card.theme.trim()) throw new Error('制作指示の案を出すには、先にテーマを決めてください')
+      if (!ctx.card.theme.trim()) throw new Error(tr('制作指示の案を出すには、先にテーマを決めてください', 'Set a theme before requesting production instruction ideas'))
       setInstructionIdeas(await suggestInstructions(ctx))
     })
 
@@ -107,14 +108,14 @@ export function useAiDrafts(inputs: DraftInputs, onError: (message: string | nul
   const runHero = () =>
     withBusy<HeroProposal>('hero', async () => {
       const card = inputs.buildCard()
-      if (!card.theme.trim()) throw new Error('メイン画像を選ぶには、先にテーマを決めてください')
+      if (!card.theme.trim()) throw new Error(tr('メイン画像を選ぶには、先にテーマを決めてください', 'Set a theme before choosing a hero image'))
       return proposeHero({ card, heroes: inputs.heroes, productNames: inputs.items.map((i) => productName(i.productId)).filter(Boolean) })
     })
 
   /** セクション 1 つ分の AI への入力(他のセクションの状況と、このセクションの現在の内容) */
   const sectionArgs = (index: number) => {
     const card = inputs.buildCard()
-    if (!card.theme.trim()) throw new Error('先にテーマを決めてください')
+    if (!card.theme.trim()) throw new Error(tr('先にテーマを決めてください', 'Set a theme first'))
     const sections = sectionsOf(inputs.template)
     const sec = sections[index]
 

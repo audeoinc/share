@@ -1,6 +1,7 @@
 import { makeStyles, mergeClasses, tokens } from '@fluentui/react-components'
 import type { Cr854_deliverycards } from './generated/models/Cr854_deliverycardsModel'
 import { statusColor } from './status'
+import { locale, optionLabel, useT } from './i18n'
 
 interface Props {
   month: Date
@@ -10,7 +11,11 @@ interface Props {
 
 const pad = (n: number) => String(n).padStart(2, '0')
 const dayKey = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土']
+// 日曜始まり。表記は現在の言語に従う(2024-01-07 は日曜日)
+const weekdays = () =>
+  Array.from({ length: 7 }, (_, i) =>
+    new Date(2024, 0, 7 + i).toLocaleDateString(locale(), { weekday: locale() === 'ja-JP' ? 'narrow' : 'short' }),
+  )
 
 const useStyles = makeStyles({
   root: {
@@ -104,6 +109,7 @@ const useStyles = makeStyles({
 
 export function Calendar({ month, cards, onSelect }: Props) {
   const styles = useStyles()
+  useT()
   const first = new Date(month.getFullYear(), month.getMonth(), 1)
   const daysInMonth = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate()
   const weeks = Math.ceil((first.getDay() + daysInMonth) / 7)
@@ -124,7 +130,7 @@ export function Calendar({ month, cards, onSelect }: Props) {
   return (
     <div className={styles.root}>
       <div className={styles.grid}>
-        {WEEKDAYS.map((w, i) => (
+        {weekdays().map((w, i) => (
           <div
             key={w}
             className={mergeClasses(styles.weekday, i === 0 && styles.sunday, i === 6 && styles.saturday)}
@@ -146,7 +152,7 @@ export function Calendar({ month, cards, onSelect }: Props) {
                   key={c.cr854_deliverycardid}
                   type="button"
                   onClick={() => onSelect(c.cr854_deliverycardid)}
-                  title={`${c.cr854_name}(${c.cr854_statusname ?? ''})`}
+                  title={`${c.cr854_name}(${optionLabel(c.cr854_statusname)})`}
                   className={styles.pill}
                   style={{
                     backgroundColor: `color-mix(in srgb, ${statusColor(c.cr854_status)} 16%, var(--colorNeutralBackground1))`,
@@ -154,8 +160,8 @@ export function Calendar({ month, cards, onSelect }: Props) {
                   }}
                 >
                   <span className={styles.pillMeta}>
-                    {new Date(c.cr854_scheduledat!).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}
-                    {' '}{c.cr854_countryname}・{c.cr854_channelname}
+                    {new Date(c.cr854_scheduledat!).toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit' })}
+                    {' '}{optionLabel(c.cr854_countryname)}・{optionLabel(c.cr854_channelname)}
                   </span>
                   <span className={styles.pillName}>{c.cr854_name}</span>
                 </button>

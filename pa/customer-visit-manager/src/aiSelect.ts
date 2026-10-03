@@ -1,6 +1,7 @@
 import { Cr854_airequestsService } from './generated/services/Cr854_airequestsService'
 import type { Cr854_products } from './generated/models/Cr854_productsModel'
 import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
+import { getLang, tr } from './i18n'
 
 // AI要求テーブルの状態(選択肢の値)。エージェントは、フロー「AI要求の処理」が呼ぶ。仕様は docs/ai-queue.md、docs/copilot-agent.md
 const STATUS_WAITING = 588230000
@@ -177,7 +178,7 @@ export interface HeroProposal {
 export function extractJson(text: string): unknown {
   const start = text.indexOf('{')
   const end = text.lastIndexOf('}')
-  if (start < 0 || end < start) throw new Error(`エージェントの応答に JSON が含まれていません。応答の冒頭: ${text.slice(0, 300)}`)
+  if (start < 0 || end < start) throw new Error(tr(`エージェントの応答に JSON が含まれていません。応答の冒頭: ${text.slice(0, 300)}`, `The agent's response contains no JSON. Start of response: ${text.slice(0, 300)}`))
   const body = text.slice(start, end + 1)
   try {
     return JSON.parse(body)
@@ -193,16 +194,32 @@ export function extractJson(text: string): unknown {
 
 // 文字列の中の半角ダブルクォートは、JSON を壊す原因になる
 const JSON_NOTE = '【重要】返答の JSON は、文字列の中に半角のダブルクォート(")を入れないこと。強調や引用には「」を使う。\n\n'
+// 画面の言語が英語のときは、画面に表示する説明文を英語で書かせる(コピー・見出しの言語は language が決める)
+const EN_NOTE = '【重要】画面に表示する文章(テーマ、見出し、理由、切り口、制作指示など)は、すべて自然な英語で書くこと。以下の指示にある日本語の例は、書式の参考であり、出力は英語にする。\n\n'
 const PARSE_ATTEMPTS = 3
+
+/**
+ * 画面が英語のとき、指示文の「日本語で書く」という指定を「英語で書く」に直し、文字数の上限を英語の長さに合わせる。
+ * コピーの言語の指定('ja' は日本語、'en' は英語)など、出力の言語を決めない箇所は変えない。
+ */
+function localizePrompt(prompt: string): string {
+  if (getLang() !== 'en') return prompt
+  return prompt
+    .replace(/日本語で/g, '英語で')
+    .replace(/日本語(?= ?\d)/g, '英語')
+    .replace(/は日本語。/g, 'は英語。')
+    .replace(/200〜240 文字/g, '420〜520 文字')
+    .replace(/(\d+) 文字以内/g, (_, n: string) => `${Math.round(Number(n) * 2.2)} 文字以内`)
+}
 
 /** プロンプトと入力 JSON をエージェントへ送り、応答の JSON オブジェクトを返す。返答の JSON が壊れていたときは、依頼し直す */
 export async function askAgent(prompt: string, payload: unknown): Promise<Record<string, unknown>> {
   let lastError: unknown
   for (let attempt = 0; attempt < PARSE_ATTEMPTS; attempt++) {
-    const text = await askText(JSON_NOTE + prompt + JSON.stringify(payload))
+    const text = await askText((getLang() === 'en' ? EN_NOTE : '') + JSON_NOTE + localizePrompt(prompt) + JSON.stringify(payload))
     try {
       const parsed = extractJson(text) as Record<string, unknown>
-      if (typeof parsed.error === 'string') throw new Error(`エージェントからのエラー: ${parsed.error}`)
+      if (typeof parsed.error === 'string') throw new Error(tr(`エージェントからのエラー: ${parsed.error}`, `Error from the agent: ${parsed.error}`))
       return parsed
     } catch (e) {
       if (!(e instanceof SyntaxError)) throw e
@@ -222,7 +239,7 @@ async function askText(message: string): Promise<string> {
     statecode: 0,
   })
   const id = created.data?.cr854_airequestid
-  if (!created.success || !id) throw new Error(created.error?.message ?? 'AI の依頼を登録できませんでした')
+  if (!created.success || !id) throw new Error(created.error?.message ?? tr('AI の依頼を登録できませんでした', 'Could not register the AI request'))
   try {
     const deadline = Date.now() + POLL_TIMEOUT_MS
     while (Date.now() < deadline) {
@@ -230,11 +247,11 @@ async function askText(message: string): Promise<string> {
       const got = await Cr854_airequestsService.get(id)
       if (!got.success || !got.data) continue
       const status = got.data.cr854_status
-      if (status === STATUS_ERROR) throw new Error(got.data.cr854_response || 'エージェントの呼び出しに失敗しました')
+      if (status === STATUS_ERROR) throw new Error(got.data.cr854_response || tr('エージェントの呼び出しに失敗しました', 'Failed to call the agent'))
       if (status !== STATUS_DONE) continue
       return got.data.cr854_response ?? ''
     }
-    throw new Error('AI の返答がタイムアウトしました。フロー「AI要求の処理」がオンか確認してください')
+    throw new Error(tr('AI の返答がタイムアウトしました。フロー「AI要求の処理」がオンか確認してください', 'The AI response timed out. Check that the flow "AI要求の処理" is turned on'))
   } finally {
     // 読み取ったあと(失敗時も)、依頼の行は消す
     void Cr854_airequestsService.delete(id).catch(() => undefined)
@@ -337,7 +354,7 @@ function toSelection(raw: unknown, pool: Cr854_products[], slots: number): Produ
     seen.add(id)
     rows.push({ productId: id, reason: it.reason ?? '' })
   }
-  if (rows.length === 0) throw new Error('エージェントが選んだ商品を候補から特定できませんでした')
+  if (rows.length === 0) throw new Error(tr('エージェントが選んだ商品を候補から特定できませんでした', 'Could not match the products the agent chose to the candidates'))
   const n = Number.isFinite(slots) ? slots : rows.length
   return { selected: rows.slice(0, n), candidates: rows.slice(n, n + CANDIDATE_COUNT) }
 }
@@ -371,7 +388,7 @@ export async function proposeSection(
 export async function proposeSectionTitles(args: SectionArgs): Promise<TitleCandidate[]> {
   const parsed = await askAgent(TITLES_PROMPT, sectionPayload('select_section_titles', args))
   const titles = toTitles(parsed.titles, args.section.wantTitle)
-  if (titles.length === 0) throw new Error('見出しの候補を取得できませんでした')
+  if (titles.length === 0) throw new Error(tr('見出しの候補を取得できませんでした', 'Could not get heading candidates'))
   return titles
 }
 
@@ -379,7 +396,7 @@ export async function proposeSectionTitles(args: SectionArgs): Promise<TitleCand
 export async function proposeSectionCopies(args: SectionArgs): Promise<CopyCandidate[]> {
   const parsed = await askAgent(COPIES_PROMPT, sectionPayload('select_section_copies', args))
   const copies = toCopies(parsed.copies)
-  if (copies.length === 0) throw new Error('コピーの候補を取得できませんでした')
+  if (copies.length === 0) throw new Error(tr('コピーの候補を取得できませんでした', 'Could not get copy candidates'))
   return copies
 }
 
@@ -432,6 +449,6 @@ export async function proposeHero(args: {
     const h = toHero(it)
     if (h && h.heroId !== hero?.heroId && !candidates.some((c) => c.heroId === h.heroId)) candidates.push(h)
   }
-  if (!hero && candidates.length === 0) throw new Error('メイン画像を候補から特定できませんでした')
+  if (!hero && candidates.length === 0) throw new Error(tr('メイン画像を候補から特定できませんでした', 'Could not match the hero image to the candidates'))
   return { hero, candidates: candidates.slice(0, CANDIDATE_COUNT) }
 }
