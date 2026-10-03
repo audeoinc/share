@@ -1,7 +1,4 @@
-import Box from '@mui/material/Box'
-import ButtonBase from '@mui/material/ButtonBase'
-import Paper from '@mui/material/Paper'
-import Typography from '@mui/material/Typography'
+import { makeStyles, mergeClasses, tokens } from '@fluentui/react-components'
 import type { Cr854_deliverycards } from './generated/models/Cr854_deliverycardsModel'
 import { statusColor } from './status'
 
@@ -15,7 +12,98 @@ const pad = (n: number) => String(n).padStart(2, '0')
 const dayKey = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土']
 
+const useStyles = makeStyles({
+  root: {
+    overflow: 'hidden',
+    border: `1px solid ${tokens.colorNeutralStroke2}`,
+    borderRadius: tokens.borderRadiusXLarge,
+    backgroundColor: tokens.colorNeutralBackground1,
+    boxShadow: tokens.shadow2,
+  },
+  grid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(7, minmax(0, 1fr))',
+  },
+  weekday: {
+    textAlign: 'center',
+    paddingTop: tokens.spacingVerticalS,
+    paddingBottom: tokens.spacingVerticalS,
+    backgroundColor: tokens.colorNeutralBackground2,
+    color: tokens.colorNeutralForeground3,
+    fontSize: tokens.fontSizeBase200,
+    fontWeight: tokens.fontWeightSemibold,
+  },
+  sunday: { color: tokens.colorPaletteRedForeground1 },
+  saturday: { color: tokens.colorBrandForeground1 },
+  cell: {
+    minHeight: '72px',
+    padding: tokens.spacingHorizontalXS,
+    borderTop: `1px solid ${tokens.colorNeutralStroke2}`,
+    borderRight: `1px solid ${tokens.colorNeutralStroke2}`,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalXS,
+    minWidth: 0,
+    '@media (min-width: 900px)': { minHeight: '112px' },
+  },
+  outside: { opacity: 0.4 },
+  dayNum: {
+    alignSelf: 'flex-start',
+    width: '24px',
+    height: '24px',
+    lineHeight: '24px',
+    textAlign: 'center',
+    borderRadius: tokens.borderRadiusCircular,
+    fontSize: tokens.fontSizeBase200,
+    color: tokens.colorNeutralForeground1,
+  },
+  today: {
+    backgroundColor: tokens.colorBrandBackground,
+    color: tokens.colorNeutralForegroundOnBrand,
+    fontWeight: tokens.fontWeightBold,
+  },
+  // 状態の色は、左の線と薄い色味で示す(塗りつぶしの帯より、落ち着いて読みやすい)
+  pill: {
+    display: 'block',
+    textAlign: 'left',
+    border: 'none',
+    cursor: 'pointer',
+    fontFamily: 'inherit',
+    paddingLeft: tokens.spacingHorizontalSNudge,
+    paddingRight: tokens.spacingHorizontalSNudge,
+    paddingTop: '3px',
+    paddingBottom: '3px',
+    borderRadius: tokens.borderRadiusMedium,
+    color: tokens.colorNeutralForeground1,
+    minWidth: 0,
+    width: '100%',
+    transitionProperty: 'box-shadow',
+    transitionDuration: tokens.durationFast,
+    ':hover': { boxShadow: tokens.shadow4 },
+  },
+  pillMeta: {
+    display: 'none',
+    color: tokens.colorNeutralForeground3,
+    lineHeight: 1.2,
+    fontSize: tokens.fontSizeBase100,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    '@media (min-width: 900px)': { display: 'block' },
+  },
+  pillName: {
+    display: 'block',
+    fontSize: tokens.fontSizeBase200,
+    fontWeight: tokens.fontWeightSemibold,
+    lineHeight: 1.3,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+})
+
 export function Calendar({ month, cards, onSelect }: Props) {
+  const styles = useStyles()
   const first = new Date(month.getFullYear(), month.getMonth(), 1)
   const daysInMonth = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate()
   const weeks = Math.ceil((first.getDay() + daysInMonth) / 7)
@@ -34,87 +122,48 @@ export function Calendar({ month, cards, onSelect }: Props) {
   const today = dayKey(new Date())
 
   return (
-    <Paper variant="outlined" sx={{ overflow: 'hidden' }}>
-      <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(7, minmax(0, 1fr))' }}>
+    <div className={styles.root}>
+      <div className={styles.grid}>
         {WEEKDAYS.map((w, i) => (
-          <Typography
+          <div
             key={w}
-            variant="caption"
-            align="center"
-            sx={{
-              py: 1,
-              bgcolor: 'action.hover',
-              color: i === 0 ? 'error.main' : i === 6 ? 'primary.main' : 'text.secondary',
-              fontWeight: 600,
-            }}
+            className={mergeClasses(styles.weekday, i === 0 && styles.sunday, i === 6 && styles.saturday)}
           >
             {w}
-          </Typography>
+          </div>
         ))}
         {days.map((d) => {
           const k = dayKey(d)
           const isToday = k === today
           return (
-            <Box
+            <div
               key={k}
-              sx={{
-                minHeight: { xs: 72, md: 112 },
-                p: 0.5,
-                borderTop: 1,
-                borderRight: 1,
-                borderColor: 'divider',
-                opacity: d.getMonth() === month.getMonth() ? 1 : 0.4,
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 0.5,
-                minWidth: 0,
-              }}
+              className={mergeClasses(styles.cell, d.getMonth() !== month.getMonth() && styles.outside)}
             >
-              <Typography
-                variant="caption"
-                sx={{
-                  alignSelf: 'flex-start',
-                  width: 24,
-                  height: 24,
-                  lineHeight: '24px',
-                  textAlign: 'center',
-                  borderRadius: '50%',
-                  ...(isToday && { bgcolor: 'primary.main', color: 'primary.contrastText', fontWeight: 700 }),
-                }}
-              >
-                {d.getDate()}
-              </Typography>
+              <span className={mergeClasses(styles.dayNum, isToday && styles.today)}>{d.getDate()}</span>
               {(byDay.get(k) ?? []).map((c) => (
-                <ButtonBase
+                <button
                   key={c.cr854_deliverycardid}
+                  type="button"
                   onClick={() => onSelect(c.cr854_deliverycardid)}
                   title={`${c.cr854_name}(${c.cr854_statusname ?? ''})`}
-                  sx={{
-                    display: 'block',
-                    textAlign: 'left',
-                    px: 0.75,
-                    py: 0.25,
-                    borderRadius: 1,
-                    bgcolor: statusColor(c.cr854_status),
-                    color: '#fff',
-                    minWidth: 0,
-                    width: '100%',
-                    '&:hover': { filter: 'brightness(1.1)' },
+                  className={styles.pill}
+                  style={{
+                    backgroundColor: `color-mix(in srgb, ${statusColor(c.cr854_status)} 16%, var(--colorNeutralBackground1))`,
+                    borderLeft: `3px solid ${statusColor(c.cr854_status)}`,
                   }}
                 >
-                  <Typography variant="caption" noWrap sx={{ display: { xs: 'none', md: 'block' }, opacity: 0.85, lineHeight: 1.2 }}>
+                  <span className={styles.pillMeta}>
                     {new Date(c.cr854_scheduledat!).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}
                     {' '}{c.cr854_countryname}・{c.cr854_channelname}
-                  </Typography>
-                  <Typography variant="caption" noWrap sx={{ display: 'block', fontWeight: 600, lineHeight: 1.3 }}>
-                    {c.cr854_name}
-                  </Typography>
-                </ButtonBase>
+                  </span>
+                  <span className={styles.pillName}>{c.cr854_name}</span>
+                </button>
               ))}
-            </Box>
+            </div>
           )
         })}
-      </Box>
-    </Paper>
+      </div>
+    </div>
   )
 }

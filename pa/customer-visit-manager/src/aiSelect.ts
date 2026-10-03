@@ -178,15 +178,46 @@ export function extractJson(text: string): unknown {
   const start = text.indexOf('{')
   const end = text.lastIndexOf('}')
   if (start < 0 || end < start) throw new Error(`エージェントの応答に JSON が含まれていません。応答の冒頭: ${text.slice(0, 300)}`)
-  return JSON.parse(text.slice(start, end + 1))
+  const body = text.slice(start, end + 1)
+  try {
+    return JSON.parse(body)
+  } catch (e) {
+    // よくある崩れ(末尾のカンマ)だけは直して読む。直らなければ、もとのエラーを返す
+    try {
+      return JSON.parse(body.replace(/,(\s*[}\]])/g, '$1'))
+    } catch {
+      throw e
+    }
+  }
 }
 
-/** プロンプトと入力 JSON をエージェントへ送り、応答の JSON オブジェクトを返す */
+// 文字列の中の半角ダブルクォートは、JSON を壊す原因になる
+const JSON_NOTE = '【重要】返答の JSON は、文字列の中に半角のダブルクォート(")を入れないこと。強調や引用には「」を使う。\n\n'
+const PARSE_ATTEMPTS = 3
+
+/** プロンプトと入力 JSON をエージェントへ送り、応答の JSON オブジェクトを返す。返答の JSON が壊れていたときは、依頼し直す */
 export async function askAgent(prompt: string, payload: unknown): Promise<Record<string, unknown>> {
+  let lastError: unknown
+  for (let attempt = 0; attempt < PARSE_ATTEMPTS; attempt++) {
+    const text = await askText(JSON_NOTE + prompt + JSON.stringify(payload))
+    try {
+      const parsed = extractJson(text) as Record<string, unknown>
+      if (typeof parsed.error === 'string') throw new Error(`エージェントからのエラー: ${parsed.error}`)
+      return parsed
+    } catch (e) {
+      if (!(e instanceof SyntaxError)) throw e
+      lastError = e
+    }
+  }
+  throw lastError
+}
+
+/** 依頼文をエージェントへ送り、返答のテキストを返す */
+async function askText(message: string): Promise<string> {
   // ゲストでも使えるよう、Copilot Studio は直接呼ばない。依頼を AI要求テーブルに書き、フロー(Power Automate)の返答を待つ
   const created = await Cr854_airequestsService.create({
     cr854_name: `req-${new Date().toISOString()}`,
-    cr854_prompt: prompt + JSON.stringify(payload),
+    cr854_prompt: message,
     cr854_status: STATUS_WAITING,
     statecode: 0,
   })
@@ -201,9 +232,7 @@ export async function askAgent(prompt: string, payload: unknown): Promise<Record
       const status = got.data.cr854_status
       if (status === STATUS_ERROR) throw new Error(got.data.cr854_response || 'エージェントの呼び出しに失敗しました')
       if (status !== STATUS_DONE) continue
-      const parsed = extractJson(got.data.cr854_response ?? '') as Record<string, unknown>
-      if (typeof parsed.error === 'string') throw new Error(`エージェントからのエラー: ${parsed.error}`)
-      return parsed
+      return got.data.cr854_response ?? ''
     }
     throw new Error('AI の返答がタイムアウトしました。フロー「AI要求の処理」がオンか確認してください')
   } finally {

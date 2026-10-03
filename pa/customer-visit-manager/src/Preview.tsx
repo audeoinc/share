@@ -1,17 +1,15 @@
 import { useLayoutEffect, useRef, useState } from 'react'
-import Box from '@mui/material/Box'
-import IconButton from '@mui/material/IconButton'
-import InputBase from '@mui/material/InputBase'
-import ToggleButton from '@mui/material/ToggleButton'
-import ToggleButtonGroup from '@mui/material/ToggleButtonGroup'
-import Typography from '@mui/material/Typography'
-import CloseIcon from '@mui/icons-material/Close'
-import ArrowDownwardIcon from '@mui/icons-material/ArrowDownward'
-import ArrowUpwardIcon from '@mui/icons-material/ArrowUpward'
-import ChevronLeftIcon from '@mui/icons-material/ChevronLeft'
-import ChevronRightIcon from '@mui/icons-material/ChevronRight'
+import { Button, Input, ToggleButton, makeStyles, mergeClasses, tokens } from '@fluentui/react-components'
+import {
+  ArrowDownRegular,
+  ArrowUpRegular,
+  ChevronLeftRegular,
+  ChevronRightRegular,
+  DismissRegular,
+} from '@fluentui/react-icons'
 import type { Cr854_products } from './generated/models/Cr854_productsModel'
 import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
+import { AutoTextarea } from './AutoTextarea'
 import { DND_HERO, DND_ITEM, scaled, yen, type Item } from './items'
 import { heroImage, productImage } from './images'
 import { EMAIL_TEMPLATES, type EmailTemplateId } from './templates'
@@ -53,6 +51,93 @@ interface Props {
 // メール・プッシュは受信側の見た目なので、テーマに依らず固定の配色にする
 const INK = '#222'
 const SUB = '#666'
+const ACCENT = '#6750a4'
+const ACCENT_BG = 'rgba(103,80,164,0.08)'
+
+const useStyles = makeStyles({
+  fit: { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  controls: {
+    position: 'absolute',
+    top: '8px',
+    left: '8px',
+    right: '8px',
+    display: 'flex',
+    justifyContent: 'space-between',
+    opacity: 0,
+    pointerEvents: 'none',
+  },
+  controlsGroup: { display: 'flex', gap: '4px', pointerEvents: 'auto' },
+  ctlRight: { pointerEvents: 'auto' },
+  ctl: {
+    backgroundColor: 'rgba(255,255,255,0.9)',
+    color: INK,
+    '&:hover': { backgroundColor: '#fff', color: INK },
+    '&:hover:active': { backgroundColor: '#fff', color: INK },
+  },
+  heroClear: { position: 'absolute', top: '8px', right: '8px', opacity: 0 },
+  frame: {
+    position: 'relative',
+    cursor: 'grab',
+    padding: '6px',
+    borderRadius: '12px',
+    border: '2px solid transparent',
+    '&:hover .remove': { opacity: 1 },
+  },
+  featureFrame: { display: 'flex', gap: '12px' },
+  featureBody: { flexGrow: 1, minWidth: 0, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: '4px' },
+  img: { objectFit: 'cover', borderRadius: '8px', backgroundColor: '#eee', display: 'block' },
+  noWrap: { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  slot: {
+    border: '2px dashed #bbb',
+    borderRadius: '12px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    color: SUB,
+    textAlign: 'center',
+  },
+  hero: {
+    position: 'relative',
+    containerType: 'inline-size',
+    color: '#999',
+    display: 'grid',
+    placeItems: 'center',
+    fontSize: '12.8px',
+    '&:hover .hero-clear': { opacity: 1 },
+  },
+  headingInput: {
+    border: `2px solid ${INK}`,
+    borderRadius: 0,
+    backgroundColor: 'transparent',
+    color: INK,
+    maxWidth: '100%',
+    '::after': { display: 'none' },
+  },
+  copyTextarea: {
+    width: '100%',
+    border: 'none',
+    backgroundColor: 'transparent',
+    '::after': { display: 'none' },
+    '& textarea::placeholder': { opacity: 0.6 },
+  },
+  pushRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    padding: '6px',
+    border: '2px solid',
+    borderRadius: '12px',
+    cursor: 'grab',
+  },
+  pushDrop: {
+    border: '2px dashed',
+    borderRadius: '12px',
+    padding: '12px 0',
+    textAlign: 'center',
+    color: tokens.colorNeutralForeground2,
+    fontSize: '13.6px',
+  },
+})
 
 export function Preview(props: Props) {
   return props.channel === 'email' ? <EmailPreview {...props} /> : <PushPreview {...props} />
@@ -77,7 +162,8 @@ function useDropTarget(onDropAt: Props['onDropAt']) {
 }
 
 /** 1 行に必ず収まる文字。はみ出すときだけ、フォントサイズを縮める(下限 minScale。それでも収まらなければ「…」で省略) */
-function FitLine({ baseSize, minScale = 0.55, sx, children }: { baseSize: string; minScale?: number; sx?: object; children: string }) {
+function FitLine({ baseSize, minScale = 0.55, style, children }: { baseSize: string; minScale?: number; style?: React.CSSProperties; children: string }) {
+  const classes = useStyles()
   const ref = useRef<HTMLDivElement>(null)
 
   useLayoutEffect(() => {
@@ -101,16 +187,14 @@ function FitLine({ baseSize, minScale = 0.55, sx, children }: { baseSize: string
   }, [children, minScale])
 
   return (
-    <Box
-      ref={ref}
-      sx={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontSize: `calc(${baseSize} * var(--fit, 1))`, ...sx }}
-    >
+    <div ref={ref} className={classes.fit} style={{ fontSize: `calc(${baseSize} * var(--fit, 1))`, ...style }}>
       {children}
-    </Box>
+    </div>
   )
 }
 
 function EmailPreview({ subject, headline, copy, items, products, selectedKey, showHeadings, template, sectionTitles, onSectionTitle, sectionCopies, onSectionCopy, compact = false, hero, onDropHero, onClearHero, onSelect, onRemove, onMove, onDropAt }: Props) {
+  const classes = useStyles()
   const { over, handlers, clear } = useDropTarget(onDropAt)
   const [heroOver, setHeroOver] = useState(false)
   const byId = new Map(products.map((p) => [p.cr854_productid, p]))
@@ -120,48 +204,45 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
 
   // 商品にマウスを乗せたときに出る、並べ替えと削除のボタン
   const controls = (it: Item, idx: number) => (
-    <Box
-      className="remove"
-      sx={{ position: 'absolute', top: 8, left: 8, right: 8, display: 'flex', justifyContent: 'space-between', opacity: 0, pointerEvents: 'none' }}
-    >
-      <Box sx={{ display: 'flex', gap: 0.5, pointerEvents: 'auto' }}>
-        <IconButton
+    <div className={mergeClasses('remove', classes.controls)}>
+      <div className={classes.controlsGroup}>
+        <Button
+          className={classes.ctl}
+          appearance="subtle"
           size="small"
+          icon={<ChevronLeftRegular />}
           disabled={idx === 0}
           onClick={(e) => {
             e.stopPropagation()
             onMove(it.key, -1)
           }}
-          sx={{ bgcolor: 'rgba(255,255,255,0.9)', '&:hover': { bgcolor: '#fff' } }}
           aria-label="前へ"
-        >
-          <ChevronLeftIcon fontSize="small" sx={{ color: INK }} />
-        </IconButton>
-        <IconButton
+        />
+        <Button
+          className={classes.ctl}
+          appearance="subtle"
           size="small"
+          icon={<ChevronRightRegular />}
           disabled={idx === items.length - 1}
           onClick={(e) => {
             e.stopPropagation()
             onMove(it.key, 1)
           }}
-          sx={{ bgcolor: 'rgba(255,255,255,0.9)', '&:hover': { bgcolor: '#fff' } }}
           aria-label="後ろへ"
-        >
-          <ChevronRightIcon fontSize="small" sx={{ color: INK }} />
-        </IconButton>
-      </Box>
-      <IconButton
+        />
+      </div>
+      <Button
+        className={mergeClasses(classes.ctl, classes.ctlRight)}
+        appearance="subtle"
         size="small"
+        icon={<DismissRegular />}
         onClick={(e) => {
           e.stopPropagation()
           onRemove(it.key)
         }}
-        sx={{ bgcolor: 'rgba(255,255,255,0.9)', pointerEvents: 'auto', '&:hover': { bgcolor: '#fff' } }}
         aria-label="外す"
-      >
-        <CloseIcon fontSize="small" sx={{ color: INK }} />
-      </IconButton>
-    </Box>
+      />
+    </div>
   )
 
   const dragProps = (it: Item, idx: number) => ({
@@ -175,45 +256,39 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
     ...handlers(idx),
   })
 
-  const frame = (it: Item, idx: number) => ({
-    position: 'relative',
-    cursor: 'grab',
-    p: 0.75,
-    borderRadius: 1.5,
-    border: '2px solid',
-    borderColor: over === idx ? 'primary.main' : it.key === selectedKey ? '#6750a4' : 'transparent',
-    bgcolor: over === idx ? 'rgba(103,80,164,0.08)' : 'transparent',
-    '&:hover .remove': { opacity: 1 },
+  const frameStyle = (it: Item, idx: number): React.CSSProperties => ({
+    borderColor: over === idx ? tokens.colorBrandForeground1 : it.key === selectedKey ? ACCENT : 'transparent',
+    backgroundColor: over === idx ? 'rgba(103,80,164,0.08)' : 'transparent',
   })
 
   const priceEl = (price?: number) =>
     offer ? (
-      <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 0.75, flexWrap: 'wrap' }}>
-        <Typography component="span" sx={{ fontSize: '1.05rem', fontWeight: 800, color: '#d32f2f' }}>{yen(price)}</Typography>
-        <Typography component="span" sx={{ fontSize: '0.65rem', fontWeight: 700, color: '#fff', bgcolor: '#d32f2f', px: 0.75, borderRadius: 0.5 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: '1.05rem', fontWeight: 800, color: '#d32f2f' }}>{yen(price)}</span>
+        <span style={{ fontSize: '0.65rem', fontWeight: 700, color: '#fff', backgroundColor: '#d32f2f', padding: '0 6px', borderRadius: 4 }}>
           期間限定
-        </Typography>
-      </Box>
+        </span>
+      </div>
     ) : (
-      <Typography sx={{ fontSize: '0.8rem', fontWeight: 700, color: INK }}>{yen(price)}</Typography>
+      <div style={{ fontSize: '0.8rem', fontWeight: 700, color: INK }}>{yen(price)}</div>
     )
 
   const cta = (
-    <Box sx={{ mt: 0.75, py: 0.5, textAlign: 'center', bgcolor: offer ? '#d32f2f' : '#222', color: '#fff', fontSize: '0.75rem', borderRadius: 0.5 }}>
+    <div style={{ marginTop: 6, padding: '4px 0', textAlign: 'center', backgroundColor: offer ? '#d32f2f' : '#222', color: '#fff', fontSize: '0.75rem', borderRadius: 4 }}>
       詳細はこちら
-    </Box>
+    </div>
   )
 
   const gridTile = (it: Item, idx: number) => {
     const p = byId.get(it.productId)
     return (
-      <Box key={it.key} {...dragProps(it, idx)} sx={frame(it, idx)}>
-        <Box component="img" draggable={false} src={productImage(p)} alt={p?.cr854_name} sx={{ width: '100%', aspectRatio: compact ? '1 / 1' : '3 / 4', objectFit: 'cover', borderRadius: 1, bgcolor: '#eee', display: 'block' }} />
-        <Typography sx={{ fontSize: '0.85rem', fontWeight: 600, mt: 0.5, color: INK }} noWrap>{p?.cr854_name}</Typography>
+      <div key={it.key} {...dragProps(it, idx)} className={classes.frame} style={frameStyle(it, idx)}>
+        <img className={classes.img} draggable={false} src={productImage(p)} alt={p?.cr854_name} style={{ width: '100%', aspectRatio: compact ? '1 / 1' : '3 / 4' }} />
+        <div className={classes.noWrap} style={{ fontSize: '0.85rem', fontWeight: 600, marginTop: 4, color: INK }}>{p?.cr854_name}</div>
         {priceEl(p?.cr854_price)}
         {cta}
         {controls(it, idx)}
-      </Box>
+      </div>
     )
   }
 
@@ -221,100 +296,87 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
   const featureTile = (it: Item, idx: number) => {
     const p = byId.get(it.productId)
     return (
-      <Box key={it.key} {...dragProps(it, idx)} sx={{ ...frame(it, idx), display: 'flex', gap: 1.5 }}>
-        <Box component="img" draggable={false} src={productImage(p)} alt={p?.cr854_name} sx={{ width: compact ? '30%' : '44%', aspectRatio: compact ? '1 / 1' : '3 / 4', objectFit: 'cover', borderRadius: 1, bgcolor: '#eee', display: 'block', flexShrink: 0 }} />
-        <Box sx={{ flexGrow: 1, minWidth: 0, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 0.5 }}>
-          <Typography sx={{ fontSize: '0.7rem', letterSpacing: 2, color: SUB }}>FEATURE</Typography>
-          <Typography sx={{ fontSize: '1rem', fontWeight: 700, color: INK }}>{p?.cr854_name}</Typography>
-          <Typography sx={{ fontSize: '0.8rem', color: SUB }}>{p?.cr854_description}</Typography>
+      <div key={it.key} {...dragProps(it, idx)} className={mergeClasses(classes.frame, classes.featureFrame)} style={frameStyle(it, idx)}>
+        <img className={classes.img} draggable={false} src={productImage(p)} alt={p?.cr854_name} style={{ width: compact ? '30%' : '44%', aspectRatio: compact ? '1 / 1' : '3 / 4', flexShrink: 0 }} />
+        <div className={classes.featureBody}>
+          <div style={{ fontSize: '0.7rem', letterSpacing: 2, color: SUB }}>FEATURE</div>
+          <div style={{ fontSize: '1rem', fontWeight: 700, color: INK }}>{p?.cr854_name}</div>
+          <div style={{ fontSize: '0.8rem', color: SUB }}>{p?.cr854_description}</div>
           {priceEl(p?.cr854_price)}
           {cta}
-        </Box>
+        </div>
         {controls(it, idx)}
-      </Box>
+      </div>
     )
   }
 
   // 空きの枠: ここへドロップすると、末尾の空き枠から埋まる
   const emptySlot = (key: string, feature: boolean) => (
-    <Box
+    <div
       key={key}
       {...handlers(items.length)}
-      sx={{
+      className={classes.slot}
+      style={{
         aspectRatio: feature ? undefined : compact ? '1 / 1' : '3 / 4',
         minHeight: feature ? 120 : undefined,
-        border: '2px dashed',
-        borderColor: over === items.length ? '#6750a4' : '#bbb',
-        bgcolor: over === items.length ? 'rgba(103,80,164,0.08)' : 'transparent',
-        borderRadius: 1.5,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        color: SUB,
+        borderColor: over === items.length ? ACCENT : '#bbb',
+        backgroundColor: over === items.length ? ACCENT_BG : 'transparent',
         fontSize: '0.8rem',
-        textAlign: 'center',
-        p: 1,
+        padding: 8,
       }}
     >
       ここに商品をドロップ
-    </Box>
+    </div>
   )
 
   const headingEl = (text: string) => (
-    <Box sx={{ textAlign: 'center', my: 1.5 }}>
-      <Typography
-        component="span"
-        sx={{ display: 'inline-block', border: '2px solid', borderColor: INK, px: 2, py: 0.25, fontWeight: 700, fontSize: '0.95rem', color: INK, letterSpacing: 4 }}
-      >
+    <div style={{ textAlign: 'center', margin: '12px 0' }}>
+      <span style={{ display: 'inline-block', border: `2px solid ${INK}`, padding: '2px 16px', fontWeight: 700, fontSize: '0.95rem', color: INK, letterSpacing: 4 }}>
         {text}
-      </Typography>
-    </Box>
+      </span>
+    </div>
   )
 
   // カテゴリ系テンプレートの見出し。クリックして書き換えられる(未設定なら商品カテゴリ名を出す)
   const editableHeading = (index: number, fallback: string) => {
     const value = sectionTitles[index] !== undefined ? sectionTitles[index] : fallback
     return (
-      <Box sx={{ textAlign: 'center', my: 1.5 }}>
-        <InputBase
+      <div style={{ textAlign: 'center', margin: '12px 0' }}>
+        <Input
+          className={classes.headingInput}
+          appearance="outline"
           value={value}
-          onChange={(e) => onSectionTitle(index, e.target.value)}
-          inputProps={{ 'aria-label': `セクション${index + 1}の見出し`, style: { textAlign: 'center' } }}
-          sx={{
-            border: '2px solid',
-            borderColor: INK,
-            px: 2,
-            py: 0.25,
-            fontWeight: 700,
-            fontSize: '0.95rem',
-            color: INK,
-            letterSpacing: 2,
-            width: `${Math.max(10, value.length * 2 + 4)}ch`,
-            maxWidth: '100%',
-          }}
+          onChange={(_, d) => onSectionTitle(index, d.value)}
+          input={{ 'aria-label': `セクション${index + 1}の見出し`, style: { textAlign: 'center', fontWeight: 700, fontSize: '0.95rem', letterSpacing: 2, color: INK } }}
+          style={{ width: `${Math.max(10, value.length * 2 + 4)}ch` }}
         />
-      </Box>
+      </div>
     )
   }
 
   // セクションのコピー。クリックして書き換えられる(見出しの下、商品の上に入る)
-  const sectionCopyEl = (index: number) => (
-    <Box sx={{ textAlign: 'center', mb: 1.25, px: 1 }}>
-      <InputBase
-        multiline
-        fullWidth
-        value={sectionCopies[index] ?? ''}
-        onChange={(e) => onSectionCopy(index, e.target.value)}
-        placeholder="(セクションのコピー)"
-        inputProps={{ 'aria-label': `セクション${index + 1}のコピー`, style: { textAlign: 'center' } }}
-        sx={{ fontSize: '0.85rem', color: SUB, letterSpacing: 0.5, '& textarea::placeholder': { opacity: 0.6 } }}
-      />
-    </Box>
-  )
+  // hasHeading: カテゴリ見出しの直下かどうか。見出しがないときは、メイン画像から離す(コピーは、直下の商品に寄せる)
+  const sectionCopyEl = (index: number, hasHeading: boolean) => {
+    const text = sectionCopies[index] ?? ''
+    return (
+      <div style={{ textAlign: 'center', marginTop: hasHeading ? 6 : 22, marginBottom: 4, padding: '0 8px' }}>
+        <AutoTextarea
+          className={classes.copyTextarea}
+          appearance="outline"
+          rows={Math.max(1, text.split('\n').length)}
+          value={text}
+          onChange={(_, d) => onSectionCopy(index, d.value)}
+          placeholder="(セクションのコピー)"
+          textarea={{ 'aria-label': `セクション${index + 1}のコピー`, style: { textAlign: 'center', fontSize: '0.85rem', color: SUB, letterSpacing: 0.5, paddingTop: 2, paddingBottom: 2, minHeight: 0 } }}
+        />
+      </div>
+    )
+  }
 
   // ---- ヒーロー(メイン画像 + 見出し)。種類によって装飾が変わる
   const heroBox = (
-    <Box
+    <div
+      className={classes.hero}
       onDragOver={(e) => {
         if (!e.dataTransfer.types.includes(DND_HERO)) return
         e.preventDefault()
@@ -327,82 +389,75 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
         const id = e.dataTransfer.getData(DND_HERO)
         if (id) onDropHero(id)
       }}
-      sx={{
-        position: 'relative',
+      style={{
         aspectRatio: compact ? '3 / 1' : '8 / 3',
-        containerType: 'inline-size',
-        bgcolor: heroOver ? 'rgba(103,80,164,0.15)' : '#e9e9ee',
-        outline: heroOver ? '3px solid #6750a4' : 'none',
+        backgroundColor: heroOver ? 'rgba(103,80,164,0.15)' : '#e9e9ee',
+        outline: heroOver ? `3px solid ${ACCENT}` : 'none',
         outlineOffset: -3,
-        color: '#999',
-        display: 'grid',
-        placeItems: 'center',
-        fontSize: '0.8rem',
-        '&:hover .hero-clear': { opacity: 1 },
       }}
     >
       {hero ? (
         <>
-          <Box component="img" draggable={false} src={heroImage(hero)} alt={hero.cr854_name} sx={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
-          <IconButton
-            className="hero-clear"
+          <img draggable={false} src={heroImage(hero)} alt={hero.cr854_name} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+          <Button
+            className={mergeClasses('hero-clear', classes.heroClear, classes.ctl)}
+            appearance="subtle"
             size="small"
+            icon={<DismissRegular />}
             onClick={onClearHero}
             aria-label="メイン画像を外す"
-            sx={{ position: 'absolute', top: 8, right: 8, opacity: 0, bgcolor: 'rgba(255,255,255,0.9)', '&:hover': { bgcolor: '#fff' } }}
-          >
-            <CloseIcon fontSize="small" sx={{ color: INK }} />
-          </IconButton>
+          />
         </>
       ) : (
         'メインビジュアル(候補から画像をドロップ)'
       )}
       {tpl.hero === 'offer' && (
-        <Box sx={{ position: 'absolute', top: 12, left: 12, bgcolor: '#d32f2f', color: '#fff', fontWeight: 800, letterSpacing: 2, fontSize: '0.75rem', px: 1.25, py: 0.5, borderRadius: 0.5 }}>
+        <div style={{ position: 'absolute', top: 12, left: 12, backgroundColor: '#d32f2f', color: '#fff', fontWeight: 800, letterSpacing: 2, fontSize: '0.75rem', padding: '4px 10px', borderRadius: 4 }}>
           LIMITED OFFER
-        </Box>
+        </div>
       )}
       {tpl.hero === 'collab' && (
-        <Box sx={{ position: 'absolute', top: 0, left: 0, right: 0, bgcolor: 'rgba(0,0,0,0.55)', color: '#fff', textAlign: 'center', letterSpacing: 4, fontSize: '0.7rem', py: 0.5 }}>
+        <div style={{ position: 'absolute', top: 0, left: 0, right: 0, backgroundColor: 'rgba(0,0,0,0.55)', color: '#fff', textAlign: 'center', letterSpacing: 4, fontSize: '0.7rem', padding: '4px 0' }}>
           SPECIAL COLLABORATION
-        </Box>
+        </div>
       )}
       {/* ヘッドライン: 画像の下部に半透明の帯を敷いて、左寄せの太字で載せる */}
-      <Box
-        sx={{
+      <div
+        style={{
           position: 'absolute',
           left: 0,
           right: 0,
           bottom: 0,
-          px: '5cqw',
-          py: compact ? '1.2cqw' : '2.2cqw',
-          bgcolor: 'rgba(0,0,0,0.42)',
+          padding: `${compact ? '1.2cqw' : '2.2cqw'} 5cqw`,
+          backgroundColor: 'rgba(0,0,0,0.42)',
           color: '#fff',
           textAlign: 'left',
           pointerEvents: 'none',
         }}
       >
-        <Typography
-          sx={{
+        {/* 日英どちらも 1 行に収める: 長いときは、文字を縮める(下限は 0.4 倍) */}
+        <FitLine
+          baseSize={`calc(${compact ? '4.2cqw' : '5cqw'} * ${hf.scale})`}
+          minScale={0.4}
+          style={{
             fontFamily: hf.family,
             fontWeight: hf.weight,
-            // 日本語を含むヘッドラインは、字間を狭める(広いままだと、長いヘッドラインが折り返す)
+            // 日本語を含むヘッドラインは、字間を狭める
             letterSpacing: /[\u3000-\u9fff\uff00-\uffef]/.test(headline) ? hf.trackingJa : hf.tracking,
             textTransform: hf.upper ? 'uppercase' : 'none',
-            fontSize: `calc(${compact ? '4.2cqw' : '5cqw'} * ${hf.scale})`,
             lineHeight: 1.2,
           }}
         >
           {headline || '(ヘッドライン未入力)'}
-        </Typography>
+        </FitLine>
         <FitLine
           baseSize={compact ? '2.6cqw' : '2.9cqw'}
-          sx={{ mt: '0.8cqw', fontFamily: hf.family, fontWeight: 400, letterSpacing: '0.06em', lineHeight: 1.5, opacity: 0.95 }}
+          style={{ marginTop: '0.8cqw', fontFamily: hf.family, fontWeight: 400, letterSpacing: '0.06em', lineHeight: 1.5, opacity: 0.95 }}
         >
           {copy || '(コピー未入力)'}
         </FitLine>
-      </Box>
-    </Box>
+      </div>
+    </div>
   )
 
   // ---- 本文(商品)。free は連続する同カテゴリごとに見出しを付け、それ以外はテンプレートの枠に流し込む
@@ -418,31 +473,25 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
     body = (
       <>
         {runs.map((run) => (
-          <Box key={run.start} sx={{ px: 2, pb: 2 }}>
+          <div key={run.start} style={{ padding: '0 16px 16px' }}>
             {showHeadings && run.category && headingEl(run.category)}
-            <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1.5 }}>{run.items.map((it, j) => gridTile(it, run.start + j))}</Box>
-          </Box>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>{run.items.map((it, j) => gridTile(it, run.start + j))}</div>
+          </div>
         ))}
-        <Box sx={{ px: 2, pb: 3 }}>
-          <Box
+        <div style={{ padding: '0 16px 24px' }}>
+          <div
             {...handlers(items.length)}
-            sx={{
+            className={classes.slot}
+            style={{
               minHeight: items.length === 0 ? 96 : 44,
-              border: '2px dashed',
-              borderColor: over === items.length ? '#6750a4' : '#bbb',
-              bgcolor: over === items.length ? 'rgba(103,80,164,0.08)' : 'transparent',
-              borderRadius: 1.5,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: SUB,
+              borderColor: over === items.length ? ACCENT : '#bbb',
+              backgroundColor: over === items.length ? ACCENT_BG : 'transparent',
               fontSize: '0.85rem',
-              textAlign: 'center',
             }}
           >
             {items.length === 0 ? 'ここに商品をドロップ' : '＋ ここにドロップで末尾に追加'}
-          </Box>
-        </Box>
+          </div>
+        </div>
       </>
     )
   } else {
@@ -459,46 +508,47 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, s
           const category = sec.categoryHeading ? byId.get(list[0]?.productId ?? '')?.cr854_categoryname : undefined
           const feature = sec.kind === 'feature'
           return (
-            <Box key={start} sx={{ px: 2, pb: 2 }}>
+            <div key={start} style={{ padding: '0 16px 16px' }}>
               {sec.categoryHeading && editableHeading(si, category ?? `CATEGORY ${si + 1}`)}
-              {sectionCopyEl(si)}
-              <Box sx={{ display: 'grid', gridTemplateColumns: feature ? '1fr' : '1fr 1fr', gap: 1.5 }}>
+              {sectionCopyEl(si, !!sec.categoryHeading)}
+              <div style={{ display: 'grid', gridTemplateColumns: feature ? '1fr' : '1fr 1fr', gap: 12 }}>
                 {Array.from({ length: sec.slots }, (_, j) =>
                   list[j] ? (feature ? featureTile(list[j], start + j) : gridTile(list[j], start + j)) : emptySlot(`e${start + j}`, feature),
                 )}
-              </Box>
-            </Box>
+              </div>
+            </div>
           )
         })}
         {overflow.length > 0 && (
-          <Box sx={{ px: 2, pb: 3 }}>
-            <Typography sx={{ fontSize: '0.75rem', color: '#b26a00', bgcolor: '#fff4e0', borderRadius: 1, px: 1, py: 0.5, mb: 1 }}>
+          <div style={{ padding: '0 16px 24px' }}>
+            <div style={{ fontSize: '0.75rem', color: '#b26a00', backgroundColor: '#fff4e0', borderRadius: 8, padding: '4px 8px', marginBottom: 8 }}>
               枠外({overflow.length}件): このテンプレートの枠を超えているため、メールには載りません
-            </Typography>
-            <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1.5, opacity: 0.55 }}>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, opacity: 0.55 }}>
               {overflow.map((it, j) => gridTile(it, offset + j))}
-            </Box>
-          </Box>
+            </div>
+          </div>
         )}
       </>
     )
   }
 
   return (
-    <Box sx={{ maxWidth: 440, mx: 'auto' }}>
-      {!compact && <Typography variant="caption" color="text.secondary">件名: {subject || '(配信名未入力)'}</Typography>}
-      <Box sx={{ bgcolor: '#fff', color: INK, border: '1px solid #ddd', borderRadius: 2, overflow: 'hidden', mt: 0.5, ...scaled }}>
-        <Box sx={{ bgcolor: '#222', color: '#fff', textAlign: 'center', py: 1.5, letterSpacing: 4, fontWeight: 700 }}>SHOP</Box>
+    <div style={{ maxWidth: 440, margin: '0 auto' }}>
+      {!compact && <span style={{ fontSize: 12, color: tokens.colorNeutralForeground2 }}>件名: {subject || '(配信名未入力)'}</span>}
+      <div style={{ backgroundColor: '#fff', color: INK, border: '1px solid #ddd', borderRadius: 16, overflow: 'hidden', marginTop: 4, ...scaled }}>
+        <div style={{ backgroundColor: '#222', color: '#fff', textAlign: 'center', padding: '12px 0', letterSpacing: 4, fontWeight: 700 }}>SHOP</div>
         {heroBox}
         {body}
-        {!compact && <Box sx={{ bgcolor: '#f5f5f5', color: SUB, fontSize: '0.75rem', textAlign: 'center', py: 1.5 }}>配信停止はこちら</Box>}
-      </Box>
-    </Box>
+        {!compact && <div style={{ backgroundColor: '#f5f5f5', color: SUB, fontSize: '0.75rem', textAlign: 'center', padding: '12px 0' }}>配信停止はこちら</div>}
+      </div>
+    </div>
   )
 }
 
 function PushPreview(props: Props) {
   const { subject, headline, copy, scheduledAt, items, products, selectedKey, hero: pickedHero, onSelect, onRemove, onMove, onDropAt } = props
+  const classes = useStyles()
   const { over, handlers, clear } = useDropTarget(onDropAt)
   const [style, setStyle] = useState<'ios' | 'android'>('ios')
   const byId = new Map(products.map((p) => [p.cr854_productid, p]))
@@ -523,86 +573,87 @@ function PushPreview(props: Props) {
   const more = items.length > 1 ? `ほか${items.length - 1}点の商品` : ''
 
   const appIcon = (size: number) => (
-    <Box sx={{ width: size, height: size, borderRadius: style === 'ios' ? '22%' : '50%', bgcolor: '#222', color: '#fff', display: 'grid', placeItems: 'center', fontSize: size * 0.5, fontWeight: 800, flexShrink: 0 }}>
+    <div style={{ width: size, height: size, borderRadius: style === 'ios' ? '22%' : '50%', backgroundColor: '#222', color: '#fff', display: 'grid', placeItems: 'center', fontSize: size * 0.5, fontWeight: 800, flexShrink: 0 }}>
       S
-    </Box>
+    </div>
   )
 
   const image = heroSrc && (
-    <Box
-      component="img"
+    <img
       draggable={false}
       src={heroSrc}
       alt={heroAlt}
-      sx={{ width: '100%', aspectRatio: style === 'ios' ? '16 / 9' : '2 / 1', objectFit: 'cover', borderRadius: style === 'ios' ? 2 : 3, display: 'block', bgcolor: '#e9e9ee', mt: 1 }}
+      style={{ width: '100%', aspectRatio: style === 'ios' ? '16 / 9' : '2 / 1', objectFit: 'cover', borderRadius: style === 'ios' ? 16 : 24, display: 'block', backgroundColor: '#e9e9ee', marginTop: 8 }}
     />
   )
 
   const notification =
     style === 'ios' ? (
-      <Box sx={{ bgcolor: 'rgba(250,250,252,0.86)', color: INK, borderRadius: '22px', p: 1.5, boxShadow: '0 4px 18px rgba(0,0,0,0.25)' }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, mb: 0.75 }}>
+      <div style={{ backgroundColor: 'rgba(250,250,252,0.86)', color: INK, borderRadius: 22, padding: 12, boxShadow: '0 4px 18px rgba(0,0,0,0.25)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
           {appIcon(20)}
-          <Typography sx={{ flexGrow: 1, fontSize: '0.7rem', letterSpacing: 1, color: SUB }}>SHOP</Typography>
-          <Typography sx={{ fontSize: '0.7rem', color: SUB }}>たった今</Typography>
-        </Box>
-        <Typography sx={{ ...titleFont, fontSize: '0.9rem', color: INK }}>{title}</Typography>
-        <Typography sx={{ ...bodyFont, fontSize: '0.85rem', color: INK, whiteSpace: 'pre-wrap' }}>{bodyText}</Typography>
+          <div style={{ flexGrow: 1, fontSize: '0.7rem', letterSpacing: 1, color: SUB }}>SHOP</div>
+          <div style={{ fontSize: '0.7rem', color: SUB }}>たった今</div>
+        </div>
+        <div style={{ ...titleFont, fontSize: '0.9rem', color: INK }}>{title}</div>
+        <div style={{ ...bodyFont, fontSize: '0.85rem', color: INK, whiteSpace: 'pre-wrap' }}>{bodyText}</div>
         {image}
-        {more && <Typography sx={{ fontSize: '0.7rem', color: SUB, mt: 0.75 }}>{more}</Typography>}
-      </Box>
+        {more && <div style={{ fontSize: '0.7rem', color: SUB, marginTop: 6 }}>{more}</div>}
+      </div>
     ) : (
-      <Box sx={{ bgcolor: '#f3edf7', color: INK, borderRadius: '24px', p: 1.5, boxShadow: '0 2px 10px rgba(0,0,0,0.3)' }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, mb: 0.5 }}>
+      <div style={{ backgroundColor: '#f3edf7', color: INK, borderRadius: 24, padding: 12, boxShadow: '0 2px 10px rgba(0,0,0,0.3)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
           {appIcon(18)}
-          <Typography sx={{ flexGrow: 1, fontSize: '0.7rem', color: SUB }}>SHOP ・ たった今</Typography>
-          <Typography sx={{ fontSize: '0.8rem', color: SUB, lineHeight: 1 }}>⌃</Typography>
-        </Box>
-        <Typography sx={{ ...titleFont, fontSize: '0.9rem', color: INK }}>{title}</Typography>
-        <Typography sx={{ ...bodyFont, fontSize: '0.85rem', color: '#444', whiteSpace: 'pre-wrap' }}>{bodyText}</Typography>
+          <div style={{ flexGrow: 1, fontSize: '0.7rem', color: SUB }}>SHOP ・ たった今</div>
+          <div style={{ fontSize: '0.8rem', color: SUB, lineHeight: 1 }}>⌃</div>
+        </div>
+        <div style={{ ...titleFont, fontSize: '0.9rem', color: INK }}>{title}</div>
+        <div style={{ ...bodyFont, fontSize: '0.85rem', color: '#444', whiteSpace: 'pre-wrap' }}>{bodyText}</div>
         {image}
-        {more && <Typography sx={{ fontSize: '0.7rem', color: SUB, mt: 0.75 }}>{more}</Typography>}
-      </Box>
+        {more && <div style={{ fontSize: '0.7rem', color: SUB, marginTop: 6 }}>{more}</div>}
+      </div>
     )
 
   return (
-    <Box sx={{ maxWidth: 380, mx: 'auto', display: 'grid', gap: 2 }}>
-      <ToggleButtonGroup size="small" exclusive value={style} onChange={(_, v) => v && setStyle(v)} sx={{ justifySelf: 'center' }}>
-        <ToggleButton value="ios">iOS風</ToggleButton>
-        <ToggleButton value="android">Android風</ToggleButton>
-      </ToggleButtonGroup>
+    <div style={{ maxWidth: 380, margin: '0 auto', display: 'grid', gap: 16 }}>
+      <div style={{ justifySelf: 'center', display: 'flex' }}>
+        <ToggleButton size="small" checked={style === 'ios'} onClick={() => setStyle('ios')} style={{ borderTopRightRadius: 0, borderBottomRightRadius: 0 }}>
+          iOS風
+        </ToggleButton>
+        <ToggleButton size="small" checked={style === 'android'} onClick={() => setStyle('android')} style={{ borderTopLeftRadius: 0, borderBottomLeftRadius: 0, marginLeft: -1 }}>
+          Android風
+        </ToggleButton>
+      </div>
       {/* スマホのロック画面 */}
-      <Box
-        sx={{
+      <div
+        style={{
           background: style === 'ios' ? 'linear-gradient(165deg, #3b4a6b, #1d2438 70%, #2a2440)' : 'linear-gradient(165deg, #2b3a4a, #141c26)',
           border: '6px solid #101010',
-          borderRadius: '36px',
-          px: 1.75,
-          pt: 3,
-          pb: 3,
+          borderRadius: 36,
+          padding: '24px 14px',
           color: '#fff',
-          boxShadow: 6,
+          boxShadow: tokens.shadow16,
           ...scaled,
         }}
       >
-        <Box sx={{ textAlign: style === 'ios' ? 'center' : 'left', mb: 2.5, px: style === 'ios' ? 0 : 1 }}>
-          {dateText && <Typography sx={{ fontSize: '0.85rem', opacity: 0.85 }}>{dateText}</Typography>}
-          <Typography sx={{ fontSize: style === 'ios' ? '3.6rem' : '3rem', fontWeight: style === 'ios' ? 300 : 400, lineHeight: 1.1 }}>{clock}</Typography>
-        </Box>
+        <div style={{ textAlign: style === 'ios' ? 'center' : 'left', marginBottom: 20, padding: style === 'ios' ? 0 : '0 8px' }}>
+          {dateText && <div style={{ fontSize: '0.85rem', opacity: 0.85 }}>{dateText}</div>}
+          <div style={{ fontSize: style === 'ios' ? '3.6rem' : '3rem', fontWeight: style === 'ios' ? 300 : 400, lineHeight: 1.1 }}>{clock}</div>
+        </div>
         {notification}
-        <Box sx={{ width: 96, height: 4, borderRadius: 2, bgcolor: 'rgba(255,255,255,0.55)', mx: 'auto', mt: 3 }} />
-      </Box>
-      <Typography variant="caption" color="text.secondary">
+        <div style={{ width: 96, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.55)', margin: '24px auto 0' }} />
+      </div>
+      <span style={{ fontSize: 12, color: tokens.colorNeutralForeground2 }}>
         通知の画像には、メイン画像(なければ先頭の商品)を使います。下のリストで、商品の順序を入れ替えられます。
-      </Typography>
+      </span>
       {/* 通知をタップしたあとのメッセージ本文。メールと同じレイアウトで、画像を小さくしたもの */}
-      <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>タップ後のメッセージ(メールと同じレイアウト)</Typography>
+      <div style={{ fontSize: 14, fontWeight: 700 }}>タップ後のメッセージ(メールと同じレイアウト)</div>
       <EmailPreview {...props} compact />
-      <Box sx={{ display: 'grid', gap: 0.75 }}>
+      <div style={{ display: 'grid', gap: 6 }}>
         {items.map((it, idx) => {
           const p = byId.get(it.productId)
           return (
-            <Box
+            <div
               key={it.key}
               draggable
               onDragStart={(e) => {
@@ -612,70 +663,55 @@ function PushPreview(props: Props) {
               onDragEnd={clear}
               onClick={() => onSelect(it.key)}
               {...handlers(idx)}
-              sx={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 1,
-                p: 0.75,
-                border: 2,
-                borderRadius: 1.5,
-                cursor: 'grab',
-                borderColor: over === idx ? 'primary.main' : it.key === selectedKey ? 'primary.main' : 'divider',
-              }}
+              className={classes.pushRow}
+              style={{ borderColor: over === idx || it.key === selectedKey ? tokens.colorBrandForeground1 : tokens.colorNeutralStroke2 }}
             >
-              <Typography variant="caption" color="text.secondary" sx={{ width: 16 }}>{idx + 1}</Typography>
-              <Box component="img" draggable={false} src={productImage(p)} alt="" sx={{ width: 32, height: 32, borderRadius: 1, objectFit: 'cover' }} />
-              <Typography noWrap sx={{ flexGrow: 1, fontSize: '0.85rem' }}>{p?.cr854_name}</Typography>
-              <IconButton
+              <span style={{ width: 16, fontSize: 12, color: tokens.colorNeutralForeground2 }}>{idx + 1}</span>
+              <img draggable={false} src={productImage(p)} alt="" style={{ width: 32, height: 32, borderRadius: 8, objectFit: 'cover' }} />
+              <div className={classes.noWrap} style={{ flexGrow: 1, fontSize: '0.85rem' }}>{p?.cr854_name}</div>
+              <Button
+                appearance="subtle"
                 size="small"
+                icon={<ArrowUpRegular />}
                 disabled={idx === 0}
                 onClick={(e) => {
                   e.stopPropagation()
                   onMove(it.key, -1)
                 }}
                 aria-label="上へ"
-              >
-                <ArrowUpwardIcon fontSize="small" />
-              </IconButton>
-              <IconButton
+              />
+              <Button
+                appearance="subtle"
                 size="small"
+                icon={<ArrowDownRegular />}
                 disabled={idx === items.length - 1}
                 onClick={(e) => {
                   e.stopPropagation()
                   onMove(it.key, 1)
                 }}
                 aria-label="下へ"
-              >
-                <ArrowDownwardIcon fontSize="small" />
-              </IconButton>
-              <IconButton
+              />
+              <Button
+                appearance="subtle"
                 size="small"
+                icon={<DismissRegular />}
                 onClick={(e) => {
                   e.stopPropagation()
                   onRemove(it.key)
                 }}
                 aria-label="外す"
-              >
-                <CloseIcon fontSize="small" />
-              </IconButton>
-            </Box>
+              />
+            </div>
           )
         })}
-        <Box
+        <div
           {...handlers(items.length)}
-          sx={{
-            border: '2px dashed',
-            borderColor: over === items.length ? 'primary.main' : 'divider',
-            borderRadius: 1.5,
-            py: 1.5,
-            textAlign: 'center',
-            color: 'text.secondary',
-            fontSize: '0.85rem',
-          }}
+          className={classes.pushDrop}
+          style={{ borderColor: over === items.length ? tokens.colorBrandForeground1 : tokens.colorNeutralStroke2 }}
         >
           {items.length === 0 ? 'ここに商品をドロップ' : '＋ ここにドロップで末尾に追加'}
-        </Box>
-      </Box>
-    </Box>
+        </div>
+      </div>
+    </div>
   )
 }

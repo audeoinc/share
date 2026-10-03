@@ -1,23 +1,22 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import AppBar from '@mui/material/AppBar'
-import Alert from '@mui/material/Alert'
-import Box from '@mui/material/Box'
-import Button from '@mui/material/Button'
-import Chip from '@mui/material/Chip'
-import CircularProgress from '@mui/material/CircularProgress'
-import Container from '@mui/material/Container'
-import FormControlLabel from '@mui/material/FormControlLabel'
-import IconButton from '@mui/material/IconButton'
-import MenuItem from '@mui/material/MenuItem'
-import Switch from '@mui/material/Switch'
-import TextField from '@mui/material/TextField'
-import Tooltip from '@mui/material/Tooltip'
-import Toolbar from '@mui/material/Toolbar'
-import Typography from '@mui/material/Typography'
-import AddIcon from '@mui/icons-material/Add'
-import ChevronLeftIcon from '@mui/icons-material/ChevronLeft'
-import ChevronRightIcon from '@mui/icons-material/ChevronRight'
-import CalendarMonthIcon from '@mui/icons-material/CalendarMonth'
+import {
+  Button,
+  Field,
+  MessageBar,
+  MessageBarBody,
+  Select,
+  Spinner,
+  Tooltip,
+  makeStyles,
+  mergeClasses,
+  tokens,
+} from '@fluentui/react-components'
+import {
+  AddRegular,
+  CalendarLtrRegular,
+  ChevronLeftRegular,
+  ChevronRightRegular,
+} from '@fluentui/react-icons'
 import { Cr854_deliverycardsService } from './generated/services/Cr854_deliverycardsService'
 import type { Cr854_deliverycards } from './generated/models/Cr854_deliverycardsModel'
 import { Cr854_productsService } from './generated/services/Cr854_productsService'
@@ -37,23 +36,148 @@ interface Filters {
 }
 const noFilter: Filters = { country: '', channel: '', department: '', status: '' }
 
+const useStyles = makeStyles({
+  header: {
+    position: 'sticky',
+    top: 0,
+    zIndex: 10,
+    display: 'flex',
+    alignItems: 'center',
+    gap: tokens.spacingHorizontalM,
+    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalXL}`,
+    backgroundColor: tokens.colorNeutralBackground1,
+    color: tokens.colorNeutralForeground1,
+    borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
+    boxShadow: tokens.shadow2,
+  },
+  headerIcon: { color: tokens.colorBrandForeground1, flexShrink: 0 },
+  title: {
+    flexGrow: 1,
+    margin: 0,
+    fontSize: tokens.fontSizeBase400,
+    fontWeight: tokens.fontWeightSemibold,
+    lineHeight: tokens.lineHeightBase400,
+    letterSpacing: '0.01em',
+  },
+  // Fluent の標準スイッチは文字の色などを細かく変えにくいので、ヘッダーの設定だけ、自前のスイッチで描く
+  autoDraft: {
+    display: 'flex',
+    alignItems: 'center',
+    columnGap: tokens.spacingHorizontalS,
+    padding: `${tokens.spacingVerticalXS} ${tokens.spacingHorizontalS}`,
+    border: 'none',
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: 'transparent',
+    color: tokens.colorNeutralForeground2,
+    fontFamily: 'inherit',
+    fontSize: tokens.fontSizeBase200,
+    cursor: 'pointer',
+    ':hover': { backgroundColor: tokens.colorNeutralBackground2 },
+  },
+  track: {
+    position: 'relative',
+    flexShrink: 0,
+    width: '32px',
+    height: '18px',
+    boxSizing: 'border-box',
+    borderRadius: tokens.borderRadiusCircular,
+    border: `1.5px solid ${tokens.colorNeutralStrokeAccessible}`,
+    backgroundColor: 'transparent',
+    transitionProperty: 'background-color, border-color',
+    transitionDuration: tokens.durationFast,
+  },
+  trackOn: { backgroundColor: tokens.colorBrandBackground, borderTopColor: tokens.colorBrandBackground, borderRightColor: tokens.colorBrandBackground, borderBottomColor: tokens.colorBrandBackground, borderLeftColor: tokens.colorBrandBackground },
+  thumb: {
+    position: 'absolute',
+    top: '2px',
+    left: '2px',
+    width: '11px',
+    height: '11px',
+    borderRadius: tokens.borderRadiusCircular,
+    backgroundColor: tokens.colorNeutralStrokeAccessible,
+    transitionProperty: 'left, background-color',
+    transitionDuration: tokens.durationFast,
+  },
+  thumbOn: { left: '16px', backgroundColor: tokens.colorNeutralForegroundOnBrand },
+  autoDraftState: { fontWeight: tokens.fontWeightSemibold, minWidth: '2.2em', color: tokens.colorNeutralForeground1 },
+  container: {
+    width: '100%',
+    boxSizing: 'border-box',
+    maxWidth: '1200px',
+    margin: '0 auto',
+    padding: `${tokens.spacingVerticalXXL} ${tokens.spacingHorizontalL}`,
+  },
+  center: { textAlign: 'center', padding: `${tokens.spacingVerticalXXXL} 0` },
+  alert: { marginBottom: tokens.spacingVerticalL },
+  filterRow: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: tokens.spacingHorizontalM,
+    marginBottom: tokens.spacingVerticalL,
+    alignItems: 'flex-end',
+  },
+  filterField: { minWidth: '130px' },
+  count: {
+    marginLeft: 'auto',
+    fontSize: tokens.fontSizeBase200,
+    color: tokens.colorNeutralForeground2,
+  },
+  monthRow: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: tokens.spacingHorizontalS,
+    marginBottom: tokens.spacingVerticalS,
+  },
+  monthLabel: {
+    minWidth: '120px',
+    textAlign: 'center',
+    fontSize: tokens.fontSizeBase400,
+    fontWeight: tokens.fontWeightSemibold,
+  },
+  legend: {
+    display: 'flex',
+    gap: tokens.spacingHorizontalXS,
+    marginLeft: 'auto',
+    flexWrap: 'wrap',
+  },
+  legendPill: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    columnGap: tokens.spacingHorizontalXS,
+    color: tokens.colorNeutralForeground2,
+    fontSize: tokens.fontSizeBase200,
+    fontWeight: tokens.fontWeightSemibold,
+    padding: `2px ${tokens.spacingHorizontalS}`,
+    borderRadius: tokens.borderRadiusCircular,
+    border: `1px solid ${tokens.colorNeutralStroke2}`,
+    backgroundColor: tokens.colorNeutralBackground1,
+    whiteSpace: 'nowrap',
+  },
+  legendDot: { width: '8px', height: '8px', borderRadius: tokens.borderRadiusCircular, flexShrink: 0 },
+})
+
 function FilterSelect({ label, value, options, onChange }: {
   label: string
   value: string
   options: { value: number; label: string }[]
   onChange: (v: string) => void
 }) {
+  const styles = useStyles()
   return (
-    <TextField select size="small" label={label} value={value} onChange={(e) => onChange(e.target.value)} sx={{ minWidth: 130 }}>
-      <MenuItem value="">すべて</MenuItem>
-      {options.map((o) => (
-        <MenuItem key={o.value} value={String(o.value)}>{o.label}</MenuItem>
-      ))}
-    </TextField>
+    <Field label={label} size="small" className={styles.filterField}>
+      <Select size="small" value={value} onChange={(_, d) => onChange(d.value)}>
+        <option value="">すべて</option>
+        {options.map((o) => (
+          <option key={o.value} value={String(o.value)}>{o.label}</option>
+        ))}
+      </Select>
+    </Field>
   )
 }
 
 function App() {
+  const styles = useStyles()
   const [cards, setCards] = useState<Cr854_deliverycards[]>([])
   const [products, setProducts] = useState<Cr854_products[]>([])
   const [heroes, setHeroes] = useState<Cr854_heroimages[]>([])
@@ -121,71 +245,68 @@ function App() {
 
   return (
     <>
-      <AppBar position="sticky" color="primary" elevation={2}>
-        <Toolbar>
-          <CalendarMonthIcon sx={{ mr: 1.5 }} />
-          <Typography variant="h6" sx={{ flexGrow: 1 }}>配信カレンダー</Typography>
-          <Tooltip title="内容が空の配信カードを開いたとき、AIが自動で下書きを作ります(同じカードでは1回だけ)">
-            <FormControlLabel
-              control={
-                <Switch
-                  size="small"
-                  color="success"
-                  checked={autoDraft}
-                  onChange={(e) => {
-                    setAutoDraft(e.target.checked)
-                    saveAutoDraft(e.target.checked)
-                  }}
-                />
-              }
-              label={`開いたとき自動で下書き:${autoDraft ? 'オン' : 'オフ'}`}
-              sx={{
-                mr: 2,
-                '& .MuiFormControlLabel-label': { fontSize: '0.8rem', fontWeight: autoDraft ? 700 : 400 },
-                '& .MuiSwitch-track': { bgcolor: 'common.white', opacity: 0.5 },
-                '& .Mui-checked + .MuiSwitch-track': { bgcolor: 'success.light', opacity: 1 },
-              }}
-            />
-          </Tooltip>
-          <Button color="inherit" startIcon={<AddIcon />} onClick={() => setCreating(true)}>新規作成</Button>
-        </Toolbar>
-      </AppBar>
-      <Container maxWidth="lg" sx={{ py: 3 }}>
-        {loading && <Box sx={{ textAlign: 'center', py: 6 }}><CircularProgress /></Box>}
-        {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+      <header className={styles.header}>
+        <CalendarLtrRegular fontSize={24} className={styles.headerIcon} />
+        <h1 className={styles.title}>配信カレンダー</h1>
+        <Tooltip
+          content="内容が空の配信カードを開いたとき、AIが自動で下書きを作ります(同じカードでは1回だけ)"
+          relationship="description"
+        >
+          <button
+            type="button"
+            role="switch"
+            aria-checked={autoDraft}
+            className={styles.autoDraft}
+            onClick={() => {
+              setAutoDraft(!autoDraft)
+              saveAutoDraft(!autoDraft)
+            }}
+          >
+            <span className={mergeClasses(styles.track, autoDraft && styles.trackOn)}>
+              <span className={mergeClasses(styles.thumb, autoDraft && styles.thumbOn)} />
+            </span>
+            開いたとき自動で下書き
+            <span className={styles.autoDraftState}>{autoDraft ? 'オン' : 'オフ'}</span>
+          </button>
+        </Tooltip>
+        <Button appearance="primary" size="small" icon={<AddRegular />} onClick={() => setCreating(true)}>
+          新規作成
+        </Button>
+      </header>
+      <div className={styles.container}>
+        {loading && <div className={styles.center}><Spinner /></div>}
+        {error && (
+          <MessageBar layout="multiline" intent="error" className={styles.alert}>
+            <MessageBarBody>{error}</MessageBarBody>
+          </MessageBar>
+        )}
         {!loading && !error && month && (
           <>
-            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1.5, mb: 2, alignItems: 'center' }}>
+            <div className={styles.filterRow}>
               <FilterSelect label="国" value={filters.country} options={countryOptions} onChange={setFilter('country')} />
               <FilterSelect label="チャネル" value={filters.channel} options={channelOptions} onChange={setFilter('channel')} />
               <FilterSelect label="部署" value={filters.department} options={departmentOptions} onChange={setFilter('department')} />
               <FilterSelect label="ステータス" value={filters.status} options={statusOptions} onChange={setFilter('status')} />
-              {filtering && <Button onClick={() => setFilters(noFilter)}>クリア</Button>}
-              <Typography variant="body2" color="text.secondary" sx={{ ml: 'auto' }}>
-                {filtered.length} / {cards.length} 件
-              </Typography>
-            </Box>
-            <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 1, mb: 1 }}>
-              <IconButton onClick={() => shift(-1)} aria-label="前の月"><ChevronLeftIcon /></IconButton>
-              <Typography variant="h6" sx={{ minWidth: 120, textAlign: 'center' }}>
-                {month.getFullYear()}年{month.getMonth() + 1}月
-              </Typography>
-              <IconButton onClick={() => shift(1)} aria-label="次の月"><ChevronRightIcon /></IconButton>
-              <Box sx={{ display: 'flex', gap: 0.75, ml: 'auto', flexWrap: 'wrap' }}>
+              {filtering && <Button size="small" appearance="subtle" onClick={() => setFilters(noFilter)}>クリア</Button>}
+              <span className={styles.count}>{filtered.length} / {cards.length} 件</span>
+            </div>
+            <div className={styles.monthRow}>
+              <Button appearance="subtle" size="small" icon={<ChevronLeftRegular />} onClick={() => shift(-1)} aria-label="前の月" />
+              <span className={styles.monthLabel}>{month.getFullYear()}年{month.getMonth() + 1}月</span>
+              <Button appearance="subtle" size="small" icon={<ChevronRightRegular />} onClick={() => shift(1)} aria-label="次の月" />
+              <div className={styles.legend}>
                 {statusOptions.map((o) => (
-                  <Chip
-                    key={o.value}
-                    size="small"
-                    label={o.label}
-                    sx={{ bgcolor: statusColor(o.value), color: '#fff', fontWeight: 600 }}
-                  />
+                  <span key={o.value} className={styles.legendPill}>
+                    <span className={styles.legendDot} style={{ backgroundColor: statusColor(o.value) }} />
+                    {o.label}
+                  </span>
                 ))}
-              </Box>
-            </Box>
+              </div>
+            </div>
             <Calendar month={month} cards={filtered} onSelect={setSelectedId} />
           </>
         )}
-      </Container>
+      </div>
       {(selected || creating) && (
         <CardDetail
           key={selected?.cr854_deliverycardid ?? 'new'}

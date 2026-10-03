@@ -1,31 +1,31 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import Alert from '@mui/material/Alert'
-import Box from '@mui/material/Box'
-import Button from '@mui/material/Button'
-import Chip from '@mui/material/Chip'
-import CircularProgress from '@mui/material/CircularProgress'
-import Dialog from '@mui/material/Dialog'
-import DialogActions from '@mui/material/DialogActions'
-import DialogTitle from '@mui/material/DialogTitle'
-import IconButton from '@mui/material/IconButton'
-import LinearProgress from '@mui/material/LinearProgress'
-import MenuItem from '@mui/material/MenuItem'
-import FormControlLabel from '@mui/material/FormControlLabel'
-import Slider from '@mui/material/Slider'
-import Switch from '@mui/material/Switch'
-import Tab from '@mui/material/Tab'
-import Tabs from '@mui/material/Tabs'
-import ToggleButton from '@mui/material/ToggleButton'
-import Tooltip from '@mui/material/Tooltip'
-import TextField from '@mui/material/TextField'
-import Typography from '@mui/material/Typography'
-import useMediaQuery from '@mui/material/useMediaQuery'
-import { useTheme } from '@mui/material/styles'
-import AddIcon from '@mui/icons-material/Add'
-import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome'
-import CloseIcon from '@mui/icons-material/Close'
-import RemoveIcon from '@mui/icons-material/Remove'
-import SaveIcon from '@mui/icons-material/Save'
+import {
+  Badge,
+  Button,
+  Caption1,
+  Dialog,
+  DialogSurface,
+  Field,
+  Input,
+  MessageBar,
+  MessageBarBody,
+  ProgressBar,
+  Select,
+  Slider,
+  Spinner,
+  Switch,
+  Tab,
+  TabList,
+  Text,
+  ToggleButton,
+  Tooltip,
+  makeStyles,
+  mergeClasses,
+  tokens,
+} from '@fluentui/react-components'
+import { AddRegular, DismissRegular, SaveRegular, SubtractRegular } from '@fluentui/react-icons'
+import { AiIcon } from './AiMark'
+import { AutoTextarea } from './AutoTextarea'
 import { Cr854_deliverycardsService } from './generated/services/Cr854_deliverycardsService'
 import type { Cr854_deliverycards } from './generated/models/Cr854_deliverycardsModel'
 import { Cr854_deliveryproductsService } from './generated/services/Cr854_deliveryproductsService'
@@ -73,6 +73,10 @@ interface Form {
   headline: string
   copy: string
   instructions: string
+  /** 採用したAIの案の補足(テーマの理由、コピー・制作指示の切り口)。手で書き換えたら消す */
+  themeReason: string
+  copyAngle: string
+  instructionsAngle: string
 }
 
 const str = (v?: number) => (v === undefined ? '' : String(v))
@@ -88,21 +92,26 @@ const toForm = (c?: Cr854_deliverycards): Form => ({
   headline: c?.cr854_headline ?? '',
   copy: c?.cr854_copy ?? '',
   instructions: c?.cr854_instructions ?? '',
+  themeReason: c?.cr854_themereason ?? '',
+  copyAngle: c?.cr854_copyangle ?? '',
+  instructionsAngle: c?.cr854_instructionsangle ?? '',
 })
 
-function Select({ label, value, options, onChange }: {
+function OptionSelect({ label, value, options, onChange }: {
   label: string
   value: string
   options: { value: number; label: string }[]
   onChange: (v: string) => void
 }) {
   return (
-    <TextField select fullWidth size="small" label={label} value={value} onChange={(e) => onChange(e.target.value)}>
-      <MenuItem value="">未設定</MenuItem>
-      {options.map((o) => (
-        <MenuItem key={o.value} value={String(o.value)}>{o.label}</MenuItem>
-      ))}
-    </TextField>
+    <Field label={label}>
+      <Select size="small" value={value} onChange={(_, d) => onChange(d.value)}>
+        <option value="">未設定</option>
+        {options.map((o) => (
+          <option key={o.value} value={String(o.value)}>{o.label}</option>
+        ))}
+      </Select>
+    </Field>
   )
 }
 
@@ -162,12 +171,88 @@ function parseCopies(v?: string): string[] {
 }
 const encodeCopies = (a: string[]) => (a.some(Boolean) ? JSON.stringify(a) : '')
 
-const paneSx = { p: 2, overflow: 'auto', minHeight: 0, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 1.5, alignContent: 'start' } as const
+const useStyles = makeStyles({
+  surface: {
+    position: 'relative',
+    padding: 0,
+    overflow: 'hidden',
+    maxWidth: 'none',
+    width: 'min(1800px, 98vw)',
+    height: '92vh',
+    maxHeight: '92vh',
+    '@media (max-width: 899px)': {
+      width: '100vw',
+      height: '100vh',
+      maxHeight: '100vh',
+      borderRadius: 0,
+    },
+  },
+  form: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 },
+  overlay: {
+    position: 'absolute',
+    inset: 0,
+    zIndex: 20,
+    display: 'grid',
+    placeContent: 'center',
+    justifyItems: 'center',
+    rowGap: '16px',
+    paddingLeft: '24px',
+    paddingRight: '24px',
+    textAlign: 'center',
+    backgroundColor: tokens.colorNeutralBackground1,
+  },
+  overlayBar: { width: '320px' },
+  titleRow: { display: 'flex', alignItems: 'center', columnGap: '8px', padding: '12px 12px 12px 24px', backgroundColor: tokens.colorNeutralBackground1 },
+  titleText: { flexGrow: 1, minWidth: 0 },
+  panes: {
+    flexGrow: 1,
+    minHeight: 0,
+    display: 'grid',
+    gridTemplateColumns: '1fr',
+    borderTop: `1px solid ${tokens.colorNeutralStroke2}`,
+    borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
+    overflow: 'auto',
+    '@media (min-width: 900px)': {
+      gridTemplateColumns: 'var(--w0) 1px var(--w1) 1px minmax(0, 1fr)',
+      gridTemplateRows: 'minmax(0, 1fr)',
+      overflow: 'hidden',
+    },
+  },
+  pane: {
+    padding: '16px',
+    overflow: 'auto',
+    minHeight: 0,
+    display: 'grid',
+    gridTemplateColumns: 'minmax(0, 1fr)',
+    rowGap: '12px',
+    backgroundColor: tokens.colorNeutralBackground1,
+    alignContent: 'start',
+  },
+  paneMid: { backgroundColor: tokens.colorNeutralBackground1 },
+  panePreview: { gridTemplateRows: 'auto minmax(0, 1fr)' },
+  caption: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200, fontWeight: tokens.fontWeightRegular },
+  lead: { fontWeight: tokens.fontWeightSemibold },
+  captionTight: { marginTop: '-4px' },
+  success: { color: tokens.colorPaletteGreenForeground1 },
+  fullWidth: { width: '100%' },
+  sectionHead: { marginTop: '12px' },
+  twoCol: { display: 'grid', gridTemplateColumns: '1fr 1fr', columnGap: '12px', rowGap: '12px' },
+  statusRow: { display: 'flex', alignItems: 'center', columnGap: '6px' },
+  dot: { width: '10px', height: '10px', borderRadius: '50%', flexShrink: 0 },
+  grow: { flexGrow: 1 },
+  filled: { borderBottomColor: tokens.colorPaletteGreenBorder2 },
+  toolbar: { display: 'flex', alignItems: 'center', columnGap: '8px', rowGap: '4px', flexWrap: 'wrap' },
+  zoomBox: { display: 'flex', alignItems: 'center', columnGap: '2px' },
+  slider: { width: '90px', minWidth: '90px' },
+  zoomLabel: { width: '34px', textAlign: 'right' },
+  previewBox: { overflow: 'auto', minHeight: 0, paddingTop: '8px', paddingBottom: '8px' },
+  error: { margin: '12px 12px 0' },
+  actions: { display: 'flex', justifyContent: 'flex-end', columnGap: '8px', padding: '12px 24px' },
+})
 
 export function CardDetail({ card, products, heroes, otherThemes, onBack, onSaved }: Props) {
+  const styles = useStyles()
   const [form, setForm] = useState<Form>(() => toForm(card))
-  const theme = useTheme()
-  const fullScreen = useMediaQuery(theme.breakpoints.down('md'))
   const [items, setItems] = useState<Item[]>([])
   // 選定候補(配信商品テーブルの「候補」の行。セクションごと)
   const [candidates, setCandidates] = useState<Candidate[]>([])
@@ -242,7 +327,12 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
     }
   }, [card])
 
-  const set = <K extends keyof Form>(k: K) => (v: Form[K]) => setForm({ ...form, [k]: v })
+  // 左ペインで手で書き換えたら、採用した案の補足は消す
+  const STALE: Partial<Record<keyof Form, keyof Form>> = { theme: 'themeReason', headline: 'copyAngle', copy: 'copyAngle', instructions: 'instructionsAngle' }
+  const set = <K extends keyof Form>(k: K) => (v: Form[K]) => {
+    const stale = STALE[k]
+    setForm({ ...form, [k]: v, ...(stale ? { [stale]: '' } : {}) })
+  }
   const num = (v: string) => (v === '' ? undefined : (Number(v) as never))
   const productName = (id: string) => products.find((p) => p.cr854_productid === id)?.cr854_name ?? ''
 
@@ -314,7 +404,7 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
       ro.disconnect()
       inner.style.zoom = ''
     }
-  }, [zoom, previewTab, template, items, form.headline, form.copy, sectionTitles, sectionCopies, heroId, fullScreen])
+  }, [zoom, previewTab, template, items, form.headline, form.copy, sectionTitles, sectionCopies, heroId])
 
   const shownZoom = zoom === 'fit' ? fitZoom : zoom
   const stepZoom = (d: number) => setZoom(Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.round((shownZoom + d) * 20) / 20)))
@@ -361,9 +451,12 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
     setForm((f) => ({
       ...f,
       theme: res.theme ?? f.theme,
+      themeReason: res.theme ? (res.themeIdeas[0]?.reason ?? '') : f.themeReason,
       headline: res.headline ?? f.headline,
       copy: res.copy ?? f.copy,
+      copyAngle: res.headline ? (res.copyIdeas[0]?.angle ?? '') : f.copyAngle,
       instructions: res.instructions ?? f.instructions,
+      instructionsAngle: res.instructions ? (res.instructionIdeas[0]?.angle ?? '') : f.instructionsAngle,
     }))
     const toItem = (r: { productId: string; reason: string }): Item => ({ key: crypto.randomUUID(), productId: r.productId, reason: r.reason, source: SOURCE_AI })
     if (res.sections.some((sec) => sec.selected.length > 0)) {
@@ -522,6 +615,9 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
         cr854_products: items.map((i) => productName(i.productId)).filter(Boolean).join(' / '),
         cr854_copy: form.copy,
         cr854_instructions: form.instructions,
+        cr854_themereason: form.themeReason,
+        cr854_copyangle: form.copyAngle,
+        cr854_instructionsangle: form.instructionsAngle,
         cr854_heroreason: heroReason,
         cr854_emailtemplate: TEMPLATE_VALUES[template],
         cr854_sectiontitles: sectionTitles.join('\n').replace(/\n+$/, ''),
@@ -553,271 +649,248 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
   const hero = heroes.find((h) => h.cr854_heroimageid === heroId)
 
   return (
-    <Dialog
-      open
-      onClose={saving ? undefined : onBack}
-      fullScreen={fullScreen}
-      fullWidth
-      maxWidth={false}
-      scroll="paper"
-      slotProps={{
-        paper: {
-          component: 'form',
-          onSubmit: submit,
-          sx: { position: 'relative', width: { md: 'min(1800px, 98vw)' }, height: { md: '92vh' }, maxHeight: { md: '92vh' } },
-        },
-      }}
-    >
-      {auto && (
-        <Box
-          sx={{
-            position: 'absolute',
-            inset: 0,
-            zIndex: 20,
-            display: 'grid',
-            placeContent: 'center',
-            justifyItems: 'center',
-            gap: 2,
-            px: 3,
-            textAlign: 'center',
-            bgcolor: 'background.paper',
-          }}
-        >
-          <CircularProgress />
-          <Typography variant="h6">AIが下書きを作っています</Typography>
-          <Typography>{auto.label}({Math.min(auto.done + 1, auto.total)} / {auto.total})</Typography>
-          <LinearProgress variant="determinate" value={Math.min(100, (auto.done / auto.total) * 100)} sx={{ width: 320 }} />
-          <Typography variant="caption" color="text.secondary">
-            結果は画面に反映されるだけで、保存はされません。気に入らなければ、保存せずに閉じられます。
-          </Typography>
-          <Button
-            onClick={() => {
-              cancelRef.current = true
-              setAuto(null)
-            }}
-          >
-            スキップして開く
-          </Button>
-        </Box>
-      )}
-      <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1, pr: 1 }}>
-        <Box component="span" sx={{ flexGrow: 1 }}>{card ? card.cr854_name : '配信カードの新規作成'}</Box>
-        <Tooltip title={progress.remaining.length ? `未完了: ${progress.remaining.join('、')}` : 'すべての工程が完了しています'}>
-          <Chip size="small" label={`工程 ${progress.done} / ${progress.total}`} color={progress.done === progress.total ? 'success' : 'default'} />
-        </Tooltip>
-        <IconButton onClick={onBack} aria-label="閉じる"><CloseIcon /></IconButton>
-      </DialogTitle>
+    <Dialog open onOpenChange={(_, d) => { if (!d.open && !saving) onBack() }}>
+      <DialogSurface className={styles.surface} aria-label={card ? card.cr854_name : '配信カードの新規作成'}>
+        <form onSubmit={submit} className={styles.form}>
+          {auto && (
+            <div className={styles.overlay}>
+              <Spinner size="large" />
+              <Text as="h2" size={500} weight="semibold">AIが下書きを作っています</Text>
+              <Text>{auto.label}({Math.min(auto.done + 1, auto.total)} / {auto.total})</Text>
+              <ProgressBar className={styles.overlayBar} value={Math.min(1, auto.done / auto.total)} />
+              <Caption1 className={styles.caption}>
+                結果は画面に反映されるだけで、保存はされません。気に入らなければ、保存せずに閉じられます。
+              </Caption1>
+              <Button
+                type="button"
+                appearance="subtle"
+                onClick={() => {
+                  cancelRef.current = true
+                  setAuto(null)
+                }}
+              >
+                スキップして開く
+              </Button>
+            </div>
+          )}
+          <div className={styles.titleRow}>
+            <Text as="h2" size={500} weight="semibold" className={styles.titleText}>{card ? card.cr854_name : '配信カードの新規作成'}</Text>
+            <Tooltip
+              relationship="description"
+              content={progress.remaining.length ? `未完了: ${progress.remaining.join('、')}` : 'すべての工程が完了しています'}
+            >
+              <Badge appearance="tint" color={progress.done === progress.total ? 'success' : 'informative'} size="large">
+                {`工程 ${progress.done} / ${progress.total}`}
+              </Badge>
+            </Tooltip>
+            <Button type="button" appearance="subtle" icon={<DismissRegular />} onClick={onBack} aria-label="閉じる" />
+          </div>
 
-      <Box
-        sx={{
-          flexGrow: 1,
-          minHeight: 0,
-          display: 'grid',
-          gridTemplateColumns: { xs: '1fr', md: `${widths[0]}px 1px ${widths[1]}px 1px minmax(0, 1fr)` },
-          gridTemplateRows: { md: 'minmax(0, 1fr)' },
-          borderTop: 1,
-          borderBottom: 1,
-          borderColor: 'divider',
-          overflow: { xs: 'auto', md: 'hidden' },
-        }}
-      >
-        {/* 左: 配信の情報 */}
-        <Box sx={paneSx}>
-          <Button
-            fullWidth
-            variant="contained"
-            startIcon={<AutoAwesomeIcon />}
-            onClick={runAllManual}
-            disabled={!!auto || saving}
-          >
-            すべてAIで下書き
-          </Button>
-          <Typography variant="caption" color="text.secondary" sx={{ mt: -0.5 }}>
-            テーマ・メイン画像・ヘッドライン・セクション・制作指示を、まとめてAIが下書きします
-          </Typography>
-          <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>配信情報</Typography>
-          <TextField required fullWidth size="small" label="配信名" value={form.name} onChange={(e) => set('name')(e.target.value)} />
-          <TextField
-            required
-            fullWidth
-            size="small"
-            type="datetime-local"
-            label="配信日時"
-            value={form.scheduledAt}
-            onChange={(e) => set('scheduledAt')(e.target.value)}
-            slotProps={{ inputLabel: { shrink: true } }}
-          />
-          <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1.5 }}>
-            <Select label="国" value={form.country} options={countryOptions} onChange={set('country')} />
-            <Select label="チャネル" value={form.channel} options={channelOptions} onChange={set('channel')} />
-            <Select label="部署" value={form.department} options={departmentOptions} onChange={set('department')} />
-            <TextField select fullWidth size="small" label="ステータス" value={form.status} onChange={(e) => set('status')(e.target.value)}>
-              {statusOptions.map((o) => (
-                <MenuItem key={o.value} value={String(o.value)}>
-                  <Box component="span" sx={{ width: 10, height: 10, borderRadius: '50%', bgcolor: statusColor(o.value), mr: 1 }} />
-                  {o.label}
-                </MenuItem>
-              ))}
-            </TextField>
-          </Box>
-          <Typography variant="subtitle2" sx={{ fontWeight: 700, mt: 1 }}>工程</Typography>
-          <TextField
-            fullWidth
-            multiline
-            minRows={2}
-            size="small"
-            label="テーマ(配信全体の前提。メールには出ません)"
-            value={form.theme}
-            onChange={(e) => set('theme')(e.target.value)}
-            color={form.theme ? 'success' : 'primary'}
-          />
-          <Typography variant="caption" color={items.length ? 'success.main' : 'text.secondary'}>
-            掲載商品: {items.length}件(中央の「商品選定」タブで選びます)
-          </Typography>
-          <TextField
-            fullWidth
-            multiline
-            minRows={1}
-            size="small"
-            label="ヘッドライン(メイン画像に載せる大見出し)"
-            value={form.headline}
-            onChange={(e) => set('headline')(e.target.value)}
-            color={form.headline ? 'success' : 'primary'}
-          />
-          <TextField
-            fullWidth
-            multiline
-            minRows={2}
-            size="small"
-            label="コピー(ヘッドラインの下の導入文)"
-            value={form.copy}
-            onChange={(e) => set('copy')(e.target.value)}
-            color={form.copy ? 'success' : 'primary'}
-          />
-          <TextField
-            fullWidth
-            multiline
-            minRows={2}
-            size="small"
-            label="制作指示"
-            value={form.instructions}
-            onChange={(e) => set('instructions')(e.target.value)}
-            color={form.instructions ? 'success' : 'primary'}
-          />
-        </Box>
-
-        <Splitter onDrag={resize(0)} onDone={saveWidths} />
-
-        {/* 中: コンテンツ生成(テーマ・商品選定・コピー・制作指示) */}
-        <Box sx={{ ...paneSx, bgcolor: 'action.hover' }}>
-          <ContentPane
-            theme={form.theme}
-            headline={form.headline}
-            copy={form.copy}
-            instructions={form.instructions}
-            onField={(key, value) => setForm((f) => ({ ...f, [key]: value }))}
-            template={template}
-            onTemplate={changeTemplate}
-            sectionTitles={sectionTitles}
-            onSectionTitle={setSectionTitle}
-            sectionCopies={sectionCopies}
-            onSectionCopy={setSectionCopy}
-            products={products}
-            heroes={heroes}
-            items={items}
-            setItems={setItems}
-            candidates={candidates}
-            setCandidates={setCandidates}
-            heroId={heroId}
-            setHeroId={setHeroId}
-            heroReason={heroReason}
-            setHeroReason={setHeroReason}
-            heroCandidates={heroCandidates}
-            setHeroCandidates={setHeroCandidates}
-            language={language}
-            onLanguage={setLanguage}
-            drafts={drafts}
-            disabled={saving}
-          />
-        </Box>
-
-        <Splitter onDrag={resize(1)} onDone={saveWidths} />
-
-        {/* 右: プレビュー */}
-        <Box sx={{ ...paneSx, gridTemplateRows: 'auto minmax(0, 1fr)' }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
-            <Tabs value={previewTab} onChange={(_, v) => setPreviewTab(v)} sx={{ minHeight: 40, flexGrow: 1 }}>
-              <Tab value="email" label="メール" sx={{ minHeight: 40 }} />
-              <Tab value="push" label="プッシュ" sx={{ minHeight: 40 }} />
-            </Tabs>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-              <IconButton size="small" onClick={() => stepZoom(-0.1)} aria-label="縮小"><RemoveIcon fontSize="small" /></IconButton>
-              <Slider
-                size="small"
-                min={ZOOM_MIN * 100}
-                max={ZOOM_MAX * 100}
-                step={5}
-                value={Math.round(shownZoom * 100)}
-                onChange={(_, v) => setZoom((v as number) / 100)}
-                sx={{ width: 90, mx: 0.5 }}
-                aria-label="プレビューの倍率"
-              />
-              <IconButton size="small" onClick={() => stepZoom(0.1)} aria-label="拡大"><AddIcon fontSize="small" /></IconButton>
-              <Typography variant="caption" sx={{ width: 34, textAlign: 'right' }}>{Math.round(shownZoom * 100)}%</Typography>
-              <ToggleButton size="small" value="fit" selected={zoom === 'fit'} onChange={() => setZoom(zoom === 'fit' ? shownZoom : 'fit')} sx={{ py: 0.25, ml: 0.5 }}>
-                全体
-              </ToggleButton>
-            </Box>
-            {previewTab === 'email' && template === 'free' && (
-              <>
-                <FormControlLabel
-                  control={<Switch size="small" checked={showHeadings} onChange={(e) => setShowHeadings(e.target.checked)} />}
-                  label="カテゴリ見出し"
+          <div className={styles.panes} style={{ '--w0': `${widths[0]}px`, '--w1': `${widths[1]}px` } as React.CSSProperties}>
+            {/* 左: 配信の情報 */}
+            <div className={styles.pane}>
+              <Button
+                appearance="primary"
+                icon={<AiIcon tone="white" size={18} />}
+                onClick={runAllManual}
+                disabled={!!auto || saving}
+                className={styles.fullWidth}
+              >
+                すべてAIで下書き
+              </Button>
+              <Caption1 className={mergeClasses(styles.caption, styles.captionTight)}>
+                テーマ・メイン画像・ヘッドライン・セクション・制作指示を、まとめてAIが下書きします
+              </Caption1>
+              <Text weight="semibold" size={300}>配信情報</Text>
+              <Field label="配信名" required>
+                <Input size="small" required value={form.name} onChange={(_, d) => set('name')(d.value)} />
+              </Field>
+              <Field label="配信日時" required>
+                <Input size="small" required type="datetime-local" value={form.scheduledAt} onChange={(_, d) => set('scheduledAt')(d.value)} />
+              </Field>
+              <div className={styles.twoCol}>
+                <OptionSelect label="国" value={form.country} options={countryOptions} onChange={set('country')} />
+                <OptionSelect label="チャネル" value={form.channel} options={channelOptions} onChange={set('channel')} />
+                <OptionSelect label="部署" value={form.department} options={departmentOptions} onChange={set('department')} />
+                <Field label="ステータス">
+                  <div className={styles.statusRow}>
+                    <span className={styles.dot} style={{ backgroundColor: statusColor(Number(form.status)) }} />
+                    <Select size="small" className={styles.grow} value={form.status} onChange={(_, d) => set('status')(d.value)}>
+                      {statusOptions.map((o) => (
+                        <option key={o.value} value={String(o.value)}>{o.label}</option>
+                      ))}
+                    </Select>
+                  </div>
+                </Field>
+              </div>
+              <Text weight="semibold" size={300} className={styles.sectionHead}>工程</Text>
+              <Field label="テーマ(配信全体の前提。メールには出ません)">
+                <AutoTextarea
+                  size="small"
+                  rows={2}
+                                    className={form.theme ? styles.filled : undefined}
+                  value={form.theme}
+                  onChange={(_, d) => set('theme')(d.value)}
                 />
-                <Button onClick={groupByCategory} disabled={items.length < 2}>カテゴリでまとめる</Button>
-              </>
-            )}
-          </Box>
-          <Box ref={previewBoxRef} sx={{ overflow: 'auto', minHeight: 0, py: 1 }}>
-            <Box ref={previewInnerRef} sx={{ zoom: zoom === 'fit' ? undefined : zoom }}>
-            <Preview
-              channel={previewTab}
-              subject={form.name}
-              headline={form.headline}
-              copy={form.copy}
-              items={items}
-              products={products}
-              selectedKey={selectedKey}
-              showHeadings={showHeadings}
-              template={template}
-              scheduledAt={form.scheduledAt}
-              sectionTitles={sectionTitles}
-              onSectionTitle={setSectionTitle}
-              sectionCopies={sectionCopies}
-              onSectionCopy={setSectionCopy}
-              hero={hero}
-              onDropHero={setHeroId}
-              onClearHero={() => setHeroId(undefined)}
-              onSelect={setSelectedKey}
-              onRemove={removeItem}
-              onMove={(key, d) => {
-                const i = items.findIndex((x) => x.key === key)
-                moveItem(i, i + d)
-              }}
-              onDropAt={dropAt}
-            />
-            </Box>
-          </Box>
-        </Box>
-      </Box>
+              </Field>
+              {form.theme && form.themeReason && <Caption1 className={styles.caption}><span className={styles.lead}>AIの理由:</span>{` ${form.themeReason}`}</Caption1>}
+              <Caption1 className={items.length ? styles.success : styles.caption}>
+                掲載商品: {items.length}件(中央の「商品選定」タブで選びます)
+              </Caption1>
+              <Field label="ヘッドライン(メイン画像に載せる大見出し)">
+                <AutoTextarea
+                  size="small"
+                  rows={1}
+                                    className={form.headline ? styles.filled : undefined}
+                  value={form.headline}
+                  onChange={(_, d) => set('headline')(d.value)}
+                />
+              </Field>
+              <Field label="コピー(ヘッドラインの下の導入文)">
+                <AutoTextarea
+                  size="small"
+                  rows={2}
+                                    className={form.copy ? styles.filled : undefined}
+                  value={form.copy}
+                  onChange={(_, d) => set('copy')(d.value)}
+                />
+              </Field>
+              {(form.headline || form.copy) && form.copyAngle && <Caption1 className={styles.caption}><span className={styles.lead}>切り口:</span>{` ${form.copyAngle}`}</Caption1>}
+              <Field label="制作指示">
+                <AutoTextarea
+                  size="small"
+                  rows={2}
+                                    className={form.instructions ? styles.filled : undefined}
+                  value={form.instructions}
+                  onChange={(_, d) => set('instructions')(d.value)}
+                />
+              </Field>
+              {form.instructions && form.instructionsAngle && <Caption1 className={styles.caption}><span className={styles.lead}>切り口:</span>{` ${form.instructionsAngle}`}</Caption1>}
+            </div>
 
-      {error && <Alert severity="error" sx={{ m: 1.5, mb: 0 }}>{error}</Alert>}
-      <DialogActions sx={{ px: 3, py: 1.5 }}>
-        <Button onClick={onBack} disabled={saving}>キャンセル</Button>
-        <Button type="submit" variant="contained" startIcon={<SaveIcon />} disabled={saving}>
-          {saving ? '保存中...' : '保存'}
-        </Button>
-      </DialogActions>
+            <Splitter onDrag={resize(0)} onDone={saveWidths} />
+
+            {/* 中: コンテンツ生成(テーマ・商品選定・コピー・制作指示) */}
+            <div className={mergeClasses(styles.pane, styles.paneMid)}>
+              <ContentPane
+                theme={form.theme}
+                headline={form.headline}
+                copy={form.copy}
+                instructions={form.instructions}
+                themeReason={form.themeReason}
+                copyAngle={form.copyAngle}
+                instructionsAngle={form.instructionsAngle}
+                onField={(key, value) => setForm((f) => ({ ...f, [key]: value }))}
+                template={template}
+                onTemplate={changeTemplate}
+                sectionTitles={sectionTitles}
+                onSectionTitle={setSectionTitle}
+                sectionCopies={sectionCopies}
+                onSectionCopy={setSectionCopy}
+                products={products}
+                heroes={heroes}
+                items={items}
+                setItems={setItems}
+                candidates={candidates}
+                setCandidates={setCandidates}
+                heroId={heroId}
+                setHeroId={setHeroId}
+                heroReason={heroReason}
+                setHeroReason={setHeroReason}
+                heroCandidates={heroCandidates}
+                setHeroCandidates={setHeroCandidates}
+                language={language}
+                onLanguage={setLanguage}
+                drafts={drafts}
+                disabled={saving}
+              />
+            </div>
+
+            <Splitter onDrag={resize(1)} onDone={saveWidths} />
+
+            {/* 右: プレビュー */}
+            <div className={mergeClasses(styles.pane, styles.panePreview)}>
+              <div className={styles.toolbar}>
+                <TabList
+                  size="small"
+                  className={styles.grow}
+                  selectedValue={previewTab}
+                  onTabSelect={(_, d) => setPreviewTab(d.value as 'email' | 'push')}
+                >
+                  <Tab value="email">メール</Tab>
+                  <Tab value="push">プッシュ</Tab>
+                </TabList>
+                <div className={styles.zoomBox}>
+                  <Button type="button" size="small" appearance="subtle" icon={<SubtractRegular />} onClick={() => stepZoom(-0.1)} aria-label="縮小" />
+                  <Slider
+                    size="small"
+                    className={styles.slider}
+                    min={ZOOM_MIN * 100}
+                    max={ZOOM_MAX * 100}
+                    step={5}
+                    value={Math.round(shownZoom * 100)}
+                    onChange={(_, d) => setZoom(d.value / 100)}
+                    aria-label="プレビューの倍率"
+                  />
+                  <Button type="button" size="small" appearance="subtle" icon={<AddRegular />} onClick={() => stepZoom(0.1)} aria-label="拡大" />
+                  <Caption1 className={styles.zoomLabel}>{Math.round(shownZoom * 100)}%</Caption1>
+                  <ToggleButton type="button" size="small" checked={zoom === 'fit'} onClick={() => setZoom(zoom === 'fit' ? shownZoom : 'fit')}>
+                    全体
+                  </ToggleButton>
+                </div>
+                {previewTab === 'email' && template === 'free' && (
+                  <>
+                    <Switch label="カテゴリ見出し" checked={showHeadings} onChange={(_, d) => setShowHeadings(d.checked)} />
+                    <Button type="button" size="small" appearance="subtle" onClick={groupByCategory} disabled={items.length < 2}>カテゴリでまとめる</Button>
+                  </>
+                )}
+              </div>
+              <div ref={previewBoxRef} className={styles.previewBox}>
+                <div ref={previewInnerRef} style={{ zoom: zoom === 'fit' ? undefined : zoom }}>
+                  <Preview
+                    channel={previewTab}
+                    subject={form.name}
+                    headline={form.headline}
+                    copy={form.copy}
+                    items={items}
+                    products={products}
+                    selectedKey={selectedKey}
+                    showHeadings={showHeadings}
+                    template={template}
+                    scheduledAt={form.scheduledAt}
+                    sectionTitles={sectionTitles}
+                    onSectionTitle={setSectionTitle}
+                    sectionCopies={sectionCopies}
+                    onSectionCopy={setSectionCopy}
+                    hero={hero}
+                    onDropHero={setHeroId}
+                    onClearHero={() => setHeroId(undefined)}
+                    onSelect={setSelectedKey}
+                    onRemove={removeItem}
+                    onMove={(key, d) => {
+                      const i = items.findIndex((x) => x.key === key)
+                      moveItem(i, i + d)
+                    }}
+                    onDropAt={dropAt}
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {error && (
+            <MessageBar layout="multiline" intent="error" className={styles.error}>
+              <MessageBarBody>{error}</MessageBarBody>
+            </MessageBar>
+          )}
+          <div className={styles.actions}>
+            <Button type="button" onClick={onBack} disabled={saving}>キャンセル</Button>
+            <Button type="submit" appearance="primary" icon={<SaveRegular />} disabled={saving}>
+              {saving ? '保存中...' : '保存'}
+            </Button>
+          </div>
+        </form>
+      </DialogSurface>
     </Dialog>
   )
 }

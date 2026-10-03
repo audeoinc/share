@@ -50,6 +50,14 @@
           "x-ms-schema-name": "cr854_copy",
           "maxLength": 2000
         },
+        "cr854_copyangle": {
+          "type": "string",
+          "title": "copyangle",
+          "x-ms-dataverse-attribute": "cr854_copyangle",
+          "x-ms-dataverse-type": "StringType",
+          "x-ms-schema-name": "cr854_copyangle",
+          "maxLength": 200
+        },
         "cr854_country": {
           "type": "string",
           "title": "国",
@@ -215,6 +223,14 @@
           "x-ms-schema-name": "cr854_instructions",
           "maxLength": 2000
         },
+        "cr854_instructionsangle": {
+          "type": "string",
+          "title": "instructionsangle",
+          "x-ms-dataverse-attribute": "cr854_instructionsangle",
+          "x-ms-dataverse-type": "StringType",
+          "x-ms-schema-name": "cr854_instructionsangle",
+          "maxLength": 200
+        },
         "cr854_name": {
           "type": "string",
           "title": "配信名",
@@ -300,6 +316,14 @@
           "x-ms-dataverse-attribute": "cr854_theme",
           "x-ms-dataverse-type": "MemoType",
           "x-ms-schema-name": "cr854_theme",
+          "maxLength": 2000
+        },
+        "cr854_themereason": {
+          "type": "string",
+          "title": "themereason",
+          "x-ms-dataverse-attribute": "cr854_themereason",
+          "x-ms-dataverse-type": "MemoType",
+          "x-ms-schema-name": "cr854_themereason",
           "maxLength": 2000
         },
         "createdby": {

@@ -1,4 +1,4 @@
-import Box from '@mui/material/Box'
+import { makeStyles, tokens } from '@fluentui/react-components'
 
 interface Props {
   /** ドラッグ中、ポインタの移動量(px)ごとに呼ばれる */
@@ -6,8 +6,25 @@ interface Props {
   onDone?: () => void
 }
 
-/** ペイン間の境界。ドラッグで幅を変える(md 以上でのみ表示) */
+const useStyles = makeStyles({
+  root: {
+    cursor: 'col-resize',
+    touchAction: 'none',
+    position: 'relative',
+    backgroundColor: tokens.colorNeutralStroke2,
+    transitionProperty: 'background-color',
+    transitionDuration: tokens.durationFast,
+    '::after': { content: '""', position: 'absolute', top: 0, bottom: 0, left: '-3px', right: '-3px' },
+    ':hover': { backgroundColor: tokens.colorBrandStroke1 },
+    ':active': { backgroundColor: tokens.colorBrandStroke1 },
+    '@media (max-width: 899px)': { display: 'none' },
+  },
+})
+
+/** ペイン間の境界。ドラッグで幅を変える(900px 以上でのみ表示) */
 export function Splitter({ onDrag, onDone }: Props) {
+  const styles = useStyles()
+
   function start(e: React.PointerEvent<HTMLDivElement>) {
     e.preventDefault()
     const el = e.currentTarget
@@ -28,20 +45,5 @@ export function Splitter({ onDrag, onDone }: Props) {
     el.addEventListener('pointercancel', end)
   }
 
-  return (
-    <Box
-      role="separator"
-      aria-orientation="vertical"
-      onPointerDown={start}
-      sx={{
-        display: { xs: 'none', md: 'block' },
-        cursor: 'col-resize',
-        touchAction: 'none',
-        position: 'relative',
-        bgcolor: 'divider',
-        '&::after': { content: '""', position: 'absolute', top: 0, bottom: 0, left: -3, right: -3 },
-        '&:hover, &:active': { bgcolor: 'primary.main' },
-      }}
-    />
-  )
+  return <div role="separator" aria-orientation="vertical" onPointerDown={start} className={styles.root} />
 }

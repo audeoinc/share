@@ -48,6 +48,7 @@ export type Cr854_deliverycardsstatuscode = keyof typeof Cr854_deliverycardsstat
 export interface Cr854_deliverycardsBase {
   cr854_channel?: Cr854_deliverycardscr854_channel;
   cr854_copy?: string;
+  cr854_copyangle?: string;
   cr854_country?: Cr854_deliverycardscr854_country;
   cr854_deliverycardid: string;
   cr854_department?: Cr854_deliverycardscr854_department;
@@ -56,6 +57,7 @@ export interface Cr854_deliverycardsBase {
   "cr854_heroimage@odata.bind"?: string;
   cr854_heroreason?: string;
   cr854_instructions?: string;
+  cr854_instructionsangle?: string;
   cr854_name: string;
   cr854_products?: string;
   cr854_scheduledat?: string;
@@ -63,6 +65,7 @@ export interface Cr854_deliverycardsBase {
   cr854_sectiontitles?: string;
   cr854_status?: Cr854_deliverycardscr854_status;
   cr854_theme?: string;
+  cr854_themereason?: string;
   importsequencenumber?: number;
   overriddencreatedon?: string;
   statecode: Cr854_deliverycardsstatecode;

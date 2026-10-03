@@ -1,10 +1,6 @@
 import { useMemo, useState } from 'react'
-import Box from '@mui/material/Box'
-import Chip from '@mui/material/Chip'
-import InputAdornment from '@mui/material/InputAdornment'
-import TextField from '@mui/material/TextField'
-import Typography from '@mui/material/Typography'
-import SearchIcon from '@mui/icons-material/Search'
+import { Badge, Button, Caption1, Input, Text, makeStyles, mergeClasses, shorthands, tokens } from '@fluentui/react-components'
+import { SearchRegular } from '@fluentui/react-icons'
 import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
 import { DND_HERO } from './items'
 import { heroImage } from './images'
@@ -15,8 +11,44 @@ interface Props {
   onSelect: (id: string) => void
 }
 
+const useStyles = makeStyles({
+  root: { display: 'grid', rowGap: '8px', minWidth: 0 },
+  chips: { display: 'flex', flexWrap: 'wrap', columnGap: '4px', rowGap: '4px' },
+  caption: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200, fontWeight: tokens.fontWeightRegular },
+  grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', columnGap: '8px', rowGap: '8px' },
+  card: {
+    position: 'relative',
+    minWidth: 0,
+    border: `1px solid ${tokens.colorNeutralStroke2}`,
+    borderRadius: tokens.borderRadiusLarge,
+    overflow: 'hidden',
+    cursor: 'pointer',
+    backgroundColor: tokens.colorNeutralBackground1,
+    ':hover': { backgroundColor: tokens.colorNeutralBackground1Hover, ...shorthands.borderColor(tokens.colorNeutralStroke1) },
+    ':focus-visible': { outline: `2px solid ${tokens.colorBrandStroke1}` },
+  },
+  cardUsed: {
+    cursor: 'default',
+    backgroundColor: tokens.colorBrandBackground2,
+    ...shorthands.borderColor(tokens.colorBrandStroke1),
+    ':hover': { backgroundColor: tokens.colorBrandBackground2, ...shorthands.borderColor(tokens.colorBrandStroke1) },
+  },
+  img: { width: '100%', aspectRatio: '8 / 3', objectFit: 'cover', display: 'block', backgroundColor: tokens.colorNeutralBackground3 },
+  badge: { position: 'absolute', top: '6px', right: '6px' },
+  info: { padding: '8px', minWidth: 0 },
+  line: {
+    display: 'block',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    color: tokens.colorNeutralForeground3,
+    fontSize: tokens.fontSizeBase200,
+  },
+})
+
 /** すべてのメイン画像から探す。サムネイルの一覧で、クリックするだけで設定できる(ドラッグ&ドロップでも設定できる) */
 export function HeroCandidates({ heroes, selectedId, onSelect }: Props) {
+  const styles = useStyles()
   const [query, setQuery] = useState('')
   const [purpose, setPurpose] = useState('')
 
@@ -28,32 +60,33 @@ export function HeroCandidates({ heroes, selectedId, onSelect }: Props) {
   })
 
   return (
-    <Box sx={{ display: 'grid', gap: 1.25, minWidth: 0 }}>
-      <TextField
-        fullWidth
+    <div className={styles.root}>
+      <Input
         size="small"
         placeholder="画像名・タグ・説明で検索"
         value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        slotProps={{ input: { startAdornment: <InputAdornment position="start"><SearchIcon fontSize="small" /></InputAdornment> } }}
+        onChange={(_, d) => setQuery(d.value)}
+        contentBefore={<SearchRegular />}
       />
-      <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
-        <Chip size="small" label="すべて" color={purpose === '' ? 'primary' : 'default'} onClick={() => setPurpose('')} />
+      <div className={styles.chips}>
+        <Button size="small" shape="circular" appearance={purpose === '' ? 'primary' : 'outline'} onClick={() => setPurpose('')}>すべて</Button>
         {purposes.map((c) => (
-          <Chip key={c} size="small" label={c} color={purpose === c ? 'primary' : 'default'} onClick={() => setPurpose(c === purpose ? '' : c)} />
+          <Button key={c} size="small" shape="circular" appearance={purpose === c ? 'primary' : 'outline'} onClick={() => setPurpose(c === purpose ? '' : c)}>
+            {c}
+          </Button>
         ))}
-      </Box>
-      <Typography variant="caption" color="text.secondary">
+      </div>
+      <Caption1 className={styles.caption}>
         {shown.length}件 ・ クリックで設定(ドラッグ&ドロップでも設定できます)
-      </Typography>
-      <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 1 }}>
+      </Caption1>
+      <div className={styles.grid}>
         {shown.map((h) => {
           const used = h.cr854_heroimageid === selectedId
           const select = () => {
             if (!used) onSelect(h.cr854_heroimageid)
           }
           return (
-            <Box
+            <div
               key={h.cr854_heroimageid}
               role="button"
               tabIndex={0}
@@ -70,31 +103,20 @@ export function HeroCandidates({ heroes, selectedId, onSelect }: Props) {
                   select()
                 }
               }}
-              sx={{
-                position: 'relative',
-                minWidth: 0,
-                border: 2,
-                borderColor: used ? 'primary.main' : 'divider',
-                borderRadius: 2,
-                overflow: 'hidden',
-                cursor: used ? 'default' : 'pointer',
-                bgcolor: 'background.paper',
-                '&:hover': used ? undefined : { borderColor: 'primary.light' },
-                '&:focus-visible': { outline: '2px solid', outlineColor: 'primary.main' },
-              }}
+              className={mergeClasses(styles.card, used && styles.cardUsed)}
             >
-              <Box component="img" draggable={false} src={heroImage(h)} alt={h.cr854_name} sx={{ width: '100%', aspectRatio: '8 / 3', objectFit: 'cover', display: 'block', bgcolor: '#e9e9ee' }} />
-              {used && <Chip size="small" label="設定中" color="primary" sx={{ position: 'absolute', top: 6, right: 6 }} />}
-              <Box sx={{ p: 0.75, minWidth: 0 }}>
-                <Typography noWrap sx={{ fontWeight: 600, fontSize: '0.8rem' }}>{h.cr854_name}</Typography>
-                <Typography variant="caption" color="text.secondary" noWrap sx={{ display: 'block' }}>
+              <img draggable={false} src={heroImage(h)} alt={h.cr854_name} className={styles.img} />
+              {used && <Badge appearance="filled" color="brand" className={styles.badge}>設定中</Badge>}
+              <div className={styles.info}>
+                <Text weight="semibold" size={300} truncate wrap={false} block>{h.cr854_name}</Text>
+                <Caption1 className={styles.line}>
                   {h.cr854_imagecode} ・ {h.cr854_purposename} ・ {h.cr854_seasonname}
-                </Typography>
-              </Box>
-            </Box>
+                </Caption1>
+              </div>
+            </div>
           )
         })}
-      </Box>
-    </Box>
+      </div>
+    </div>
   )
 }
