@@ -344,17 +344,42 @@ const toCopies = (raw: unknown): CopyCandidate[] =>
     .slice(0, TITLE_CANDIDATE_COUNT)
 
 /** 商品のコードを ID に変換し、選定 + 候補に分ける(候補にないコードと重複は捨てる) */
+/** エージェントの返答を、候補の商品に対応づけられなかった(依頼し直せば解決することが多い) */
+class MatchError extends Error {}
+
+/** MatchError のときだけ、依頼し直す(通信の失敗やタイムアウトは、やり直さない) */
+async function retryOnMatchError<T>(fn: () => Promise<T>, attempts = 2): Promise<T> {
+  let last: unknown
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn()
+    } catch (e) {
+      if (!(e instanceof MatchError)) throw e
+      last = e
+    }
+  }
+  throw last
+}
+
+const norm = (v: unknown) => String(v ?? '').trim().toLowerCase()
+
 function toSelection(raw: unknown, pool: Cr854_products[], slots: number): ProductSelection {
-  const byCode = new Map(pool.map((p) => [p.cr854_productcode, p.cr854_productid]))
+  // コードの大文字小文字・前後の空白の違い、code 以外のキー名、商品名での返答も受け付ける
+  const byCode = new Map(pool.map((p) => [norm(p.cr854_productcode), p.cr854_productid]))
+  const byName = new Map(pool.map((p) => [norm(p.cr854_name), p.cr854_productid]))
   const seen = new Set<string>()
   const rows: ProposedRow[] = []
-  for (const it of (raw as { code?: string; reason?: string }[] | undefined) ?? []) {
-    const id = it.code ? byCode.get(it.code) : undefined
+  type Raw = { code?: string; productCode?: string; product_code?: string; id?: string; name?: string; productName?: string; reason?: string }
+  const list = Array.isArray(raw) ? (raw as (Raw | string)[]) : []
+  for (const entry of list) {
+    const it: Raw = typeof entry === 'string' ? { code: entry } : entry
+    const id =
+      byCode.get(norm(it.code ?? it.productCode ?? it.product_code ?? it.id)) ?? byName.get(norm(it.name ?? it.productName ?? it.code))
     if (!id || seen.has(id)) continue
     seen.add(id)
     rows.push({ productId: id, reason: it.reason ?? '' })
   }
-  if (rows.length === 0) throw new Error(tr('エージェントが選んだ商品を候補から特定できませんでした', 'Could not match the products the agent chose to the candidates'))
+  if (rows.length === 0) throw new MatchError(tr('エージェントが選んだ商品を候補から特定できませんでした', 'Could not match the products the agent chose to the candidates'))
   const n = Number.isFinite(slots) ? slots : rows.length
   return { selected: rows.slice(0, n), candidates: rows.slice(n, n + CANDIDATE_COUNT) }
 }
@@ -369,19 +394,21 @@ export async function proposeSection(
   },
 ): Promise<SectionProposal> {
   const pool = args.products.filter((p) => !args.excludedProductIds.has(p.cr854_productid))
-  const parsed = await askAgent(SECTION_PROMPT, {
-    ...sectionPayload('select_section', args),
-    products: pool.map(productPayload),
+  return retryOnMatchError(async () => {
+    const parsed = await askAgent(SECTION_PROMPT, {
+      ...sectionPayload('select_section', args),
+      products: pool.map(productPayload),
+    })
+    const titles = toTitles(parsed.titles, args.section.wantTitle)
+    const copies = toCopies(parsed.copies)
+    return {
+      ...toSelection(parsed.products, pool, args.section.slots),
+      titles,
+      title: titles[0]?.title ?? '',
+      copies,
+      copy: copies[0]?.copy ?? '',
+    }
   })
-  const titles = toTitles(parsed.titles, args.section.wantTitle)
-  const copies = toCopies(parsed.copies)
-  return {
-    ...toSelection(parsed.products, pool, args.section.slots),
-    titles,
-    title: titles[0]?.title ?? '',
-    copies,
-    copy: copies[0]?.copy ?? '',
-  }
 }
 
 /** 見出しだけ作り直す */
@@ -405,11 +432,13 @@ export async function proposeSectionProducts(
   args: SectionArgs & { excludedProductIds: Set<string>; products: Cr854_products[]; hero?: Cr854_heroimages },
 ): Promise<ProductSelection> {
   const pool = args.products.filter((p) => !args.excludedProductIds.has(p.cr854_productid))
-  const parsed = await askAgent(PRODUCTS_PROMPT, {
-    ...sectionPayload('select_section_products', args),
-    products: pool.map(productPayload),
+  return retryOnMatchError(async () => {
+    const parsed = await askAgent(PRODUCTS_PROMPT, {
+      ...sectionPayload('select_section_products', args),
+      products: pool.map(productPayload),
+    })
+    return toSelection(parsed.products, pool, args.section.slots)
   })
-  return toSelection(parsed.products, pool, args.section.slots)
 }
 
 /** メイン画像(選定 + 候補)を提案させる */

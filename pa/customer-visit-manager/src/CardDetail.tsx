@@ -17,7 +17,6 @@ import {
   Tab,
   TabList,
   Text,
-  ToggleButton,
   Tooltip,
   makeStyles,
   mergeClasses,
@@ -397,7 +396,11 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
     const calc = () => {
       inner.style.zoom = '1'
       const h = inner.offsetHeight
-      const z = h > 0 ? Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, (box.clientHeight - 16) / h)) : 1
+      // 高さだけでなく、幅にも収める(ペインを狭めたとき、横にはみ出さないように)
+      const w = (inner.firstElementChild as HTMLElement | null)?.offsetWidth ?? 0
+      const byHeight = h > 0 ? (box.clientHeight - 16) / h : 1
+      const byWidth = w > 0 ? (box.clientWidth - 8) / w : 1
+      const z = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, byHeight, byWidth))
       inner.style.zoom = String(z)
       setFitZoom(z)
     }
@@ -845,10 +848,16 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
                   />
                   <Button type="button" size="small" appearance="subtle" icon={<AddRegular />} onClick={() => stepZoom(0.1)} aria-label={t('拡大', 'Zoom in')} />
                   <Caption1 className={styles.zoomLabel}>{Math.round(shownZoom * 100)}%</Caption1>
-                  {/* 全体表示のまま、もう一度押したときは、半端な倍率にせず、100% に戻す */}
-                  <ToggleButton type="button" size="small" checked={zoom === 'fit'} onClick={() => setZoom(zoom === 'fit' ? 1 : 'fit')}>
-                    {t('全体', 'Fit')}
-                  </ToggleButton>
+                  {/* ボタンの文字は、押したときの動きを表す: 全体表示にする前は「全体」、全体表示のときは「100%」(押すと100%に戻る) */}
+                  <Button
+                    type="button"
+                    size="small"
+                    appearance={zoom === 'fit' ? 'primary' : 'outline'}
+                    onClick={() => setZoom(zoom === 'fit' ? 1 : 'fit')}
+                    aria-label={zoom === 'fit' ? t('100% の倍率に戻す', 'Reset to 100%') : t('メール全体を表示', 'Fit the whole email')}
+                  >
+                    {zoom === 'fit' ? '100%' : t('全体', 'Fit')}
+                  </Button>
                 </div>
                 {previewTab === 'email' && template === 'free' && (
                   <>
