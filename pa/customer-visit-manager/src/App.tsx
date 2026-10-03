@@ -6,9 +6,12 @@ import Button from '@mui/material/Button'
 import Chip from '@mui/material/Chip'
 import CircularProgress from '@mui/material/CircularProgress'
 import Container from '@mui/material/Container'
+import FormControlLabel from '@mui/material/FormControlLabel'
 import IconButton from '@mui/material/IconButton'
 import MenuItem from '@mui/material/MenuItem'
+import Switch from '@mui/material/Switch'
 import TextField from '@mui/material/TextField'
+import Tooltip from '@mui/material/Tooltip'
 import Toolbar from '@mui/material/Toolbar'
 import Typography from '@mui/material/Typography'
 import AddIcon from '@mui/icons-material/Add'
@@ -23,6 +26,7 @@ import { Cr854_heroimagesService } from './generated/services/Cr854_heroimagesSe
 import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
 import { Calendar } from './Calendar'
 import { CardDetail } from './CardDetail'
+import { loadAutoDraft, saveAutoDraft } from './settings'
 import { channelOptions, countryOptions, departmentOptions, statusColor, statusOptions } from './status'
 
 interface Filters {
@@ -112,6 +116,7 @@ function App() {
   const selected = cards.find((c) => c.cr854_deliverycardid === selectedId)
   const shift = (n: number) => month && setMonth(new Date(month.getFullYear(), month.getMonth() + n, 1))
   const setFilter = (k: keyof Filters) => (v: string) => setFilters({ ...filters, [k]: v })
+  const [autoDraft, setAutoDraft] = useState(loadAutoDraft)
   const filtering = Object.values(filters).some((v) => v !== '')
 
   return (
@@ -120,6 +125,28 @@ function App() {
         <Toolbar>
           <CalendarMonthIcon sx={{ mr: 1.5 }} />
           <Typography variant="h6" sx={{ flexGrow: 1 }}>配信カレンダー</Typography>
+          <Tooltip title="内容が空の配信カードを開いたとき、AIが自動で下書きを作ります(同じカードでは1回だけ)">
+            <FormControlLabel
+              control={
+                <Switch
+                  size="small"
+                  color="success"
+                  checked={autoDraft}
+                  onChange={(e) => {
+                    setAutoDraft(e.target.checked)
+                    saveAutoDraft(e.target.checked)
+                  }}
+                />
+              }
+              label={`開いたとき自動で下書き:${autoDraft ? 'オン' : 'オフ'}`}
+              sx={{
+                mr: 2,
+                '& .MuiFormControlLabel-label': { fontSize: '0.8rem', fontWeight: autoDraft ? 700 : 400 },
+                '& .MuiSwitch-track': { bgcolor: 'common.white', opacity: 0.5 },
+                '& .Mui-checked + .MuiSwitch-track': { bgcolor: 'success.light', opacity: 1 },
+              }}
+            />
+          </Tooltip>
           <Button color="inherit" startIcon={<AddIcon />} onClick={() => setCreating(true)}>新規作成</Button>
         </Toolbar>
       </AppBar>

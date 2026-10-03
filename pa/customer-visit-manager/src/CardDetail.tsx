@@ -38,6 +38,7 @@ import { Splitter } from './Splitter'
 import { DND_ITEM, DND_PRODUCT, SOURCE_AI, SOURCE_MANUAL, STATE_CANDIDATE, STATE_SELECTED, type Candidate, type Item } from './items'
 import type { AiCard, CopyLanguage, ProposedHero } from './aiSelect'
 import { progressOf } from './progress'
+import { loadAutoDraft } from './settings'
 import { runAutoDraft, type AutoDraftResult } from './autoDraft'
 import { useAiDrafts } from './useAiDrafts'
 import { channelOptions, countryOptions, departmentOptions, statusColor, statusOptions } from './status'
@@ -121,15 +122,6 @@ function loadZoom(): number | 'fit' {
   return 0.7
 }
 
-const AUTO_KEY = 'cardDetail.autoDraft'
-/** 開いたときの自動下書きの設定(既定はオン) */
-function loadAutoEnabled(): boolean {
-  try {
-    return localStorage.getItem(AUTO_KEY) !== 'off'
-  } catch {
-    return true
-  }
-}
 /** 自動下書きを済ませたカード(同じカードを開き直しても、再実行しない) */
 const autoDrafted = new Set<string>()
 
@@ -190,7 +182,7 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
   const [zoom, setZoom] = useState<number | 'fit'>(loadZoom)
   const [fitZoom, setFitZoom] = useState(1)
   // 「すべてAIで下書き」の進み具合(実行中だけ、画面全体に「推論中」を出す)
-  const [autoEnabled, setAutoEnabled] = useState(loadAutoEnabled)
+  const [autoEnabled] = useState(loadAutoDraft) // 設定は、画面上部のバーで切り替える
   const [auto, setAuto] = useState<{ label: string; done: number; total: number } | null>(null)
   const cancelRef = useRef(false)
   const aliveRef = useRef(true)
@@ -610,35 +602,6 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
       )}
       <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1, pr: 1 }}>
         <Box component="span" sx={{ flexGrow: 1 }}>{card ? card.cr854_name : '配信カードの新規作成'}</Box>
-        <Button
-          size="small"
-          variant="outlined"
-          startIcon={<AutoAwesomeIcon fontSize="small" />}
-          onClick={runAllManual}
-          disabled={!!auto || saving}
-        >
-          すべてAIで下書き
-        </Button>
-        <Tooltip title="テーマも商品も空のカードを開いたとき、AIが自動で下書きを作ります(同じカードでは1回だけ)">
-          <FormControlLabel
-            control={
-              <Switch
-                size="small"
-                checked={autoEnabled}
-                onChange={(e) => {
-                  setAutoEnabled(e.target.checked)
-                  try {
-                    localStorage.setItem(AUTO_KEY, e.target.checked ? 'on' : 'off')
-                  } catch {
-                    // 保存できなくても動作には影響しない
-                  }
-                }}
-              />
-            }
-            label="開いたとき自動"
-            sx={{ m: 0, '& .MuiFormControlLabel-label': { fontSize: '0.75rem' } }}
-          />
-        </Tooltip>
         <Tooltip title={progress.remaining.length ? `未完了: ${progress.remaining.join('、')}` : 'すべての工程が完了しています'}>
           <Chip size="small" label={`工程 ${progress.done} / ${progress.total}`} color={progress.done === progress.total ? 'success' : 'default'} />
         </Tooltip>
@@ -660,6 +623,18 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
       >
         {/* 左: 配信の情報 */}
         <Box sx={paneSx}>
+          <Button
+            fullWidth
+            variant="contained"
+            startIcon={<AutoAwesomeIcon />}
+            onClick={runAllManual}
+            disabled={!!auto || saving}
+          >
+            すべてAIで下書き
+          </Button>
+          <Typography variant="caption" color="text.secondary" sx={{ mt: -0.5 }}>
+            テーマ・メイン画像・ヘッドライン・セクション・制作指示を、まとめてAIが下書きします
+          </Typography>
           <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>配信情報</Typography>
           <TextField required fullWidth size="small" label="配信名" value={form.name} onChange={(e) => set('name')(e.target.value)} />
           <TextField
