@@ -63,6 +63,11 @@
           "entitySetName": "cr854_productpolicies",
           "logicalName": "cr854_productpolicy",
           "isHidden": false
+        },
+        "layouttemplate": {
+          "entitySetName": "cr854_layouttemplates",
+          "logicalName": "cr854_layouttemplate",
+          "isHidden": false
         }
       },
       "environmentVariableName": ""

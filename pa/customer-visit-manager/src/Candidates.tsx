@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Avatar, Badge, Button, Caption1, Input, Text, makeStyles, mergeClasses, shorthands, tokens } from '@fluentui/react-components'
-import { AddRegular, SearchRegular } from '@fluentui/react-icons'
+import { AddRegular, DismissRegular, SearchRegular } from '@fluentui/react-icons'
 import type { Cr854_products } from './generated/models/Cr854_productsModel'
 import { DND_PRODUCT, yen } from './items'
 import { productMarket } from './market'
@@ -44,6 +44,9 @@ const useStyles = makeStyles({
   },
 })
 
+/** 一度に表示する件数(商品が大量でも、重くならないように)。続きは「さらに表示」で出す */
+const PAGE = 20
+
 const trendMark = (label?: string) => (label === '上昇' ? '▲ ' : label === '下降' ? '▼ ' : '— ') + optionLabel(label === '上昇' || label === '下降' ? label : '横ばい')
 
 export function Candidates({ products, usedIds, onAdd }: Props) {
@@ -51,13 +54,20 @@ export function Candidates({ products, usedIds, onAdd }: Props) {
   const styles = useStyles()
   const [query, setQuery] = useState('')
   const [category, setCategory] = useState('')
+  const [limit, setLimit] = useState(PAGE)
 
   const categories = useMemo(() => [...new Set(products.map((p) => p.cr854_categoryname).filter(Boolean))] as string[], [products])
-  const shown = products.filter((p) => {
-    if (category && p.cr854_categoryname !== category) return false
+  // 商品が大量にあるので、検索語かカテゴリを指定するまでは、一覧を出さない
+  const searching = query.trim() !== '' || category !== ''
+  const matched = useMemo(() => {
+    if (!searching) return []
     const q = query.trim().toLowerCase()
-    return !q || `${p.cr854_name} ${p.cr854_productcode} ${p.cr854_description ?? ''}`.toLowerCase().includes(q)
-  })
+    return products.filter((p) => {
+      if (category && p.cr854_categoryname !== category) return false
+      return !q || `${p.cr854_name} ${p.cr854_productcode} ${p.cr854_description ?? ''}`.toLowerCase().includes(q)
+    })
+  }, [products, query, category, searching])
+  const shown = matched.slice(0, limit)
 
   return (
     <div className={styles.root}>
@@ -65,20 +75,35 @@ export function Candidates({ products, usedIds, onAdd }: Props) {
         size="small"
         placeholder={t('商品名・コード・説明で検索', 'Search by name, code or description')}
         value={query}
-        onChange={(_, d) => setQuery(d.value)}
+        onChange={(_, d) => {
+          setQuery(d.value)
+          setLimit(PAGE)
+        }}
         contentBefore={<SearchRegular />}
+        contentAfter={
+          query ? (
+            <Button size="small" appearance="transparent" icon={<DismissRegular />} onClick={() => setQuery('')} aria-label={t('検索語を消す', 'Clear search')} />
+          ) : undefined
+        }
       />
       <div className={styles.chips}>
-        <Button size="small" shape="circular" appearance={category === '' ? 'primary' : 'outline'} onClick={() => setCategory('')}>{t('すべて', 'All')}</Button>
+        <Button size="small" shape="circular" appearance={category === '' ? 'primary' : 'outline'} onClick={() => { setCategory(''); setLimit(PAGE) }}>{t('すべて', 'All')}</Button>
         {categories.map((c) => (
-          <Button key={c} size="small" shape="circular" appearance={category === c ? 'primary' : 'outline'} onClick={() => setCategory(c === category ? '' : c)}>
+          <Button key={c} size="small" shape="circular" appearance={category === c ? 'primary' : 'outline'} onClick={() => { setCategory(c === category ? '' : c); setLimit(PAGE) }}>
             {optionLabel(c)}
           </Button>
         ))}
       </div>
-      <Caption1 className={styles.caption}>
-        {t(`${shown.length}件`, `${shown.length} items`)} ・ {t('右のプレビューへドラッグして掲載', 'Drag to the preview on the right to include')}
-      </Caption1>
+      {!searching ? (
+        <Caption1 className={styles.caption}>
+          {t(`商品名・コードで検索するか、カテゴリを選ぶと、商品が表示されます(対象 ${products.length}件)。`, `Search by name or code, or pick a category, to see products (${products.length} available).`)}
+        </Caption1>
+      ) : (
+        <Caption1 className={styles.caption}>
+          {t(`${matched.length}件`, `${matched.length} items`)} ・ {t('右のプレビューへドラッグして掲載', 'Drag to the preview on the right to include')}
+        </Caption1>
+      )}
+      {searching && matched.length === 0 && <Caption1 className={styles.caption}>{t('該当する商品がありません。', 'No matching products.')}</Caption1>}
       {shown.map((p) => {
         const used = usedIds.has(p.cr854_productid)
         return (
@@ -109,6 +134,11 @@ export function Candidates({ products, usedIds, onAdd }: Props) {
           </div>
         )
       })}
+      {matched.length > shown.length && (
+        <Button size="small" appearance="outline" onClick={() => setLimit(limit + PAGE)}>
+          {t(`さらに表示(残り ${matched.length - shown.length}件)`, `Show more (${matched.length - shown.length} left)`)}
+        </Button>
+      )}
     </div>
   )
 }

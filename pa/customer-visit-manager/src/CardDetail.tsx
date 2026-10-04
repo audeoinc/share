@@ -308,7 +308,7 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
   const previewInnerRef = useRef<HTMLDivElement>(null)
   // コピー・ヘッドラインの言語(AI に渡す。保存はしない)
   const [language, setLanguage] = useState<CopyLanguage>('auto')
-  const [template, setTemplate] = useState<EmailTemplateId>(() => templateFromValue(card?.cr854_emailtemplate))
+  const [template, setTemplate] = useState<EmailTemplateId>(() => card?.cr854_layoutkey || templateFromValue(card?.cr854_emailtemplate))
   // カテゴリ系テンプレートの見出し(セクションの順。保存は 1 行 1 見出し)
   const [sectionTitles, setSectionTitles] = useState<string[]>(() => (card?.cr854_sectiontitles ? card.cr854_sectiontitles.split('\n') : []))
   // 各セクションのコピー(セクションの順)
@@ -674,7 +674,9 @@ export function CardDetail({ card, products, heroes, otherThemes, onBack, onSave
         cr854_copyangle: form.copyAngle,
         cr854_instructionsangle: form.instructionsAngle,
         cr854_heroreason: heroReason,
+        // 標準のテンプレートは、以前の選択肢の列にも書く(互換)。作ったテンプレートは、layoutkey だけ
         cr854_emailtemplate: TEMPLATE_VALUES[template],
+        cr854_layoutkey: template,
         cr854_sectiontitles: sectionTitles.join('\n').replace(/\n+$/, ''),
         cr854_sectioncopies: encodeCopies(sectionCopies),
         // 外したときは null を送ってルックアップを空にする

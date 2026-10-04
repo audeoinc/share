@@ -93,6 +93,7 @@ const useStyles = makeStyles({
   },
   who: {
     justifySelf: 'start',
+    whiteSpace: 'nowrap',
     padding: '0 6px',
     borderRadius: tokens.borderRadiusSmall,
     fontSize: tokens.fontSizeBase100,
@@ -214,7 +215,7 @@ export function ChatPanel({ title, messages, busy, suggestions, idleHint, onSend
           )}
           {messages.map((m, i) => (
             <div key={i} className={mergeClasses(s.msg, m.role === 'assistant' && s.msgAi)}>
-              <span className={mergeClasses(s.who, m.role === 'assistant' && s.whoAi)}>{m.role === 'user' ? t('あなた', 'You') : 'AI'}</span>
+              <span className={mergeClasses(s.who, m.role === 'assistant' && s.whoAi)}>{m.role === 'user' ? 'You' : 'AI'}</span>
               <span>{m.text}</span>
             </div>
           ))}

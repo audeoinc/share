@@ -14,6 +14,7 @@ import {
 import {
   AddRegular,
   CalendarLtrRegular,
+  LayoutColumnTwoRegular,
   ChevronLeftRegular,
   ChevronRightRegular,
 } from '@fluentui/react-icons'
@@ -25,6 +26,9 @@ import { Cr854_heroimagesService } from './generated/services/Cr854_heroimagesSe
 import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
 import { Calendar } from './Calendar'
 import { withHeroLabels, withProductLabels } from './labels'
+import { loadCustomTemplates } from './layoutTemplates'
+import { TemplateManager } from './TemplateManager'
+import { openTemplateManager, useTemplates } from './templates'
 import { CardDetail } from './CardDetail'
 import { loadAutoDraft, saveAutoDraft } from './settings'
 import { locale, optionLabel, setLang, tr, useLang, useT } from './i18n'
@@ -272,13 +276,22 @@ function App() {
   const shift = (n: number) => month && setMonth(new Date(month.getFullYear(), month.getMonth() + n, 1))
   const setFilter = (k: keyof Filters) => (v: string) => setFilters({ ...filters, [k]: v })
   const [autoDraft, setAutoDraft] = useState(loadAutoDraft)
+  useTemplates() // テンプレートの登録が変わったら、画面全体を描き直す
+  // ユーザーが作ったテンプレートを読み込む(読めなくても、標準のテンプレートで動く)
+  useEffect(() => {
+    loadCustomTemplates().catch(() => undefined)
+  }, [])
   const filtering = Object.values(filters).some((v) => v !== '')
 
   return (
     <>
+      <TemplateManager />
       <header className={styles.header}>
         <CalendarLtrRegular fontSize={24} className={styles.headerIcon} />
         <h1 className={styles.title}>{t('配信カレンダー', 'Delivery Calendar')}</h1>
+        <Button appearance="subtle" size="small" icon={<LayoutColumnTwoRegular />} onClick={openTemplateManager}>
+          {t('テンプレート', 'Templates')}
+        </Button>
         <div className={styles.langSwitch} role="group" aria-label={t('言語', 'Language')}>
           {([['ja', '日本語'], ['en', 'English']] as const).map(([l, name]) => (
             <button

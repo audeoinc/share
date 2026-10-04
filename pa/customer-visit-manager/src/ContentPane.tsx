@@ -26,6 +26,7 @@ import {
   DismissRegular,
 } from '@fluentui/react-icons'
 import { AiIcon } from './AiMark'
+import { TemplateThumb } from './TemplateThumb'
 import { ChatPanel, type ChatMsg } from './ChatPanel'
 import { AutoTextarea } from './AutoTextarea'
 import type { Cr854_products } from './generated/models/Cr854_productsModel'
@@ -39,7 +40,7 @@ import { optionLabel, tr, useT } from './i18n'
 import { Row, productMeta } from './ProductRow'
 import { useSelection } from './useSelection'
 import { progressOf } from './progress'
-import { EMAIL_TEMPLATES, TEMPLATE_OPTIONS, sectionRange, type EmailTemplateId, type SectionInfo } from './templates'
+import { openTemplateManager, sectionRange, templateOptions, type EmailTemplateId, type SectionInfo } from './templates'
 import type { AiDrafts } from './useAiDrafts'
 
 type TopTab = 'theme' | 'template' | 'hero' | 'sections' | 'instructions'
@@ -448,45 +449,6 @@ function CopyTab(props: {
 
 // ------------------------------------------------------------------ テンプレート
 
-const templateDesc = (id: EmailTemplateId): string =>
-  ({
-    free: tr('カテゴリ見出しを自動で付ける、自由な並び。商品の数に決まりはありません。', 'A free-form layout with category headings added automatically. No fixed number of products.'),
-    standard4: tr('メイン画像 + 2×2 の商品グリッド(4 点)。基本の構成です。', 'Main image + a 2x2 product grid (4 items). The basic layout.'),
-    collab: tr('コラボ用のヒーロー + 特集の商品 2 点 + グリッド 2 点(計 4 点)。', 'Collab hero + 2 featured products + 2 grid items (4 in total).'),
-    offer: tr('期間限定・お得感を打ち出す赤基調のヒーロー + 価格を強調した 4 点。', 'A red-toned hero for limited-time deals + 4 items with emphasized prices.'),
-    cat2: tr('メイン画像 + カテゴリ 2 つ(各 2 点、計 4 点)。カテゴリごとに見出しが付きます。', 'Main image + 2 categories (2 items each, 4 in total). Each category gets a heading.'),
-    cat3: tr('メイン画像 + カテゴリ 3 つ(各 2 点、計 6 点)。カテゴリごとに見出しが付きます。', 'Main image + 3 categories (2 items each, 6 in total). Each category gets a heading.'),
-  })[id]
-
-const HERO_COLOR = { standard: '#cfd2dc', collab: '#b9a9d6', offer: '#f0a5a0' } as const
-
-/** 構成の見取り図(ヒーロー、見出し、商品の枠) */
-function TemplateThumb({ id }: { id: EmailTemplateId }) {
-  const s = useStyles()
-  const t = useT()
-  const tpl = EMAIL_TEMPLATES[id]
-  return (
-    <div className={s.thumb}>
-      <div style={{ height: 24, background: HERO_COLOR[tpl.hero] }} />
-      <div style={{ height: 4, width: '60%', margin: '0 auto', background: '#8a8f98' }} />
-      {id === 'free' ? (
-        <span className={s.thumbFree}>{t('自由', 'Free')}</span>
-      ) : (
-        tpl.sections.map((sec, i) => (
-          <div key={i}>
-            {sec.categoryHeading && <div style={{ height: 3, width: '45%', margin: '0 auto 4px', background: '#555' }} />}
-            <div style={{ display: 'grid', gridTemplateColumns: sec.kind === 'feature' ? '1fr' : '1fr 1fr', gap: 2 }}>
-              {Array.from({ length: sec.slots }, (_, k) => (
-                <div key={k} style={{ height: sec.kind === 'feature' ? 10 : 14, background: '#e0e0e6' }} />
-              ))}
-            </div>
-          </div>
-        ))
-      )}
-    </div>
-  )
-}
-
 function TemplateTab({ template, onTemplate, hasCandidates }: { template: EmailTemplateId; onTemplate: (id: EmailTemplateId) => void; hasCandidates: boolean }) {
   const s = useStyles()
   const t = useT()
@@ -496,17 +458,20 @@ function TemplateTab({ template, onTemplate, hasCandidates }: { template: EmailT
         {t('メールの構成を選びます。選んだテンプレートの枠に、商品が順に入ります。', 'Choose the email layout. Products fill the slots of the chosen template in order.')}
         {hasCandidates && t(' テンプレートを変えると、セクションの構成が変わるため、選定候補は破棄されます(選定済みの商品は残ります)。', ' Changing the template changes the section layout, so the candidates will be discarded (selected products are kept).')}
       </span>
-      {TEMPLATE_OPTIONS.map((o) => {
+      <div>
+        <Button size="small" appearance="outline" onClick={openTemplateManager}>{t('テンプレートを管理(作成・編集)', 'Manage templates (create / edit)')}</Button>
+      </div>
+      {templateOptions().map((o) => {
         const selected = o.id === template
         return (
           <div key={o.id} onClick={() => onTemplate(o.id)} className={mergeClasses(s.tplCard, selected && s.tplCardSelected)}>
-            <TemplateThumb id={o.id} />
+            <TemplateThumb hero={o.hero} sections={o.sections} free={o.id === 'free'} />
             <div style={{ minWidth: 0 }}>
               <div className={s.flexRowTight}>
                 <span className={s.bold}>{o.label}</span>
                 {selected && <Badge size="small" appearance="filled" color="brand">{t('選択中', 'Selected')}</Badge>}
               </div>
-              <span className={s.caption}>{templateDesc(o.id)}</span>
+              <span className={s.caption}>{o.description}</span>
             </div>
           </div>
         )

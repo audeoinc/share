@@ -33,6 +33,13 @@ export const dataSourcesInfo = {
     "dataSourceType": "Dataverse",
     "apis": {}
   },
+  "cr854_layouttemplates": {
+    "tableId": "",
+    "version": "",
+    "primaryKey": "cr854_layouttemplateid",
+    "dataSourceType": "Dataverse",
+    "apis": {}
+  },
   "cr854_productpolicies": {
     "tableId": "",
     "version": "",

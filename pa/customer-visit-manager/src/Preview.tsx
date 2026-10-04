@@ -13,7 +13,7 @@ import { AutoTextarea } from './AutoTextarea'
 import { DND_HERO, DND_ITEM, scaled, yen, type Item } from './items'
 import { heroImage, productImage } from './images'
 import { productMarket } from './market'
-import { EMAIL_TEMPLATES, type EmailTemplateId } from './templates'
+import { getTemplate, type EmailTemplateId } from './templates'
 import { HEADLINE_FONT } from './fonts'
 import { locale, optionLabel, useT } from './i18n'
 
@@ -216,7 +216,7 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, h
     document.querySelector(`[data-item-key="${selectedKey}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
   }, [selectedKey])
   const byId = new Map(products.map((p) => [p.cr854_productid, p]))
-  const tpl = EMAIL_TEMPLATES[template]
+  const tpl = getTemplate(template)
   const offer = tpl.hero === 'offer'
   const hf = HEADLINE_FONT
 

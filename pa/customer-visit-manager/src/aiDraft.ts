@@ -2,7 +2,7 @@ import type { Cr854_products } from './generated/models/Cr854_productsModel'
 import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
 import { askAgent, type AiCard, type CopyLanguage } from './aiSelect'
 import { tr } from './i18n'
-import { EMAIL_TEMPLATES, type EmailTemplateId } from './templates'
+import { hasTemplate, templateOptions, type EmailTemplateId } from './templates'
 
 // テーマ・コピー・制作指示の「案」の生成。出力形式はメッセージ内で毎回指定する(aiSelect.ts と同じ理由)
 
@@ -154,15 +154,12 @@ const TEMPLATE_PROMPT = `あなたは、ファッション通販の配信(メー
 {"template":"standard4","reason":"..."}
 
 # テンプレート
-- standard4: 標準。メイン画像 + 2×2 の商品 4 点。迷ったときは、これを選ぶ。
-- collab: コラボや特別企画。特集の商品 2 点 + グリッド 2 点。
-- offer: 期間限定、セール、お得な価格を打ち出す配信。価格を強調した 4 点。
-- cat2: 2 つの切り口(カテゴリ)で、各 2 点。切り口の違う提案を並べたいとき。
-- cat3: 3 つの切り口(カテゴリ)で、各 2 点。品揃えを広く見せたいとき。
-- free: 商品の数や並びが決まっていない、自由な構成。
+入力の templates は、選べるテンプレートの一覧。id、name(名前)、description(説明)、hero(ヒーローの種類)、sections(商品の枠の構成。kind は grid=グリッド / feature=特集、slots=商品の数、categoryHeading=カテゴリ見出し付き)を持つ。
+標準の id: standard4(標準。迷ったときは、これ)、collab(コラボや特別企画)、offer(期間限定・セール)、cat2 / cat3(カテゴリごとの見出し付き)、free(自由な構成)。
+ユーザーが作ったテンプレートも、description と構成を読んで、配信に合うなら選ぶ。
 
 # ルール
-1. template は、上の id のどれか 1 つ。
+1. template は、入力の templates の id のどれか 1 つ。
 2. 配信テーマ(card.theme)を最優先にする。次に、配信日の時期、チャネル、部署を考慮する。
 3. セール、タイムセール、期間限定などのテーマは offer。コラボや特別企画のテーマは collab。
 4. 特定の商品を絞って訴求するテーマ(例:「ブーツ特集」)は standard4。複数の切り口を見せたいテーマは cat2 か cat3。
@@ -182,8 +179,9 @@ export async function suggestTemplate(args: { card: AiCard }): Promise<TemplateC
     task: 'suggest_template',
     today: new Date().toISOString().slice(0, 10),
     card: args.card,
+    templates: templateOptions().map((o) => ({ id: o.id, name: o.label, description: o.description, hero: o.hero, sections: o.sections })),
   })) as { template?: string; reason?: string }
   const id = String(parsed.template ?? '') as EmailTemplateId
   // 想定外の値は、標準にする
-  return { template: id in EMAIL_TEMPLATES ? id : 'standard4', reason: String(parsed.reason ?? '') }
+  return { template: hasTemplate(id) ? id : 'standard4', reason: String(parsed.reason ?? '') }
 }

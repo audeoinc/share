@@ -58,6 +58,7 @@ export interface Cr854_deliverycardsBase {
   cr854_heroreason?: string;
   cr854_instructions?: string;
   cr854_instructionsangle?: string;
+  cr854_layoutkey?: string;
   cr854_name: string;
   cr854_products?: string;
   cr854_scheduledat?: string;
