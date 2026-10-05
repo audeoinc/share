@@ -70,6 +70,14 @@ BEGIN
   -- unrelated access-denied or invalid-query failure is not mistaken for a 03
   -- problem. Set FALSE to see everything that failed.
   DECLARE lineage_statements_only BOOL DEFAULT TRUE;
+  -- Which RUN to report on. A lookback window usually spans several 03 runs, and
+  -- mixing them makes every total meaningless -- a phase breakdown over three runs
+  -- says nothing about any of them.
+  --
+  -- Left NULL, [C] finds the most recent run by itself and every report below is
+  -- scoped to it. Set it to a script job id to analyze an older run, or to the empty
+  -- string '' to deliberately report the whole window.
+  DECLARE run_job_id STRING DEFAULT NULL;
 
   -- --------------------------------------------------------------------------
   -- [C] DERIVED / INTERNAL -- from [A]/[B]; DO NOT edit
@@ -91,6 +99,44 @@ BEGIN
 
   ASSERT lookback_hours >= 1 AS 'lookback_hours must be >= 1.';
   ASSERT row_limit >= 1 AS 'row_limit must be >= 1.';
+
+  -- Identify the most recent 03 run, as the PARENT of the newest ANALYSIS_BATCH_PAYLOAD
+  -- statement. That notice is emitted by 03 and by nothing else, and a BigQuery script
+  -- stamps every statement it runs with parent_job_id = the script's own job, so the
+  -- parent of that notice IS the run. Detecting the run from its own statements avoids
+  -- having to recognize 03 by its script text -- which would also match this file,
+  -- since it quotes the same names.
+  --
+  -- A run that analyzed nothing emits no such notice, so nothing is found and the
+  -- reports fall back to the whole window. That is correct rather than wrong: there
+  -- were no batches to attribute time to.
+  IF run_job_id IS NULL THEN
+    EXECUTE IMMEDIATE FORMAT(
+      """
+      SELECT parent_job_id
+      FROM `%s.region-%s`.INFORMATION_SCHEMA.JOBS_BY_PROJECT
+      WHERE creation_time > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)
+        AND query LIKE '%%ANALYSIS_BATCH_PAYLOAD%%'
+        AND query NOT LIKE '%%INFORMATION_SCHEMA.JOBS%%'
+        AND parent_job_id IS NOT NULL
+      ORDER BY creation_time DESC
+      LIMIT 1
+      """,
+      jobs_project_id,
+      @@location
+    ) INTO run_job_id USING lookback_hours AS hours;
+  END IF;
+
+  -- '' means "the whole window"; so does a failed auto-detect. Both read as NULL to
+  -- the reports, whose filter is (@run IS NULL OR parent_job_id = @run).
+  IF run_job_id = '' THEN
+    SET run_job_id = NULL;
+  END IF;
+
+  SELECT
+    'REPORT_SCOPE' AS notice,
+    IFNULL(run_job_id, '(whole lookback window -- no single run identified)') AS run_job_id,
+    lookback_hours AS lookback_hours;
 
   -- --------------------------------------------------------------------------
   -- Report 1: the ANALYSIS_BATCH_PAYLOAD statements, newest first.
@@ -119,6 +165,7 @@ BEGIN
         AND query LIKE '%%ANALYSIS_BATCH_PAYLOAD%%'
         -- The statement that DEFINES the notice, not this diagnostic script reading it.
         AND query NOT LIKE '%%INFORMATION_SCHEMA.JOBS%%'
+        AND (@run IS NULL OR parent_job_id = @run)
     )
     SELECT
       job_id,
@@ -147,7 +194,7 @@ BEGIN
   );
 
   EXECUTE IMMEDIATE rendered_sql
-  USING lookback_hours AS hours, row_limit AS max_rows;
+  USING lookback_hours AS hours, row_limit AS max_rows, run_job_id AS run;
 
   -- --------------------------------------------------------------------------
   -- Report 2: failed statements in the same window.
@@ -170,6 +217,10 @@ BEGIN
     WHERE creation_time > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)
       AND error_result IS NOT NULL
       AND query IS NOT NULL
+      -- Scoped like the others. A run that failed before any batch emits no payload
+      -- notice, so run_job_id is NULL and this widens to the window -- which is the
+      -- behaviour that finds the failure.
+      AND (@run IS NULL OR parent_job_id = @run)
       AND (
         NOT @lineage_only
         OR query LIKE '%%lnge_%%'
@@ -187,7 +238,8 @@ BEGIN
   USING
     lookback_hours AS hours,
     row_limit AS max_rows,
-    lineage_statements_only AS lineage_only;
+    lineage_statements_only AS lineage_only,
+    run_job_id AS run;
 
   -- --------------------------------------------------------------------------
   -- Report 3: WHERE THE TIME WENT -- the run's statements, slowest first.
@@ -215,6 +267,7 @@ BEGIN
     FROM `%s.region-%s`.INFORMATION_SCHEMA.JOBS_BY_PROJECT
     WHERE creation_time > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)
       AND query IS NOT NULL
+      AND (@run IS NULL OR parent_job_id = @run)
       AND (
         NOT @lineage_only
         OR query LIKE '%%lnge_%%'
@@ -232,7 +285,8 @@ BEGIN
   USING
     lookback_hours AS hours,
     row_limit AS max_rows,
-    lineage_statements_only AS lineage_only;
+    lineage_statements_only AS lineage_only,
+    run_job_id AS run;
 
   -- --------------------------------------------------------------------------
   -- Report 4: the same time, grouped into the phases of a 03 run.
@@ -296,6 +350,7 @@ BEGIN
     FROM `%s.region-%s`.INFORMATION_SCHEMA.JOBS_BY_PROJECT
     WHERE creation_time > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)
       AND query IS NOT NULL
+      AND (@run IS NULL OR parent_job_id = @run)
       AND (
         NOT @lineage_only
         OR query LIKE '%%lnge_%%'
@@ -312,5 +367,6 @@ BEGIN
   EXECUTE IMMEDIATE rendered_sql
   USING
     lookback_hours AS hours,
-    lineage_statements_only AS lineage_only;
+    lineage_statements_only AS lineage_only,
+    run_job_id AS run;
 END;
