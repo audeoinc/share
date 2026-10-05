@@ -266,7 +266,7 @@ const useStyles = makeStyles({
   lead: { fontWeight: tokens.fontWeightSemibold },
   captionTight: { marginTop: '-4px' },
   success: { color: tokens.colorPaletteGreenForeground1 },
-  fullWidth: { width: '100%' },
+  fullWidth: { width: '100%', flexShrink: 0, minHeight: '32px' },
   sectionHead: { marginTop: '12px' },
   twoCol: { display: 'grid', gridTemplateColumns: '1fr 1fr', columnGap: '12px', rowGap: '12px' },
   statusRow: { display: 'flex', alignItems: 'center', columnGap: '6px' },
