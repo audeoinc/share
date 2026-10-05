@@ -1090,6 +1090,26 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   `batches_deferred_to_next_run`、run summary に `batches_deferred_to_next_run`。
   進捗は run summary の `remaining_changed_object_count` を見る。
 
+## 4.40 非アクティブから復活したオブジェクトが再解析されない（バグ修正）
+
+- **発見の経緯**：「週次 SQL は翌週また新規扱いになるのか？」という質問の検証中。
+- **実際の挙動**（週次の ephemeral の例）：
+  1. 月曜：`fp_<hash>` として登録・解析・エッジ公開
+  2. 木曜：age-out（`incremental_lookback_days = 3` に出現なし）→ `is_active = FALSE` /
+     `is_changed = FALSE` / `analysis_status = 'INACTIVE_FINGERPRINT_NOT_SEEN'`。
+     同時に STEP 3 冒頭の孤児削除（`03:2069`）が **direct_dependency と診断行を DELETE**
+  3. 翌週月曜：job 再実行 → MERGE が同じ `fp_<hash>` 行にマッチ。指紋＝hash が同じなので
+     `is_changed = (FALSE OR hash差分なし)` ＝ **FALSE のまま**、`is_active` だけ TRUE
+  → **再解析されないが、エッジは消えたまま**。SQL 本文が変わるまで
+    「active なのに lineage 空」が続く。再解析コストが増える話ではなく**データ欠損**。
+- **修正**：両方の registry MERGE（View 用・生成テーブル用）の `is_changed` に
+  `OR target.is_active = FALSE` を追加。条件が「ephemeral かどうか」ではなく
+  **「非アクティブだったか」**なのが要点で、孤児削除は非アクティブな定義すべての行を
+  消すため、drop → 再作成された View や永続テーブルにも同じ穴があった。
+- **副次的な結論**：「同じ指紋が既にあればスキップ」は**元から成立していた**ので、
+  そこに速度の伸びしろは無い。週次 SQL を継続的に lineage に載せたいなら
+  `incremental_lookback_days` を 8 以上にする（STEP 2 の JOBS 走査は増える）。
+
 ## 5. 現在地（2026-08-22 更新）
 
 - リポジトリ: `audeoinc/share` の `lineage/`。ブランチ `claude/lineage-project-resume-tqwrp9`。
