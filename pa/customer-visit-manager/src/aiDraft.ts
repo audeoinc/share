@@ -154,7 +154,7 @@ const TEMPLATE_PROMPT = `あなたは、ファッション通販の配信(メー
 {"template":"standard4","reason":"..."}
 
 # テンプレート
-入力の templates は、選べるテンプレートの一覧。id、name(名前)、description(説明)、hero(ヒーローの種類)、sections(商品の枠の構成。kind は grid=グリッド / feature=特集、slots=商品の数、categoryHeading=カテゴリ見出し付き)を持つ。
+入力の templates は、選べるテンプレートの一覧。id、name(名前)、description(説明)、hero(ヒーローの種類)、sections(商品の枠の構成。kind は grid=グリッド / feature=特集、columns=グリッドの列の数(省略は 2。3 は横並び)、slots=商品の数、categoryHeading=カテゴリ見出し付き)を持つ。
 標準の id: standard4(標準。迷ったときは、これ)、collab(コラボや特別企画)、offer(期間限定・セール)、cat2 / cat3(カテゴリごとの見出し付き)、free(自由な構成)。
 ユーザーが作ったテンプレートも、description と構成を読んで、配信に合うなら選ぶ。
 

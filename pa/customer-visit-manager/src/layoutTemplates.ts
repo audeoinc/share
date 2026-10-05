@@ -1,5 +1,5 @@
 import { Cr854_layouttemplatesService } from './generated/services/Cr854_layouttemplatesService'
-import { setCustomTemplates, type HeroKind, type Section } from './templates'
+import { gridColumns, setCustomTemplates, type HeroKind, type Section } from './templates'
 import { tr } from './i18n'
 
 const HERO_KINDS: HeroKind[] = ['standard', 'collab', 'offer']
@@ -7,6 +7,11 @@ const HERO_KINDS: HeroKind[] = ['standard', 'collab', 'offer']
 /** セクションの上限(画面とデータの両方で守る) */
 export const MAX_SECTIONS = 6
 export const MAX_SLOTS = 8
+
+/** 保存する形に整える。既定の値(2 列、見出しなし)は書かない(以前の JSON と同じ形を保つため) */
+function toStored(s: Section): Section {
+  return { kind: s.kind, slots: s.slots, ...(gridColumns(s) === 3 ? { columns: 3 } : {}), ...(s.categoryHeading ? { categoryHeading: true } : {}) }
+}
 
 /** 保存されている JSON から、セクションの一覧を読む(壊れていても、読める分だけ) */
 function parseSections(text?: string): Section[] {
@@ -16,10 +21,10 @@ function parseSections(text?: string): Section[] {
     if (!Array.isArray(raw)) return []
     return raw
       .map((r): Section | null => {
-        const o = r as { kind?: string; slots?: number; categoryHeading?: boolean }
+        const o = r as { kind?: string; slots?: number; columns?: number; categoryHeading?: boolean }
         const slots = Math.round(Number(o.slots))
         if (!Number.isFinite(slots) || slots < 1) return null
-        return { kind: o.kind === 'feature' ? 'feature' : 'grid', slots: Math.min(MAX_SLOTS, slots), ...(o.categoryHeading ? { categoryHeading: true } : {}) }
+        return toStored({ kind: o.kind === 'feature' ? 'feature' : 'grid', slots: Math.min(MAX_SLOTS, slots), columns: o.columns === 3 ? 3 : undefined, categoryHeading: !!o.categoryHeading })
       })
       .filter((s): s is Section => s !== null)
       .slice(0, MAX_SECTIONS)
@@ -60,7 +65,7 @@ export async function saveTemplate(input: TemplateInput): Promise<string> {
     cr854_name: input.name.trim(),
     cr854_description: input.description.trim(),
     cr854_herokind: input.hero,
-    cr854_sections: JSON.stringify(input.sections.map((s) => ({ kind: s.kind, slots: s.slots, ...(s.categoryHeading ? { categoryHeading: true } : {}) }))),
+    cr854_sections: JSON.stringify(input.sections.map(toStored)),
   }
   const res = input.id
     ? await Cr854_layouttemplatesService.update(input.id, fields)
