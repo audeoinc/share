@@ -12,13 +12,17 @@ const bundle = require(path.join(__dirname, "../dist/lineage_udf_bundle.js"));
  * time.
  *
  * fingerprintSqlForBigQuery therefore folds digit runs of at least
- * FINGERPRINT_MIN_IDENTIFIER_DIGIT_RUN (10) digits inside IDENTIFIER and
- * BACKTICK_IDENTIFIER tokens to "#". The floor is measured, not guessed: a census of
- * the digit runs inside identifiers in the real registry found 20-digit runs with
- * 1,783 distinct values in 2,047 occurrences (per-object ids -- fold), against 6-digit
- * runs with 1,507 distinct values that are NOT century-dated (product codes and the
- * like -- must stay apart) and 9-digit runs with only 7 distinct values (not rotating,
- * nothing to gain). 10 folds the first group and only the first group.
+ * FINGERPRINT_MIN_IDENTIFIER_DIGIT_RUN (6) digits inside IDENTIFIER and
+ * BACKTICK_IDENTIFIER tokens to "#".
+ *
+ * The floor is measured, and the test that set it is RECURRENCE, not length: a value
+ * that is minted per run appears on exactly one day, while a value that identifies a
+ * real thing comes back every day. Over eight days of job history, every distinct
+ * 6, 8, 18, 19 and 20-digit run appeared on exactly one day (3,026 distinct 6-digit
+ * values, 100% one-day), while the 1, 2 and 9-digit runs appeared on 7-8 days each.
+ * So 6 is where throwaway ids begin. A length census alone had suggested 10 and was
+ * wrong: 6-digit values look exactly like product codes until you ask whether they
+ * ever come back.
  */
 
 const fp = bundle.fingerprintSqlForBigQuery;
@@ -39,36 +43,45 @@ assert(
 // 2. ... and unquoted, where the id is part of a bare IDENTIFIER.
 assert(
   fp("SELECT a FROM tmp_1234567890") === fp("SELECT a FROM tmp_9999999999"),
-  "a 10-digit id is at the floor and must fold"
+  "a 10-digit id must fold"
 );
 
-// 3. A 9-digit run is below the floor and stays distinct.
+// 3. A 6-digit run is AT the floor and folds: this is the per-run id that was
+//    registering a new ephemeral object every day.
 assert(
-  fp("SELECT a FROM `p.d.t_123456789`") !== fp("SELECT a FROM `p.d.t_987654321`"),
-  "a 9-digit run is below the floor and must stay distinct"
+  fp("SELECT a FROM `p.d.tmp_123456`") === fp("SELECT a FROM `p.d.tmp_654321`"),
+  "a 6-digit run id must fold"
 );
 
-// 4. Short runs stay distinct: these name different things.
+// 4. Runs below the floor stay distinct: these name different things, and the
+//    recurrence census found them coming back day after day.
 assert(
   fp("SELECT a FROM `p.d.table_v1`") !== fp("SELECT a FROM `p.d.table_v2`"),
   "a one-digit version suffix must stay distinct"
 );
 assert(
-  fp("SELECT a FROM `p.d.item_123456`") !== fp("SELECT a FROM `p.d.item_654321`"),
-  "a 6-digit code must stay distinct"
+  fp("SELECT a FROM `p.d.table_12`") !== fp("SELECT a FROM `p.d.table_34`"),
+  "a two-digit suffix must stay distinct"
 );
 assert(
-  fp("SELECT a FROM `p.d.events_20260101`") !== fp("SELECT a FROM `p.d.events_20260102`"),
-  "an 8-digit date is below the floor and must stay distinct"
+  fp("SELECT a FROM `p.d.t_12345`") !== fp("SELECT a FROM `p.d.t_54321`"),
+  "a 5-digit run is below the floor and must stay distinct"
 );
 
-// 5. Column and alias names fold by the same rule.
+// 5. An 8-digit date suffix folds too -- at this floor it is indistinguishable from
+//    any other throwaway run id, and the census found those values non-recurring.
+assert(
+  fp("SELECT a FROM `p.d.events_20260101`") === fp("SELECT a FROM `p.d.events_20260102`"),
+  "an 8-digit date suffix must fold"
+);
+
+// 6. Column and alias names fold by the same rule.
 assert(
   fp("SELECT col_12345678901 AS c FROM t") === fp("SELECT col_10987654321 AS c FROM t"),
   "a long id in a column name must fold"
 );
 
-// 6. Structure is still structure: folding must not merge different shapes.
+// 7. Structure is still structure: folding must not merge different shapes.
 assert(
   fp("SELECT a FROM `p.d.tmp_01234567890123456789`")
     !== fp("SELECT a, b FROM `p.d.tmp_98765432109876543210`"),
@@ -80,7 +93,7 @@ assert(
   "a different table stem must still change the fingerprint"
 );
 
-// 7. Digits that are NUMBER literals keep collapsing through the literal rule, so a
+// 8. Digits that are NUMBER literals keep collapsing through the literal rule, so a
 //    long numeric literal is "?" rather than "#".
 assert(
   fp("SELECT a FROM t WHERE n > 12345678901234567890")
@@ -88,21 +101,21 @@ assert(
   "numeric literals must still collapse as literals"
 );
 
-// 8. Keywords are untouched: a structural keyword difference still separates.
+// 9. Keywords are untouched: a structural keyword difference still separates.
 assert(
   fp("SELECT a FROM t WHERE x = 1 AND y = 2")
     !== fp("SELECT a FROM t WHERE x = 1 OR y = 2"),
   "AND vs OR must still change the fingerprint"
 );
 
-// 9. Test 046's guarantees are unchanged.
+// 10. Test 046's guarantees are unchanged.
 assert(
   fp("SELECT id, name FROM `p.d.t` WHERE dt = '2024-01-01' AND n > 100")
     === fp("select ID, NAME from `p.d.t` where DT = '2024-02-15' and N > 999"),
   "literal-only and case-only differences must still collapse"
 );
 
-// 10. Determinism, including repeated folding within one statement (the regex is
+// 11. Determinism, including repeated folding within one statement (the regex is
 //     built per call, so a shared lastIndex cannot make the second call differ).
 const repeated =
   "SELECT a FROM `p.d.tmp_01234567890123456789` JOIN `p.d.stg_01234567890123456789` USING (a)";
@@ -116,5 +129,5 @@ assert(
 console.log(JSON.stringify({
   test: "test_v1_5_0_079",
   status: "PASS",
-  issue: "Digit runs of 10+ inside identifiers fold in the fingerprint; shorter ones stay distinct"
+  issue: "Digit runs of 6+ inside identifiers fold in the fingerprint; shorter ones stay distinct"
 }));

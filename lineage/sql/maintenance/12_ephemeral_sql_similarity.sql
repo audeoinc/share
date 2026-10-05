@@ -601,4 +601,90 @@ BEGIN
   );
 
   EXECUTE IMMEDIATE rendered_sql;
+
+  -- --------------------------------------------------------------------------
+  -- Report 5: DOES A DIGIT RUN NAME A SOURCE TABLE? -- the question that decides
+  -- whether folding it is safe, and the one neither length nor recurrence answers.
+  --
+  -- Recurrence (report 8 of 10_pending_analysis_workload.sql) shows which values are
+  -- used once and never again. That is NOT the same as "throwaway": a job that
+  -- processes a different product code every day gives each code exactly one day too.
+  -- So one-day-only cannot, on its own, license folding.
+  --
+  -- What licenses folding is position. Folding a digit run merges two statements into
+  -- one representative, and the representative's lineage is the lineage that survives.
+  -- So the only thing that matters is whether the digits are part of a SOURCE
+  -- REFERENCE:
+  --   digits inside a FROM / JOIN target  -> each value reads a DIFFERENT TABLE.
+  --                                          Folding discards real edges. Do not fold.
+  --   digits only elsewhere (a destination or temp name, an alias, a literal)
+  --                                       -> every value reads the SAME tables.
+  --                                          Folding changes no lineage. Safe.
+  --
+  -- The measurement extracts the identifier that follows FROM or JOIN and asks whether
+  -- it carries a digit run of at least min_digit_run. source_refs_with_digits near
+  -- zero is the green light; anything else is the red one, however convincing the
+  -- recurrence numbers look.
+  --
+  -- It is deliberately crude in the safe direction: the regex takes the token after
+  -- FROM/JOIN whether it is a table, a subquery alias or a CTE name, so a CTE whose
+  -- name carries digits is counted as a source reference it is not. That OVERSTATES
+  -- the risk, which is the right way for this particular check to be wrong. The
+  -- samples are there to spot it.
+  -- --------------------------------------------------------------------------
+  SET rendered_sql = FORMAT(
+    """
+    WITH ephemeral AS (
+      SELECT definition_text
+      FROM `%s`
+      WHERE is_active = TRUE
+        AND is_ephemeral = TRUE
+        AND definition_text IS NOT NULL
+    ),
+    source_refs AS (
+      SELECT DISTINCT source_ref
+      FROM ephemeral,
+        UNNEST(REGEXP_EXTRACT_ALL(
+          definition_text,
+          '(?i)(?:FROM|JOIN)[[:space:]]+[`]?([A-Za-z_][A-Za-z0-9_.]*)'
+        )) AS source_ref
+    ),
+    all_identifiers AS (
+      SELECT DISTINCT identifier
+      FROM ephemeral,
+        UNNEST(REGEXP_EXTRACT_ALL(definition_text, '[A-Za-z_][A-Za-z0-9_]*'))
+          AS identifier
+      WHERE REGEXP_CONTAINS(identifier, '[0-9]{%d,}')
+    )
+    SELECT
+      (SELECT COUNT(*) FROM source_refs) AS distinct_source_refs,
+      (
+        SELECT COUNTIF(REGEXP_CONTAINS(source_ref, '[0-9]{%d,}'))
+        FROM source_refs
+      ) AS source_refs_with_digits,
+      (
+        SELECT ROUND(
+          100 * COUNTIF(REGEXP_CONTAINS(source_ref, '[0-9]{%d,}')) / COUNT(*), 1
+        )
+        FROM source_refs
+      ) AS pct_source_refs_with_digits,
+      (SELECT COUNT(*) FROM all_identifiers) AS distinct_identifiers_with_digits,
+      (
+        SELECT ARRAY_TO_STRING(ARRAY_AGG(source_ref ORDER BY source_ref LIMIT 10), ' ')
+        FROM source_refs
+        WHERE REGEXP_CONTAINS(source_ref, '[0-9]{%d,}')
+      ) AS sample_source_refs_with_digits,
+      (
+        SELECT ARRAY_TO_STRING(ARRAY_AGG(identifier ORDER BY identifier LIMIT 10), ' ')
+        FROM all_identifiers
+      ) AS sample_identifiers_with_digits
+    """,
+    registry_fqn,
+    detail_min_digit_run,
+    detail_min_digit_run,
+    detail_min_digit_run,
+    detail_min_digit_run
+  );
+
+  EXECUTE IMMEDIATE rendered_sql;
 END;
