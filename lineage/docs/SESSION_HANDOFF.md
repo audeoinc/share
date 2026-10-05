@@ -1071,6 +1071,25 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 - 回帰テスト `test_v1_5_0_079` を 6 桁基準に更新（6 桁・8 桁・10 桁・20 桁は畳む／
   1・2・5 桁は畳まない）。バンドル `sha256 = eecd0bc8…`、`478961` bytes。
 
+## 4.39 1 回の実行を縛る `analysis_max_batches_per_run`（SQLのみ）
+
+- **動機**：バッチ予算（`analysis_batch_max_sql_bytes` / `_max_objects`）は
+  「1 バッチの大きさ」を決めるだけで、**バッチの本数＝実行時間**は縛れない。
+  長時間 SQL が許容されない環境で、初回 lookback（例：14 日）のシードを一度に
+  流すのは筋が悪い。**小さくするのではなく、分割して複数回で流す**ための knob。
+- **既定 0 ＝ 無制限**。通常の日次運用では 1〜2 バッチなので設定不要。
+- **やり残しは触らないだけ**。`is_changed` は「自分のバッチが解析成功したとき」にしか
+  クリアされないので、対象外になったオブジェクトは pending のまま残り、**次回実行が
+  続きから**処理する。03 を繰り返すだけで滞留が等分に減る。
+  失敗扱いにも診断行にもしない（リソースエラーのスキップとはここが違う）。
+- **cap は両ループが読む共通リスト（`analysis_batches`）に掛ける**。
+  discovery 先行パスと解析ループのどちらか片方に掛けると「この実行がどのバッチを
+  カバーしたか」が食い違うため。取り出し順は (dataset, batch_no) 固定なので、
+  繰り返し実行しても**安定した順序で前進**する。
+- **可視化**：`ANALYSIS_BATCHES` 行に `batches_available` /
+  `batches_deferred_to_next_run`、run summary に `batches_deferred_to_next_run`。
+  進捗は run summary の `remaining_changed_object_count` を見る。
+
 ## 5. 現在地（2026-08-22 更新）
 
 - リポジトリ: `audeoinc/share` の `lineage/`。ブランチ `claude/lineage-project-resume-tqwrp9`。

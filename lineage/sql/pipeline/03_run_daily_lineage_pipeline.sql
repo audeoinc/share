@@ -254,6 +254,28 @@ DECLARE configured_max_impact_rank INT64 DEFAULT 100;
 DECLARE analysis_batch_max_sql_bytes INT64 DEFAULT 200000;
 DECLARE analysis_batch_max_objects INT64 DEFAULT 200;
 
+-- How many batches ONE RUN may analyze. 0 (default) means all of them.
+--
+-- This bounds a run's WALL CLOCK, which the batch budgets above do not: they decide
+-- how big a batch is, not how many there are. A first run after a long JOBS lookback
+-- can have hundreds, and an environment that will not tolerate a multi-hour statement
+-- needs the work split across invocations rather than made smaller.
+--
+-- What is left over is simply not touched: is_changed stays TRUE on those objects
+-- (it is cleared only by a successful analysis of their own batch), so the NEXT run
+-- picks them up where this one stopped. Running 03 repeatedly therefore drains the
+-- backlog in equal bites, and the run summary's remaining_changed_object_count is the
+-- progress bar. Nothing is marked failed and no diagnostic is written: a deferred
+-- batch is not an error, it is work not yet started.
+--
+-- The cap applies to the batch list BOTH loops read, so the discovery pre-pass and
+-- the analysis loop stay in step. Batches are taken in (dataset, batch_no) order, so
+-- repeated runs make progress in a stable order instead of re-picking at random.
+--
+-- Leave it at 0 for a normal daily run, where the whole backlog is one or two
+-- batches anyway. Set it when seeding a repository from a long lookback.
+DECLARE analysis_max_batches_per_run INT64 DEFAULT 0;
+
 -- What to do when a batch's UDF call runs out of memory. The analysis UDF query has
 -- no per-object isolation -- one batch is one query -- so a resource error there used
 -- to abort the whole script, losing every batch that had not run yet.
@@ -643,6 +665,8 @@ ASSERT analysis_batch_max_sql_bytes >= 1
 AS 'analysis_batch_max_sql_bytes must be >= 1.';
 ASSERT analysis_batch_max_objects >= 1
 AS 'analysis_batch_max_objects must be >= 1.';
+ASSERT analysis_max_batches_per_run >= 0
+AS 'analysis_max_batches_per_run must be >= 0 (0 = no limit).';
 
 -- Column usage index table qualified name (not a lnge_render_dynamic_sql placeholder).
 -- Built once and reused by STEP 3's publish. CREATE TABLE IF NOT EXISTS keeps a
@@ -2036,6 +2060,10 @@ BEGIN
   -- run, which skips the metadata scan and the whole analysis loop. The units
   -- themselves live in the analysis_batches temp table built below.
   DECLARE analysis_batch_total INT64 DEFAULT 0;
+  -- Batches this run COULD have taken, before analysis_max_batches_per_run is
+  -- applied, and the number left for the next run. Reported, not acted on.
+  DECLARE analysis_batch_available_total INT64 DEFAULT 0;
+  DECLARE analysis_batch_deferred_total INT64 DEFAULT 0;
 
   -- --------------------------------------------------------------------------
   -- Remove repository rows whose target definition is no longer active.
@@ -2199,11 +2227,35 @@ BEGIN
 
   -- The loop units. Ordered reads of this table drive both the discovery pre-pass
   -- and the analysis loop, so the two see identical batches.
+  --
+  -- analysis_max_batches_per_run is applied HERE, to the shared list, for that reason:
+  -- capping either loop on its own would let them disagree about which batches this
+  -- run covers. Batches are taken in (dataset, batch_no) order so repeated runs
+  -- advance in a stable order, and what is left simply keeps is_changed = TRUE for
+  -- the next run.
   CREATE OR REPLACE TEMP TABLE analysis_batches AS
-  SELECT DISTINCT object_dataset, batch_no
-  FROM changed_object_batches;
+  SELECT object_dataset, batch_no
+  FROM (
+    SELECT
+      object_dataset,
+      batch_no,
+      ROW_NUMBER() OVER (ORDER BY object_dataset, batch_no) AS batch_rank
+    FROM (
+      SELECT DISTINCT object_dataset, batch_no
+      FROM changed_object_batches
+    )
+  )
+  WHERE analysis_max_batches_per_run <= 0
+    OR batch_rank <= analysis_max_batches_per_run;
 
+  SET analysis_batch_available_total = (
+    SELECT COUNT(*) FROM (
+      SELECT DISTINCT object_dataset, batch_no FROM changed_object_batches
+    )
+  );
   SET analysis_batch_total = (SELECT COUNT(*) FROM analysis_batches);
+  SET analysis_batch_deferred_total =
+    analysis_batch_available_total - analysis_batch_total;
   SET has_analysis_work = analysis_batch_total > 0;
 
   -- Surfaced in "All results" so the batching is visible: a dataset cut into many
@@ -2215,6 +2267,9 @@ BEGIN
       analysis_batch_max_sql_bytes AS max_sql_bytes_per_batch,
       analysis_batch_max_objects AS max_objects_per_batch,
       analysis_batch_total AS batches_to_run,
+      -- Equal to batches_to_run unless analysis_max_batches_per_run capped this run.
+      analysis_batch_available_total AS batches_available,
+      analysis_batch_deferred_total AS batches_deferred_to_next_run,
       (SELECT COUNT(DISTINCT object_dataset) FROM changed_object_batches)
         AS datasets_to_analyze,
       (SELECT COUNT(*) FROM changed_object_batches) AS changed_objects,
@@ -4282,6 +4337,10 @@ BEGIN
       -- ANALYSIS_FAILED_UDF_RESOURCE_ERROR rows in the unanalyzed-object snapshot.
       @p_resource_skipped_batch_count AS resource_skipped_batch_count,
       @p_resource_skipped_object_count AS resource_skipped_object_count,
+      -- Batches this run did not start because analysis_max_batches_per_run capped
+      -- it. Those objects keep is_changed = TRUE, so the next run continues from
+      -- there -- this is work postponed, not work failed.
+      @p_batches_deferred AS batches_deferred_to_next_run,
       (
         SELECT COUNT(*)
         FROM
@@ -4313,7 +4372,8 @@ BEGIN
     analyzed_object_count AS p_analyzed_object_count,
     failed_object_count AS p_failed_object_count,
     resource_skipped_batch_count AS p_resource_skipped_batch_count,
-    resource_skipped_object_count AS p_resource_skipped_object_count;
+    resource_skipped_object_count AS p_resource_skipped_object_count,
+    analysis_batch_deferred_total AS p_batches_deferred;
 END;
 
 -- ============================================================================

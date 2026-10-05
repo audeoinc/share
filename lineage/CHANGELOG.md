@@ -1,5 +1,26 @@
 # 1.5.0-032
 
+- STEP 3 gains `analysis_max_batches_per_run` (default 0 = no limit), which bounds a
+  run's WALL CLOCK rather than its batch size.
+  The existing budgets decide how big a batch is, not how many there are, so a first
+  run after a long JOBS lookback can carry hundreds of them -- and an environment that
+  will not tolerate a multi-hour statement needs the work split across invocations,
+  not made smaller. Seeding a repository from a 14-day lookback is exactly that case.
+  What is left over is not touched: `is_changed` is cleared only by a successful
+  analysis of an object's own batch, so the deferred objects stay pending and the next
+  run continues from where this one stopped. Running 03 repeatedly drains the backlog
+  in equal bites. Nothing is marked failed and no diagnostic is written -- a deferred
+  batch is work not yet started, not an error, which is the difference between this
+  and the resource-error skip.
+  The cap is applied to the batch list BOTH loops read, because capping either loop on
+  its own would let the discovery pre-pass and the analysis loop disagree about which
+  batches the run covers. Batches are taken in (dataset, batch_no) order so repeated
+  runs advance in a stable order.
+  Visible in two places: the `ANALYSIS_BATCHES` notice gains `batches_available` and
+  `batches_deferred_to_next_run`, and the run summary gains
+  `batches_deferred_to_next_run` next to the existing
+  `remaining_changed_object_count`, which is the progress bar across runs.
+
 - The fingerprint's digit floor drops from 10 to 6, folding the per-run ids that were
   registering a new ephemeral object on every execution.
   Evidence: over eight days of job history, every distinct 6, 8, 18, 19 and 20-digit
