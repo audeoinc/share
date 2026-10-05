@@ -14232,6 +14232,22 @@ function discoverPhysicalSourcesForBigQuery(sqlText) {
   };
 }
 
+/*
+ * 識別子の中の数字列をフィンガープリント上だけ「#」に畳む際の最小桁数。
+ *
+ * 日付サフィックス付きTable（events_20260101 / events_20260102）はトークナイザから
+ * 見れば1個のIDENTIFIERなので、リテラル正規化では畳まれない。一方で `table_v1` と
+ * `table_v2` は本当に別のTableなので、1桁から畳むと誤って同一視する。実測では
+ * しきい値4と6の結果が完全に一致し（効いている数字列は6〜7桁）、6でも畳み効果の
+ * 大半が残ったため、安全側の6を採用する。
+ *
+ * 影響範囲はephemeral（一時／ローテーション出力）のオブジェクト同一性だけ。03は
+ * 永続destinationを宛先名でPARTITIONしており、フィンガープリントは
+ * ELSE側（ephemeral）のキーにしか使っていない。畳んだ結果の代表1件は実際のSQL本文で
+ * 解析されるので、lineage自体が粗くなるわけではない。
+ */
+const FINGERPRINT_MIN_IDENTIFIER_DIGIT_RUN = 6;
+
 /**
  * SQLの構造フィンガープリント（正準化文字列）を返す。
  *
@@ -14242,6 +14258,10 @@ function discoverPhysicalSourcesForBigQuery(sqlText) {
  * 演算子・記号は保持するため、構造（参照Table/列や結合・句の形）が異なるSQLは
  * 別のフィンガープリントになる。DATE '...' のような型付きリテラルは後続の
  * STRING が「?」になるため DATE ? へ畳まれる。
+ *
+ * さらにIDENTIFIER / BACKTICK_IDENTIFIER に限り、FINGERPRINT_MIN_IDENTIFIER_DIGIT_RUN
+ * 桁以上の数字列を「#」へ畳む。パラメータがTable名の日付サフィックスとして現れる
+ * 生成SQL（毎日同じ構造で宛先と参照先の日付だけが変わる類）を1件にまとめるため。
  *
  * 呼び出し側（03パイプライン）はこの文字列を TO_HEX(SHA256(...)) でハッシュ化し、
  * statement_type = 'SELECT' のジョブをフィンガープリント単位でまとめ、最新の
@@ -14278,6 +14298,24 @@ function fingerprintSqlForBigQuery(sqlText) {
       const normalized = token.normalized_token != null
         ? token.normalized_token
         : token.token;
+
+      /*
+       * 日付サフィックス等の長い数字列は識別子の中にあるのでNUMBERにならない。
+       * 識別子トークンに限って畳む（KEYWORDや演算子には触れない）。正規表現は
+       * ここで生成する。モジュール定数にするとlastIndexを共有するため。
+       */
+      if (
+        token.token_type === "IDENTIFIER" ||
+        token.token_type === "BACKTICK_IDENTIFIER"
+      ) {
+        parts.push(
+          normalized.replace(
+            new RegExp("[0-9]{" + FINGERPRINT_MIN_IDENTIFIER_DIGIT_RUN + ",}", "g"),
+            "#"
+          )
+        );
+        continue;
+      }
 
       parts.push(normalized);
     }

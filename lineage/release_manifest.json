@@ -6,8 +6,8 @@
   "source_of_truth": "javascript/src",
   "bundle": {
     "path": "javascript/dist/lineage_udf_bundle.js",
-    "sha256": "6ad8490309f0e6740c80d8ec09655ff2431a6ed58236e6d0992620e4e68c34ec",
-    "size_bytes": 475682
+    "sha256": "78636c5006983877f16e0f4da58e92a5b76705f1f4ea7c66a629ade9518bbbad",
+    "size_bytes": 477745
   },
   "tests": {
     "executed": true,

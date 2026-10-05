@@ -36,7 +36,7 @@ JavaScript エンジンと、それを日次で回す BigQuery パイプライ�
 cd javascript
 node scripts/build_udf.js       # src → dist/lineage_udf_bundle.js を再生成
 node scripts/verify_bundle.js   # バンドルの API とスモーク解析を検証
-npm run test:release            # リリース回帰（41 本、test_v1_5_0_061 … 014）
+npm run test:release            # リリース回帰（60 本、test_v1_5_0_079 … 014）
 node test/test_v1_5_0_003.js    # ゴールデン回帰（48 ケース）
 npm test                        # build + verify:bundle + test:release を一括
 ```
@@ -51,7 +51,7 @@ npm test                        # build + verify:bundle + test:release を一括
 1 変更 = 「実装 + 番号付き回帰テスト + CHANGELOG 追記」をワンセットにする。
 
 - 回帰テストは `javascript/test/test_v1_5_0_0XX.js` を新規作成し、`package.json` の
-  `test:release` チェーンの先頭に追加する（番号は連番、現行最新は 061）。
+  `test:release` チェーンの先頭に追加する（番号は連番、現行最新は 079）。
 - `CHANGELOG.md` の現行バージョン見出し直下に、症状・原因・修正・対象テストを追記。
 - 詳細な変更手順・単位は `docs/DEVELOPMENT_GUIDE.md` に従う。
 
