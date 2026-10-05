@@ -2913,6 +2913,12 @@ BEGIN
   ASSERT NOT REGEXP_CONTAINS(batch_sql_registry_failed, r'__[A-Z0-9_]+__')
   AS 'Unresolved placeholder in batch registry FAILED UPDATE SQL.';
 
+  -- Snapshot the active VIEW registry so the per-object staging query can classify
+  -- source object types without referencing the (configurable-named) repository table
+  -- directly inside a static statement. Run ONCE, not per batch: which Views are
+  -- active is decided in STEP 1/2 and nothing the analysis loop publishes changes it.
+  EXECUTE IMMEDIATE pre_batch_sql_view_snapshot;
+
   FOR ds_row IN (
     SELECT
       batch_group AS grp,
@@ -2923,26 +2929,14 @@ BEGIN
     ORDER BY batch_group, batch_no
   ) DO
 
-  -- Progress marker. BigQuery prepends the lnge_render_dynamic_sql TEMP FUNCTION DDL
-  -- to the query text of every child job that calls it, so the console's "All
-  -- results" list would otherwise show only "create temp function
-  -- lnge_render_dynamic_sql(" for each statement. This marker runs a dynamic SELECT
-  -- with the dataset name baked into the executed text (via FORMAT, not a bound
-  -- variable), so each iteration surfaces which dataset STEP 3 is processing.
+  -- Which batch this iteration is on. These feed the EXCEPTION handlers (which
+  -- cannot see the loop variable) and the ANALYSIS_BATCH_PAYLOAD notice below, which
+  -- doubles as this batch's progress marker: it already carries the dataset and batch
+  -- number, so a separate marker statement would be a BigQuery job spent printing
+  -- what the next one prints anyway.
   SET current_batch_dataset = ds_row.ds;
   SET current_batch_no = ds_row.batch_no;
 
-  EXECUTE IMMEDIATE FORMAT(
-    "SELECT '===== STEP 3 | dataset: %s | batch: %d =====' AS processing_step",
-    ds_row.ds,
-    ds_row.batch_no
-  );
-
-  -- Snapshot the active VIEW registry once so the per-object staging query can
-  -- classify source object types without referencing the (configurable-named)
-  -- repository table directly inside a static statement.
-
-  EXECUTE IMMEDIATE pre_batch_sql_view_snapshot;
 
   -- --------------------------------------------------------------------------
   -- Reuse the source discovery already computed by the pre-pass. The pre-pass ran
@@ -3365,14 +3359,6 @@ BEGIN
        AND m.generation_type = c.generation_type
        AND m.definition_hash = c.definition_hash
     ) AS t;
-
-    -- ------------------------------------------------------------------------
-    -- Progress marker: analysis sub-step for the current batch.
-    EXECUTE IMMEDIATE FORMAT(
-      "SELECT '----- STEP 3.analysis | dataset: %s | batch: %d -----' AS processing_step",
-      ds_row.ds,
-      ds_row.batch_no
-    );
 
     -- 3. Run the persistent lineage UDF over every analyzable object in the
     -- current BATCH in a single query. The enclosing loop bounds how many objects
@@ -4220,6 +4206,8 @@ BEGIN
     -- operational result set (set-based form of the loop's per-object inserts).
     -- ------------------------------------------------------------------------
     -- Non-COMPLETED UDF results: one row per emitted diagnostic.
+    -- One INSERT, three branches: these used to be three statements, and a statement
+    -- costs a BigQuery job whatever it writes. Same rows, same order, one job.
     INSERT INTO non_completed_udf_results
     SELECT
       LOWER(r.object_project),
@@ -4262,10 +4250,9 @@ BEGIN
         AND fail.object_type = r.object_type
         AND fail.generation_type = r.generation_type
         AND fail.definition_hash = r.definition_hash
-    );
-
+    )
+    UNION ALL
     -- Non-publishable UDF results with no diagnostic row: a single summary row.
-    INSERT INTO non_completed_udf_results
     SELECT
       LOWER(r.object_project),
       LOWER(r.object_dataset),
@@ -4302,10 +4289,9 @@ BEGIN
       AND ARRAY_LENGTH(COALESCE(
         JSON_QUERY_ARRAY(r.exported_json, '$.exported_tables.diagnostics'),
         CAST([] AS ARRAY<STRING>)
-      )) = 0;
-
+      )) = 0
+    UNION ALL
     -- Pre-analysis failures.
-    INSERT INTO non_completed_udf_results
     SELECT
       LOWER(f.object_project),
       LOWER(f.object_dataset),
