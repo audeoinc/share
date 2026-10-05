@@ -87,6 +87,9 @@ BEGIN
   DECLARE ephemeral_object_dataset_label STRING DEFAULT 'ephemeral_generated_sql';
   -- Days of arrival history in report 5. Long enough to see a weekly rhythm.
   DECLARE arrival_history_days INT64 DEFAULT 14;
+  -- Days of job history in reports 6 and 7. Bounded by what 03's own JOBS lookback
+  -- has actually collected -- a longer window here does not invent jobs.
+  DECLARE job_history_days INT64 DEFAULT 14;
 
   -- --------------------------------------------------------------------------
   -- [C] DERIVED / INTERNAL -- from [A]; DO NOT edit
@@ -95,6 +98,7 @@ BEGIN
   -- to a literal only if the repository lives in a separate project.
   DECLARE repository_project_id STRING DEFAULT NULL;
   DECLARE registry_fqn STRING;
+  DECLARE job_registry_fqn STRING;
   DECLARE rendered_sql STRING;
   -- Token extracted from the project id (see project_token_pattern).
   DECLARE project_token STRING;
@@ -125,12 +129,19 @@ BEGIN
     AS 'repository_dataset must be letters/digits/underscore only (check for an unsubstituted {project_token}).';
 
   ASSERT arrival_history_days >= 1 AS 'arrival_history_days must be >= 1.';
+  ASSERT job_history_days >= 1 AS 'job_history_days must be >= 1.';
 
   SET registry_fqn = FORMAT(
     '%s.%s.%s',
     repository_project_id,
     repository_dataset,
     table_name_prefix || 'lnge_' || 'm_' || 'definition_registry' || table_name_suffix
+  );
+  SET job_registry_fqn = FORMAT(
+    '%s.%s.%s',
+    repository_project_id,
+    repository_dataset,
+    table_name_prefix || 'lnge_' || 'm_' || 'job_registry' || table_name_suffix
   );
 
   -- --------------------------------------------------------------------------
@@ -302,4 +313,98 @@ BEGIN
   USING
     ephemeral_object_dataset_label AS ephemeral_label,
     arrival_history_days AS days;
+
+  -- --------------------------------------------------------------------------
+  -- Report 6: DO THE GENERATED STATEMENTS RECUR? -- fingerprint lifetime histogram.
+  --
+  -- This is the question report 5 cannot answer from two rows. An ephemeral object
+  -- is identified by its fingerprint, so a statement that runs again tomorrow with
+  -- the same structure is SEEN again (no new object, no analysis). One that carries a
+  -- rotating id inside an identifier gets a new fingerprint every run, and arrives as
+  -- a brand new object every day forever.
+  --
+  -- active_days is how many distinct days a fingerprint was seen in the job history:
+  --   active_days = 1 for most fingerprints -> they CHURN. Today's 3,880 objects are
+  --                 tomorrow's 3,880 different objects, the backlog never clears, and
+  --                 no amount of catching up makes a run cheaper.
+  --   active_days spread across the window -> they RECUR. The population is stable,
+  --                 today's load is a one-time backfill, and a steady-state run only
+  --                 pays for genuinely new statements.
+  --
+  -- CAVEAT: this reads the job registry, which holds what 03 has COLLECTED. A day on
+  -- which no run completed contributes no jobs, and will deflate active_days for
+  -- every fingerprint. Check report 7's jobs_collected column before concluding
+  -- "churn" -- a one-row-per-day pattern there means the history is too thin to tell.
+  -- --------------------------------------------------------------------------
+  SET rendered_sql = FORMAT(
+    """
+    WITH job_days AS (
+      SELECT DISTINCT sql_fingerprint, DATE(creation_time) AS job_date
+      FROM `%s`
+      WHERE sql_fingerprint IS NOT NULL
+        AND creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+    ),
+    per_fingerprint AS (
+      SELECT sql_fingerprint, COUNT(*) AS active_days
+      FROM job_days
+      GROUP BY sql_fingerprint
+    )
+    SELECT
+      active_days,
+      COUNT(*) AS fingerprints,
+      ROUND(100 * COUNT(*) / SUM(COUNT(*)) OVER (), 1) AS pct_of_fingerprints
+    FROM per_fingerprint
+    GROUP BY active_days
+    ORDER BY active_days
+    """,
+    job_registry_fqn
+  );
+
+  EXECUTE IMMEDIATE rendered_sql
+  USING job_history_days AS days;
+
+  -- --------------------------------------------------------------------------
+  -- Report 7: the same history day by day -- how many fingerprints ran, and how many
+  -- of them had never been seen before that day.
+  --
+  -- new_fingerprints is the steady-state arrival rate, measured from the jobs
+  -- themselves rather than from when the pipeline happened to run. The first day of
+  -- the window counts everything as new by construction (nothing precedes it), so
+  -- read the LATER rows.
+  --
+  -- jobs_collected near zero on a day means 03 did not collect that day, not that
+  -- nothing ran -- see the caveat on report 6.
+  -- --------------------------------------------------------------------------
+  SET rendered_sql = FORMAT(
+    """
+    WITH jobs AS (
+      SELECT sql_fingerprint, DATE(creation_time) AS job_date
+      FROM `%s`
+      WHERE sql_fingerprint IS NOT NULL
+        AND creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+    ),
+    first_day AS (
+      SELECT sql_fingerprint, MIN(job_date) AS first_job_date
+      FROM jobs
+      GROUP BY sql_fingerprint
+    )
+    SELECT
+      jobs.job_date,
+      COUNT(*) AS jobs_collected,
+      COUNT(DISTINCT jobs.sql_fingerprint) AS distinct_fingerprints,
+      COUNT(DISTINCT IF(
+        first_day.first_job_date = jobs.job_date,
+        jobs.sql_fingerprint,
+        NULL
+      )) AS new_fingerprints
+    FROM jobs
+    JOIN first_day USING (sql_fingerprint)
+    GROUP BY jobs.job_date
+    ORDER BY jobs.job_date DESC
+    """,
+    job_registry_fqn
+  );
+
+  EXECUTE IMMEDIATE rendered_sql
+  USING job_history_days AS days;
 END;
