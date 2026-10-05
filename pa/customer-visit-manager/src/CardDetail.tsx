@@ -45,9 +45,14 @@ import { runAutoDraft, type AutoDraftResult } from './autoDraft'
 import { useAiDrafts } from './useAiDrafts'
 import { channelOptions, countryOptions, departmentOptions, statusColor, statusOptions } from './status'
 
+/** 新規作成のときに、最初から入れておく値(カレンダーで押した日付、絞り込み中の国・チャネル・部署) */
+export type NewCardDefaults = Partial<Pick<Form, 'scheduledAt' | 'country' | 'channel' | 'department'>>
+
 interface Props {
   /** undefined のときは新規作成 */
   card?: Cr854_deliverycards
+  /** 新規作成のときだけ使う */
+  defaults?: NewCardDefaults
   products: Cr854_products[]
   heroes: Cr854_heroimages[]
   /** 他の配信で使われているテーマ(テーマ案の重複回避用) */
@@ -282,10 +287,10 @@ const useStyles = makeStyles({
   actions: { display: 'flex', justifyContent: 'flex-end', columnGap: '8px', padding: '12px 24px' },
 })
 
-export function CardDetail({ card, products, heroes, otherThemes, onBack, onSaved }: Props) {
+export function CardDetail({ card, defaults, products, heroes, otherThemes, onBack, onSaved }: Props) {
   const t = useT()
   const styles = useStyles()
-  const [form, setForm] = useState<Form>(() => toForm(card))
+  const [form, setForm] = useState<Form>(() => (card ? toForm(card) : { ...toForm(), ...defaults }))
   const [items, setItems] = useState<Item[]>([])
   // 選定候補(配信商品テーブルの「候補」の行。セクションごと)
   const [candidates, setCandidates] = useState<Candidate[]>([])

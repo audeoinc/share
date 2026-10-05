@@ -29,7 +29,7 @@ import { withHeroLabels, withProductLabels } from './labels'
 import { loadCustomTemplates } from './layoutTemplates'
 import { TemplateManager } from './TemplateManager'
 import { openTemplateManager, useTemplates } from './templates'
-import { CardDetail } from './CardDetail'
+import { CardDetail, type NewCardDefaults } from './CardDetail'
 import { loadAutoDraft, saveAutoDraft } from './settings'
 import { locale, optionLabel, setLang, tr, useLang, useT } from './i18n'
 import { channelOptions, countryOptions, departmentOptions, statusColor, statusOptions } from './status'
@@ -221,7 +221,8 @@ function App() {
   const [month, setMonth] = useState<Date | null>(null)
   const [filters, setFilters] = useState<Filters>(noFilter)
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [creating, setCreating] = useState(false)
+  // 新規作成中なら、最初に入れておく値(null は新規作成していない)
+  const [creating, setCreating] = useState<NewCardDefaults | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -282,6 +283,13 @@ function App() {
     loadCustomTemplates().catch(() => undefined)
   }, [])
   const filtering = Object.values(filters).some((v) => v !== '')
+  // 新規作成の初期値: 絞り込み中の国・チャネル・部署を引き継ぐ(その条件の配信を作ることが多いため)
+  const newCardDefaults = (scheduledAt?: string): NewCardDefaults => ({
+    ...(scheduledAt ? { scheduledAt } : {}),
+    ...(filters.country ? { country: filters.country } : {}),
+    ...(filters.channel ? { channel: filters.channel } : {}),
+    ...(filters.department ? { department: filters.department } : {}),
+  })
 
   return (
     <>
@@ -327,7 +335,7 @@ function App() {
             <span className={styles.autoDraftState}>{autoDraft ? t('オン', 'On') : t('オフ', 'Off')}</span>
           </button>
         </Tooltip>
-        <Button appearance="primary" size="small" icon={<AddRegular />} onClick={() => setCreating(true)}>
+        <Button appearance="primary" size="small" icon={<AddRegular />} onClick={() => setCreating(newCardDefaults())}>
           {t('新規作成', 'New')}
         </Button>
       </header>
@@ -361,7 +369,8 @@ function App() {
                 ))}
               </div>
             </div>
-            <Calendar month={month} cards={filtered} onSelect={setSelectedId} />
+            {/* 日付から作るときは、その日の 10:00 を配信日時にする(過去の日付でも作れる) */}
+            <Calendar month={month} cards={filtered} onSelect={setSelectedId} onCreate={(day) => setCreating(newCardDefaults(`${day}T10:00`))} />
           </>
         )}
       </div>
@@ -369,12 +378,13 @@ function App() {
         <CardDetail
           key={selected?.cr854_deliverycardid ?? 'new'}
           card={selected}
+          defaults={creating ?? undefined}
           products={products}
           heroes={heroes}
           otherThemes={cards.filter((c) => c.cr854_deliverycardid !== selected?.cr854_deliverycardid && c.cr854_theme).map((c) => c.cr854_theme!)}
           onBack={() => {
             setSelectedId(null)
-            setCreating(false)
+            setCreating(null)
           }}
           onSaved={load}
         />
