@@ -31,9 +31,18 @@
 --                                evidence either way (counted separately, as unknown)
 --
 -- Report 3 then opens the biggest groups up member by member, so what actually
--- differs between them is visible by eye rather than inferred.
+-- differs between them is visible by eye rather than inferred, and report 4 censuses
+-- the digit runs inside identifiers so the kind of digit -- date, code, id -- is
+-- counted rather than assumed.
 --
--- HOW MUCH TO FOLD IS THE REAL DECISION: folding from one digit up also merges things
+-- WHICH DIGITS, NOT HOW MANY, IS THE REAL DECISION. A length threshold cannot tell
+-- `202601` (a month) from `123456` (a product code), and the measured collapse lives
+-- almost entirely in 6-7 digit runs -- exactly the length a code is likely to be. So
+-- report 4 counts the digit runs by length and by whether they parse as a date,
+-- which is what says whether folding at a given length is a merge or a MIS-merge.
+-- Report 1's thresholds quantify the prize; report 4 says whether it is ours to take.
+--
+-- HOW MUCH TO FOLD, GIVEN THAT: folding from one digit up also merges things
 -- that are genuinely different -- `table_v1` and `table_v2` are two tables, while
 -- `events_20260101` and `events_20260102` are two days of one. Report 1 therefore
 -- reports one row per threshold in digit_run_thresholds (a floor on the length of a
@@ -503,4 +512,68 @@ BEGIN
     sample_length AS sample_len,
     inspect_group_count AS group_count,
     inspect_members_per_group AS members_each;
+
+  -- --------------------------------------------------------------------------
+  -- Report 4: what the digits actually ARE -- a census of the digit runs that
+  -- appear INSIDE identifier-shaped tokens, by run length.
+  --
+  -- This is the report that decides the rule, because a length threshold cannot
+  -- tell a date from a product code. A run of 6 digits is `202601` (a month) or
+  -- `123456` (a code), and folding the second one merges two genuinely different
+  -- objects. Report 1 says how MUCH each threshold collapses; this says WHETHER it
+  -- should.
+  --
+  -- date_shaped counts the runs that parse as a plausible date: (19|20)YY, a month
+  -- 01-12, and optionally a day 01-31 -- so 6 or 8 digits, and only with a leading
+  -- century. `123456` is not date-shaped; `202601` is. Read it as a RATE per length:
+  --   date_shaped close to occurrences -> the runs at that length are dates, and
+  --                                       folding them is what we want
+  --   date_shaped close to zero        -> codes or ids; folding them is a FALSE MERGE
+  -- example_runs and example_identifiers are there to confirm by eye, since a product
+  -- code that happens to start with 20 would be counted as date-shaped.
+  --
+  -- Identifier-shaped means a token starting with a letter or underscore, so digits
+  -- in numeric literals and in quoted strings are not counted -- the fingerprint
+  -- already folds those as literals and they cannot explain a surviving duplicate.
+  -- A dotted path in backticks (`project.dataset.events_20260101`) is split on the
+  -- dots, which is fine: each part is still an identifier.
+  -- --------------------------------------------------------------------------
+  SET rendered_sql = FORMAT(
+    """
+    WITH ephemeral AS (
+      SELECT definition_text
+      FROM `%s`
+      WHERE is_active = TRUE
+        AND is_ephemeral = TRUE
+        AND definition_text IS NOT NULL
+    ),
+    identifier_runs AS (
+      SELECT
+        identifier,
+        digit_run
+      FROM ephemeral,
+        UNNEST(REGEXP_EXTRACT_ALL(definition_text, '[A-Za-z_][A-Za-z0-9_]*'))
+          AS identifier,
+        UNNEST(REGEXP_EXTRACT_ALL(identifier, '[0-9]+')) AS digit_run
+    )
+    SELECT
+      LENGTH(digit_run) AS digit_run_length,
+      COUNT(*) AS occurrences,
+      COUNT(DISTINCT digit_run) AS distinct_values,
+      COUNTIF(
+        REGEXP_CONTAINS(
+          digit_run,
+          '^(19|20)[0-9][0-9](0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])?$'
+        )
+      ) AS date_shaped,
+      ARRAY_AGG(DISTINCT digit_run ORDER BY digit_run LIMIT 5) AS example_runs,
+      ARRAY_AGG(DISTINCT identifier ORDER BY identifier LIMIT 5) AS example_identifiers
+    FROM identifier_runs
+    GROUP BY digit_run_length
+    ORDER BY digit_run_length
+    """,
+    registry_fqn
+  );
+
+  EXECUTE IMMEDIATE rendered_sql;
 END;
