@@ -51,6 +51,12 @@
   The analysis UDF's 135 seconds is therefore a floor, and 11:22 is the practical
   lower bound for this seed. What remains is operational (a shorter lookback, less
   frequent static table builds) or another minute of statement-count work.
+  And 11:22 is the SEED. A re-run with nothing changed takes 4 minutes, which is what
+  a daily run actually costs: the seven-minute difference was analyzing every
+  ephemeral object once, exactly as the design intends -- a successful analysis clears
+  is_changed, so subsequent runs pay only for new fingerprints. What is left at 4
+  minutes is almost all fixed cost: collecting 8 days of JOBS, and rebuilding impact
+  and the static report tables.
 
 - MEASURED OUTCOME of the STEP 3 work: the same seed that could not finish in two and
   a half hours now takes 11 minutes 22 seconds. Same repository, rebuilt from 01, same
