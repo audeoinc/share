@@ -245,14 +245,22 @@ DECLARE configured_max_impact_rank INT64 DEFAULT 100;
 -- The budget is approximate in one direction: a batch can overshoot by up to the
 -- size of its last object.
 --
--- Lower these if STEP 3 still reports out of memory; raise them to trade BigQuery
--- job count for fewer, larger UDF calls. Only the first run after a large JOBS
+-- These set the BATCH COUNT, and the batch count is the runtime: a batch costs ~32
+-- statements of roughly 3 seconds each, nearly all of it BigQuery job startup rather
+-- than work, so halving the number of batches halves STEP 3. They were far lower when
+-- a UDF out-of-memory took the whole run down; it now costs only the failing batch,
+-- which is recorded and retryable, so they can be set for throughput.
+-- Raise them together: a batch breaks on GREATEST(DIV(bytes, max_bytes),
+-- DIV(index, max_objects)), so lifting one alone leaves the other binding. At the
+-- measured ~2,900 characters per ephemeral object, 1,200,000 bytes is about 410
+-- objects, so the object cap is the looser of the two at these values.
+-- Lower them if STEP 3 reports out of memory. Only the first run after a large JOBS
 -- collection has batches worth counting -- a successful analysis clears is_changed,
 -- so a steady-state daily run is normally one small batch per dataset.
 -- sql/maintenance/10_pending_analysis_workload.sql reports the volume per dataset,
 -- which is what these should be set against.
-DECLARE analysis_batch_max_sql_bytes INT64 DEFAULT 600000;
-DECLARE analysis_batch_max_objects INT64 DEFAULT 600;
+DECLARE analysis_batch_max_sql_bytes INT64 DEFAULT 1200000;
+DECLARE analysis_batch_max_objects INT64 DEFAULT 1200;
 
 -- How many batches ONE RUN may analyze. 0 (default) means all of them.
 --
