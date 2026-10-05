@@ -19,6 +19,20 @@
   The two definition-registry MERGEs are left alone: they carry one row per object
   rather than per job, and their `last_seen_at` is meant to advance on every run.
 
+- Measured, and closed, the last compression idea. Report 6 of
+  `12_ephemeral_sql_similarity.sql`, run against the registry AFTER the digit-aware
+  fingerprint, returns 0 removable objects for the deployed rule -- confirming it is
+  fully applied -- and 0 more for the literal-count rule. Parameter lists of differing
+  length, the remaining hypothesis for why near-identical statements stay apart, do
+  not occur in this corpus.
+  The 1,049 objects that rules 3 and 4 would still collapse come from folding 1 and
+  2-digit runs, and the recurrence census already showed those values appearing on
+  seven or eight distinct days each: they name things rather than identify runs, so
+  folding them would merge `table_v1` with `table_v2`.
+  The analysis UDF's 135 seconds is therefore a floor, and 11:22 is the practical
+  lower bound for this seed. What remains is operational (a shorter lookback, less
+  frequent static table builds) or another minute of statement-count work.
+
 - MEASURED OUTCOME of the STEP 3 work: the same seed that could not finish in two and
   a half hours now takes 11 minutes 22 seconds. Same repository, rebuilt from 01, same
   8-day window: 200,000-byte per-dataset batches (abandoned at 44 batches) ->
