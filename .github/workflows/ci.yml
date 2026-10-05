@@ -1,0 +1,34 @@
+name: CI
+
+# プルリクエストと main への push のたびに、型チェック・lint・ビルドを行う(main を、常に反映できる状態に保つ)。
+# 共有のアプリへの反映は、ここでは行わない(pa CLI は、ブラウザでのサインインが必要なため)。反映は npm run deploy。
+
+on:
+  pull_request:
+    paths:
+      - 'pa/customer-visit-manager/**'
+  push:
+    branches: [main]
+    paths:
+      - 'pa/customer-visit-manager/**'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pa/customer-visit-manager
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: pa/customer-visit-manager/package-lock.json
+      - run: npm ci
+      - name: Type check
+        run: npx tsc -b
+      - name: Lint
+        run: npx eslint . --ignore-pattern "src/generated/**"
+      - name: Build
+        run: npm run build
