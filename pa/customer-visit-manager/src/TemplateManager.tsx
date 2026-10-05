@@ -23,7 +23,7 @@ import { AutoTextarea } from './AutoTextarea'
 import { useT } from './i18n'
 import { MAX_SECTIONS, MAX_SLOTS, deleteTemplate, saveTemplate } from './layoutTemplates'
 import { TemplateThumb } from './TemplateThumb'
-import { setTemplateManagerOpen, templateOptions, useTemplateManagerOpen, useTemplates, type HeroKind, type Section } from './templates'
+import { gridColumns, setTemplateManagerOpen, templateOptions, useTemplateManagerOpen, useTemplates, type HeroKind, type Section } from './templates'
 
 interface Draft {
   /** 保存済みの行の ID(新規は undefined) */
@@ -33,6 +33,13 @@ interface Draft {
   hero: HeroKind
   sections: Section[]
 }
+
+/** 種類の選択肢。3 列のグリッドは、データでは grid + columns: 3 */
+type SectionLayout = 'grid' | 'grid3' | 'feature'
+const layoutValue = (sec: Section): SectionLayout => (sec.kind === 'feature' ? 'feature' : gridColumns(sec) === 3 ? 'grid3' : 'grid')
+/** 3 列にしたときは、横並び 1 行(3 点)になるように枠の数も合わせる。2 列・特集に戻すときは、列の指定を消す */
+const layoutPatch = (v: SectionLayout): Partial<Section> =>
+  v === 'grid3' ? { kind: 'grid', columns: 3, slots: 3 } : { kind: v, columns: undefined }
 
 const NEW_DRAFT: Draft = { name: '', description: '', hero: 'standard', sections: [{ kind: 'grid', slots: 4 }] }
 
@@ -78,7 +85,7 @@ const useStyles = makeStyles({
   },
   sectionNo: { width: '18px', color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
   slotSelect: { width: '78px' },
-  kindSelect: { width: '102px' },
+  kindSelect: { width: '140px' },
   actions: { display: 'flex', alignItems: 'center', columnGap: '8px', padding: '10px 16px', borderTop: `1px solid ${tokens.colorNeutralStroke2}` },
 })
 
@@ -248,11 +255,12 @@ export function TemplateManager() {
                             <Select
                               size="small"
                               className={s.kindSelect}
-                              value={sec.kind}
+                              value={layoutValue(sec)}
                               aria-label={t('種類', 'Type')}
-                              onChange={(_, d) => patchSection(i, { kind: d.value as Section['kind'] })}
+                              onChange={(_, d) => patchSection(i, layoutPatch(d.value as SectionLayout))}
                             >
-                              <option value="grid">{t('グリッド', 'Grid')}</option>
+                              <option value="grid">{t('グリッド(2列)', 'Grid (2 columns)')}</option>
+                              <option value="grid3">{t('グリッド(3列)', 'Grid (3 columns)')}</option>
                               <option value="feature">{t('特集', 'Feature')}</option>
                             </Select>
                             <Select
@@ -303,7 +311,7 @@ export function TemplateManager() {
                       <span style={{ fontSize: tokens.fontSizeBase200 }}>
                         {selected.id === 'free'
                           ? t('自由な並び(枠の数は決まっていません)', 'Free-form (no fixed number of slots)')
-                          : selected.sections.map((x) => `${x.kind === 'feature' ? t('特集', 'Feature') : t('グリッド', 'Grid')}${t(` ${x.slots}点`, ` ×${x.slots}`)}${x.categoryHeading ? t('(見出し付き)', ' (heading)') : ''}`).join(' → ')}
+                          : selected.sections.map((x) => `${x.kind === 'feature' ? t('特集', 'Feature') : gridColumns(x) === 3 ? t('グリッド(3列)', 'Grid (3 col)') : t('グリッド', 'Grid')}${t(` ${x.slots}点`, ` ×${x.slots}`)}${x.categoryHeading ? t('(見出し付き)', ' (heading)') : ''}`).join(' → ')}
                       </span>
                     </div>
                     <div style={{ display: 'flex', gap: 8 }}>

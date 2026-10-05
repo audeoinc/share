@@ -13,7 +13,7 @@ import { AutoTextarea } from './AutoTextarea'
 import { DND_HERO, DND_ITEM, scaled, yen, type Item } from './items'
 import { heroImage, productImage } from './images'
 import { productMarket } from './market'
-import { getTemplate, type EmailTemplateId } from './templates'
+import { getTemplate, gridColumns, type EmailTemplateId } from './templates'
 import { HEADLINE_FONT } from './fonts'
 import { locale, optionLabel, useT } from './i18n'
 
@@ -526,11 +526,13 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, h
         {sections.map(({ sec, start, list }, si) => {
           const category = sec.categoryHeading ? byId.get(list[0]?.productId ?? '')?.cr854_categoryname : undefined
           const feature = sec.kind === 'feature'
+          const cols = gridColumns(sec)
           return (
             <div key={start} style={{ padding: '0 16px 16px' }}>
               {sec.categoryHeading && editableHeading(si, category ? optionLabel(category) : `CATEGORY ${si + 1}`)}
               {sectionCopyEl(si, !!sec.categoryHeading)}
-              <div style={{ display: 'grid', gridTemplateColumns: feature ? '1fr' : '1fr 1fr', gap: 12 }}>
+              {/* 3 列は 1 枠が狭いので、名前が枠を押し広げないよう minmax(0, 1fr) にし、間隔も詰める */}
+              <div style={{ display: 'grid', gridTemplateColumns: feature ? '1fr' : cols === 3 ? 'repeat(3, minmax(0, 1fr))' : '1fr 1fr', gap: cols === 3 ? 8 : 12 }}>
                 {Array.from({ length: sec.slots }, (_, j) =>
                   list[j] ? (feature ? featureTile(list[j], start + j) : gridTile(list[j], start + j)) : emptySlot(`e${start + j}`, feature),
                 )}

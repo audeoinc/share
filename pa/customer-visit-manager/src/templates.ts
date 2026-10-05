@@ -13,12 +13,17 @@ export type EmailTemplateId = string
 export type HeroKind = 'standard' | 'collab' | 'offer'
 
 export interface Section {
-  /** grid: 2列の商品グリッド / feature: 1件ずつ大きく見せる特集枠 */
+  /** grid: 商品グリッド(列の数は columns) / feature: 1件ずつ大きく見せる特集枠 */
   kind: 'grid' | 'feature'
   slots: number
+  /** grid の列の数(省略は 2。3 列と 3 点にすると、横並び 1 行になる)。feature では使わない */
+  columns?: 2 | 3
   /** true のとき、枠内の先頭の商品のカテゴリを見出しに出す */
   categoryHeading?: boolean
 }
+
+/** グリッドの列の数(以前のテンプレートや feature は、列の指定を持たないので 2 として扱う) */
+export const gridColumns = (sec: Section): 2 | 3 => (sec.kind === 'grid' && sec.columns === 3 ? 3 : 2)
 
 export interface EmailTemplate {
   label: string
