@@ -83,10 +83,11 @@ BEGIN
   -- scoped to it. Set it to a script job id to analyze an older run, or to the empty
   -- string '' to deliberately report the whole window.
   DECLARE run_job_id STRING DEFAULT NULL;
-  -- Report 5 only: how many characters of a statement make up its "shape". Raise it
-  -- when unrelated statements are being grouped together, lower it when one statement
-  -- splits into several shapes because a name is inlined into its text.
-  DECLARE statement_shape_length INT64 DEFAULT 90;
+  -- Report 5 only: how many WORDS after the first make up a statement's identity.
+  -- 5 gives "CREATE OR REPLACE TEMP TABLE <name>", which is usually enough to name
+  -- the statement. Raise it when different statements are being grouped together;
+  -- lower it when one statement splits into several rows because a name is inlined.
+  DECLARE statement_shape_length INT64 DEFAULT 5;
 
   -- --------------------------------------------------------------------------
   -- [C] DERIVED / INTERNAL -- from [A]/[B]; DO NOT edit
@@ -395,16 +396,22 @@ BEGIN
   -- batch budgets) or a per-DATASET or per-OBJECT one (not expected, and the thing to
   -- remove).
   --
-  -- shape_length trims the key. Too short and unrelated statements merge; too long
-  -- and the same statement with a different inlined name splits into two shapes.
+  -- The key is the first few WORDS of the statement, which names it without printing
+  -- it: "CREATE OR REPLACE TEMP TABLE batch_object_metadata" rather than ninety
+  -- characters of SQL. statement_shape_length sets how many words follow the first.
   -- --------------------------------------------------------------------------
   SET rendered_sql = FORMAT(
     """
     SELECT
       COUNT(*) AS statements,
       SUM(TIMESTAMP_DIFF(end_time, start_time, SECOND)) AS total_sec,
-      SUM(total_slot_ms) AS total_slot_ms,
-      SUBSTR(REGEXP_REPLACE(query, "[[:space:]]+", " "), 1, @shape_len) AS statement_shape
+      -- The first few WORDS, not the first N characters: a statement is identified by
+      -- its verb and its target ("CREATE OR REPLACE TEMP TABLE batch_object_metadata"),
+      -- and that fits on one line and can be read -- or copied by hand -- at a glance.
+      REGEXP_EXTRACT(
+        REGEXP_REPLACE(query, "[[:space:]]+", " "),
+        CONCAT('^([^ ]+(?: [^ ]+){0,', CAST(@shape_len AS STRING), '})')
+      ) AS statement_head
     FROM `%s.region-%s`.INFORMATION_SCHEMA.JOBS_BY_PROJECT
     WHERE creation_time > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)
       AND query IS NOT NULL
@@ -415,7 +422,7 @@ BEGIN
         OR query LIKE '%%batch_%%'
         OR query LIKE '%%changed_%%'
       )
-    GROUP BY statement_shape
+    GROUP BY statement_head
     ORDER BY statements DESC
     LIMIT @max_rows
     """,
