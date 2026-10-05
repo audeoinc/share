@@ -11,8 +11,9 @@
 -- number LITERALS, comments, whitespace, case and backticks. So two runs of "the
 -- same SQL with different parameters" should already be one object. When hundreds
 -- survive anyway, the parameter is not reaching the SQL as a literal -- the usual
--- cause is a date-suffixed identifier (events_20260101 vs events_20260102), which
--- the tokenizer sees as one IDENTIFIER token and the fingerprint keeps intact.
+-- cause is a digit-bearing identifier (a temp table whose name carries a per-run id,
+-- or a date-suffixed table), which the tokenizer sees as one IDENTIFIER token and the
+-- fingerprint keeps intact.
 --
 -- HOW THE MEASUREMENT WORKS: every object in the registry is already distinct under
 -- the current fingerprint, so COUNT(*) is the baseline for free. Grouping those rows
@@ -116,13 +117,14 @@ BEGIN
   DECLARE inspect_members_per_group INT64 DEFAULT 5;
   -- MINIMUM LENGTH OF A DIGIT RUN TO FOLD. This is the actual design choice, because
   -- folding from one digit up also merges things that are genuinely different:
-  -- `table_v1` and `table_v2` are two tables, while `events_20260101` and
-  -- `events_20260102` are two days of one. A date suffix is 6-8 digits, so a floor of
-  -- 6 keeps the first pair apart and still collapses the second.
+  -- `table_v1` and `table_v2` are two tables, and a 6-digit product code is not a
+  -- date, while a 20-digit run in a temp table name is a per-run id and nothing else.
+  -- The default floor of 10 comes from report 4 on the real registry: it folds the
+  -- machine-generated ids and leaves every shorter run alone.
   -- Report 1 reports EVERY threshold in this array, one row each, so the cost of being
   -- cautious is visible instead of assumed. Reports 2 and 3 use detail_min_digit_run.
-  DECLARE digit_run_thresholds ARRAY<INT64> DEFAULT [1, 2, 4, 6, 8];
-  DECLARE detail_min_digit_run INT64 DEFAULT 6;
+  DECLARE digit_run_thresholds ARRAY<INT64> DEFAULT [1, 2, 4, 6, 8, 10, 12];
+  DECLARE detail_min_digit_run INT64 DEFAULT 10;
 
   -- --------------------------------------------------------------------------
   -- [C] DERIVED / INTERNAL -- from [A]; DO NOT edit
@@ -518,19 +520,29 @@ BEGIN
   -- appear INSIDE identifier-shaped tokens, by run length.
   --
   -- This is the report that decides the rule, because a length threshold cannot
-  -- tell a date from a product code. A run of 6 digits is `202601` (a month) or
-  -- `123456` (a code), and folding the second one merges two genuinely different
-  -- objects. Report 1 says how MUCH each threshold collapses; this says WHETHER it
-  -- should.
+  -- tell a date from a product code. A run of 6 digits is `202601` (a month),
+  -- `260101` (a two-digit-year date) or `123456` (a code), and folding the last one
+  -- merges two genuinely different objects. Report 1 says how MUCH each threshold
+  -- collapses; this says WHETHER it should.
   --
-  -- date_shaped counts the runs that parse as a plausible date: (19|20)YY, a month
-  -- 01-12, and optionally a day 01-31 -- so 6 or 8 digits, and only with a leading
-  -- century. `123456` is not date-shaped; `202601` is. Read it as a RATE per length:
-  --   date_shaped close to occurrences -> the runs at that length are dates, and
-  --                                       folding them is what we want
-  --   date_shaped close to zero        -> codes or ids; folding them is a FALSE MERGE
-  -- example_runs and example_identifiers are there to confirm by eye, since a product
-  -- code that happens to start with 20 would be counted as date-shaped.
+  -- THE THREE SHAPE COUNTS, which is how a code is told from a date:
+  --   date_century  (19|20)YY, month 01-12, optional day 01-31 -- so 6 or 8 digits
+  --                 with a century. `202601` and `20260101` match; `123456` does not.
+  --   date_yy_mmdd  YYMMDD without a century: any 2 digits, then a valid month and a
+  --                 valid day. `260101` matches.
+  --   neither       everything else.
+  -- A RANDOM 6-digit number passes date_yy_mmdd by chance about 4% of the time
+  -- (12/100 for the month times 31/100 for the day), so this count separates the two
+  -- readings cleanly: near 100% means dates, near 4% means codes that happen to land
+  -- on a valid month and day.
+  --
+  -- distinct_year_prefix is the second, independent check: dates drawn from a lookback
+  -- window share a handful of leading 2-digit values (one or two years), while codes
+  -- spread across many. min_value / max_value bound the range for the same reason.
+  --
+  -- sample_values and sample_identifiers are plain comma-joined STRINGS, not ARRAYs,
+  -- so they can be read (and pasted) straight out of the result grid. The identifier
+  -- samples carry real object names: they are for looking at, not for sharing.
   --
   -- Identifier-shaped means a token starting with a letter or underscore, so digits
   -- in numeric literals and in quoted strings are not counted -- the fingerprint
@@ -565,9 +577,22 @@ BEGIN
           digit_run,
           '^(19|20)[0-9][0-9](0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])?$'
         )
-      ) AS date_shaped,
-      ARRAY_AGG(DISTINCT digit_run ORDER BY digit_run LIMIT 5) AS example_runs,
-      ARRAY_AGG(DISTINCT identifier ORDER BY identifier LIMIT 5) AS example_identifiers
+      ) AS date_century,
+      COUNTIF(
+        REGEXP_CONTAINS(
+          digit_run,
+          '^[0-9][0-9](0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])$'
+        )
+      ) AS date_yy_mmdd,
+      COUNT(DISTINCT SUBSTR(digit_run, 1, 2)) AS distinct_year_prefix,
+      MIN(digit_run) AS min_value,
+      MAX(digit_run) AS max_value,
+      ARRAY_TO_STRING(
+        ARRAY_AGG(DISTINCT digit_run ORDER BY digit_run LIMIT 10), ' '
+      ) AS sample_values,
+      ARRAY_TO_STRING(
+        ARRAY_AGG(DISTINCT identifier ORDER BY identifier LIMIT 5), ' '
+      ) AS sample_identifiers
     FROM identifier_runs
     GROUP BY digit_run_length
     ORDER BY digit_run_length
