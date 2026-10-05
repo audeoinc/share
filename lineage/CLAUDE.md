@@ -256,7 +256,7 @@ npm test                        # build + verify:bundle + test:release を一括
   `process_generated_tables=FALSE` が回避策になっていた。
   **ループ単位を (dataset, batch_no) に変更**。`changed_object_batches` が各オブジェクトに
   「自分より前の SQL 累積長」から batch_no を割り当て、`analysis_batch_max_sql_bytes`
-  （既定 200000）で切る。`analysis_batch_max_objects`（既定 200）は「極小多数」用の
+  （既定 1200000）で切る。`analysis_batch_max_objects`（既定 1200）は「極小多数」用の
   二次上限。discovery 先行パスと解析ループは同じ `analysis_batches` を読むので**両者の
   バッチは必ず一致**する。**排他的プレフィックスで切る**ので、予算超えの単体オブジェクトは
   単独バッチになる（隣を巻き込まない）。GREATEST の両項が単調増加なのでバッチは連続区間、
