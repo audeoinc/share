@@ -224,5 +224,9 @@
 | 13-product-detail | 商品の詳細(売上・在庫のグラフ、販売方針、基本情報) | 商品情報 |
 | 14-template-manager | テンプレート管理(標準 + 作成したもの) | テンプレート |
 | 15-template-custom | 作成したテンプレート(特集 1 点 + 3 列グリッド) | テンプレート |
+| 16-template-new | 「新規作成」の入力フォーム(名前・説明・ヒーローの種類・セクション) | テンプレートの作成 |
+| 17-template-duplicate-edit | 標準を「複製して編集」した画面(名前が「…のコピー」になる) | テンプレートの作成 |
+| 18-template-add-section | 「セクションを追加」で、2 つめのセクションを足した状態 | テンプレートの編集 |
+| 19-template-3col | 2 つめを「グリッド(3列)・3点」にして名前を付けた状態(右の見取り図に反映) | テンプレートの編集 |
 
 作り直すとき: `npm run screenshots`(Edge が必要。サーバーは自動で起動)。仕組みは `vite.mock.config.ts`(サービスを `src/mock` に差し替え)と `scripts/screenshots.mjs`。

@@ -56,10 +56,13 @@ for (let i = 0; i < 60; i++) {
 const browser = await puppeteer.connect({ browserURL: `http://127.0.0.1:${DEBUG_PORT}`, defaultViewport: { width: 1600, height: 960, deviceScaleFactor: 2 } })
 
 /** 見出しなどの文字(前方一致)を持つ、いちばん内側の要素を押す */
-async function click(page, text, { tag = 'button,[role=tab],[role=menuitem],[role=option],div,span', nth = 0, wait = 350 } = {}) {
+async function click(page, text, { tag = 'button,[role=tab],[role=menuitem],[role=option],div,span', nth = 0, wait = 350, top = false } = {}) {
   const ok = await page.evaluate(
-    (text, tag, nth) => {
-      const els = [...document.querySelectorAll(tag)].filter((e) => {
+    (text, tag, nth, top) => {
+      // top: いちばん手前のダイアログの中だけを探す(背面の同名のボタンを押さない)
+      const dialogs = document.querySelectorAll('[role=dialog]')
+      const root = top && dialogs.length ? dialogs[dialogs.length - 1] : document
+      const els = [...root.querySelectorAll(tag)].filter((e) => {
         const r = e.getBoundingClientRect()
         return r.width > 0 && r.height > 0 && (e.textContent ?? '').trim().replace(/^[✓●\s]+/, '').startsWith(text)
       })
@@ -74,6 +77,7 @@ async function click(page, text, { tag = 'button,[role=tab],[role=menuitem],[rol
     text,
     tag,
     nth,
+    top,
   )
   if (!ok) throw new Error(`見つかりません: ${text}`)
   await sleep(wait)
@@ -108,6 +112,7 @@ const shot = async (page, name, clip) => {
 
 async function fresh(lang) {
   const page = await browser.newPage()
+  page.on('dialog', (d) => d.accept()) // 「編集中の内容を破棄しますか」などの確認は、承諾する
   await page.emulateTimezone('Asia/Tokyo')
   await page.evaluateOnNewDocument((lang) => localStorage.setItem('ui.lang', lang), lang)
   await page.goto(URL, { waitUntil: 'networkidle0' })
@@ -117,7 +122,8 @@ async function fresh(lang) {
 
 const dialogShot = async (page, name) => {
   const rect = await page.evaluate(() => {
-    const d = document.querySelector('[role=dialog]')
+    const all = document.querySelectorAll('[role=dialog]')
+    const d = all[all.length - 1]
     if (!d) return null
     const r = d.getBoundingClientRect()
     return { x: r.x, y: r.y, width: r.width, height: r.height }
@@ -220,14 +226,42 @@ const SCENES = {
     await click(page, 'Feature + 3-column grid', { tag: 'div,span' })
     await sleep(600)
     await dialogShot(page, `${L}-15-template-custom`)
+    // 新規作成
+    await click(page, T(L, '新規作成', 'New'), { tag: 'button', top: true })
+    await sleep(600)
+    await dialogShot(page, `${L}-16-template-new`)
+    // 標準を複製して編集 → セクションを足す
+    await click(page, 'Standard Hero + 4 Grid Items', { tag: 'div,span', top: true })
+    await sleep(500)
+    await click(page, T(L, '複製して編集', 'Duplicate to edit'), { tag: 'button', top: true })
+    await sleep(600)
+    await dialogShot(page, `${L}-17-template-duplicate-edit`)
+    await click(page, T(L, 'セクションを追加', 'Add a section'), { tag: 'button', top: true })
+    await sleep(500)
+    await dialogShot(page, `${L}-18-template-add-section`)
+    // 2 つめのセクションを 3 列グリッド(3 点)にして、名前を付ける
+    const selects = await page.$$('[role=dialog]:last-of-type select')
+    await selects[2].select('grid3')
+    await selects[3].select('3')
+    const name = await page.$('[role=dialog]:last-of-type input')
+    if (name) {
+      await name.click()
+      await page.keyboard.down('Control')
+      await page.keyboard.press('KeyA')
+      await page.keyboard.up('Control')
+      await name.type(T(L, '特集 + 3列グリッド', 'Feature + 3-column grid (copy)'))
+    }
+    await sleep(500)
+    await dialogShot(page, `${L}-19-template-3col`)
     await closeDialog(page)
   },
 }
 
 try {
-  for (const L of ['ja', 'en']) {
+  for (const L of (process.env.LANGS ?? 'ja,en').split(',')) {
     const page = await fresh(L)
     for (const [name, fn] of Object.entries(SCENES)) {
+      if (process.env.ONLY && !process.env.ONLY.split(',').includes(name)) continue
       try {
         await fn(page, L)
       } catch (e) {
