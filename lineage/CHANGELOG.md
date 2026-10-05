@@ -1,5 +1,27 @@
 # 1.5.0-032
 
+- A batch may now span datasets (`analysis_batch_group_datasets`, default TRUE), so a
+  dataset holding one changed View no longer costs a whole iteration.
+  The loop body runs about 60 BigQuery statements per batch -- the UDF call plus the
+  publish into direct_dependency / impact / diagnostics / column usage and the
+  registry updates -- and each is a job whose startup cost does not depend on how many
+  objects the batch holds. With a per-dataset batch key, a region with 58 datasets
+  spent ~3,500 statements on work that fits in one batch. Measured symptom: STEP 3
+  grinding through "normal" datasets long after the ephemeral ones were done, with
+  almost no Views in them.
+  Grouping was impossible when the loop ran one UDF call per dataset for memory; the
+  byte and object budgets took that job over, leaving the dataset as nothing but a
+  grouping key -- the body used it only to select the batch's rows and to print
+  progress. The key is now a `batch_group` column, '' when batches may span datasets
+  and the dataset name when they may not, carried through `changed_object_batches` and
+  `all_changed_with_discovery` so the discovery pre-pass and the analysis loop still
+  agree on batch membership. Ordering inside a group is by dataset first, so a batch
+  spans as few datasets as the budget allows.
+  Set it FALSE if a mixed batch pushes the UDF's metadata payload over the heap: a
+  batch spanning datasets references more distinct source tables than either would
+  alone, and the budgets bound SQL text, not metadata. The resource-error handler
+  already survives that; a per-dataset batch just makes the failure smaller.
+
 - An object that comes back from `is_active = FALSE` is now re-analyzed. Both registry
   MERGEs add `OR target.is_active = FALSE` to the `is_changed` expression.
   Symptom (found while answering "does a weekly statement get re-analyzed?"): a
