@@ -15,6 +15,16 @@
 --             how long the batch between them took. The payload byte counts still
 --             need the job's own result: job_id is what to open in job history.
 --
+--   Report 3  Where did the run's time go? Every statement, slowest first, with
+--             wall time against slot time -- which separates "waiting for a job to
+--             start" from "doing work", and so says whether to run fewer statements
+--             or write better ones.
+--
+--   Report 4  The same time grouped into the phases of a run (STEP 1/2/3/4), so the
+--             next thing to optimize is chosen from a share of the clock rather than
+--             a guess. Labels are matched from SQL text: a heuristic, good enough to
+--             rank phases and not to audit them.
+--
 --   Report 2  Which statement actually failed, and with what error?
 --             "Resource exceeded during query execution: UDF out of memory" shows up
 --             here against the CREATE OR REPLACE TEMP TABLE batch_udf_results
@@ -177,5 +187,130 @@ BEGIN
   USING
     lookback_hours AS hours,
     row_limit AS max_rows,
+    lineage_statements_only AS lineage_only;
+
+  -- --------------------------------------------------------------------------
+  -- Report 3: WHERE THE TIME WENT -- the run's statements, slowest first.
+  --
+  -- A BigQuery script records every statement as a child job with its own timings, so
+  -- a finished run can be taken apart without adding a single marker to 03. This is
+  -- the first thing to read when a run is slower than expected: the top rows name the
+  -- statements to attack, and query_head says which they are.
+  --
+  -- elapsed_sec is wall time. slot_ms and bytes are there to tell two different kinds
+  -- of slow apart: a statement with seconds of wall time and almost no slot time or
+  -- bytes was waiting (job startup, queueing), and no amount of query tuning will help
+  -- it -- only running fewer statements will. One with large slot time is doing real
+  -- work and is worth optimizing as a query.
+  -- --------------------------------------------------------------------------
+  SET rendered_sql = FORMAT(
+    """
+    SELECT
+      TIMESTAMP_DIFF(end_time, start_time, SECOND) AS elapsed_sec,
+      total_slot_ms,
+      total_bytes_processed,
+      creation_time,
+      job_id,
+      SUBSTR(REGEXP_REPLACE(query, "[[:space:]]+", " "), 1, 160) AS query_head
+    FROM `%s.region-%s`.INFORMATION_SCHEMA.JOBS_BY_PROJECT
+    WHERE creation_time > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)
+      AND query IS NOT NULL
+      AND (
+        NOT @lineage_only
+        OR query LIKE '%%lnge_%%'
+        OR query LIKE '%%batch_%%'
+        OR query LIKE '%%changed_%%'
+      )
+    ORDER BY elapsed_sec DESC
+    LIMIT @max_rows
+    """,
+    jobs_project_id,
+    @@location
+  );
+
+  EXECUTE IMMEDIATE rendered_sql
+  USING
+    lookback_hours AS hours,
+    row_limit AS max_rows,
+    lineage_statements_only AS lineage_only;
+
+  -- --------------------------------------------------------------------------
+  -- Report 4: the same time, grouped into the phases of a 03 run.
+  --
+  -- Report 3 says which statements are slow; this says which PART OF THE PIPELINE
+  -- they add up to, which is what decides where to spend effort. Read total_sec as a
+  -- share of the run, and statements next to it: a phase with many statements and
+  -- little slot time is paying job startup and gets faster by running fewer
+  -- statements; a phase with few statements and high slot time needs a better query.
+  --
+  -- The labels are matched from the SQL text, so they are a HEURISTIC, not an
+  -- instrumented measurement. They are good enough to say "STEP 2 is half the run"
+  -- and not good enough to audit. A statement that matches nothing lands in
+  -- 'other / unclassified'; if that bucket is large, read report 3 instead of
+  -- trusting this one. The CASE is ordered -- the first match wins -- so the more
+  -- specific patterns come first.
+  -- --------------------------------------------------------------------------
+  SET rendered_sql = FORMAT(
+    """
+    SELECT
+      CASE
+        WHEN query LIKE '%%batch_udf_results%%' THEN 'STEP3 UDF analysis'
+        WHEN query LIKE '%%source_discovery_only%%'
+          OR query LIKE '%%changed_definitions_with_discovery%%'
+          THEN 'STEP3 discovery pre-pass'
+        WHEN query LIKE '%%batch_object_metadata%%'
+          OR query LIKE '%%current_target_columns%%'
+          THEN 'STEP3 column metadata'
+        WHEN query LIKE '%%batch_staged_%%'
+          OR query LIKE '%%batch_object_status%%'
+          OR query LIKE '%%batch_analysis_input%%'
+          THEN 'STEP3 staging'
+        WHEN query LIKE '%%ANALYSIS_BATCH_PAYLOAD%%'
+          OR query LIKE '%%processing_step%%'
+          THEN 'progress notices'
+        WHEN query LIKE '%%lnge_t_impact%%' THEN 'STEP4 impact'
+        WHEN query LIKE '%%lnge_t_object_dependency%%'
+          OR query LIKE '%%lnge_t_column_usage_impact%%'
+          THEN 'STEP4b static report tables'
+        WHEN query LIKE '%%lnge_t_unanalyzed_definition%%'
+          THEN 'STEP5 unanalyzed snapshot'
+        WHEN query LIKE '%%INFORMATION_SCHEMA.JOBS%%'
+          OR query LIKE '%%lnge_m_job_registry%%'
+          THEN 'STEP2 job collection'
+        WHEN query LIKE '%%INFORMATION_SCHEMA.VIEWS%%'
+          OR query LIKE '%%INFORMATION_SCHEMA.TABLES%%'
+          OR query LIKE '%%INFORMATION_SCHEMA.SCHEMATA%%'
+          THEN 'STEP1 metadata discovery'
+        WHEN query LIKE '%%lnge_t_direct_dependency%%'
+          OR query LIKE '%%lnge_t_lineage_diagnostic%%'
+          OR query LIKE '%%lnge_t_column_usage%%'
+          OR query LIKE '%%lnge_m_definition_registry%%'
+          THEN 'STEP3 publish'
+        ELSE 'other / unclassified'
+      END AS phase,
+      COUNT(*) AS statements,
+      SUM(TIMESTAMP_DIFF(end_time, start_time, SECOND)) AS total_sec,
+      ROUND(AVG(TIMESTAMP_DIFF(end_time, start_time, SECOND)), 1) AS avg_sec,
+      MAX(TIMESTAMP_DIFF(end_time, start_time, SECOND)) AS max_sec,
+      SUM(total_slot_ms) AS total_slot_ms
+    FROM `%s.region-%s`.INFORMATION_SCHEMA.JOBS_BY_PROJECT
+    WHERE creation_time > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)
+      AND query IS NOT NULL
+      AND (
+        NOT @lineage_only
+        OR query LIKE '%%lnge_%%'
+        OR query LIKE '%%batch_%%'
+        OR query LIKE '%%changed_%%'
+      )
+    GROUP BY phase
+    ORDER BY total_sec DESC
+    """,
+    jobs_project_id,
+    @@location
+  );
+
+  EXECUTE IMMEDIATE rendered_sql
+  USING
+    lookback_hours AS hours,
     lineage_statements_only AS lineage_only;
 END;
