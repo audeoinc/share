@@ -1167,6 +1167,15 @@ BEGIN
           target.is_changed = (
             target.is_changed
             OR target.definition_hash IS DISTINCT FROM source.definition_hash
+            -- A row coming back from is_active = FALSE has NO dependency or
+            -- diagnostic rows left: STEP 3 deletes the repository rows of every
+            -- inactive definition. Re-activating it without re-analyzing would leave
+            -- it active and edgeless until its SQL happens to change -- silently
+            -- missing lineage rather than visibly unanalyzed. This matters most for
+            -- ephemeral objects on a WEEKLY schedule: they age out after
+            -- incremental_lookback_days, come back on the next run with an identical
+            -- fingerprint, and would never be analyzed again.
+            OR target.is_active = FALSE
           ),
           target.is_active = TRUE,
           target.analysis_status = CASE
@@ -1824,6 +1833,15 @@ BEGIN
           target.is_changed = (
             target.is_changed
             OR target.definition_hash IS DISTINCT FROM source.definition_hash
+            -- A row coming back from is_active = FALSE has NO dependency or
+            -- diagnostic rows left: STEP 3 deletes the repository rows of every
+            -- inactive definition. Re-activating it without re-analyzing would leave
+            -- it active and edgeless until its SQL happens to change -- silently
+            -- missing lineage rather than visibly unanalyzed. This matters most for
+            -- ephemeral objects on a WEEKLY schedule: they age out after
+            -- incremental_lookback_days, come back on the next run with an identical
+            -- fingerprint, and would never be analyzed again.
+            OR target.is_active = FALSE
           ),
           target.is_active = TRUE,
           target.analysis_status = CASE

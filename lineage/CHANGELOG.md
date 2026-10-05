@@ -1,5 +1,21 @@
 # 1.5.0-032
 
+- An object that comes back from `is_active = FALSE` is now re-analyzed. Both registry
+  MERGEs add `OR target.is_active = FALSE` to the `is_changed` expression.
+  Symptom (found while answering "does a weekly statement get re-analyzed?"): a
+  generated statement on a WEEKLY schedule ages out after
+  `incremental_lookback_days` (default 3) -- is_active = FALSE, is_changed = FALSE --
+  and STEP 3's orphan cleanup deletes its dependency and diagnostic rows. When it runs
+  again the next week, the MERGE matches the same `fp_<fingerprint>` row, the hash is
+  identical, so `is_changed` stayed FALSE: the object was re-activated and NEVER
+  re-analyzed. It sat in the repository active and edgeless until its SQL happened to
+  change -- silently missing lineage rather than visibly unanalyzed.
+  The condition is exactly right as "was inactive", not "is ephemeral": the cleanup
+  deletes the rows of every inactive definition, so a dropped-and-recreated View or
+  persistent table had the same hole.
+  Cost: a returning object pays one analysis, which is what it owes -- its edges have
+  to be rebuilt. Nothing changes for an object that never went inactive.
+
 - STEP 3 gains `analysis_max_batches_per_run` (default 0 = no limit), which bounds a
   run's WALL CLOCK rather than its batch size.
   The existing budgets decide how big a batch is, not how many there are, so a first
