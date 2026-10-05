@@ -1,5 +1,32 @@
 # 1.5.0-032
 
+- `12_ephemeral_sql_similarity.sql` report 1 now reports ONE ROW PER DIGIT-RUN
+  THRESHOLD (`digit_run_thresholds`, default 1 / 2 / 4 / 6 / 8) instead of a single
+  row that folded every digit. The threshold is the actual design decision: folding
+  from one digit up also merges things that are genuinely different (`table_v1` and
+  `table_v2` are two tables, where `events_20260101` and `events_20260102` are two
+  days of one), and a date suffix is 6-8 digits, so a floor of 6 keeps the first pair
+  apart. One run now shows what the cautious rule costs instead of assuming it.
+  Reports 2 and 3 take `detail_min_digit_run` (default 6) so the groups they list are
+  the ones the chosen row of report 1 counted.
+  The query is assembled per threshold -- one `g_<n>` CTE and one UNION ALL branch
+  each -- so every digit pattern stays a literal in the generated SQL; a
+  column-valued regex would be the obvious alternative and is not worth the risk. The
+  shared work (normalizing, joining to the source sets) stays in one `joined` CTE.
+  Also: the CTE named `groups` was a GoogleSQL reserved keyword (the window-frame unit
+  in ROWS | RANGE | GROUPS) and made report 3 fail with "Expected keyword SELECT but
+  got keyword GROUPS", surfacing as "Invalid EXECUTE IMMEDIATE". Renamed, and report
+  3's final SELECT now joins with an explicit ON through a `picked` CTE instead of
+  USING + QUALIFY.
+
+  FIRST MEASUREMENT (min_digit_run = 1): 4,814 active ephemeral objects collapse to
+  1,420 groups -- 3,394 removable (70%), and 13,891,890 -> 2,655,350 characters of
+  SQL (81% less), which is the figure that predicts STEP 3's runtime. Of the
+  removable objects only 63 are lossy (their group members resolve to different
+  source sets), 561 are lossless and 2,770 are unknown because no member of their
+  group has ever been analyzed -- itself a measure of the ephemeral backlog the OOM
+  skips left behind.
+
 - Added `sql/maintenance/12_ephemeral_sql_similarity.sql`, a read-only report that
   measures how many EPHEMERAL objects are "the same SQL with different parameters"
   and whether collapsing them would lose lineage.

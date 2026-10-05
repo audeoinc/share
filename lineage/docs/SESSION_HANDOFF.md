@@ -905,6 +905,33 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   - レポート 2：グループ一覧と `distinct_source_sets`（`lnge_t_direct_dependency` から算出。
     1 = 畳んでもロスレス、>1 = **エッジを捨てる**、0 = 未解析なので判断材料なし）。
   - レポート 3：上位グループをメンバーごとに並べて出力。**何が違うのかを目で見る**ため。
+- **実測（min_digit_run = 1、2026-10-05）**：
+
+  | 列 | 値 |
+  |---|---|
+  | `objects_now` | 4,814 |
+  | `groups_after` | 1,420 |
+  | `objects_removable` | 3,394（70%） |
+  | `lossless_removable` | 561 |
+  | `lossy_removable` | **63**（removable の 1.9%） |
+  | `unknown_removable` | 2,770 |
+  | `sql_bytes_now` → `sql_bytes_after` | 13,891,890 → 2,655,350（**81% 減**） |
+
+  STEP 3 の所要時間は SQL バイト量にほぼ比例するので、効くのは最後の行。
+  根拠のあるグループ（561+63）のうちロスは 10%。`unknown` が 2,770 と大きいのは
+  ephemeral の大半が未解析のまま滞留している（OOM スキップ分を含む）ことの裏返しで、
+  畳めばその滞留も 1,420 件・2.66M 文字に縮む。
+- **しきい値がむしろ本題**：上記は 1 桁から畳んだ数字なので、`table_v1` と `table_v2`
+  のような「1 桁違いで本当に別物」も同一視している。日付サフィックスだけを狙うなら
+  **6 桁以上**に限定する方が安全。レポート 1 は `digit_run_thresholds`
+  （既定 1/2/4/6/8）の**各しきい値を 1 行ずつ**出すので、慎重側の代償が 1 回の実行で
+  見える。レポート 2・3 は `detail_min_digit_run`（既定 6）を使う。
+  生成 SQL はしきい値ごとに `g_<n>` CTE ＋ UNION ALL ブランチを組み立てる形にして、
+  **数字パターンを必ずリテラル**に保っている（列値の正規表現は避けた）。
+- **ハマりどころ**：CTE 名に `groups` は使えない。`GROUPS` は GoogleSQL の予約語
+  （ウィンドウフレームの `ROWS | RANGE | GROUPS`）で、
+  `Expected keyword SELECT but got keyword GROUPS` ＝ 外からは
+  `Invalid EXECUTE IMMEDIATE` として見える。
 - **対処方針（測定後に判断）**：ユーザーが挙げた「UDF で事前に弾いて解析対象外にする」より、
   **指紋を数字に鈍感にして代表 1 件に畳む**方が良い。前者は系統ごと lineage を失うが、
   後者は代表の lineage が残るので DAG が切れない。

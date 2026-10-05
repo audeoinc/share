@@ -33,6 +33,14 @@
 -- Report 3 then opens the biggest groups up member by member, so what actually
 -- differs between them is visible by eye rather than inferred.
 --
+-- HOW MUCH TO FOLD IS THE REAL DECISION: folding from one digit up also merges things
+-- that are genuinely different -- `table_v1` and `table_v2` are two tables, while
+-- `events_20260101` and `events_20260102` are two days of one. Report 1 therefore
+-- reports one row per threshold in digit_run_thresholds (a floor on the length of a
+-- digit run before it is folded), so the cost of the cautious rule is measured rather
+-- than assumed: if the 6-digit row collapses nearly as much as the 1-digit row, there
+-- is no reason to take the 1-digit risk. Reports 2 and 3 use detail_min_digit_run.
+--
 -- Read-only report; changes nothing. Run it to decide whether extending
 -- fingerprintSqlForBigQuery is worth the one-off re-registration it would cause
 -- (the ephemeral definition_hash IS the fingerprint, so changing it re-identifies
@@ -40,7 +48,8 @@
 --
 -- NOTE ON THE NORMALIZATION: the key re-does on raw text what the fingerprint does on
 -- tokens (strip backticks, collapse quoted literals to '?', collapse whitespace,
--- uppercase) and then folds digit runs to '#'. The fingerprint's own normalizations
+-- uppercase) and then folds digit runs of at least min_digit_run digits to '#'. The
+-- fingerprint's own normalizations
 -- are repeated on purpose: without them, two definitions that differ in BOTH a digit
 -- and a space would not group here even though a digit-aware fingerprint would collapse
 -- them, so the measurement would understate the gain. Digits are folded wholesale, so
@@ -96,6 +105,15 @@ BEGIN
   -- members are printed next to each other so the differing part is visible by eye.
   DECLARE inspect_group_count INT64 DEFAULT 3;
   DECLARE inspect_members_per_group INT64 DEFAULT 5;
+  -- MINIMUM LENGTH OF A DIGIT RUN TO FOLD. This is the actual design choice, because
+  -- folding from one digit up also merges things that are genuinely different:
+  -- `table_v1` and `table_v2` are two tables, while `events_20260101` and
+  -- `events_20260102` are two days of one. A date suffix is 6-8 digits, so a floor of
+  -- 6 keeps the first pair apart and still collapses the second.
+  -- Report 1 reports EVERY threshold in this array, one row each, so the cost of being
+  -- cautious is visible instead of assumed. Reports 2 and 3 use detail_min_digit_run.
+  DECLARE digit_run_thresholds ARRAY<INT64> DEFAULT [1, 2, 4, 6, 8];
+  DECLARE detail_min_digit_run INT64 DEFAULT 6;
 
   -- --------------------------------------------------------------------------
   -- [C] DERIVED / INTERNAL -- from [A]; DO NOT edit
@@ -106,6 +124,11 @@ BEGIN
   DECLARE registry_fqn STRING;
   DECLARE direct_dependency_fqn STRING;
   DECLARE rendered_sql STRING;
+  -- Report 1 is assembled per threshold (one CTE and one UNION ALL branch each), so
+  -- the digit pattern stays a LITERAL in the generated SQL. A column-valued regex
+  -- would be the obvious alternative and is not worth the risk.
+  DECLARE threshold_ctes STRING;
+  DECLARE threshold_branches STRING;
   -- Token extracted from the project id (see project_token_pattern).
   DECLARE project_token STRING;
 
@@ -137,6 +160,12 @@ BEGIN
   ASSERT inspect_group_count >= 1 AS 'inspect_group_count must be >= 1.';
   ASSERT inspect_members_per_group >= 2 AS
     'inspect_members_per_group must be >= 2 (one member alone shows no difference).';
+  ASSERT ARRAY_LENGTH(digit_run_thresholds) >= 1 AS
+    'digit_run_thresholds must hold at least one threshold.';
+  ASSERT NOT EXISTS (
+    SELECT 1 FROM UNNEST(digit_run_thresholds) AS t WHERE t < 1
+  ) AS 'digit_run_thresholds must all be >= 1.';
+  ASSERT detail_min_digit_run >= 1 AS 'detail_min_digit_run must be >= 1.';
 
   SET registry_fqn = FORMAT(
     '%s.%s.%s',
@@ -152,10 +181,18 @@ BEGIN
   );
 
   -- --------------------------------------------------------------------------
-  -- Report 1: how much collapse is available, and how much of it is lossless.
+  -- Report 1: how much collapse is available, how much of it is lossless, and what
+  -- it costs to be cautious about WHICH digits are folded.
+  --
+  -- ONE ROW PER THRESHOLD in digit_run_thresholds. min_digit_run = 1 folds every
+  -- digit run (`table_v1` and `table_v2` become one object, which is wrong if they
+  -- are two tables); min_digit_run = 6 folds only runs long enough to be a date or
+  -- an epoch. Reading the rows top to bottom shows how much of the collapse survives
+  -- the cautious rule -- if the 6 row is close to the 1 row, there is no reason to
+  -- take the risk of the 1 row.
   --
   -- objects_now            what STEP 3 analyzes today
-  -- groups_after           what it would analyze if identifier digits were folded
+  -- groups_after           what it would analyze at this threshold
   -- objects_removable      the difference -- the work that would disappear
   -- lossless_removable     of that, the part whose group members all resolve to the
   --                        SAME source set, so keeping one representative loses nothing
@@ -164,29 +201,86 @@ BEGIN
   -- unknown_removable      members in groups where nothing has been analyzed yet, so
   --                        neither claim can be made. The three add up to
   --                        objects_removable.
+  -- sql_bytes_now/after    total definition length before and after. This is the
+  --                        number that predicts STEP 3's runtime, not the object count.
+  --
+  -- The query is assembled rather than written out: one g_<threshold> CTE and one
+  -- UNION ALL branch per threshold, so each digit pattern is a literal. The shared
+  -- work (normalizing, joining to the source sets) is done once in `joined`.
   -- --------------------------------------------------------------------------
+  SET threshold_ctes = (
+    SELECT STRING_AGG(
+      FORMAT(
+        """
+        , g_%d AS (
+          SELECT
+            REGEXP_REPLACE(norm_base, '[0-9]{%d,}', '#') AS norm_key,
+            COUNT(*) AS members,
+            COUNT(DISTINCT source_set) AS distinct_source_sets,
+            MIN(sql_length) AS keep_sql_bytes
+          FROM joined
+          GROUP BY 1
+        )
+        """,
+        threshold, threshold
+      ),
+      ''
+      ORDER BY threshold
+    )
+    FROM UNNEST(digit_run_thresholds) AS threshold
+  );
+
+  SET threshold_branches = (
+    SELECT STRING_AGG(
+      FORMAT(
+        """
+        SELECT
+          %d AS min_digit_run,
+          (SELECT objects_now FROM totals) AS objects_now,
+          (SELECT COUNT(*) FROM g_%d) AS groups_after,
+          (SELECT SUM(members) - COUNT(*) FROM g_%d) AS objects_removable,
+          (
+            SELECT COALESCE(SUM(members - 1), 0) FROM g_%d
+            WHERE members > 1 AND distinct_source_sets = 1
+          ) AS lossless_removable,
+          (
+            SELECT COALESCE(SUM(members - 1), 0) FROM g_%d
+            WHERE members > 1 AND distinct_source_sets > 1
+          ) AS lossy_removable,
+          -- COUNT(DISTINCT source_set) ignores NULLs, so a group no member of which
+          -- was ever analyzed scores 0 -- not agreement, just no evidence.
+          (
+            SELECT COALESCE(SUM(members - 1), 0) FROM g_%d
+            WHERE members > 1 AND distinct_source_sets = 0
+          ) AS unknown_removable,
+          (SELECT sql_bytes_now FROM totals) AS sql_bytes_now,
+          (SELECT SUM(keep_sql_bytes) FROM g_%d) AS sql_bytes_after
+        """,
+        threshold, threshold, threshold, threshold, threshold, threshold, threshold
+      ),
+      ' UNION ALL '
+      ORDER BY threshold
+    )
+    FROM UNNEST(digit_run_thresholds) AS threshold
+  );
+
   SET rendered_sql = FORMAT(
     """
-    WITH ephemeral AS (
+    WITH base AS (
       SELECT
-        object_project, object_dataset, object_name, object_type,
-        definition_text,
+        object_project, object_dataset, object_name,
         LENGTH(definition_text) AS sql_length,
-        -- The measurement key: what the fingerprint already normalizes (backticks,
-        -- quoted literals, whitespace, case) PLUS digit runs inside identifiers.
-        -- Built in that order so events_20260101 -> EVENTS_#. See the header note.
+        -- What the fingerprint already normalizes (backticks, quoted literals,
+        -- whitespace, case) -- digits NOT folded yet, that is the per-threshold part.
         UPPER(
           REGEXP_REPLACE(
             REGEXP_REPLACE(
-              REGEXP_REPLACE(
-                REPLACE(definition_text, '`', ''),
-                "'[^']*'", "'?'"
-              ),
-              '[0-9]+', '#'
+              REPLACE(definition_text, '`', ''),
+              "'[^']*'", "'?'"
             ),
             '[[:space:]]+', ' '
           )
-        ) AS norm_key
+        ) AS norm_base
       FROM `%s`
       WHERE is_active = TRUE
         AND is_ephemeral = TRUE
@@ -210,55 +304,26 @@ BEGIN
       GROUP BY 1, 2, 3
     ),
     joined AS (
-      SELECT e.norm_key, e.sql_length, s.source_set
-      FROM ephemeral AS e
+      SELECT b.norm_base, b.sql_length, s.source_set
+      FROM base AS b
       LEFT JOIN source_sets AS s
-        ON  s.object_project = LOWER(e.object_project)
-        AND s.object_dataset = LOWER(e.object_dataset)
-        AND s.object_name = LOWER(e.object_name)
+        ON  s.object_project = LOWER(b.object_project)
+        AND s.object_dataset = LOWER(b.object_dataset)
+        AND s.object_name = LOWER(b.object_name)
     ),
-    grouped AS (
-      SELECT
-        norm_key,
-        COUNT(*) AS members,
-        COUNT(DISTINCT source_set) AS distinct_source_sets,
-        SUM(sql_length) AS group_sql_bytes,
-        MIN(sql_length) AS keep_sql_bytes
+    totals AS (
+      SELECT COUNT(*) AS objects_now, SUM(sql_length) AS sql_bytes_now
       FROM joined
-      GROUP BY norm_key
     )
-    SELECT
-      (SELECT COUNT(*) FROM ephemeral) AS objects_now,
-      (SELECT COUNT(*) FROM grouped) AS groups_after,
-      (SELECT SUM(members) - COUNT(*) FROM grouped) AS objects_removable,
-      (
-        SELECT COALESCE(SUM(members - 1), 0)
-        FROM grouped
-        WHERE members > 1 AND distinct_source_sets = 1
-      ) AS lossless_removable,
-      (
-        SELECT COALESCE(SUM(members - 1), 0)
-        FROM grouped
-        WHERE members > 1 AND distinct_source_sets > 1
-      ) AS lossy_removable,
-      -- COUNT(DISTINCT source_set) ignores NULLs, so a group no member of which was
-      -- ever analyzed scores 0 -- not evidence of agreement, just no evidence.
-      (
-        SELECT COALESCE(SUM(members - 1), 0)
-        FROM grouped
-        WHERE members > 1 AND distinct_source_sets = 0
-      ) AS unknown_removable,
-      (SELECT SUM(sql_length) FROM ephemeral) AS sql_bytes_now,
-      (SELECT SUM(keep_sql_bytes) FROM grouped) AS sql_bytes_after
     """,
     registry_fqn,
     direct_dependency_fqn
-  );
+  ) || threshold_ctes || threshold_branches || ' ORDER BY min_digit_run';
 
   EXECUTE IMMEDIATE rendered_sql;
 
   -- --------------------------------------------------------------------------
-  -- Report 2: the groups themselves, largest first.
+  -- Report 2: the groups themselves, largest first, at detail_min_digit_run.
   --
   -- Read distinct_source_sets first. 1 means the members' lineage is identical, so
   -- keeping one representative loses nothing. More than 1 means they read different
@@ -275,7 +340,8 @@ BEGIN
         object_project, object_dataset, object_name,
         definition_text,
         LENGTH(definition_text) AS sql_length,
-        -- Same key as report 1 -- keep the two in step.
+        -- Report 1's key at the chosen threshold (detail_min_digit_run), so the
+        -- groups listed here are the ones that row of report 1 counted.
         UPPER(
           REGEXP_REPLACE(
             REGEXP_REPLACE(
@@ -283,7 +349,7 @@ BEGIN
                 REPLACE(definition_text, '`', ''),
                 "'[^']*'", "'?'"
               ),
-              '[0-9]+', '#'
+              '[0-9]{%d,}', '#'
             ),
             '[[:space:]]+', ' '
           )
@@ -342,6 +408,7 @@ BEGIN
     ORDER BY members DESC, group_sql_bytes DESC
     LIMIT @max_rows
     """,
+    detail_min_digit_run,
     registry_fqn,
     direct_dependency_fqn
   );
@@ -368,7 +435,7 @@ BEGIN
         object_name,
         definition_text,
         LENGTH(definition_text) AS sql_length,
-        -- Same key as reports 1 and 2 -- keep the three in step.
+        -- Same key as report 2, at detail_min_digit_run.
         UPPER(
           REGEXP_REPLACE(
             REGEXP_REPLACE(
@@ -376,7 +443,7 @@ BEGIN
                 REPLACE(definition_text, '`', ''),
                 "'[^']*'", "'?'"
               ),
-              '[0-9]+', '#'
+              '[0-9]{%d,}', '#'
             ),
             '[[:space:]]+', ' '
           )
@@ -427,6 +494,7 @@ BEGIN
     WHERE member_no <= @members_each
     ORDER BY group_no, member_no
     """,
+    detail_min_digit_run,
     registry_fqn
   );
 
