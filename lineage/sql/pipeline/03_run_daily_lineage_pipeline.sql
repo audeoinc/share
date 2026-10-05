@@ -396,6 +396,17 @@ DECLARE process_generated_tables BOOL DEFAULT TRUE;
 -- with the window is a handful of set-based statements over a bigger partition range.
 -- STEP 3, which costs ~60 statements per batch, does not grow at all -- it is driven
 -- by is_changed, and a longer window REMOVES the weekly re-analysis churn.
+--
+-- THE TWO ARE NOT INDEPENDENT. The initial window only decides how much history the
+-- FIRST run carries; the incremental window is what the repository then settles at.
+-- Setting initial BELOW incremental is legitimate and sometimes wanted -- the second
+-- run simply collects the missing days and is heavier than a steady-state run, which
+-- splits a large seed across two runs instead of one. Setting initial far ABOVE
+-- incremental buys nothing lasting for ephemeral objects: anything outside the
+-- incremental window is deactivated on the very next run, and its analysis is thrown
+-- away. It still matters for PERSISTENT destinations, whose identity is the table
+-- name rather than the fingerprint, so a long initial window is worth paying when
+-- seeding their lineage and not when seeding ephemeral ones.
 DECLARE initial_lookback_days INT64 DEFAULT 60;
 DECLARE incremental_lookback_days INT64 DEFAULT 8;
 
