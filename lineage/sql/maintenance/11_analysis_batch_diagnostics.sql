@@ -25,6 +25,11 @@
 --             a guess. Labels are matched from SQL text: a heuristic, good enough to
 --             rank phases and not to audit them.
 --
+--   Report 5  Which statement SHAPES ran many times. The cheapest statements hide
+--             from reports 3 and 4, and when a run's cost is its statement count,
+--             those are exactly the ones worth finding: a 0.1s statement run a
+--             hundred times costs more than a 14-second query.
+--
 --   Report 2  Which statement actually failed, and with what error?
 --             "Resource exceeded during query execution: UDF out of memory" shows up
 --             here against the CREATE OR REPLACE TEMP TABLE batch_udf_results
@@ -78,6 +83,10 @@ BEGIN
   -- scoped to it. Set it to a script job id to analyze an older run, or to the empty
   -- string '' to deliberately report the whole window.
   DECLARE run_job_id STRING DEFAULT NULL;
+  -- Report 5 only: how many characters of a statement make up its "shape". Raise it
+  -- when unrelated statements are being grouped together, lower it when one statement
+  -- splits into several shapes because a name is inlined into its text.
+  DECLARE statement_shape_length INT64 DEFAULT 90;
 
   -- --------------------------------------------------------------------------
   -- [C] DERIVED / INTERNAL -- from [A]/[B]; DO NOT edit
@@ -369,4 +378,56 @@ BEGIN
     lookback_hours AS hours,
     lineage_statements_only AS lineage_only,
     run_job_id AS run;
+
+  -- --------------------------------------------------------------------------
+  -- Report 5: REPEATED STATEMENT SHAPES -- the same statement, run many times.
+  --
+  -- Reports 3 and 4 rank by time, which hides the cheapest statements. That is the
+  -- wrong way round when the run's cost is the COUNT: measured on this deployment, a
+  -- run's statements account for well under half its wall clock, and the rest is the
+  -- gap between them -- roughly a second each, paid whether the statement does
+  -- anything or not. A statement taking 0.1s a hundred times is then worth more than
+  -- a 14-second query.
+  --
+  -- So this groups by the SHAPE of the statement -- its first characters, with
+  -- whitespace collapsed -- and ranks by how often that shape ran. A shape with a
+  -- high count is a loop: either a per-batch statement (expected, bounded by the
+  -- batch budgets) or a per-DATASET or per-OBJECT one (not expected, and the thing to
+  -- remove).
+  --
+  -- shape_length trims the key. Too short and unrelated statements merge; too long
+  -- and the same statement with a different inlined name splits into two shapes.
+  -- --------------------------------------------------------------------------
+  SET rendered_sql = FORMAT(
+    """
+    SELECT
+      COUNT(*) AS statements,
+      SUM(TIMESTAMP_DIFF(end_time, start_time, SECOND)) AS total_sec,
+      SUM(total_slot_ms) AS total_slot_ms,
+      SUBSTR(REGEXP_REPLACE(query, "[[:space:]]+", " "), 1, @shape_len) AS statement_shape
+    FROM `%s.region-%s`.INFORMATION_SCHEMA.JOBS_BY_PROJECT
+    WHERE creation_time > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)
+      AND query IS NOT NULL
+      AND (@run IS NULL OR parent_job_id = @run)
+      AND (
+        NOT @lineage_only
+        OR query LIKE '%%lnge_%%'
+        OR query LIKE '%%batch_%%'
+        OR query LIKE '%%changed_%%'
+      )
+    GROUP BY statement_shape
+    ORDER BY statements DESC
+    LIMIT @max_rows
+    """,
+    jobs_project_id,
+    @@location
+  );
+
+  EXECUTE IMMEDIATE rendered_sql
+  USING
+    lookback_hours AS hours,
+    row_limit AS max_rows,
+    lineage_statements_only AS lineage_only,
+    run_job_id AS run,
+    statement_shape_length AS shape_len;
 END;
