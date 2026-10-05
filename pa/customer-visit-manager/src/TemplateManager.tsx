@@ -41,6 +41,9 @@ const layoutValue = (sec: Section): SectionLayout => (sec.kind === 'feature' ? '
 const layoutPatch = (v: SectionLayout): Partial<Section> =>
   v === 'grid3' ? { kind: 'grid', columns: 3, slots: 3 } : { kind: v, columns: undefined }
 
+/** 構成のプレビューの幅。一覧の見取り図(84px)では、枠の数や列が読み取りにくいため、大きく描く */
+const PREVIEW_WIDTH = 220
+
 const NEW_DRAFT: Draft = { name: '', description: '', hero: 'standard', sections: [{ kind: 'grid', slots: 4 }] }
 
 const useStyles = makeStyles({
@@ -68,10 +71,10 @@ const useStyles = makeStyles({
   itemName: { fontWeight: tokens.fontWeightSemibold, fontSize: tokens.fontSizeBase200, overflowWrap: 'anywhere' },
   caption: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200, lineHeight: '16px' },
   editor: { minHeight: 0, overflowY: 'auto', padding: '16px', display: 'grid', rowGap: '14px', alignContent: 'start', minWidth: 0 },
-  editorGrid: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 140px', columnGap: '16px', alignItems: 'start' },
+  // プレビューの欄は、見取り図の大きさ(枠線・余白を含む)に合わせる。固定の幅だと、見取り図の右端が欠ける
+  editorGrid: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', columnGap: '16px', alignItems: 'start' },
   fields: { display: 'grid', rowGap: '14px', minWidth: 0 },
   preview: { display: 'grid', rowGap: '6px', justifyItems: 'start' },
-  previewBox: { zoom: 1.5 },
   heroRow: { display: 'flex', gap: '6px', flexWrap: 'wrap' },
   sectionRow: {
     display: 'flex',
@@ -291,9 +294,7 @@ export function TemplateManager() {
                   </div>
                   <div className={s.preview}>
                     <Text size={200} weight="semibold">{t('構成のプレビュー', 'Layout preview')}</Text>
-                    <div className={s.previewBox}>
-                      <TemplateThumb hero={draft.hero} sections={draft.sections} />
-                    </div>
+                    <TemplateThumb hero={draft.hero} sections={draft.sections} width={PREVIEW_WIDTH} />
                   </div>
                 </div>
               ) : selected ? (
@@ -328,9 +329,7 @@ export function TemplateManager() {
                   </div>
                   <div className={s.preview}>
                     <Text size={200} weight="semibold">{t('構成のプレビュー', 'Layout preview')}</Text>
-                    <div className={s.previewBox}>
-                      <TemplateThumb hero={selected.hero} sections={selected.sections} free={selected.id === 'free'} />
-                    </div>
+                    <TemplateThumb hero={selected.hero} sections={selected.sections} free={selected.id === 'free'} width={PREVIEW_WIDTH} />
                   </div>
                 </div>
               ) : null}
