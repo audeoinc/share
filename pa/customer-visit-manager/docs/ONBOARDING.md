@@ -16,7 +16,7 @@ GitHub の公開リポジトリなので、誰でも中身を見られる。次�
 
 | 対象 | 内容 |
 |---|---|
-| GitHub | リポジトリ `hiroshikatada/share` への書き込み権限(コラボレーターに招待) |
+| GitHub | リポジトリ `audeoinc/share` への書き込み権限(コラボレーターに招待) |
 | Power Platform の環境 | `katada_dev` への参加と、**環境メーカー**(Environment Maker)のロール。アプリを開発・反映するため |
 | Dataverse | 環境のユーザーとして追加し、セキュリティロール **「配信コンテンツプランナー利用者」**(動作確認用)を付ける。テーブルの定義を触る人は、さらに管理者権限 |
 | Power Apps | 開発用のライセンス(Developer プラン、または従量課金の対象) |
@@ -27,7 +27,7 @@ GitHub の公開リポジトリなので、誰でも中身を見られる。次�
 1. **Node.js** をインストールする(動作確認済み: Node 24、npm 11)。
 2. リポジトリを取得する。
    ```bash
-   git clone https://github.com/hiroshikatada/share.git
+   git clone https://github.com/audeoinc/share.git
    cd share/pa/customer-visit-manager
    npm ci
    ```
