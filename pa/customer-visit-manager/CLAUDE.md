@@ -13,8 +13,9 @@ Power Apps Code App(React 19 + TypeScript + Vite + Fluent UI v9)。全体像は 
 2. **勝手に反映・公開しない。** `npm run deploy` / `npx pa app push`(共有のアプリの上書き)、`git push`、共有の変更(`pa app share`)、Dataverse のデータの削除は、**人が指示したときだけ**行う。コミットも、指示があったときに行う。
 3. **画面の見た目は、確認できていないと正直に伝える。** Power Apps のホスト上では、アプリは別ドメインの iframe の中で動くため、自動操作では確認できないことが多い。「型チェック・lint・ビルドは通った。画面は未確認」のように、確認した範囲を分けて報告する。
 4. 小さい変更は、編集ツールで行う。複数ファイルへの一括置換は、スクリプトでもよいが、**改行コード(CRLF / LF の混在)を保つ**こと。
-5. `src/generated/` は自動生成。編集しない。テーブルの列を変えたら、`npx pa app add data-source --connector dataverse --table <論理名> --org-url https://org1d7a6175.crm7.dynamics.com` で作り直す。
-6. 設計や約束事を変えたら、[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)(必要なら、このファイル)を更新する。やり残しは [docs/BACKLOG.md](docs/BACKLOG.md) に書く。
+5. `src/generated/` は自動生成。編集しない。テーブルの列を変えたら、`npx pa app add data-source --connector dataverse --table <論理名> --org-url <組織の URL>` で作り直す。
+6. **このリポジトリは公開されている。** 組織の URL、パスワード・鍵・トークン、個人のメールアドレス、顧客の実データを、コード・ドキュメント・サンプルデータ・コミットメッセージに、書かない。環境の ID は、ツールが必要とする `power.config.json` だけに置く。
+7. 設計や約束事を変えたら、[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)(必要なら、このファイル)を更新する。やり残しは [docs/BACKLOG.md](docs/BACKLOG.md) に書く。
 
 ## コードの約束
 

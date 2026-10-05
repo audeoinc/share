@@ -5,7 +5,7 @@ Power Apps **Code App**(React + TypeScript + Vite)で、データは **Dataverse
 US チームと JP チームが、日本語・英語のどちらでも使える。
 
 - 開発環境(Power Platform): `katada_dev`(環境 ID は `power.config.json` の `environmentId`)
-- Dataverse の組織: `https://org1d7a6175.crm7.dynamics.com`
+- Dataverse の組織の URL: このリポジトリには書かない(公開されているため)。チームの管理者に聞くか、Power Platform 管理センターの環境の詳細で確認する。以降のコマンドの `<組織の URL>` は、これに置き換える。
 - 新しく参加する人は、まず **[docs/ONBOARDING.md](docs/ONBOARDING.md)** を読む。
 
 ## 主な機能

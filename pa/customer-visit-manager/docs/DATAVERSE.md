@@ -1,10 +1,10 @@
 # Dataverse の定義(テーブル・ロール・フロー・サンプルデータ)
 
-環境: `katada_dev`(組織: `https://org1d7a6175.crm7.dynamics.com`)。接頭辞は `cr854_`。
+環境: `katada_dev`。接頭辞は `cr854_`。組織の URL は、公開リポジトリには書かない(チームの管理者に聞くか、管理センターの環境の詳細で確認し、以降の `<組織の URL>` に入れる)。
 テーブルや列を変えたら、このファイルも更新し、生成コード(`src/generated/`)を作り直してコミットする。
 
 ```bash
-npx pa app add data-source --connector dataverse --table <論理名> --org-url https://org1d7a6175.crm7.dynamics.com
+npx pa app add data-source --connector dataverse --table <論理名> --org-url <組織の URL>
 ```
 
 ## 1. テーブル一覧
