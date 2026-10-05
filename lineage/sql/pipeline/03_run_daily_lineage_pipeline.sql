@@ -252,15 +252,24 @@ DECLARE configured_max_impact_rank INT64 DEFAULT 100;
 -- which is recorded and retryable, so they can be set for throughput.
 -- Raise them together: a batch breaks on GREATEST(DIV(bytes, max_bytes),
 -- DIV(index, max_objects)), so lifting one alone leaves the other binding. At the
--- measured ~2,900 characters per ephemeral object, 1,200,000 bytes is about 410
+-- measured ~2,900 characters per ephemeral object, 3,000,000 bytes is about 1,030
 -- objects, so the object cap is the looser of the two at these values.
+--
+-- Where the values came from: a measured run spent 137 seconds inside the analysis
+-- UDF and roughly seven minutes on the ~35 statements per batch that surround it,
+-- almost all of that waiting for jobs to start. The UDF total does not change with
+-- the batch size -- it is proportional to the SQL analyzed -- but everything around
+-- it is paid per batch, so halving the batch count halves it. The ceiling is the
+-- UDF's memory, not its runtime: at 1,200,000 bytes a call took 12.5 seconds, and
+-- nothing says where the heap gives out, so raise these in steps and watch for
+-- SKIPPED_BATCH_UDF_RESOURCE_ERROR.
 -- Lower them if STEP 3 reports out of memory. Only the first run after a large JOBS
 -- collection has batches worth counting -- a successful analysis clears is_changed,
 -- so a steady-state daily run is normally one small batch per dataset.
 -- sql/maintenance/10_pending_analysis_workload.sql reports the volume per dataset,
 -- which is what these should be set against.
-DECLARE analysis_batch_max_sql_bytes INT64 DEFAULT 1200000;
-DECLARE analysis_batch_max_objects INT64 DEFAULT 1200;
+DECLARE analysis_batch_max_sql_bytes INT64 DEFAULT 3000000;
+DECLARE analysis_batch_max_objects INT64 DEFAULT 3000;
 
 -- How many batches ONE RUN may analyze. 0 (default) means all of them.
 --
