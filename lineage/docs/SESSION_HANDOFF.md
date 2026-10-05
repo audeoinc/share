@@ -31,8 +31,8 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 >   "FromParser: JOIN was expected, but found ..."。括弧を剥がす際に
 >   `disableSetOperations` を引き継いでいたのが原因（演算子の種類には非依存）。
 >   テスト `test_v1_5_0_074`。
->   → 現在のバンドル: `sha256 = d7992396d38f568b6d30a44ac7d75183f4563e0f2c22f867a9d7e87d8bee5372`、
->   `465176` bytes。`test:release` **54 本 PASS** / ゴールデン 48 ケース PASS。
+>   → 現在のバンドル: `sha256 = 78636c5006983877f16e0f4da58e92a5b76705f1f4ea7c66a629ade9518bbbad`、
+>   `477745` bytes。`test:release` **60 本 PASS** / ゴールデン 48 ケース PASS。
 >   **エンジン変更のため GCS 再アップロードが必要**。
 > - **本ドキュメントは §4.20 までしか追随していない**。§0.7 を参照。
 
@@ -940,14 +940,55 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   GCS 再アップロード、採番つき回帰テストの追加が必要（CLAUDE.md §4）。
   `distinct_source_sets > 1` のグループが多い場合は、畳む前にそのグループを個別に見る。
 
+## 4.36 指紋を「識別子内の長い数字列」に鈍感にする（エンジン変更）
+
+- **しきい値ごとの実測**（`12_ephemeral_sql_similarity.sql` レポート 1、
+  `objects_now = 4,814` / `sql_bytes_now = 13,891,890`）：
+
+  | min_digit_run | groups_after | objects_removable | lossless | lossy | unknown | sql_bytes_after |
+  |---|---|---|---|---|---|---|
+  | 1 | 1,420 | 3,394 | 561 | 63 | 2,770 | 2,655,350（19%） |
+  | 2 | 1,573 | 3,241 | 501 | 58 | 2,682 | 3,115,939（22%） |
+  | 4 | 2,021 | 2,793 | 377 | 58 | 2,358 | 4,193,092（30%） |
+  | 6 | 2,021 | 2,793 | 377 | 58 | 2,358 | 4,193,092（30%） |
+  | 8 | 4,135 | 679 | 0 | 58 | 621 | 12,560,828（90%） |
+
+- **読み方**：
+  - **4 と 6 が完全一致**＝効いている数字列は 6〜7 桁（4〜5 桁の数字列は寄与ゼロ）。
+    8 で効果がほぼ消えるので 8 桁以上でもない。つまり 6 は**平らな領域の中**にあり、
+    1 桁ずれても結果が変わらない＝しきい値選択として頑健。
+  - 6 → 1 で追加で得られるのは 601 オブジェクト・1.54M 文字（元の 11%）。その領域は
+    まさに `_v1` / `_v2` のような**1 桁で別物**が住んでいるので取らない。
+  - **`lossy` は 58 でほぼ全しきい値一定**。つまり「畳みすぎたから壊れる」のではなく、
+    その 58 件は元から別ソースを読むグループ。しきい値選択の責任ではない。
+  - `unknown` が大きい（6 で 2,358）のは ephemeral の大半が未解析のまま滞留している
+    ことの裏返し。判定材料が無いだけで、畳めばその滞留自体が縮む。
+- **採用**：`FINGERPRINT_MIN_IDENTIFIER_DIGIT_RUN = 6`。
+  `fingerprintSqlForBigQuery` が IDENTIFIER / BACKTICK_IDENTIFIER に限り
+  6 桁以上の数字列を `#` に畳む。KEYWORD や演算子には触れない。NUMBER リテラルは
+  従来どおり `?`（畳む対象ではない）。
+- **影響範囲は ephemeral の同一性だけ**。03 は永続 destination を**宛先名**で
+  PARTITION しており、指紋は ELSE 側（ephemeral）のキーにしか使っていない
+  （`latest_generated_table_definitions` の QUALIFY）。代表 1 件は**実際の SQL 本文**で
+  解析されるので lineage が粗くなるわけではない。
+- **運用上の一回性コスト**：ephemeral は `definition_hash` が指紋そのものなので、
+  新バンドル適用後の初回実行で全 ephemeral が一度だけ再登録される。ただし再登録後の
+  件数は 4,814 ではなく約 2,021・4.2M 文字なので、**通常回より軽い**。旧指紋の
+  オブジェクトは既存の ephemeral age-out UPDATE で自然に落ちる。
+- 回帰テスト `test_v1_5_0_079`（日付サフィックスは畳む / `_v1` `_v2` と 5 桁は畳まない /
+  構造差は従来どおり別指紋 / 1 文より後ろの数字列も畳む）。
+- **デプロイ**：バンドル再ビルド済み（`sha256 = 78636c50…`、`477745` bytes、
+  `release_manifest.json` 更新済み）。GCS の `lineage_udf_bundle.js` を差し替えるだけで、
+  SQL 側の変更は不要。
+
 ## 5. 現在地（2026-08-22 更新）
 
 - リポジトリ: `audeoinc/share` の `lineage/`。ブランチ `claude/lineage-project-resume-tqwrp9`。
 - バージョン表記: `1.5.0-032`（`release_manifest.json` / `package.json`）。
-  テスト番号は版数と独立で、現在 `test_v1_5_0_074` まで。
-- バンドル: `sha256 = d7992396d38f568b6d30a44ac7d75183f4563e0f2c22f867a9d7e87d8bee5372`、`465176` bytes
+  テスト番号は版数と独立で、現在 `test_v1_5_0_079` まで。
+- バンドル: `sha256 = 78636c5006983877f16e0f4da58e92a5b76705f1f4ea7c66a629ade9518bbbad`、`477745` bytes
   （`release_manifest.json` と一致）。
-- テスト: `test:release` **54 本 PASS** / ゴールデン（`test_v1_5_0_003`）48 ケース PASS。
+- テスト: `test:release` **60 本 PASS** / ゴールデン（`test_v1_5_0_003`）48 ケース PASS。
 - 03 STEP 3：**データセット単位ループ ＋ 周回内フルバッチ**（§4.21）。チャンク分割は撤去済み。
 - **BigQuery 実機検証は未完了**。§4.5 のバッチ化、§4.6、§4.21 の各変更はいずれも未検証。
   本番前に staging 実行と旧実装との出力 diff（direct_dependency / lineage_diagnostic /

@@ -1,5 +1,35 @@
 # 1.5.0-032
 
+- The SQL structural fingerprint now folds DIGIT RUNS OF 6 OR MORE inside IDENTIFIER
+  and BACKTICK_IDENTIFIER tokens to `#`, so generated SQL that differs only in a
+  date-suffixed table name collapses to one ephemeral object.
+  Symptom: STEP 3 spent nearly all its time on ephemeral objects -- 4,814 of them,
+  13.9M characters -- for an external scheduler's daily runs that are the same
+  statement with a different parameter.
+  Cause: the fingerprint normalizes string and number LITERALS, so a parameter passed
+  as a literal already collapsed. A parameter that lands in a TABLE NAME
+  (`events_20260101`) is part of a single IDENTIFIER token, which the fingerprint
+  kept intact -- so every day was a separate object.
+  Fix: fold long digit runs inside identifier tokens only. The 6-digit floor is the
+  safety margin and is measured, not guessed: `table_v1` and `table_v2` are two
+  tables and must stay apart, while a date or an epoch is at least 6 digits. On the
+  real registry a floor of 4 and a floor of 6 collapsed IDENTICALLY (4,814 -> 2,021
+  objects, 13.9M -> 4.2M characters, 70% less SQL for STEP 3 to analyze), so 6 sits
+  in a flat region rather than on a knife edge; dropping to 1 would buy another 11%
+  of the volume but is exactly where single-digit version suffixes live.
+  Scope: ephemeral object identity only. 03 partitions persistent destinations by
+  destination NAME and uses the fingerprint only in the ephemeral branch, and the one
+  surviving representative is still analyzed from its real SQL text, so no lineage
+  becomes coarser. Measured loss is 58 objects whose group members resolve to
+  different source sets -- and those 58 are lossy at EVERY threshold, so they are not
+  caused by this choice.
+  Operational note: for ephemeral objects `definition_hash` IS the fingerprint, so
+  the first run after deploying the new bundle re-registers them once (as ~2,021
+  objects rather than 4,814 -- cheaper than a normal run, not more expensive). The
+  old fingerprint objects then age out through the existing ephemeral age-out UPDATE.
+  Covered by test_v1_5_0_079. Bundle rebuilt (sha256 78636c50..., 477745 bytes);
+  test:release 60 / golden 48 PASS. Redeploy the bundle to GCS; no SQL change.
+
 - `12_ephemeral_sql_similarity.sql` report 1 now reports ONE ROW PER DIGIT-RUN
   THRESHOLD (`digit_run_thresholds`, default 1 / 2 / 4 / 6 / 8) instead of a single
   row that folded every digit. The threshold is the actual design decision: folding
