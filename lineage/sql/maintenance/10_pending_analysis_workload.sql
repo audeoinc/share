@@ -417,4 +417,77 @@ BEGIN
 
   EXECUTE IMMEDIATE rendered_sql
   USING job_history_days AS days;
+
+  -- --------------------------------------------------------------------------
+  -- Report 8: IS A DIGIT A CODE OR A RUN ID? -- recurrence of each digit value.
+  --
+  -- Report 6 says the fingerprints churn: 91% of them are seen on exactly one day,
+  -- so something inside the SQL changes every run. Folding that something is the only
+  -- way a run gets cheaper -- but folding a value that genuinely identifies a
+  -- different object would merge two different lineages. The registry census (report 4
+  -- of 12_ephemeral_sql_similarity.sql) could not tell those apart: a 6-digit value
+  -- that is not date-shaped and shares one leading prefix fits a product code AND an
+  -- incrementing run id equally well.
+  --
+  -- Recurrence separates them, because the two behave differently over days:
+  --   a PRODUCT CODE is reused -- the statement for code 123456 runs again tomorrow,
+  --     so the value appears on many days. Folding it merges different objects.
+  --   a RUN ID is consumed -- it is minted once and never returns, so the value
+  --     appears on exactly one day. Folding it merges the SAME object across runs,
+  --     which is exactly what the fingerprint is for.
+  --
+  -- Read pct_one_day per length:
+  --   near 100  -> run ids / timestamps. Folding runs of this length is safe and is
+  --                what stops the churn.
+  --   low       -> stable identifiers (codes, ids of real things). Do not fold.
+  -- avg_days_seen and max_days_seen are the same signal in a different shape; a
+  -- length with pct_one_day near 100 but a handful of high max_days_seen values is
+  -- worth a second look before folding.
+  --
+  -- Same extraction as the registry census: digit runs inside tokens that start with
+  -- a letter or underscore, so numeric and quoted literals are excluded.
+  --
+  -- CAVEAT: a value cannot be seen on more days than the job history holds. If
+  -- report 7 shows few days with jobs_collected, every value looks like a run id --
+  -- check that first.
+  -- --------------------------------------------------------------------------
+  SET rendered_sql = FORMAT(
+    """
+    WITH jobs AS (
+      SELECT DATE(creation_time) AS job_date, definition_text
+      FROM `%s`
+      WHERE definition_text IS NOT NULL
+        AND creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+    ),
+    digit_runs AS (
+      SELECT DISTINCT job_date, digit_run
+      FROM jobs,
+        UNNEST(REGEXP_EXTRACT_ALL(definition_text, '[A-Za-z_][A-Za-z0-9_]*'))
+          AS identifier,
+        UNNEST(REGEXP_EXTRACT_ALL(identifier, '[0-9]+')) AS digit_run
+    ),
+    per_value AS (
+      SELECT
+        LENGTH(digit_run) AS digit_run_length,
+        digit_run,
+        COUNT(*) AS days_seen
+      FROM digit_runs
+      GROUP BY digit_run_length, digit_run
+    )
+    SELECT
+      digit_run_length,
+      COUNT(*) AS distinct_values,
+      COUNTIF(days_seen = 1) AS values_on_one_day,
+      ROUND(100 * COUNTIF(days_seen = 1) / COUNT(*), 1) AS pct_one_day,
+      ROUND(AVG(days_seen), 2) AS avg_days_seen,
+      MAX(days_seen) AS max_days_seen
+    FROM per_value
+    GROUP BY digit_run_length
+    ORDER BY digit_run_length
+    """,
+    job_registry_fqn
+  );
+
+  EXECUTE IMMEDIATE rendered_sql
+  USING job_history_days AS days;
 END;
