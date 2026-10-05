@@ -1,5 +1,24 @@
 # 1.5.0-032
 
+- `10_pending_analysis_workload.sql` gains reports 6, 7 and 8, which measure whether
+  the ephemeral population RECURS or CHURNS -- the question that decides what any
+  optimization is worth, and one the registry alone cannot answer.
+  Report 6 (fingerprint lifetime histogram, from the job registry) came back
+  decisive: over 14 days, 13,488 of 14,736 fingerprints (91.5%) were seen on exactly
+  ONE day, while 185 were seen on eight -- so the history is not too thin to read, and
+  the generated statements really are re-fingerprinted every run. The "today's load is
+  a one-time backlog" reading is dead: clearing it buys one day.
+  Report 7 is the same history day by day with the count of first-ever-seen
+  fingerprints, which is the steady-state arrival rate measured from the jobs rather
+  than from when the pipeline happened to run.
+  Report 8 then separates the two readings the registry census could not: a 6-digit
+  value that is not date-shaped and shares one leading prefix fits a PRODUCT CODE and
+  an INCREMENTING RUN ID equally well, and they differ in exactly one observable --
+  a code is reused across days, a run id is minted once. It reports, per run length,
+  the share of distinct values seen on only one day. If the 6-digit values turn out to
+  be run ids, folding them is not just safe but necessary, and the 70% collapse that
+  threshold 1 promised is back on the table.
+
 - The SQL structural fingerprint now folds DIGIT RUNS OF 10 OR MORE inside IDENTIFIER
   and BACKTICK_IDENTIFIER tokens to `#`, so generated SQL that differs only in a
   per-run id embedded in a temp table name collapses to one ephemeral object.
