@@ -45,10 +45,10 @@ npm run deploy
 ```
 
 `main` に取り込まれた変更を、共有のアプリ(`power.config.json` の `appId`)に反映する。**反映してよい状態のときだけ**動く安全装置つき(`scripts/deploy.mjs`): `main` にいる / リモートと同じ / 未コミットの変更がない → 型チェック・lint・ビルド → `pa app push`。
-共有のアプリは 1 つで、`pa app push` は上書きになる。反映は、**マージ済みの `main` から、担当者が行う**(詳しくは [docs/ONBOARDING.md](docs/ONBOARDING.md) の「チームの進め方」)。
+共有のアプリは 1 つで、`pa app push` は上書きになる。反映は、**最新の `main` から、反映の権限を持つ人が行う**(詳しくは [docs/ONBOARDING.md](docs/ONBOARDING.md) の「チームの進め方」)。
 反映後、画面に「古いバージョン」と出たら、「最新の情報に更新」を押す。
 
-GitHub Actions(`.github/workflows/ci.yml`)が、プルリクエストと `main` で、型チェック・lint・ビルドを自動で行う。自動で反映はしない(`pa` CLI は、ブラウザでのサインインが必要なため)。
+GitHub Actions(`.github/workflows/ci.yml`)が、`main` への push とプルリクエストで、型チェック・lint・ビルドを自動で行う。`main` へは、PR なしで直接 push してよい(push の前に `npm run verify`)。自動で反映はしない(`pa` CLI は、ブラウザでのサインインが必要なため)。
 
 ## ディレクトリ
 

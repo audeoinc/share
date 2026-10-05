@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
+    "verify": "tsc -b && eslint . --ignore-pattern \"src/generated/**\" && vite build",
     "deploy": "node scripts/deploy.mjs"
   },
   "dependencies": {
