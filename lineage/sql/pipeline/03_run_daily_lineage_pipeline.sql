@@ -380,8 +380,24 @@ DECLARE process_generated_tables BOOL DEFAULT TRUE;
 
 -- Lookback window over INFORMATION_SCHEMA.JOBS. The initial window is used on
 -- the first run (empty job registry); the incremental window is used thereafter.
+--
+-- THE INCREMENTAL WINDOW IS ALSO THE EPHEMERAL RETENTION WINDOW. An ephemeral object
+-- is kept alive by its fingerprint reappearing in JOBS inside this window; when it
+-- stops appearing it is deactivated and its dependency rows are deleted. So this one
+-- number answers "which schedules stay represented in the repository":
+--   3  -- daily statements only. A WEEKLY statement ages out between runs, and is
+--         re-analyzed (and re-published) every week when it returns.
+--   8  -- daily and weekly (the default). A weekly statement is never out of window,
+--         so it is analyzed once and never again, and its lineage is always present.
+--   32 -- also monthly, at roughly four times the active ephemeral population.
+-- Longer is not free, but the cost is NOT per-SQL: the fingerprint UDF runs once per
+-- job_id ever (the backfill UPDATE is guarded by sql_fingerprint IS NULL), and
+-- re-collecting a day already in the registry only re-MERGEs its rows. What grows
+-- with the window is a handful of set-based statements over a bigger partition range.
+-- STEP 3, which costs ~60 statements per batch, does not grow at all -- it is driven
+-- by is_changed, and a longer window REMOVES the weekly re-analysis churn.
 DECLARE initial_lookback_days INT64 DEFAULT 60;
-DECLARE incremental_lookback_days INT64 DEFAULT 3;
+DECLARE incremental_lookback_days INT64 DEFAULT 8;
 
 -- statement_type values collected from JOBS; jobs of other types are ignored.
 -- The remaining JOBS filters (job_type = 'QUERY', state = 'DONE',

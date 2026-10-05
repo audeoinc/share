@@ -1132,6 +1132,30 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   OOM が出るならデータセット単位に戻す（リソースエラーのスキップ機構は効くが、
   失敗の単位が小さい方が被害が小さい）。
 
+## 4.42 `incremental_lookback_days` を 3 → 8（ephemeral の保持期間でもある）
+
+- **この値は JOBS の収集期間であると同時に、ephemeral の保持期間**。指紋がこの窓の中で
+  再出現し続ける限り active、出なくなると age-out で `is_active = FALSE` ＋
+  依存行の削除（§4.40）。つまり**「どの周期の SQL を lineage に載せるか」がこの 1 つの値で決まる**。
+  - 3 → 日次のみ。**週次は毎週 age-out → 再登場で毎週再解析**、かつ週の大半は lineage が無い
+  - 8 → 日次＋週次。窓から出ないので**解析は生涯 1 回**、lineage は常時存在（採用）
+  - 32 → 月次まで。アクティブ件数は約 4 倍
+- **伸ばしても「1 件ずつ SQL を見て hash を作る」処理は増えない**（利用者からの懸念）。
+  - 指紋 UDF は `WHERE sql_fingerprint IS NULL` ガードで **job_id あたり生涯 1 回**
+  - job_registry の MERGE キーは `(job_project, job_id)` なので、収集済みの日を再収集しても
+    **UPDATE されるだけ**で指紋は再計算されない
+  - スキップ判定自体は `QUALIFY ROW_NUMBER() OVER (PARTITION BY 'FP:'||sql_fingerprint)` ＝
+    **格納済みの列を使う集合演算**
+  - 増えるのは JOBS スキャン（パーティション刈り込みあり）と MERGE の書き戻し行数で、
+    どれも集合演算 1 本。**STEP 3（1 バッチ約 60 ジョブ）は増えない**どころか、
+    週次の再解析が消えるぶん減る
+- **「古いのを残す」案は却下**：解析回数は生涯 1 回で済むが、実測の到着レート
+  （新規 1,200〜1,350 指紋/日）だと**1 年で約 45 万オブジェクト**まで膨らみ、
+  STEP 3 ではなく **STEP 4（impact 再構築）と static テーブルが際限なく重くなる**。
+- 既知の改善余地：job_registry の MERGE が matched 行の全列（`query_text` /
+  `definition_text` 込み）を無条件に書き戻しているため、8 日なら毎回 20 万行規模の
+  書き込みになる。「変わった行だけ更新」にすれば削れる。
+
 ## 5. 現在地（2026-08-22 更新）
 
 - リポジトリ: `audeoinc/share` の `lineage/`。ブランチ `claude/lineage-project-resume-tqwrp9`。

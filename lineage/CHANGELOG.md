@@ -1,5 +1,25 @@
 # 1.5.0-032
 
+- `incremental_lookback_days` now defaults to 8 instead of 3, with the reason written
+  where the knob is: this window is not only how far back JOBS are collected, it is
+  the EPHEMERAL RETENTION WINDOW. An ephemeral object stays alive while its
+  fingerprint keeps reappearing inside it; when it stops, the object is deactivated
+  and its dependency rows are deleted.
+  At 3, a WEEKLY statement ages out between runs and is re-analyzed and re-published
+  every week -- and for most of each week its lineage is simply absent from the
+  repository. At 8 it is never out of window: analyzed once, present always.
+  The extra window is cheap in the way that matters. The fingerprint UDF -- the only
+  per-SQL work -- runs once per job_id ever, guarded by `sql_fingerprint IS NULL`, and
+  the job registry MERGE is keyed on (job_project, job_id), so re-collecting a day
+  already held re-MERGEs rows without re-fingerprinting them. What grows is a handful
+  of set-based statements over a wider partition range. STEP 3, at ~60 statements per
+  batch, does not grow at all: it is driven by is_changed, and the longer window
+  removes the weekly re-analysis churn.
+  The alternative -- keeping ephemeral objects forever instead of aging them out --
+  was considered and rejected: it would add ~1,250 objects a day permanently (measured
+  arrival rate), which leaves STEP 3 unchanged but makes STEP 4's impact rebuild and
+  the static report tables grow without bound.
+
 - A batch may now span datasets (`analysis_batch_group_datasets`, default TRUE), so a
   dataset holding one changed View no longer costs a whole iteration.
   The loop body runs about 60 BigQuery statements per batch -- the UDF call plus the
