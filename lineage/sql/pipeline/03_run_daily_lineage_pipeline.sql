@@ -276,6 +276,28 @@ DECLARE analysis_batch_max_objects INT64 DEFAULT 200;
 -- batches anyway. Set it when seeding a repository from a long lookback.
 DECLARE analysis_max_batches_per_run INT64 DEFAULT 0;
 
+-- Whether one batch may span datasets. TRUE (default) batches purely by the budgets
+-- above; FALSE keeps the older behavior of never mixing datasets in a batch.
+--
+-- This is a cost-per-batch knob, not a correctness one. The loop body runs about 60
+-- BigQuery statements per batch -- the UDF call plus the publish into
+-- direct_dependency / impact / diagnostics / column usage and the registry updates --
+-- and every one of those is a job whose startup cost does not depend on how many
+-- objects the batch holds. With a per-dataset batch key, a dataset holding a single
+-- changed View still pays all 60: a region with 58 datasets spends ~3,500 statements
+-- on work that would fit in one batch.
+--
+-- Grouping was not possible when the loop ran one UDF call per dataset for memory.
+-- The byte and object budgets took that job over, so the dataset is now only a
+-- grouping key -- the loop body uses it to select the batch's rows and to print
+-- progress, nothing else.
+--
+-- Set FALSE if a mixed batch pushes the UDF's metadata payload over the heap (a batch
+-- spanning datasets references more distinct source tables than either would alone,
+-- and the budgets bound SQL text, not metadata). The resource-error handler already
+-- survives that, but a dedicated batch per dataset makes the failure smaller.
+DECLARE analysis_batch_group_datasets BOOL DEFAULT TRUE;
+
 -- What to do when a batch's UDF call runs out of memory. The analysis UDF query has
 -- no per-object isolation -- one batch is one query -- so a resource error there used
 -- to abort the whole script, losing every batch that had not run yet.
@@ -2164,11 +2186,15 @@ BEGIN
   -- Empty => nothing changed => everything expensive below (the metadata scan and
   -- the analysis loop) is skipped.
   --
-  -- Each object also gets a batch_no, so one UDF call handles a bounded amount of
-  -- SQL. The loop unit is (dataset, batch_no), not dataset: a dataset alone is not a
-  -- bound, because every ephemeral generated table collapses into one synthetic
-  -- dataset (ephemeral_object_dataset_label) and would otherwise arrive as a single
-  -- iteration of arbitrary size. See analysis_batch_max_sql_bytes.
+  -- Each object also gets a (batch_group, batch_no), which is the loop unit, so one
+  -- UDF call handles a bounded amount of SQL. A dataset alone is not a bound in
+  -- either direction: every ephemeral generated table collapses into one synthetic
+  -- dataset (ephemeral_object_dataset_label), which would arrive as a single
+  -- iteration of arbitrary size, while a dataset holding one changed View would pay
+  -- for a whole iteration of its own. batch_group is '' when
+  -- analysis_batch_group_datasets lets batches span datasets (the default, so the
+  -- budgets alone decide), and the dataset name when it does not. See
+  -- analysis_batch_max_sql_bytes.
   --
   -- The cut is on bytes_before -- the cumulative SQL length BEFORE each object --
   -- rather than on the inclusive total, so an object bigger than the whole budget
@@ -2201,21 +2227,31 @@ BEGIN
         AND object_type IN ('VIEW', 'TABLE')
         AND (@include_tables OR object_type = 'VIEW')
     ),
-    positioned AS (
+    grouped AS (
       SELECT
         changed.*,
+        -- The batch key. '' puts every object in one group, so batches are cut by the
+        -- budgets alone and a dataset with one changed View shares a batch instead of
+        -- paying for its own. The dataset name restores the per-dataset behavior.
+        IF(@group_datasets, '', object_dataset) AS batch_group
+      FROM changed
+    ),
+    positioned AS (
+      SELECT
+        grouped.*,
         SUM(sql_length) OVER (
-          PARTITION BY object_dataset
-          ORDER BY object_name, object_type, definition_hash
+          PARTITION BY batch_group
+          ORDER BY object_dataset, object_name, object_type, definition_hash
           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
         ) - sql_length AS bytes_before,
         ROW_NUMBER() OVER (
-          PARTITION BY object_dataset
-          ORDER BY object_name, object_type, definition_hash
-        ) - 1 AS index_in_dataset
-      FROM changed
+          PARTITION BY batch_group
+          ORDER BY object_dataset, object_name, object_type, definition_hash
+        ) - 1 AS index_in_group
+      FROM grouped
     )
     SELECT
+      batch_group,
       object_project,
       object_dataset,
       object_name,
@@ -2227,7 +2263,7 @@ BEGIN
       sql_length,
       GREATEST(
         DIV(bytes_before, @max_sql_bytes),
-        DIV(index_in_dataset, @max_objects)
+        DIV(index_in_group, @max_objects)
       ) AS batch_no
     FROM positioned
   """;
@@ -2241,7 +2277,8 @@ BEGIN
   USING
     process_generated_tables AS include_tables,
     analysis_batch_max_sql_bytes AS max_sql_bytes,
-    analysis_batch_max_objects AS max_objects;
+    analysis_batch_max_objects AS max_objects,
+    analysis_batch_group_datasets AS group_datasets;
 
   -- The loop units. Ordered reads of this table drive both the discovery pre-pass
   -- and the analysis loop, so the two see identical batches.
@@ -2252,14 +2289,14 @@ BEGIN
   -- advance in a stable order, and what is left simply keeps is_changed = TRUE for
   -- the next run.
   CREATE OR REPLACE TEMP TABLE analysis_batches AS
-  SELECT object_dataset, batch_no
+  SELECT batch_group, batch_no
   FROM (
     SELECT
-      object_dataset,
+      batch_group,
       batch_no,
-      ROW_NUMBER() OVER (ORDER BY object_dataset, batch_no) AS batch_rank
+      ROW_NUMBER() OVER (ORDER BY batch_group, batch_no) AS batch_rank
     FROM (
-      SELECT DISTINCT object_dataset, batch_no
+      SELECT DISTINCT batch_group, batch_no
       FROM changed_object_batches
     )
   )
@@ -2268,7 +2305,7 @@ BEGIN
 
   SET analysis_batch_available_total = (
     SELECT COUNT(*) FROM (
-      SELECT DISTINCT object_dataset, batch_no FROM changed_object_batches
+      SELECT DISTINCT batch_group, batch_no FROM changed_object_batches
     )
   );
   SET analysis_batch_total = (SELECT COUNT(*) FROM analysis_batches);
@@ -2276,9 +2313,11 @@ BEGIN
     analysis_batch_available_total - analysis_batch_total;
   SET has_analysis_work = analysis_batch_total > 0;
 
-  -- Surfaced in "All results" so the batching is visible: a dataset cut into many
-  -- batches is where an out-of-memory would have happened, and the byte budget is
-  -- the knob to turn.
+  -- Surfaced in "All results" so the batching is visible: many batches is where an
+  -- out-of-memory would have happened, and the byte budget is the knob to turn.
+  -- batches_to_run far below datasets_to_analyze means batches are spanning datasets
+  -- (analysis_batch_group_datasets), which is where the per-batch statement cost
+  -- stops being paid per dataset.
   IF has_analysis_work THEN
     SELECT
       'ANALYSIS_BATCHES' AS notice,
@@ -2322,14 +2361,19 @@ BEGIN
     definition_hash STRING,
     script_variables ARRAY<STRING>,
     source_discovery_json STRING,
+    batch_group STRING,
     batch_no INT64
   );
   CREATE OR REPLACE TEMP TABLE referenced_source_datasets (dataset_name STRING);
 
   FOR ds_row IN (
-    SELECT object_dataset AS ds, batch_no
+    SELECT
+      batch_group AS grp,
+      batch_no,
+      -- Printed by the progress marker. A grouped batch has no single dataset.
+      IF(batch_group = '', '(grouped)', batch_group) AS ds
     FROM analysis_batches
-    ORDER BY object_dataset, batch_no
+    ORDER BY batch_group, batch_no
   ) DO
 
   EXECUTE IMMEDIATE FORMAT(
@@ -2352,7 +2396,7 @@ BEGIN
     definition_hash,
     script_variables
   FROM changed_object_batches
-  WHERE LOWER(object_dataset) = LOWER(ds_row.ds)
+  WHERE batch_group = ds_row.grp
     AND batch_no = ds_row.batch_no;
 
   -- Source discovery: single UDF query over this dataset's changed set.
@@ -2388,12 +2432,12 @@ BEGIN
   INSERT INTO all_changed_with_discovery (
     object_project, object_dataset, object_name, object_type,
     generation_type, definition_text, definition_hash, script_variables,
-    source_discovery_json, batch_no
+    source_discovery_json, batch_group, batch_no
   )
   SELECT
     object_project, object_dataset, object_name, object_type,
     generation_type, definition_text, definition_hash, script_variables,
-    source_discovery_json, ds_row.batch_no
+    source_discovery_json, ds_row.grp, ds_row.batch_no
   FROM changed_definitions_with_discovery;
 
   INSERT INTO referenced_source_datasets (dataset_name)
@@ -2553,9 +2597,13 @@ BEGIN
   -- per dataset.
   -- --------------------------------------------------------------------------
   FOR ds_row IN (
-    SELECT object_dataset AS ds, batch_no
+    SELECT
+      batch_group AS grp,
+      batch_no,
+      -- Printed by the progress marker. A grouped batch has no single dataset.
+      IF(batch_group = '', '(grouped)', batch_group) AS ds
     FROM analysis_batches
-    ORDER BY object_dataset, batch_no
+    ORDER BY batch_group, batch_no
   ) DO
 
   -- Progress marker. BigQuery prepends the lnge_render_dynamic_sql TEMP FUNCTION DDL
@@ -2623,7 +2671,7 @@ BEGIN
     script_variables,
     source_discovery_json
   FROM all_changed_with_discovery
-  WHERE LOWER(object_dataset) = LOWER(ds_row.ds)
+  WHERE batch_group = ds_row.grp
     AND batch_no = ds_row.batch_no;
 
   -- ==========================================================================
