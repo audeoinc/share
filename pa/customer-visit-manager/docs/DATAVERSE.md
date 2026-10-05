@@ -56,7 +56,7 @@ npx pa app add data-source --connector dataverse --table <論理名> --org-url <
 
 ### テンプレート `cr854_layouttemplate`
 
-`cr854_name`(主列。テンプレート名)/ `cr854_description` / `cr854_herokind`(standard / collab / offer)/ `cr854_sections`(セクションの JSON: `[{"kind":"grid","slots":4,"categoryHeading":true}]`。kind は grid / feature、slots は 1〜8、columns は grid の列の数で 2(省略時)または 3。3 列・3 点で、横並び 1 行になる)
+`cr854_name`(主列。テンプレート名)/ `cr854_description` / `cr854_herokind`(standard / collab / offer)/ `cr854_sections`(セクションの JSON: `[{"kind":"hero","text":"overlay","buttons":2},{"kind":"grid","slots":4,"categoryHeading":true,"buttons":2}]`。kind は grid / photos / wide / mosaic / story / feature、slots は 1〜8(mosaic は 3 の倍数)、columns は grid・photos の列の数で 2(省略時)または 3、flip は mosaic の大きい枠を右に、categoryHeading は見出し、buttons はセクションの後のボタンの数。先頭の `kind: "hero"` は、ヒーローの見せ方(text: band / overlay / below、buttons、topBar)で、既定のときは書かない)
 
 ### AI要求 `cr854_airequest`(AI 呼び出しの仲介。行は、読み取り後に削除される)
 

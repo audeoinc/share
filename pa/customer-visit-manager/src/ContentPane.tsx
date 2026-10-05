@@ -465,7 +465,7 @@ function TemplateTab({ template, onTemplate, hasCandidates }: { template: EmailT
         const selected = o.id === template
         return (
           <div key={o.id} onClick={() => onTemplate(o.id)} className={mergeClasses(s.tplCard, selected && s.tplCardSelected)}>
-            <TemplateThumb hero={o.hero} sections={o.sections} free={o.id === 'free'} />
+            <TemplateThumb layout={o} free={o.id === 'free'} maxHeight={170} />
             <div style={{ minWidth: 0 }}>
               <div className={s.flexRowTight}>
                 <span className={s.bold}>{o.label}</span>

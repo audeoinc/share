@@ -65,8 +65,14 @@ Power Automate フロー「AI要求の処理」 ──▶ Copilot Studio のエ�
 
 ## 5. テンプレート(`src/templates.ts`、`layoutTemplates.ts`)
 
-- **標準の 6 種**(free, standard4, collab, offer, cat2, cat3)は、コードに持つ。編集・削除できない。
+- **標準の 10 種**は、コードに持つ。編集・削除できない。以前からの 6 種(free, standard4, collab, offer, cat2, cat3)と、新しい部品を使う 4 種(sale, spotlight, story, editorial)。
+  - 以前からの 6 種は、**セクションの構成を変えない**。保存済みのカードは、商品をセクションの順に流し込み、見出し・コピーもセクションの番号で持つので、構成を変えると位置がずれる。見た目の設定(ヘッドラインの見せ方・ボタン)だけ変えてよい。
+  - 新しい 4 種は、以前の選択肢の列(`emailtemplate`)に値がないので、`layoutkey` だけで指す。
+- **セクションの部品**(`Section.kind`): grid(名前・価格つき。2 / 3 列)、photos(写真だけ。2 / 3 列)、wide(全幅で大きく 1 点ずつ)、mosaic(大 1 点 + 小 2 点で 1 組。枠は 3 の倍数。`flip` で大きい枠を右に)、story(写真と商品の説明を左右交互)、feature(特集)。どの部品にも、見出し(`categoryHeading`)と、後ろのボタン(`buttons`: 1 / 2)を付けられる。
+- **ヒーローの見せ方**(テンプレート全体): `heroText`(band: 写真に帯で重ねる / overlay: 写真に大きく重ねる / below: 写真の下)、`heroButtons`(0〜2)、`topBar`(お知らせ帯)。
+- 見取り図(`TemplateThumb.tsx`)は、実際のメールに近い縦横比で、縦長に描く。一覧では上の部分だけ(`maxHeight`)、管理画面では全体を表示する。
 - **ユーザーが作ったテンプレート**は、Dataverse の `cr854_layouttemplate` に保存する(名前、説明、ヒーローの種類、セクションの JSON)。アプリの起動時に読み込み、`setCustomTemplates` で登録する。
+  - ヒーローの見せ方は、列がないので、セクションの JSON の先頭に `{"kind":"hero",...}` として入れる(`layoutTemplates.ts`)。`slots` を持たないので、以前の版のアプリは読み飛ばす。知らない部品は、グリッドとして読む。
 - 配信カードは、`layoutkey`(標準は ID、作ったものは行の GUID)でテンプレートを指す。標準のテンプレートは、以前の選択肢の列(`emailtemplate`)にも書く(互換)。`layoutkey` が空なら、選択肢の値から決める。
 - 登録にない ID(削除された、まだ読み込まれていない)は、Standard4 として扱う。
 - 管理の画面は、ヘッダーの「テンプレート」ボタン、または、配信カードの「②テンプレート」タブから開く(`TemplateManager.tsx`)。

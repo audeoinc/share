@@ -1,39 +1,89 @@
 import { Cr854_layouttemplatesService } from './generated/services/Cr854_layouttemplatesService'
-import { gridColumns, setCustomTemplates, type HeroKind, type Section } from './templates'
+import { SECTION_KINDS, gridColumns, setCustomTemplates, slotStep, type HeroKind, type HeroText, type Section, type SectionKind, type TemplateLayout } from './templates'
 import { tr } from './i18n'
 
 const HERO_KINDS: HeroKind[] = ['standard', 'collab', 'offer']
+const HERO_TEXTS: HeroText[] = ['band', 'overlay', 'below']
 
 /** セクションの上限(画面とデータの両方で守る) */
 export const MAX_SECTIONS = 6
 export const MAX_SLOTS = 8
 
-/** 保存する形に整える。既定の値(2 列、見出しなし)は書かない(以前の JSON と同じ形を保つため) */
-function toStored(s: Section): Section {
-  return { kind: s.kind, slots: s.slots, ...(gridColumns(s) === 3 ? { columns: 3 } : {}), ...(s.categoryHeading ? { categoryHeading: true } : {}) }
+/** 種類に合わせて、枠の数を整える(モザイクは 3 の倍数) */
+export function fitSlots(kind: SectionKind, slots: number): number {
+  const step = slotStep(kind)
+  const max = Math.floor(MAX_SLOTS / step) * step
+  return Math.min(max, Math.max(step, Math.round(slots / step) * step))
 }
 
-/** 保存されている JSON から、セクションの一覧を読む(壊れていても、読める分だけ) */
-function parseSections(text?: string): Section[] {
-  if (!text) return []
-  try {
-    const raw = JSON.parse(text) as unknown
-    if (!Array.isArray(raw)) return []
-    return raw
-      .map((r): Section | null => {
-        const o = r as { kind?: string; slots?: number; columns?: number; categoryHeading?: boolean }
-        const slots = Math.round(Number(o.slots))
-        if (!Number.isFinite(slots) || slots < 1) return null
-        return toStored({ kind: o.kind === 'feature' ? 'feature' : 'grid', slots: Math.min(MAX_SLOTS, slots), columns: o.columns === 3 ? 3 : undefined, categoryHeading: !!o.categoryHeading })
-      })
-      .filter((s): s is Section => s !== null)
-      .slice(0, MAX_SECTIONS)
-  } catch {
-    return []
+/** 保存する形に整える。既定の値(2 列、見出しなし、ボタンなし)は書かない(以前の JSON と同じ形を保つため) */
+export function toStored(s: Section): Section {
+  return {
+    kind: s.kind,
+    slots: fitSlots(s.kind, s.slots),
+    ...(gridColumns(s) === 3 ? { columns: 3 } : {}),
+    ...(s.kind === 'mosaic' && s.flip ? { flip: true } : {}),
+    ...(s.categoryHeading ? { categoryHeading: true } : {}),
+    ...(s.buttons === 1 || s.buttons === 2 ? { buttons: s.buttons } : {}),
   }
 }
 
-export interface TemplateInput {
+/**
+ * ヒーローの見せ方は、テーブルに列がないので、セクションの JSON の先頭に { "kind": "hero", ... } として入れる。
+ * slots を持たないので、以前の版のアプリは、この要素を読み飛ばす(テンプレートは、以前の見た目で使える)
+ */
+type HeroMeta = { kind: 'hero'; text?: HeroText; buttons?: 1 | 2; topBar?: true }
+
+/** 保存されている JSON から、ヒーローの見せ方と、セクションの一覧を読む(壊れていても、読める分だけ) */
+function parseLayout(text?: string): Pick<TemplateLayout, 'heroText' | 'heroButtons' | 'topBar' | 'sections'> {
+  const empty = { sections: [] }
+  if (!text) return empty
+  try {
+    const raw = JSON.parse(text) as unknown
+    if (!Array.isArray(raw)) return empty
+    const meta = raw.find((r) => (r as { kind?: string })?.kind === 'hero') as HeroMeta | undefined
+    const sections = raw
+      .map((r): Section | null => {
+        const o = r as { kind?: string; slots?: number; columns?: number; flip?: boolean; categoryHeading?: boolean; buttons?: number }
+        const slots = Math.round(Number(o.slots))
+        if (!Number.isFinite(slots) || slots < 1) return null
+        // 知らない種類(新しい版で増えたもの)は、グリッドとして読む
+        const kind: SectionKind = SECTION_KINDS.includes(o.kind as SectionKind) ? (o.kind as SectionKind) : 'grid'
+        return toStored({
+          kind,
+          slots,
+          columns: o.columns === 3 ? 3 : undefined,
+          flip: !!o.flip,
+          categoryHeading: !!o.categoryHeading,
+          buttons: o.buttons === 1 || o.buttons === 2 ? o.buttons : undefined,
+        })
+      })
+      .filter((s): s is Section => s !== null)
+      .slice(0, MAX_SECTIONS)
+    return {
+      sections,
+      heroText: meta && HERO_TEXTS.includes(meta.text as HeroText) ? meta.text : undefined,
+      heroButtons: meta?.buttons === 1 || meta?.buttons === 2 ? meta.buttons : undefined,
+      topBar: meta?.topBar ? true : undefined,
+    }
+  } catch {
+    return empty
+  }
+}
+
+/** セクションの JSON を作る。ヒーローの見せ方が既定(帯・ボタンなし・お知らせ帯なし)のときは、以前と同じ形(配列だけ) */
+function stringifyLayout(layout: Pick<TemplateLayout, 'heroText' | 'heroButtons' | 'topBar' | 'sections'>): string {
+  const meta: HeroMeta = {
+    kind: 'hero',
+    ...(layout.heroText && layout.heroText !== 'band' ? { text: layout.heroText } : {}),
+    ...(layout.heroButtons ? { buttons: layout.heroButtons } : {}),
+    ...(layout.topBar ? { topBar: true as const } : {}),
+  }
+  const sections = layout.sections.map(toStored)
+  return JSON.stringify(Object.keys(meta).length > 1 ? [meta, ...sections] : sections)
+}
+
+export interface TemplateInput extends Pick<TemplateLayout, 'heroText' | 'heroButtons' | 'topBar'> {
   id?: string
   name: string
   description: string
@@ -52,7 +102,7 @@ export async function loadCustomTemplates(): Promise<void> {
         label: r.cr854_name,
         description: r.cr854_description ?? '',
         hero: (HERO_KINDS.includes(r.cr854_herokind as HeroKind) ? r.cr854_herokind : 'standard') as HeroKind,
-        sections: parseSections(r.cr854_sections),
+        ...parseLayout(r.cr854_sections),
       }))
       // セクションが 1 つもない行は、メールを組めないので、一覧に出さない
       .filter((t) => t.sections.length > 0),
@@ -65,7 +115,7 @@ export async function saveTemplate(input: TemplateInput): Promise<string> {
     cr854_name: input.name.trim(),
     cr854_description: input.description.trim(),
     cr854_herokind: input.hero,
-    cr854_sections: JSON.stringify(input.sections.map(toStored)),
+    cr854_sections: stringifyLayout(input),
   }
   const res = input.id
     ? await Cr854_layouttemplatesService.update(input.id, fields)
