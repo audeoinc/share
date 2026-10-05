@@ -687,4 +687,160 @@ BEGIN
   );
 
   EXECUTE IMMEDIATE rendered_sql;
+
+  -- --------------------------------------------------------------------------
+  -- Report 6: WHAT ELSE WOULD FOLD -- the same population under four rules.
+  --
+  -- Report 1 sweeps the digit threshold. This sweeps the RULE, because the digit
+  -- threshold is not the only thing keeping near-identical statements apart.
+  --
+  -- The candidate it exists to measure is LITERAL COUNT. The fingerprint normalizes
+  -- each literal to "?" but keeps how many there are, so
+  --   WHERE code IN ('A','B','C')      and
+  --   WHERE code IN ('A','B','C','D')
+  -- are two fingerprints. A job whose parameter list is a different length every day
+  -- therefore produces a new ephemeral object every day, no matter how the digits are
+  -- treated. Collapsing a run of literals to one cannot lose lineage: a literal list
+  -- contributes no column dependency, which is why this is a safe rule in a way that
+  -- folding short digit runs is not.
+  --
+  -- The four rules:
+  --   1  digits >= 6                      what the engine does today
+  --   2  digits >= 6 + literal lists      adds the rule above
+  --   3  digits >= 1                      upper bound on digits alone (NOT safe:
+  --                                       report 8 of 10_pending_analysis_workload
+  --                                       shows 1-2 digit values recur daily, so they
+  --                                       name things rather than identify runs)
+  --   4  digits >= 1 + literal lists      absolute upper bound, for scale only
+  --
+  -- Read rule 2 against rule 1: the difference is what collapsing literal lists would
+  -- buy on top of what is already deployed, and lossy_removable says what it would
+  -- cost. If rules 1 and 2 are equal, the remaining duplication is neither digits nor
+  -- literal counts -- look at report 3's samples for what actually differs.
+  -- --------------------------------------------------------------------------
+  SET rendered_sql = FORMAT(
+    """
+    WITH base AS (
+      SELECT
+        object_project, object_dataset, object_name,
+        LENGTH(definition_text) AS sql_length,
+        UPPER(
+          REGEXP_REPLACE(
+            REGEXP_REPLACE(
+              REPLACE(definition_text, '`', ''),
+              "'[^']*'", "'?'"
+            ),
+            '[[:space:]]+', ' '
+          )
+        ) AS norm_base
+      FROM `%s`
+      WHERE is_active = TRUE
+        AND is_ephemeral = TRUE
+        AND definition_text IS NOT NULL
+    ),
+    source_sets AS (
+      SELECT
+        LOWER(target_project) AS object_project,
+        LOWER(target_dataset) AS object_dataset,
+        LOWER(target_object) AS object_name,
+        STRING_AGG(DISTINCT CONCAT(
+          COALESCE(LOWER(source_project), ''), '.',
+          COALESCE(LOWER(source_dataset), ''), '.',
+          LOWER(source_object)
+        ), ',' ORDER BY CONCAT(
+          COALESCE(LOWER(source_project), ''), '.',
+          COALESCE(LOWER(source_dataset), ''), '.',
+          LOWER(source_object)
+        )) AS source_set
+      FROM `%s`
+      GROUP BY 1, 2, 3
+    ),
+    joined AS (
+      SELECT b.norm_base, b.sql_length, s.source_set
+      FROM base AS b
+      LEFT JOIN source_sets AS s
+        ON  s.object_project = LOWER(b.object_project)
+        AND s.object_dataset = LOWER(b.object_dataset)
+        AND s.object_name = LOWER(b.object_name)
+    ),
+    keyed AS (
+      SELECT
+        sql_length,
+        source_set,
+        REGEXP_REPLACE(norm_base, '[0-9]{6,}', '#') AS k_rule1,
+        -- A run of "'?'," collapses away, leaving the last one: IN ('?','?','?')
+        -- becomes IN ('?'). The quotes are there because norm_base already replaced
+        -- each quoted literal with '?'; [?] avoids escaping the regex quantifier.
+        REGEXP_REPLACE(
+          REGEXP_REPLACE(norm_base, '[0-9]{6,}', '#'),
+          "('[?]'[[:space:]]*,[[:space:]]*)+", ''
+        ) AS k_rule2,
+        REGEXP_REPLACE(norm_base, '[0-9]+', '#') AS k_rule3,
+        REGEXP_REPLACE(
+          REGEXP_REPLACE(norm_base, '[0-9]+', '#'),
+          "('[?]'[[:space:]]*,[[:space:]]*)+", ''
+        ) AS k_rule4
+      FROM joined
+    ),
+    totals AS (
+      SELECT COUNT(*) AS objects_now, SUM(sql_length) AS sql_bytes_now FROM keyed
+    ),
+    g_rule1 AS (
+      SELECT COUNT(*) AS members, COUNT(DISTINCT source_set) AS distinct_source_sets,
+        MIN(sql_length) AS keep_sql_bytes
+      FROM keyed GROUP BY k_rule1
+    ),
+    g_rule2 AS (
+      SELECT COUNT(*) AS members, COUNT(DISTINCT source_set) AS distinct_source_sets,
+        MIN(sql_length) AS keep_sql_bytes
+      FROM keyed GROUP BY k_rule2
+    ),
+    g_rule3 AS (
+      SELECT COUNT(*) AS members, COUNT(DISTINCT source_set) AS distinct_source_sets,
+        MIN(sql_length) AS keep_sql_bytes
+      FROM keyed GROUP BY k_rule3
+    ),
+    g_rule4 AS (
+      SELECT COUNT(*) AS members, COUNT(DISTINCT source_set) AS distinct_source_sets,
+        MIN(sql_length) AS keep_sql_bytes
+      FROM keyed GROUP BY k_rule4
+    )
+    SELECT 1 AS rule_no, 'digits >= 6 (deployed)' AS rule,
+      (SELECT objects_now FROM totals) AS objects_now,
+      (SELECT COUNT(*) FROM g_rule1) AS groups_after,
+      (SELECT SUM(members) - COUNT(*) FROM g_rule1) AS objects_removable,
+      (SELECT COALESCE(SUM(members - 1), 0) FROM g_rule1
+        WHERE members > 1 AND distinct_source_sets > 1) AS lossy_removable,
+      (SELECT SUM(keep_sql_bytes) FROM g_rule1) AS sql_bytes_after
+    UNION ALL
+    SELECT 2, 'digits >= 6 + literal lists',
+      (SELECT objects_now FROM totals),
+      (SELECT COUNT(*) FROM g_rule2),
+      (SELECT SUM(members) - COUNT(*) FROM g_rule2),
+      (SELECT COALESCE(SUM(members - 1), 0) FROM g_rule2
+        WHERE members > 1 AND distinct_source_sets > 1),
+      (SELECT SUM(keep_sql_bytes) FROM g_rule2)
+    UNION ALL
+    SELECT 3, 'digits >= 1 (unsafe, scale only)',
+      (SELECT objects_now FROM totals),
+      (SELECT COUNT(*) FROM g_rule3),
+      (SELECT SUM(members) - COUNT(*) FROM g_rule3),
+      (SELECT COALESCE(SUM(members - 1), 0) FROM g_rule3
+        WHERE members > 1 AND distinct_source_sets > 1),
+      (SELECT SUM(keep_sql_bytes) FROM g_rule3)
+    UNION ALL
+    SELECT 4, 'digits >= 1 + literal lists (upper bound)',
+      (SELECT objects_now FROM totals),
+      (SELECT COUNT(*) FROM g_rule4),
+      (SELECT SUM(members) - COUNT(*) FROM g_rule4),
+      (SELECT COALESCE(SUM(members - 1), 0) FROM g_rule4
+        WHERE members > 1 AND distinct_source_sets > 1),
+      (SELECT SUM(keep_sql_bytes) FROM g_rule4)
+    ORDER BY rule_no
+    """,
+    registry_fqn,
+    direct_dependency_fqn
+  );
+
+  EXECUTE IMMEDIATE rendered_sql;
 END;
