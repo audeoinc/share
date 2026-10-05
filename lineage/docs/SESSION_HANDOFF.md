@@ -808,7 +808,7 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   行ごとに繰り返す（1行 = 起点カラム × 利用箇所 × 経路）。
   `static_tables_include_usage_sql = FALSE` で static テーブルから外せる。
 
-## 4.32 STEP 3 のバッチ分割（UDF OOM・SQLのみ）
+## 4.34 STEP 3 のバッチ分割（UDF OOM・SQLのみ）
 
 - **症状**：`process_generated_tables = TRUE` で 03 を実行すると UDF out of memory。
   `FALSE` にすると通る。
@@ -881,6 +881,37 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 - SQL 追加：`sql/maintenance/08_view_last_access.sql`、
   `sql/maintenance/09_unanalyzed_object_definitions.sql`、
   `definition_registry` の `labels` 列（§4.12）
+
+## 4.35 ephemeral SQL の近似重複の測定（SQLのみ・エンジン未変更）
+
+- **背景**：ephemeral（§4.32 の合成データセットに入る一時／ローテーション出力）が
+  928 個・2.3M 文字あり、STEP 3 の所要時間のほぼ全部を占める。運用側の情報として
+  「これらは別システムが毎日流す**パラメータ違いの同じ SQL**がほとんど」。
+- **ただし既に重複排除は入っている**：ephemeral の同一性は `sql_fingerprint`
+  （`fingerprintSqlForBigQuery`）で判定していて、これは**文字列・数値リテラル**、コメント、
+  空白、大小文字、バッククォートを正規化する。つまり「リテラルだけが違う毎日の実行」は
+  **すでに 1 オブジェクトに畳まれている**。928 個生き残っているなら、違いはリテラルでは**ない**。
+- **最有力の仮説は識別子内の数字**：`events_20260101` と `events_20260102` は
+  トークナイザから見れば 1 個の IDENTIFIER なので、指紋はそのまま保持する。
+  日付サフィックス付きテーブル名・パーティション id・連番がここに該当する。
+- **測定**：`sql/maintenance/12_ephemeral_sql_similarity.sql`（読み取り専用）。
+  レジストリは**既に指紋ベースで一意**なので `COUNT(*)` がそのまま基準値になる。
+  これを「指紋がやっている正規化を生テキストで再現し、さらに数字列を `#` に畳む」キーで
+  GROUP BY すると、**数字を畳むことで追加で得られる圧縮だけ**が分離できる。
+  指紋側の正規化を敢えて再現するのは、再現しないと「数字と空白の両方が違う 2 件」が
+  ここで同居してしまい**過小評価になる**ため。
+  - レポート 1：`objects_now` / `groups_after` / `objects_removable`、および
+    `lossless_` / `lossy_` / `unknown_removable` の内訳。
+  - レポート 2：グループ一覧と `distinct_source_sets`（`lnge_t_direct_dependency` から算出。
+    1 = 畳んでもロスレス、>1 = **エッジを捨てる**、0 = 未解析なので判断材料なし）。
+  - レポート 3：上位グループをメンバーごとに並べて出力。**何が違うのかを目で見る**ため。
+- **対処方針（測定後に判断）**：ユーザーが挙げた「UDF で事前に弾いて解析対象外にする」より、
+  **指紋を数字に鈍感にして代表 1 件に畳む**方が良い。前者は系統ごと lineage を失うが、
+  後者は代表の lineage が残るので DAG が切れない。
+  ただし ephemeral は **`definition_hash` が指紋そのもの**なので、指紋を変えると
+  全 ephemeral が一度だけ再登録される（1 回分の再解析コスト）。加えてバンドル再ビルドと
+  GCS 再アップロード、採番つき回帰テストの追加が必要（CLAUDE.md §4）。
+  `distinct_source_sets > 1` のグループが多い場合は、畳む前にそのグループを個別に見る。
 
 ## 5. 現在地（2026-08-22 更新）
 
