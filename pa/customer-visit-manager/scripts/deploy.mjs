@@ -2,6 +2,7 @@
 //   npm run deploy
 // 反映してよい状態(main で、最新で、変更が残っていない)のときだけ、検証 → ビルド → pa app push を行う。
 // 共有のアプリを複数人が上書きしても、他の人の変更を消さないための確認(docs/ONBOARDING.md の「チームの進め方」)。
+// 反映したあとは、git のタグ(deployed/日時)を残し、GitHub にも送る。誰が・いつ・どのコミットを反映したかが、全員に分かる。
 
 import { execSync } from 'node:child_process'
 
@@ -17,7 +18,7 @@ const branch = sh('git rev-parse --abbrev-ref HEAD')
 if (branch !== 'main') fail(`ブランチが ${branch} です。反映は、マージ済みの main から行います(git checkout main)。`)
 
 // 2. 最新であること(リモートより遅れていない・進んでいない)
-run('git fetch origin')
+run('git fetch origin --tags')
 const behind = Number(sh('git rev-list --count HEAD..origin/main'))
 const ahead = Number(sh('git rev-list --count origin/main..HEAD'))
 if (behind > 0) fail(`リモートの main が ${behind} 件先に進んでいます。git pull してから、もう一度実行してください。`)
@@ -27,7 +28,17 @@ if (ahead > 0) fail(`まだ push していないコミットが ${ahead} 件あ�
 const dirty = sh('git status --porcelain --untracked-files=no')
 if (dirty) fail(`コミットしていない変更があります:\n${dirty}`)
 
-// 4. 検証 → ビルド → 反映
+// 4. 前回の反映を表示する。同じコミットなら、反映し直さない
+const head = sh('git rev-parse HEAD')
+const last = sh('git tag --list "deployed/*" --sort=-creatordate').split('\n').filter(Boolean)[0]
+if (last) {
+  const lastCommit = sh(`git rev-list -n 1 ${last}`)
+  const lastInfo = sh(`git tag -l --format="%(creatordate:short) %(creatordate:iso8601) %(contents:subject)" ${last}`)
+  console.log(`前回の反映: ${last}(コミット ${lastCommit.slice(0, 7)}) ${lastInfo}`)
+  if (lastCommit === head) fail('このコミットは、すでに反映済みです(反映し直す必要はありません)。')
+}
+
+// 5. 検証 → ビルド → 反映
 console.log('\n[1/4] 型チェック')
 run('npx tsc -b')
 console.log('\n[2/4] lint')
@@ -37,5 +48,24 @@ run('npm run build')
 console.log('\n[4/4] 反映(pa app push)')
 run('npx pa app push')
 
-const commit = sh('git rev-parse --short HEAD')
-console.log(`\n反映しました(コミット ${commit})。画面に「古いバージョン」と出たら、「最新の情報に更新」を押してください。\n`)
+// 6. 反映の印(タグ)を残して、GitHub に送る(失敗しても、反映は済んでいる)
+const short = sh('git rev-parse --short HEAD')
+const now = new Date()
+const pad = (n) => String(n).padStart(2, '0')
+const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+const tag = `deployed/${stamp}`
+let who = ''
+try {
+  who = sh('git config user.name')
+} catch {
+  who = ''
+}
+try {
+  run(`git tag -a ${tag} -m "deployed by ${who || 'unknown'} (${short})"`)
+  run(`git push origin ${tag}`)
+  console.log(`\n反映の印(タグ ${tag})を、GitHub に送りました。`)
+} catch {
+  console.warn(`\n(反映は済んでいますが、タグの作成・送信に失敗しました。必要なら、手で: git tag -a ${tag} -m "deployed" && git push origin ${tag})`)
+}
+
+console.log(`\n反映しました(コミット ${short})。画面に「古いバージョン」と出たら、「最新の情報に更新」を押してください。\n`)
