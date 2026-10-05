@@ -386,33 +386,46 @@ BEGIN
         AND is_ephemeral = TRUE
         AND definition_text IS NOT NULL
     ),
-    groups AS (
-      SELECT norm_key, COUNT(*) AS members
+    -- NOT named `groups`: GROUPS is a GoogleSQL reserved keyword (the window-frame
+    -- unit in ROWS | RANGE | GROUPS), so a CTE by that name is a syntax error.
+    group_sizes AS (
+      SELECT norm_key, COUNT(*) AS member_count
       FROM ephemeral
       GROUP BY norm_key
       HAVING COUNT(*) > 1
     ),
     top_groups AS (
       SELECT
-        norm_key,
-        members,
+        norm_key AS group_key,
+        member_count,
         -- ROW_NUMBER, not RANK: a tie must not drag in an unbounded number of groups.
-        ROW_NUMBER() OVER (ORDER BY members DESC, norm_key) AS group_no
-      FROM groups
+        ROW_NUMBER() OVER (ORDER BY member_count DESC, norm_key) AS group_no
+      FROM group_sizes
+    ),
+    picked AS (
+      SELECT
+        g.group_no,
+        g.member_count,
+        e.object_name,
+        e.sql_length,
+        e.definition_text,
+        ROW_NUMBER() OVER (PARTITION BY g.group_no ORDER BY e.object_name) AS member_no
+      FROM ephemeral AS e
+      INNER JOIN top_groups AS g
+        ON g.group_key = e.norm_key
+      WHERE g.group_no <= @group_count
     )
     SELECT
-      g.group_no,
-      g.members,
-      e.object_name,
-      e.sql_length,
-      SUBSTR(REGEXP_REPLACE(e.definition_text, '[[:space:]]+', ' '), 1, @sample_len)
+      group_no,
+      member_count,
+      member_no,
+      object_name,
+      sql_length,
+      SUBSTR(REGEXP_REPLACE(definition_text, '[[:space:]]+', ' '), 1, @sample_len)
         AS sql_text
-    FROM ephemeral AS e
-    JOIN top_groups AS g USING (norm_key)
-    WHERE g.group_no <= @group_count
-    QUALIFY ROW_NUMBER() OVER (PARTITION BY e.norm_key ORDER BY e.object_name)
-      <= @members_each
-    ORDER BY g.group_no, e.object_name
+    FROM picked
+    WHERE member_no <= @members_each
+    ORDER BY group_no, member_no
     """,
     registry_fqn
   );
