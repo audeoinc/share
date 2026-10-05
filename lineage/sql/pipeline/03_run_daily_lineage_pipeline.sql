@@ -251,8 +251,8 @@ DECLARE configured_max_impact_rank INT64 DEFAULT 100;
 -- so a steady-state daily run is normally one small batch per dataset.
 -- sql/maintenance/10_pending_analysis_workload.sql reports the volume per dataset,
 -- which is what these should be set against.
-DECLARE analysis_batch_max_sql_bytes INT64 DEFAULT 200000;
-DECLARE analysis_batch_max_objects INT64 DEFAULT 200;
+DECLARE analysis_batch_max_sql_bytes INT64 DEFAULT 600000;
+DECLARE analysis_batch_max_objects INT64 DEFAULT 600;
 
 -- How many batches ONE RUN may analyze. 0 (default) means all of them.
 --
