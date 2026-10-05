@@ -21,33 +21,53 @@ import {
 import { AddRegular, ArrowDownRegular, ArrowUpRegular, CopyRegular, DeleteRegular, DismissRegular } from '@fluentui/react-icons'
 import { AutoTextarea } from './AutoTextarea'
 import { useT } from './i18n'
-import { MAX_SECTIONS, MAX_SLOTS, deleteTemplate, saveTemplate } from './layoutTemplates'
+import { MAX_SECTIONS, MAX_SLOTS, deleteTemplate, fitSlots, saveTemplate } from './layoutTemplates'
 import { TemplateThumb } from './TemplateThumb'
-import { gridColumns, setTemplateManagerOpen, templateOptions, useTemplateManagerOpen, useTemplates, type HeroKind, type Section } from './templates'
+import { gridColumns, sectionKindLabel, setTemplateManagerOpen, slotStep, templateOptions, useTemplateManagerOpen, useTemplates, type HeroKind, type HeroText, type Section, type TemplateLayout } from './templates'
 
-interface Draft {
+interface Draft extends TemplateLayout {
   /** 保存済みの行の ID(新規は undefined) */
   id?: string
   name: string
   description: string
-  hero: HeroKind
-  sections: Section[]
 }
 
-/** 種類の選択肢。3 列のグリッドは、データでは grid + columns: 3 */
-type SectionLayout = 'grid' | 'grid3' | 'feature'
-const layoutValue = (sec: Section): SectionLayout => (sec.kind === 'feature' ? 'feature' : gridColumns(sec) === 3 ? 'grid3' : 'grid')
-/** 3 列にしたときは、横並び 1 行(3 点)になるように枠の数も合わせる。2 列・特集に戻すときは、列の指定を消す */
-const layoutPatch = (v: SectionLayout): Partial<Section> =>
-  v === 'grid3' ? { kind: 'grid', columns: 3, slots: 3 } : { kind: v, columns: undefined }
+/**
+ * 種類の選択肢。データでは、種類(kind)と、列の数(columns)・左右(flip)の組み合わせで表す。
+ * 選び直したときは、その種類で 1 行(1 組)になる枠の数に合わせる(3 列なら 3 点、モザイクなら 3 点)
+ */
+type SectionLayout = 'grid' | 'grid3' | 'photos' | 'photos3' | 'wide' | 'mosaic' | 'mosaicR' | 'story' | 'feature'
+const LAYOUTS: SectionLayout[] = ['grid', 'grid3', 'photos', 'photos3', 'wide', 'mosaic', 'mosaicR', 'story', 'feature']
+const layoutValue = (sec: Section): SectionLayout => {
+  if (sec.kind === 'grid' || sec.kind === 'photos') return gridColumns(sec) === 3 ? `${sec.kind}3` : sec.kind
+  if (sec.kind === 'mosaic') return sec.flip ? 'mosaicR' : 'mosaic'
+  return sec.kind
+}
+const layoutSection = (v: SectionLayout): Section => {
+  switch (v) {
+    case 'grid3':
+      return { kind: 'grid', columns: 3, slots: 3 }
+    case 'photos3':
+      return { kind: 'photos', columns: 3, slots: 6 }
+    case 'mosaicR':
+      return { kind: 'mosaic', flip: true, slots: 3 }
+    default:
+      return { kind: v, slots: v === 'mosaic' ? 3 : v === 'wide' ? 1 : 2 }
+  }
+}
+const layoutPatch = (v: SectionLayout, sec: Section): Section => {
+  const next = layoutSection(v)
+  // 種類だけを変える。見出し・ボタンは、そのまま残す
+  return { ...next, categoryHeading: sec.categoryHeading, buttons: sec.buttons }
+}
 
 /** 構成のプレビューの幅。一覧の見取り図(84px)では、枠の数や列が読み取りにくいため、大きく描く */
 const PREVIEW_WIDTH = 220
 
-const NEW_DRAFT: Draft = { name: '', description: '', hero: 'standard', sections: [{ kind: 'grid', slots: 4 }] }
+const NEW_DRAFT: Draft = { name: '', description: '', hero: 'standard', heroText: 'below', heroButtons: 1, sections: [{ kind: 'grid', slots: 4 }] }
 
 const useStyles = makeStyles({
-  surface: { width: '960px', maxWidth: '96vw', height: '82vh', maxHeight: '82vh', display: 'flex', flexDirection: 'column', padding: 0, overflow: 'hidden' },
+  surface: { width: '1120px', maxWidth: '96vw', height: '82vh', maxHeight: '82vh', display: 'flex', flexDirection: 'column', padding: 0, overflow: 'hidden' },
   body: { display: 'flex', flexDirection: 'column', minHeight: 0, flexGrow: 1, padding: 0, rowGap: 0 },
   head: { display: 'flex', alignItems: 'center', columnGap: '8px', padding: '12px 16px', borderBottom: `1px solid ${tokens.colorNeutralStroke2}` },
   grow: { flexGrow: 1 },
@@ -74,21 +94,25 @@ const useStyles = makeStyles({
   // プレビューの欄は、見取り図の大きさ(枠線・余白を含む)に合わせる。固定の幅だと、見取り図の右端が欠ける
   editorGrid: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', columnGap: '16px', alignItems: 'start' },
   fields: { display: 'grid', rowGap: '14px', minWidth: 0 },
-  preview: { display: 'grid', rowGap: '6px', justifyItems: 'start' },
+  // 縦長の見取り図をスクロールしても、編集欄と並べて見られるように、上に貼り付ける
+  preview: { display: 'grid', rowGap: '6px', justifyItems: 'start', position: 'sticky', top: 0 },
+  // 縦長の見取り図は、それだけでスクロールできるようにする(長いテンプレートでも、編集しながら下まで見られる)
+  previewScroll: { maxHeight: 'calc(82vh - 150px)', overflowY: 'auto', paddingRight: '4px' },
   heroRow: { display: 'flex', gap: '6px', flexWrap: 'wrap' },
   sectionRow: {
     display: 'flex',
     alignItems: 'center',
     flexWrap: 'wrap',
-    columnGap: '8px',
+    columnGap: '6px',
     rowGap: '4px',
     padding: '6px 8px',
     border: `1px solid ${tokens.colorNeutralStroke2}`,
     borderRadius: tokens.borderRadiusMedium,
   },
   sectionNo: { width: '18px', color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
-  slotSelect: { width: '78px' },
-  kindSelect: { width: '140px' },
+  slotSelect: { width: '68px' },
+  kindSelect: { width: '138px' },
+  buttonsSelect: { width: '96px' },
   actions: { display: 'flex', alignItems: 'center', columnGap: '8px', padding: '10px 16px', borderTop: `1px solid ${tokens.colorNeutralStroke2}` },
 })
 
@@ -112,6 +136,13 @@ export function TemplateManager() {
     collab: t('コラボ', 'Collab'),
     offer: t('期間限定', 'Limited offer'),
   }
+  const heroTextLabels: Record<HeroText, string> = {
+    band: t('写真の下部に帯で重ねる', 'Band over the photo'),
+    overlay: t('写真に大きく重ねる', 'Large over the photo'),
+    below: t('写真の下に置く', 'Below the photo'),
+  }
+  const layoutLabel = (v: SectionLayout) => sectionKindLabel(layoutSection(v))
+  const layoutOf = (o: TemplateLayout): TemplateLayout => ({ hero: o.hero, heroText: o.heroText, heroButtons: o.heroButtons, topBar: o.topBar, sections: o.sections.map((x) => ({ ...x })) })
 
   const close = () => {
     setTemplateManagerOpen(false)
@@ -137,15 +168,14 @@ export function TemplateManager() {
     setDraft({
       name: t(`${selected.label} のコピー`, `Copy of ${selected.label}`),
       description: selected.description,
-      hero: selected.hero,
-      sections: selected.sections.map((x) => ({ ...x })),
+      ...layoutOf(selected),
     })
     setSelectedId('')
   }
   const startEdit = () => {
     if (!selected || selected.builtin) return
     setError(null)
-    setDraft({ id: selected.id, name: selected.label, description: selected.description, hero: selected.hero, sections: selected.sections.map((x) => ({ ...x })) })
+    setDraft({ id: selected.id, name: selected.label, description: selected.description, ...layoutOf(selected) })
   }
 
   const patch = (p: Partial<Draft>) => setDraft((d) => (d ? { ...d, ...p } : d))
@@ -196,7 +226,7 @@ export function TemplateManager() {
 
   const renderItem = (o: (typeof options)[number]) => (
     <div key={o.id} className={mergeClasses(s.item, !editing && o.id === selected?.id && s.itemSelected)} onClick={() => choose(o.id)} role="button" tabIndex={0}>
-      <TemplateThumb hero={o.hero} sections={o.sections} free={o.id === 'free'} />
+      <TemplateThumb layout={o} free={o.id === 'free'} maxHeight={170} />
       <div className={s.itemText}>
         <span className={s.itemName}>{o.label}</span>
         <span className={s.caption}>{o.description}</span>
@@ -250,6 +280,25 @@ export function TemplateManager() {
                         ))}
                       </div>
                     </Field>
+                    <div className={s.heroRow}>
+                      <Field label={t('ヘッドラインの見せ方', 'Headline placement')}>
+                        <Select size="small" value={draft.heroText ?? 'band'} onChange={(_, d) => patch({ heroText: d.value as HeroText })}>
+                          {(['below', 'overlay', 'band'] as HeroText[]).map((h) => (
+                            <option key={h} value={h}>{heroTextLabels[h]}</option>
+                          ))}
+                        </Select>
+                      </Field>
+                      <Field label={t('ヒーローのボタン', 'Hero buttons')}>
+                        <Select size="small" value={String(draft.heroButtons ?? 0)} onChange={(_, d) => patch({ heroButtons: Number(d.value) as 0 | 1 | 2 })}>
+                          <option value="0">{t('なし', 'None')}</option>
+                          <option value="1">{t('1 つ', '1 button')}</option>
+                          <option value="2">{t('2 つ', '2 buttons')}</option>
+                        </Select>
+                      </Field>
+                      <Field label={t('お知らせ帯', 'Top bar')}>
+                        <Checkbox label={t('メールの最上部に置く', 'Show at the very top')} checked={!!draft.topBar} onChange={(_, d) => patch({ topBar: d.checked === true || undefined })} />
+                      </Field>
+                    </div>
                     <Field label={t(`セクション(商品の枠は合計 ${totalSlots} 点)`, `Sections (${totalSlots} product slots in total)`)}>
                       <div style={{ display: 'grid', rowGap: 6 }}>
                         {draft.sections.map((sec, i) => (
@@ -260,24 +309,35 @@ export function TemplateManager() {
                               className={s.kindSelect}
                               value={layoutValue(sec)}
                               aria-label={t('種類', 'Type')}
-                              onChange={(_, d) => patchSection(i, layoutPatch(d.value as SectionLayout))}
+                              onChange={(_, d) => patchSection(i, layoutPatch(d.value as SectionLayout, sec))}
                             >
-                              <option value="grid">{t('グリッド(2列)', 'Grid (2 columns)')}</option>
-                              <option value="grid3">{t('グリッド(3列)', 'Grid (3 columns)')}</option>
-                              <option value="feature">{t('特集', 'Feature')}</option>
+                              {LAYOUTS.map((v) => (
+                                <option key={v} value={v}>{layoutLabel(v)}</option>
+                              ))}
                             </Select>
                             <Select
                               size="small"
                               className={s.slotSelect}
                               value={String(sec.slots)}
                               aria-label={t('商品の枠の数', 'Product slots')}
-                              onChange={(_, d) => patchSection(i, { slots: Number(d.value) })}
+                              onChange={(_, d) => patchSection(i, { slots: fitSlots(sec.kind, Number(d.value)) })}
                             >
-                              {Array.from({ length: MAX_SLOTS }, (_, k) => k + 1).map((n) => (
+                              {Array.from({ length: Math.floor(MAX_SLOTS / slotStep(sec.kind)) }, (_, k) => (k + 1) * slotStep(sec.kind)).map((n) => (
                                 <option key={n} value={n}>{t(`${n} 点`, `${n} items`)}</option>
                               ))}
                             </Select>
-                            <Checkbox label={t('カテゴリ見出し', 'Category heading')} checked={!!sec.categoryHeading} onChange={(_, d) => patchSection(i, { categoryHeading: d.checked === true })} />
+                            <Select
+                              size="small"
+                              className={s.buttonsSelect}
+                              value={String(sec.buttons ?? 0)}
+                              aria-label={t('セクションの後のボタン', 'Buttons after the section')}
+                              onChange={(_, d) => patchSection(i, { buttons: Number(d.value) ? (Number(d.value) as 1 | 2) : undefined })}
+                            >
+                              <option value="0">{t('ボタンなし', 'No buttons')}</option>
+                              <option value="1">{t('ボタン 1', '1 button')}</option>
+                              <option value="2">{t('ボタン 2', '2 buttons')}</option>
+                            </Select>
+                            <Checkbox label={t('見出し', 'Heading')} checked={!!sec.categoryHeading} onChange={(_, d) => patchSection(i, { categoryHeading: d.checked === true })} />
                             <span className={s.grow} />
                             <Button size="small" appearance="subtle" icon={<ArrowUpRegular />} disabled={i === 0} onClick={() => moveSection(i, -1)} aria-label={t('上へ', 'Move up')} />
                             <Button size="small" appearance="subtle" icon={<ArrowDownRegular />} disabled={i === draft.sections.length - 1} onClick={() => moveSection(i, 1)} aria-label={t('下へ', 'Move down')} />
@@ -294,7 +354,9 @@ export function TemplateManager() {
                   </div>
                   <div className={s.preview}>
                     <Text size={200} weight="semibold">{t('構成のプレビュー', 'Layout preview')}</Text>
-                    <TemplateThumb hero={draft.hero} sections={draft.sections} width={PREVIEW_WIDTH} />
+                    <div className={s.previewScroll}>
+                      <TemplateThumb layout={draft} width={PREVIEW_WIDTH} />
+                    </div>
                   </div>
                 </div>
               ) : selected ? (
@@ -307,12 +369,21 @@ export function TemplateManager() {
                     <span className={s.caption}>{selected.description || t('(説明なし)', '(No description)')}</span>
                     <div style={{ display: 'grid', gridTemplateColumns: 'auto minmax(0, 1fr)', columnGap: 12, rowGap: 4 }}>
                       <span className={s.caption}>{t('ヒーロー', 'Hero')}</span>
-                      <span style={{ fontSize: tokens.fontSizeBase200 }}>{heroLabels[selected.hero]}</span>
+                      <span style={{ fontSize: tokens.fontSizeBase200 }}>
+                        {[
+                          heroLabels[selected.hero],
+                          heroTextLabels[selected.heroText ?? 'band'],
+                          selected.heroButtons ? t(`ボタン ${selected.heroButtons}`, `${selected.heroButtons} button(s)`) : '',
+                          selected.topBar ? t('お知らせ帯あり', 'top bar') : '',
+                        ]
+                          .filter(Boolean)
+                          .join(t('、', ', '))}
+                      </span>
                       <span className={s.caption}>{t('セクション', 'Sections')}</span>
                       <span style={{ fontSize: tokens.fontSizeBase200 }}>
                         {selected.id === 'free'
                           ? t('自由な並び(枠の数は決まっていません)', 'Free-form (no fixed number of slots)')
-                          : selected.sections.map((x) => `${x.kind === 'feature' ? t('特集', 'Feature') : gridColumns(x) === 3 ? t('グリッド(3列)', 'Grid (3 col)') : t('グリッド', 'Grid')}${t(` ${x.slots}点`, ` ×${x.slots}`)}${x.categoryHeading ? t('(見出し付き)', ' (heading)') : ''}`).join(' → ')}
+                          : selected.sections.map((x) => `${sectionKindLabel(x)}${t(` ${x.slots}点`, ` ×${x.slots}`)}${x.categoryHeading ? t('(見出し付き)', ' (heading)') : ''}${x.buttons ? t(`(ボタン ${x.buttons})`, ` (${x.buttons} btn)`) : ''}`).join(' → ')}
                       </span>
                     </div>
                     <div style={{ display: 'flex', gap: 8 }}>
@@ -329,7 +400,9 @@ export function TemplateManager() {
                   </div>
                   <div className={s.preview}>
                     <Text size={200} weight="semibold">{t('構成のプレビュー', 'Layout preview')}</Text>
-                    <TemplateThumb hero={selected.hero} sections={selected.sections} free={selected.id === 'free'} width={PREVIEW_WIDTH} />
+                    <div className={s.previewScroll}>
+                      <TemplateThumb layout={selected} free={selected.id === 'free'} width={PREVIEW_WIDTH} />
+                    </div>
                   </div>
                 </div>
               ) : null}

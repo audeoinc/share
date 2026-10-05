@@ -13,7 +13,7 @@ import { AutoTextarea } from './AutoTextarea'
 import { DND_HERO, DND_ITEM, scaled, yen, type Item } from './items'
 import { heroImage, productImage } from './images'
 import { productMarket } from './market'
-import { getTemplate, gridColumns, type EmailTemplateId } from './templates'
+import { getTemplate, gridColumns, type EmailTemplateId, type Section } from './templates'
 import { HEADLINE_FONT } from './fonts'
 import { locale, optionLabel, useT } from './i18n'
 
@@ -218,6 +218,8 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, h
   const byId = new Map(products.map((p) => [p.cr854_productid, p]))
   const tpl = getTemplate(template)
   const offer = tpl.hero === 'offer'
+  const heroText = tpl.heroText ?? 'band'
+  const jaHeadline = /[\u3000-\u9fff\uff00-\uffef]/.test(headline)
   const hf = HEADLINE_FONT
 
   // 商品にマウスを乗せたときに出る、並べ替えと削除のボタン
@@ -305,7 +307,56 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, h
         <img className={classes.img} draggable={false} src={productImage(p)} alt={p?.cr854_name} style={{ width: '100%', aspectRatio: compact ? '1 / 1' : '3 / 4' }} />
         <div className={classes.noWrap} style={{ fontSize: '0.85rem', fontWeight: 600, marginTop: 4, color: INK }}>{p?.cr854_name}</div>
         {priceEl(p?.cr854_price, productMarket(p))}
-        {cta}
+        {controls(it, idx)}
+      </div>
+    )
+  }
+
+  // 写真だけのタイル: 名前・価格を出さず、写真を敷き詰める
+  const photoTile = (it: Item, idx: number) => {
+    const p = byId.get(it.productId)
+    return (
+      <div key={it.key} {...dragProps(it, idx)} className={classes.frame} style={{ ...frameStyle(it, idx), padding: 2 }}>
+        <img className={classes.img} draggable={false} src={productImage(p)} alt={p?.cr854_name} style={{ width: '100%', aspectRatio: '4 / 5', borderRadius: 4 }} />
+        {controls(it, idx)}
+      </div>
+    )
+  }
+
+  // 写真を枠いっぱいに敷き、名前・価格を左下に重ねる(大きく 1 点・モザイク)。
+  // fill: 枠の高さに合わせる(モザイクのマス)。そうでなければ正方形
+  const overlayTile = (it: Item, idx: number, fill: boolean, small = false) => {
+    const p = byId.get(it.productId)
+    return (
+      <div key={it.key} {...dragProps(it, idx)} className={classes.frame} style={{ ...frameStyle(it, idx), padding: 0, ...(fill ? { height: '100%' } : {}) }}>
+        <img className={classes.img} draggable={false} src={productImage(p)} alt={p?.cr854_name} style={{ width: '100%', ...(fill ? { height: '100%' } : { aspectRatio: '1 / 1' }) }} />
+        <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, padding: small ? '14px 6px 4px' : '28px 12px 10px', borderRadius: '0 0 8px 8px', background: 'linear-gradient(rgba(255,255,255,0), rgba(255,255,255,0.9))' }}>
+          <div className={classes.noWrap} style={{ fontSize: small ? '0.7rem' : '0.9rem', fontWeight: 600, color: INK }}>{p?.cr854_name}</div>
+          {!small && priceEl(p?.cr854_price, productMarket(p))}
+        </div>
+        {controls(it, idx)}
+      </div>
+    )
+  }
+
+  // ストーリー: 写真と、名前・価格・商品の説明を横に並べる。reverse で、写真を左にする
+  const storyRow = (it: Item, idx: number, reverse: boolean) => {
+    const p = byId.get(it.productId)
+    const text = (
+      <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 4, padding: '12px 14px', minWidth: 0 }}>
+        {p?.cr854_categoryname && <div style={{ fontSize: '0.65rem', letterSpacing: 2, color: SUB }}>{optionLabel(p.cr854_categoryname).toUpperCase()}</div>}
+        <div style={{ fontSize: '1rem', fontWeight: 600, color: INK }}>{p?.cr854_name}</div>
+        {priceEl(p?.cr854_price, productMarket(p))}
+        {p?.cr854_description && <div style={{ fontSize: '0.78rem', color: SUB, lineHeight: 1.5, marginTop: 6 }}>“{p.cr854_description}”</div>}
+      </div>
+    )
+    const img = <img className={classes.img} draggable={false} src={productImage(p)} alt={p?.cr854_name} style={{ width: '100%', aspectRatio: '3 / 4', borderRadius: 0 }} />
+    return (
+      <div key={it.key} {...dragProps(it, idx)} className={classes.frame} style={{ ...frameStyle(it, idx), padding: 0, backgroundColor: over === idx ? ACCENT_BG : '#f1f1f3' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', alignItems: 'stretch' }}>
+          {reverse ? img : text}
+          {reverse ? text : img}
+        </div>
         {controls(it, idx)}
       </div>
     )
@@ -330,7 +381,7 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, h
   }
 
   // 空きの枠: ここへドロップすると、末尾の空き枠から埋まる
-  const emptySlot = (key: string, feature: boolean) => (
+  const emptySlot = (key: string, feature: boolean, shape?: React.CSSProperties) => (
     <div
       key={key}
       {...handlers(items.length)}
@@ -338,6 +389,7 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, h
       style={{
         aspectRatio: feature ? undefined : compact ? '1 / 1' : '3 / 4',
         minHeight: feature ? 120 : undefined,
+        ...shape,
         borderColor: over === items.length ? ACCENT : '#bbb',
         backgroundColor: over === items.length ? ACCENT_BG : 'transparent',
         fontSize: '0.8rem',
@@ -409,7 +461,7 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, h
         if (id) onDropHero(id)
       }}
       style={{
-        aspectRatio: compact ? '3 / 1' : '8 / 3',
+        aspectRatio: heroText === 'band' ? (compact ? '3 / 1' : '8 / 3') : compact ? '2 / 1' : heroText === 'overlay' ? '4 / 5' : '1 / 1',
         backgroundColor: heroOver ? 'rgba(103,80,164,0.15)' : '#e9e9ee',
         outline: heroOver ? `3px solid ${ACCENT}` : 'none',
         outlineOffset: -3,
@@ -440,7 +492,8 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, h
           SPECIAL COLLABORATION
         </div>
       )}
-      {/* ヘッドライン: 画像の下部に半透明の帯を敷いて、左寄せの太字で載せる */}
+      {/* ヘッドライン(帯): 画像の下部に半透明の帯を敷いて、左寄せの太字で載せる */}
+      {heroText === 'band' && (
       <div
         style={{
           position: 'absolute',
@@ -476,8 +529,113 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, h
           {copy || t('(コピー未入力)', '(No copy)')}
         </FitLine>
       </div>
+      )}
+      {/* ヘッドライン(大きく重ねる): 写真の中央に、折り返して大きく載せる。コピーは写真の下 */}
+      {heroText === 'overlay' && (
+        <div
+          style={{
+            position: 'absolute',
+            inset: '0 6cqw',
+            display: 'grid',
+            placeItems: 'center',
+            color: '#fff',
+            textAlign: 'center',
+            pointerEvents: 'none',
+            fontFamily: hf.family,
+            fontWeight: hf.weight,
+            fontSize: `calc(${compact ? '6cqw' : '10cqw'} * ${hf.scale})`,
+            lineHeight: 1.15,
+            letterSpacing: jaHeadline ? hf.trackingJa : hf.tracking,
+            textTransform: hf.upper ? 'uppercase' : 'none',
+            textShadow: '0 2px 12px rgba(0,0,0,0.35)',
+            overflowWrap: 'anywhere',
+          }}
+        >
+          {headline || t('(ヘッドライン未入力)', '(No headline)')}
+        </div>
+      )}
     </div>
   )
+
+  // ---- ヒーローの下(写真の下に置くヘッドライン・コピーと、ボタン)
+  const buttonLabels = [t('商品を見る', 'Shop now'), t('もっと見る', 'See more')]
+  const buttonRow = (n: number | undefined, outline: boolean) =>
+    n ? (
+      <div style={{ display: 'grid', gridTemplateColumns: `repeat(${n}, 1fr)`, gap: 10, padding: n === 1 ? '4px 25%' : '4px 16px' }}>
+        {buttonLabels.slice(0, n).map((label) => (
+          <div
+            key={label}
+            style={{
+              textAlign: 'center',
+              padding: '8px 0',
+              borderRadius: 999,
+              fontSize: '0.8rem',
+              ...(outline ? { border: `1px solid ${INK}`, color: INK } : { backgroundColor: offer ? '#d32f2f' : '#222', color: '#fff' }),
+            }}
+          >
+            {label}
+          </div>
+        ))}
+      </div>
+    ) : null
+  const heroAfter = (
+    <>
+      {heroText === 'below' && (
+        <div style={{ textAlign: 'center', padding: '16px 16px 0', color: INK }}>
+          <div style={{ fontFamily: hf.family, fontWeight: hf.weight, fontSize: `calc(1.5rem * ${hf.scale})`, lineHeight: 1.25, letterSpacing: jaHeadline ? hf.trackingJa : hf.tracking, textTransform: hf.upper ? 'uppercase' : 'none' }}>
+            {headline || t('(ヘッドライン未入力)', '(No headline)')}
+          </div>
+        </div>
+      )}
+      {heroText !== 'band' && (
+        <div style={{ textAlign: 'center', padding: '8px 24px 0', fontSize: '0.85rem', color: SUB, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{copy || t('(コピー未入力)', '(No copy)')}</div>
+      )}
+      {tpl.heroButtons ? <div style={{ paddingTop: 12 }}>{buttonRow(tpl.heroButtons, false)}</div> : null}
+      <div style={{ height: 8 }} />
+    </>
+  )
+
+  // ---- セクションの商品の並び(種類ごと)。start は、並び全体の中での先頭の位置
+  const sectionBody = (sec: Section, start: number, list: Item[]) => {
+    const slot = (j: number, tile: (it: Item, idx: number) => React.ReactNode, shape?: React.CSSProperties, feature = false) =>
+      list[j] ? tile(list[j], start + j) : emptySlot(`e${start + j}`, feature, shape)
+    const slots = Array.from({ length: sec.slots }, (_, j) => j)
+    const cols = gridColumns(sec)
+    switch (sec.kind) {
+      case 'photos':
+        return (
+          <div style={{ display: 'grid', gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, gap: 4, alignItems: 'start' }}>{slots.map((j) => slot(j, photoTile, { aspectRatio: '4 / 5', padding: 4 }))}</div>
+        )
+      case 'wide':
+        return <div style={{ display: 'grid', gap: 12 }}>{slots.map((j) => slot(j, (it, idx) => overlayTile(it, idx, false), { aspectRatio: '1 / 1' }))}</div>
+      case 'mosaic': {
+        // 3 点で 1 組。各組の先頭が大きいマス(縦 2 行分)
+        const groups = Array.from({ length: Math.ceil(sec.slots / 3) }, (_, g) => g * 3)
+        const cell = (j: number, big: boolean) => slot(j, (it, idx) => overlayTile(it, idx, true, !big), { aspectRatio: 'auto', height: '100%' })
+        return (
+          <div style={{ display: 'grid', gap: 8 }}>
+            {groups.map((g) => (
+              <div key={g} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gridTemplateRows: '1fr 1fr', gap: 8, aspectRatio: '1 / 1' }}>
+                <div style={{ gridRow: '1 / 3', gridColumn: sec.flip ? 2 : 1, minHeight: 0 }}>{cell(g, true)}</div>
+                <div style={{ gridRow: 1, gridColumn: sec.flip ? 1 : 2, minHeight: 0 }}>{cell(g + 1, false)}</div>
+                <div style={{ gridRow: 2, gridColumn: sec.flip ? 1 : 2, minHeight: 0 }}>{cell(g + 2, false)}</div>
+              </div>
+            ))}
+          </div>
+        )
+      }
+      case 'story':
+        return <div style={{ display: 'grid', gap: 8 }}>{slots.map((j) => slot(j, (it, idx) => storyRow(it, idx, j % 2 === 1), { aspectRatio: '2 / 1.3' }))}</div>
+      case 'feature':
+        return <div style={{ display: 'grid', gap: 12 }}>{slots.map((j) => slot(j, featureTile, undefined, true))}</div>
+      default:
+        // 3 列は 1 枠が狭いので、名前が枠を押し広げないよう minmax(0, 1fr) にし、間隔も詰める
+        return (
+          // alignItems: start: 空き枠を、隣の商品(名前・価格の分だけ高い)の高さに引き伸ばすと、縦横比のせいで横にはみ出すため
+          <div style={{ display: 'grid', gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, gap: cols === 3 ? 8 : 12, alignItems: 'start' }}>{slots.map((j) => slot(j, gridTile))}</div>
+        )
+    }
+  }
 
   // ---- 本文(商品)。free は連続する同カテゴリごとに見出しを付け、それ以外はテンプレートの枠に流し込む
   let body: React.ReactNode
@@ -525,18 +683,12 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, h
       <>
         {sections.map(({ sec, start, list }, si) => {
           const category = sec.categoryHeading ? byId.get(list[0]?.productId ?? '')?.cr854_categoryname : undefined
-          const feature = sec.kind === 'feature'
-          const cols = gridColumns(sec)
           return (
             <div key={start} style={{ padding: '0 16px 16px' }}>
               {sec.categoryHeading && editableHeading(si, category ? optionLabel(category) : `CATEGORY ${si + 1}`)}
               {sectionCopyEl(si, !!sec.categoryHeading)}
-              {/* 3 列は 1 枠が狭いので、名前が枠を押し広げないよう minmax(0, 1fr) にし、間隔も詰める */}
-              <div style={{ display: 'grid', gridTemplateColumns: feature ? '1fr' : cols === 3 ? 'repeat(3, minmax(0, 1fr))' : '1fr 1fr', gap: cols === 3 ? 8 : 12 }}>
-                {Array.from({ length: sec.slots }, (_, j) =>
-                  list[j] ? (feature ? featureTile(list[j], start + j) : gridTile(list[j], start + j)) : emptySlot(`e${start + j}`, feature),
-                )}
-              </div>
+              {sectionBody(sec, start, list)}
+              {sec.buttons ? <div style={{ paddingTop: 14 }}>{buttonRow(sec.buttons, true)}</div> : null}
             </div>
           )
         })}
@@ -558,8 +710,15 @@ function EmailPreview({ subject, headline, copy, items, products, selectedKey, h
     <div style={{ maxWidth: 440, margin: '0 auto' }}>
       {!compact && <span style={{ fontSize: 12, color: tokens.colorNeutralForeground2 }}>{t('件名', 'Subject')}: {subject || t('(配信名未入力)', '(No name)')}</span>}
       <div style={{ backgroundColor: '#fff', color: INK, border: '1px solid #ddd', borderRadius: 16, overflow: 'hidden', marginTop: 4, ...scaled }}>
+        {/* お知らせ帯: 配信名を、メールの最上部に細い帯で出す */}
+        {tpl.topBar && (
+          <div className={classes.noWrap} style={{ backgroundColor: '#555', color: '#fff', textAlign: 'center', padding: '6px 12px', fontSize: '0.75rem', letterSpacing: 2 }}>
+            {subject || t('(配信名未入力)', '(No name)')} ›
+          </div>
+        )}
         <div style={{ backgroundColor: '#222', color: '#fff', textAlign: 'center', padding: '12px 0', letterSpacing: 4, fontWeight: 700 }}>SHOP</div>
         {heroBox}
+        {heroAfter}
         {body}
         {!compact && <div style={{ backgroundColor: '#f5f5f5', color: SUB, fontSize: '0.75rem', textAlign: 'center', padding: '12px 0' }}>{t('配信停止はこちら', 'Unsubscribe')}</div>}
       </div>

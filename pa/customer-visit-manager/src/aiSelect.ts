@@ -2,6 +2,7 @@ import { Cr854_airequestsService } from './generated/services/Cr854_airequestsSe
 import type { Cr854_products } from './generated/models/Cr854_productsModel'
 import type { Cr854_heroimages } from './generated/models/Cr854_heroimagesModel'
 import { getLang, tr } from './i18n'
+import type { SectionKind } from './templates'
 
 // AI要求テーブルの状態(選択肢の値)。エージェントは、フロー「AI要求の処理」が呼ぶ。仕様は docs/ai-queue.md、docs/copilot-agent.md
 const STATUS_WAITING = 588230000
@@ -56,6 +57,7 @@ const PRODUCT_RULES = `# 商品選定のルール
 7. 先頭は、このセクションの切り口を最もよく表す商品にする。
 8. 理由(reason)は日本語。選定した商品は 60 文字以内で、テーマとの関係や、在庫・売上トレンド・評価などの根拠を、具体的な数値や語を使って書く。候補は 40 文字以内で、選定との違いや、次点である理由を書く。
 9. メイン画像(hero)、ヘッドライン(card.headline)、コピー(card.copy)が決まっている場合は、それらの世界観・訴求と整合させる(色味や雰囲気、言葉づかい、季節感)。メイン画像に写る商品の種類や色味とも、調和するものを選ぶ。
+10. section.kind は、メールでの見せ方。wide(全幅で大きく 1 点ずつ)・mosaic(3 点で 1 組。各組の先頭が大きい)・story(写真と商品の説明を並べる)・feature(特集)は、商品を大きく見せるので、写真で魅力が伝わる主力の商品を先頭に置く。photos(写真だけ。名前・価格を出さない)は、並べたときの色味や雰囲気のまとまりを重視する。grid は名前・価格つきの一覧。
 `
 
 const PRODUCTS_FORMAT = `- products は、優先度の高い順に並べる。先頭から section.slots 件が「選定」、その続き ${CANDIDATE_COUNT} 件が「残りの候補」。候補が足りなければ、選べた分だけ。\n`
@@ -325,7 +327,7 @@ const productPayload = (p: Cr854_products) => ({
 export interface SectionRequest {
   slots: number
   wantTitle: boolean
-  kind: 'grid' | 'feature'
+  kind: SectionKind
 }
 
 /** 他のセクションの状況(切り口と商品が重ならないようにするための情報) */

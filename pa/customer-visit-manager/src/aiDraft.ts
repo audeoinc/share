@@ -154,8 +154,8 @@ const TEMPLATE_PROMPT = `あなたは、ファッション通販の配信(メー
 {"template":"standard4","reason":"..."}
 
 # テンプレート
-入力の templates は、選べるテンプレートの一覧。id、name(名前)、description(説明)、hero(ヒーローの種類)、sections(商品の枠の構成。kind は grid=グリッド / feature=特集、columns=グリッドの列の数(省略は 2。3 は横並び)、slots=商品の数、categoryHeading=カテゴリ見出し付き)を持つ。
-標準の id: standard4(標準。迷ったときは、これ)、collab(コラボや特別企画)、offer(期間限定・セール)、cat2 / cat3(カテゴリごとの見出し付き)、free(自由な構成)。
+入力の templates は、選べるテンプレートの一覧。id、name(名前)、description(説明)、hero(ヒーローの種類)、heroText(ヘッドラインの見せ方。band=写真に帯で重ねる / overlay=写真に大きく重ねる / below=写真の下)、sections(商品の枠の構成。kind は grid=名前・価格つきのグリッド / photos=写真だけのタイル / wide=全幅で大きく 1 点 / mosaic=大 1 点 + 小 2 点の組 / story=写真と説明を左右交互 / feature=特集、columns=列の数(省略は 2)、slots=商品の数、categoryHeading=見出し付き、buttons=セクションの後のボタンの数)を持つ。
+標準の id: standard4(標準。迷ったときは、これ)、collab(コラボや特別企画)、offer(期間限定・セール)、cat2 / cat3(カテゴリごとの見出し付き)、free(自由な構成)、sale(セール。目玉の商品を大きく見せる)、spotlight(主役の商品を大きく見せる特集)、story(1 点ずつ丁寧に紹介)、editorial(新作・コレクションを写真中心に見せる)。
 ユーザーが作ったテンプレートも、description と構成を読んで、配信に合うなら選ぶ。
 
 # ルール
@@ -179,7 +179,7 @@ export async function suggestTemplate(args: { card: AiCard }): Promise<TemplateC
     task: 'suggest_template',
     today: new Date().toISOString().slice(0, 10),
     card: args.card,
-    templates: templateOptions().map((o) => ({ id: o.id, name: o.label, description: o.description, hero: o.hero, sections: o.sections })),
+    templates: templateOptions().map((o) => ({ id: o.id, name: o.label, description: o.description, hero: o.hero, heroText: o.heroText ?? 'band', sections: o.sections })),
   })) as { template?: string; reason?: string }
   const id = String(parsed.template ?? '') as EmailTemplateId
   // 想定外の値は、標準にする
