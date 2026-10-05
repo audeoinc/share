@@ -1,5 +1,29 @@
 # 1.5.0-032
 
+- Added `sql/maintenance/12_ephemeral_sql_similarity.sql`, a read-only report that
+  measures how many EPHEMERAL objects are "the same SQL with different parameters"
+  and whether collapsing them would lose lineage.
+  Context: ephemeral objects are already deduplicated by `sql_fingerprint`, which
+  normalizes string and number LITERALS, comments, whitespace, case and backticks --
+  so a parameterized query re-run daily should already be ONE object. When hundreds
+  survive anyway (measured: 928 ephemeral objects, 2.3M chars, in a single batch
+  bucket) the parameter is not reaching the SQL as a literal. The leading candidate is
+  a digit-bearing identifier (`events_20260101`), which the tokenizer sees as one
+  IDENTIFIER token and the fingerprint keeps intact.
+  The report groups the registry by a key that re-does the fingerprint's own
+  normalizations on raw text and then folds digit runs, which isolates exactly the
+  EXTRA collapse a digit-aware fingerprint would buy -- the registry is already
+  fingerprint-distinct, so `COUNT(*)` is a free baseline. Report 1 quantifies it
+  (`objects_removable`, split into `lossless_` / `lossy_` / `unknown_removable`),
+  report 2 lists the groups with `distinct_source_sets` from
+  `lnge_t_direct_dependency` (1 = merging is lossless, >1 = merging would discard
+  edges, 0 = never analyzed, so no evidence), and report 3 opens the biggest groups
+  up member by member so what differs is visible rather than inferred.
+  Measurement only -- nothing in the engine or the pipeline changes. Extending
+  `fingerprintSqlForBigQuery` would re-identify every ephemeral object once (for
+  ephemeral objects the fingerprint IS the `definition_hash`), so the decision waits
+  on these numbers.
+
 - A UDF resource error in STEP 3 no longer aborts the run. The analysis UDF query
   covers a whole batch, so "UDF out of memory" there has no per-object granularity and
   used to kill the script, discarding every batch that had not run yet -- a run could
