@@ -27,6 +27,15 @@
 -- process_generated_tables gate), so the numbers are what the next run would see.
 -- Set process_generated_tables below to match the 03 setting you intend to use.
 --
+-- Reports 4 and 5 answer a different question: HOW MUCH OF THE WORK IS ONE-TIME.
+-- Report 4 splits the repository by analysis_status, so the objects that have never
+-- been analyzed (a backlog that a successful pass removes for good) are separated
+-- from the ones that are simply due again. Report 5 counts genuinely NEW objects per
+-- day, which is what a run costs once the backlog is gone -- a generated statement
+-- that runs again tomorrow keeps its fingerprint and is seen again, not registered
+-- again. Together they say whether "the pipeline is slow" or "the pipeline is still
+-- catching up", and those have very different fixes.
+--
 -- Read-only report; not part of the daily pipeline. Run it on demand -- and in
 -- particular BEFORE and AFTER a run, since a successful analysis clears
 -- is_changed and the pending workload shrinks.
@@ -76,6 +85,8 @@ BEGIN
   -- Must match 03's ephemeral_object_dataset_label. Only used to flag the synthetic
   -- bucket in report 1; a stale value here makes that flag wrong, nothing else.
   DECLARE ephemeral_object_dataset_label STRING DEFAULT 'ephemeral_generated_sql';
+  -- Days of arrival history in report 5. Long enough to see a weekly rhythm.
+  DECLARE arrival_history_days INT64 DEFAULT 14;
 
   -- --------------------------------------------------------------------------
   -- [C] DERIVED / INTERNAL -- from [A]; DO NOT edit
@@ -112,6 +123,8 @@ BEGIN
   -- dataset name is surfaced here instead of failing later at query time.
   ASSERT REGEXP_CONTAINS(repository_dataset, r'^[A-Za-z0-9_]+$')
     AS 'repository_dataset must be letters/digits/underscore only (check for an unsubstituted {project_token}).';
+
+  ASSERT arrival_history_days >= 1 AS 'arrival_history_days must be >= 1.';
 
   SET registry_fqn = FORMAT(
     '%s.%s.%s',
@@ -205,4 +218,88 @@ BEGIN
 
   EXECUTE IMMEDIATE rendered_sql
   USING process_generated_tables AS include_tables;
+
+  -- --------------------------------------------------------------------------
+  -- Report 4: the BACKLOG -- how much of the repository has never been analyzed.
+  --
+  -- Reports 1-3 size the NEXT run. This one says how much of that is a one-time
+  -- debt rather than the daily rhythm, which is the difference between "the pipeline
+  -- is slow" and "the pipeline is still catching up". is_changed is sticky and is
+  -- cleared only by a successful analysis, so an object that has never been analyzed
+  -- (or whose analysis failed) stays in the pending workload run after run until it
+  -- succeeds once.
+  --
+  -- analysis_status reads:
+  --   COMPLETED                   analyzed; will not be re-analyzed unless its SQL
+  --                               changes
+  --   FAILED_UDF_RESOURCE_ERROR   a batch the UDF could not fit in memory; STEP 3
+  --                               recorded it and carried on. Retry with smaller
+  --                               batch budgets after setting is_changed = TRUE.
+  --   NULL                        never analyzed at all
+  -- Read still_pending against the totals: if most of the pending work is objects
+  -- that have NEVER completed, one successful full pass removes it permanently.
+  -- --------------------------------------------------------------------------
+  SET rendered_sql = FORMAT(
+    """
+    SELECT
+      (LOWER(object_dataset) = LOWER(@ephemeral_label)) AS is_ephemeral_bucket,
+      COALESCE(analysis_status, 'NEVER_ANALYZED') AS analysis_status,
+      COUNT(*) AS objects,
+      SUM(LENGTH(definition_text)) AS total_sql_bytes,
+      COUNTIF(is_changed) AS still_pending,
+      SUM(IF(is_changed, LENGTH(definition_text), 0)) AS pending_sql_bytes
+    FROM `%s`
+    WHERE is_active = TRUE
+      AND definition_text IS NOT NULL
+      AND object_type IN ('VIEW', 'TABLE')
+    GROUP BY is_ephemeral_bucket, analysis_status
+    ORDER BY is_ephemeral_bucket DESC, total_sql_bytes DESC
+    """,
+    registry_fqn
+  );
+
+  EXECUTE IMMEDIATE rendered_sql
+  USING ephemeral_object_dataset_label AS ephemeral_label;
+
+  -- --------------------------------------------------------------------------
+  -- Report 5: the ARRIVAL RATE -- how many objects are genuinely NEW per day.
+  --
+  -- This is what a steady-state run costs once the backlog is gone. A generated
+  -- statement that runs again tomorrow with the same structure keeps its
+  -- fingerprint, so it is seen again rather than registered again: it does not come
+  -- back into the workload. Only a NEW statement does, and that is what this counts.
+  --
+  -- CAVEAT on the first rows: first_seen_at is when THIS PIPELINE first saw the
+  -- object, not when it was created. The day of the initial load, and the first day
+  -- after widening the dataset filters or the lookback, both show the whole history
+  -- arriving at once. Read the recent, ordinary days -- and ignore a day on which no
+  -- run completed, which shows as a gap rather than a zero.
+  -- --------------------------------------------------------------------------
+  SET rendered_sql = FORMAT(
+    """
+    SELECT
+      DATE(first_seen_at) AS first_seen_date,
+      COUNTIF(LOWER(object_dataset) = LOWER(@ephemeral_label)) AS new_ephemeral_objects,
+      SUM(IF(
+        LOWER(object_dataset) = LOWER(@ephemeral_label),
+        LENGTH(definition_text),
+        0
+      )) AS new_ephemeral_sql_bytes,
+      COUNTIF(LOWER(object_dataset) != LOWER(@ephemeral_label)) AS new_other_objects,
+      COUNT(*) AS new_objects_total
+    FROM `%s`
+    WHERE is_active = TRUE
+      AND definition_text IS NOT NULL
+      AND object_type IN ('VIEW', 'TABLE')
+      AND first_seen_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+    GROUP BY first_seen_date
+    ORDER BY first_seen_date DESC
+    """,
+    registry_fqn
+  );
+
+  EXECUTE IMMEDIATE rendered_sql
+  USING
+    ephemeral_object_dataset_label AS ephemeral_label,
+    arrival_history_days AS days;
 END;
