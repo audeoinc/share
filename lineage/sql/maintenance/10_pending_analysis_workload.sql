@@ -27,7 +27,7 @@
 -- process_generated_tables gate), so the numbers are what the next run would see.
 -- Set process_generated_tables below to match the 03 setting you intend to use.
 --
--- Reports 4 and 5 answer a different question: HOW MUCH OF THE WORK IS ONE-TIME.
+-- Reports 4 to 7 answer a different question: HOW MUCH OF THE WORK IS ONE-TIME.
 -- Report 4 splits the repository by analysis_status, so the objects that have never
 -- been analyzed (a backlog that a successful pass removes for good) are separated
 -- from the ones that are simply due again. Report 5 counts genuinely NEW objects per
@@ -35,6 +35,15 @@
 -- that runs again tomorrow keeps its fingerprint and is seen again, not registered
 -- again. Together they say whether "the pipeline is slow" or "the pipeline is still
 -- catching up", and those have very different fixes.
+--
+-- Reports 6 and 7 settle it from the JOB side, which is the only place the answer
+-- really lives: a generated statement that recurs keeps its fingerprint and costs
+-- nothing after its first analysis, while one that carries a rotating id in an
+-- identifier is a NEW object on every run and can never be caught up with. Report 6
+-- is the histogram of how many days each fingerprint was seen; report 7 is the same
+-- history day by day, with the count of fingerprints seen for the first time -- the
+-- steady-state arrival rate, measured from the jobs rather than from when the
+-- pipeline happened to run.
 --
 -- Read-only report; not part of the daily pipeline. Run it on demand -- and in
 -- particular BEFORE and AFTER a run, since a successful analysis clears
@@ -398,7 +407,8 @@ BEGIN
         NULL
       )) AS new_fingerprints
     FROM jobs
-    JOIN first_day USING (sql_fingerprint)
+    INNER JOIN first_day
+      ON first_day.sql_fingerprint = jobs.sql_fingerprint
     GROUP BY jobs.job_date
     ORDER BY jobs.job_date DESC
     """,
