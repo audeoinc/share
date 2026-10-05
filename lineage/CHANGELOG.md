@@ -19,6 +19,20 @@
   The two definition-registry MERGEs are left alone: they carry one row per object
   rather than per job, and their `last_seen_at` is meant to advance on every run.
 
+- MEASURED OUTCOME of the STEP 3 work: the same seed that could not finish in two and
+  a half hours now takes 11 minutes 22 seconds. Same repository, rebuilt from 01, same
+  8-day window: 200,000-byte per-dataset batches (abandoned at 44 batches) ->
+  1,200,000 / 1,200 with the digit-aware fingerprint, grouped batches and hoisted
+  rendering (16 minutes, 11 batches) -> 3,000,000 / 3,000 with five fewer statements
+  per batch (11:22, ~5 batches).
+  What the numbers say about where the time is: 514 statements accounted for 407
+  seconds inside a 960-second run, so more than half the clock was the gap BETWEEN
+  statements -- about 1.1 seconds each, paid whether a statement does anything or not.
+  The single largest piece of real work is the analysis UDF at 137 seconds, and that
+  is a floor: it is proportional to the SQL analyzed, so a bigger batch does not
+  shrink it. Everything else is 0.1-0.7 seconds a statement, where the count is the
+  cost.
+
 - `incremental_lookback_days` now defaults to 8 instead of 3, with the reason written
   where the knob is: this window is not only how far back JOBS are collected, it is
   the EPHEMERAL RETENTION WINDOW. An ephemeral object stays alive while its
