@@ -64,6 +64,7 @@ GitHub の公開リポジトリなので、誰でも中身を見られる。次�
   npm run verify                     # 型チェック・lint・ビルド。通らないものは push しない
   git push origin main
   ```
+- **`npm ci`(依存の入れ直し)が必要なとき**: 初めて clone した直後と、`git pull` で `package.json` / `package-lock.json` が変わったとき(`git diff --stat HEAD@{1} -- package-lock.json` などで分かる)。**普段の push やデプロイでは不要**。`Cannot find module` のようなエラーが出たら、まず `npm ci` を実行する(lock の通りに入れ直すだけなので、実行しても害はない)。
 - **PR なしの代わりに、`main` を壊さない約束**: ① push の前に、必ず `npm run verify` を通す。② 1 つのコミットは、1 つのまとまった変更にする。③ 大きな変更や、他の人の意見がほしい変更は、ブランチ(`feature/○○`)で作業して、プルリクエストにしてよい(任意)。
 - push のあとは、GitHub Actions(`.github/workflows/ci.yml`)が、同じ検証を自動で行う。**失敗したら、気づいた人がすぐ直す**(または、直前のコミットを取り消す `git revert`)。
 - コミットメッセージは、変更の目的が分かる文にする(英語でも日本語でもよい)。
