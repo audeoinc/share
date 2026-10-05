@@ -16,8 +16,10 @@
     20 digits  2,047 occurrences / 1,783 distinct  -- per-run ids; fold these
      9 digits    289 occurrences /     7 distinct  -- not rotating; nothing to gain
      8 digits     30 occurrences /     3 distinct  -- real dates, but negligible
-     6 digits  2,906 occurrences / 1,507 distinct, ZERO century-dated -- product
-                codes and the like, which must NOT be merged
+     6 digits  2,906 occurrences / 1,507 distinct, ZERO date-shaped in EITHER form
+                (century or two-digit year, where a random 6-digit number would pass
+                the second about 4% of the time) and all sharing one 2-digit prefix
+                -- a code scheme, which must NOT be merged
   A floor of 10 folds the first group and only the first group.
   An earlier draft of this change used a floor of 6, chosen from report 1 alone
   because thresholds 4 and 6 collapsed identically. That reasoning was wrong: the
