@@ -2,16 +2,18 @@
 -- 11_analysis_batch_diagnostics.sql
 -- BigQuery Physical Lineage Repository - STEP 3 batch diagnostics (from JOBS)
 -- ============================================================================
--- Reads INFORMATION_SCHEMA.JOBS to answer two questions after a 03 run that died
--- in STEP 3, without hunting through the console's per-statement result list.
+-- Reads INFORMATION_SCHEMA.JOBS to answer two questions about a 03 run's STEP 3 --
+-- how long each batch took, and which statement failed if one did -- without hunting
+-- through the console's per-statement result list.
 --
---   Report 1  Where did 03 report each batch's payload size?
+--   Report 1  How long did each batch take, and how big was its payload?
 --             03 emits an ANALYSIS_BATCH_PAYLOAD row immediately BEFORE each
 --             analysis UDF call, so when that call aborts the script the last such
 --             row describes the batch that failed. The dataset and batch number are
 --             inlined into that statement's SQL text, so they are pulled out here as
---             columns -- the byte counts still need the job's own result, and the
---             job_id column is what to open in the console's job history to see it.
+--             columns, and batch_seconds is the gap to the NEXT notice -- that is,
+--             how long the batch between them took. The payload byte counts still
+--             need the job's own result: job_id is what to open in job history.
 --
 --   Report 2  Which statement actually failed, and with what error?
 --             "Resource exceeded during query execution: UDF out of memory" shows up
@@ -93,19 +95,40 @@ BEGIN
   -- --------------------------------------------------------------------------
   SET rendered_sql = FORMAT(
     """
+    WITH payload_statements AS (
+      SELECT
+        job_id,
+        creation_time,
+        REGEXP_EXTRACT(query, "'([^']*)' AS dataset") AS dataset,
+        CAST(REGEXP_EXTRACT(query, "([0-9]+) AS batch_no") AS INT64) AS batch_no,
+        state,
+        error_result.message AS error_message,
+        SUBSTR(REGEXP_REPLACE(query, "[[:space:]]+", " "), 1, 200) AS query_head
+      FROM `%s.region-%s`.INFORMATION_SCHEMA.JOBS_BY_PROJECT
+      WHERE creation_time > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)
+        AND query LIKE '%%ANALYSIS_BATCH_PAYLOAD%%'
+        -- The statement that DEFINES the notice, not this diagnostic script reading it.
+        AND query NOT LIKE '%%INFORMATION_SCHEMA.JOBS%%'
+    )
     SELECT
       job_id,
       creation_time,
-      REGEXP_EXTRACT(query, "'([^']*)' AS dataset") AS dataset,
-      CAST(REGEXP_EXTRACT(query, "([0-9]+) AS batch_no") AS INT64) AS batch_no,
+      dataset,
+      batch_no,
+      -- HOW LONG THAT BATCH TOOK. The notice is emitted once per batch, immediately
+      -- before its UDF call, so the gap to the NEXT notice is that batch's wall time:
+      -- the UDF, the staging queries and the publish -- everything the loop body does.
+      -- The newest row has no successor and reads NULL, because its batch ended with
+      -- the run rather than with another notice.
+      TIMESTAMP_DIFF(
+        LAG(creation_time) OVER (ORDER BY creation_time),
+        creation_time,
+        SECOND
+      ) AS batch_seconds,
       state,
-      error_result.message AS error_message,
-      SUBSTR(REGEXP_REPLACE(query, "[[:space:]]+", " "), 1, 200) AS query_head
-    FROM `%s.region-%s`.INFORMATION_SCHEMA.JOBS_BY_PROJECT
-    WHERE creation_time > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)
-      AND query LIKE '%%ANALYSIS_BATCH_PAYLOAD%%'
-      -- The statement that DEFINES the notice, not this diagnostic script reading it.
-      AND query NOT LIKE '%%INFORMATION_SCHEMA.JOBS%%'
+      error_message,
+      query_head
+    FROM payload_statements
     ORDER BY creation_time DESC
     LIMIT @max_rows
     """,
