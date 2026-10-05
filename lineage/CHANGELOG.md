@@ -1,5 +1,24 @@
 # 1.5.0-032
 
+- The job registry MERGE no longer re-writes matched rows that are identical. A
+  `WHEN MATCHED AND (...)` guard compares the stored columns and updates only when one
+  of them differs.
+  A finished BigQuery job is immutable and the lookback window deliberately overlaps,
+  so nearly every matched row was being written back unchanged -- about 200k rows per
+  run at an 8-day window, each carrying `query_text` and `definition_text`. The rows
+  that genuinely differ are the few worth the write: a job collected while still
+  RUNNING and since finished (`end_time`), or one whose extraction changed because the
+  engine was upgraded (`definition_hash`, `execution_source`, destination).
+  `definition_hash` stands in for `definition_text`, and with it for `query_text`,
+  which the two derive from -- comparing the text columns themselves would make the
+  MERGE READ them on both sides, which is the cost being avoided. `labels` is an
+  ARRAY<STRUCT> with no equality operator, so it is compared as JSON. `collected_at`
+  and `updated_at` are excluded deliberately: they change every run by construction,
+  and including them would skip nothing. `collected_at` therefore now means "when this
+  row last changed", which nothing reads.
+  The two definition-registry MERGEs are left alone: they carry one row per object
+  rather than per job, and their `last_seen_at` is meant to advance on every run.
+
 - `incremental_lookback_days` now defaults to 8 instead of 3, with the reason written
   where the knob is: this window is not only how far back JOBS are collected, it is
   the EPHEMERAL RETENTION WINDOW. An ephemeral object stays alive while its
