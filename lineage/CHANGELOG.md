@@ -1,5 +1,32 @@
 # 1.5.0-032
 
+- The fingerprint's digit floor drops from 10 to 6, folding the per-run ids that were
+  registering a new ephemeral object on every execution.
+  Evidence: over eight days of job history, every distinct 6, 8, 18, 19 and 20-digit
+  run inside an identifier appeared on exactly ONE day (3,026 distinct 6-digit values,
+  100% one-day), while the 1, 2 and 9-digit runs appeared on 7-8 days each. 6 is where
+  values stop being reused.
+  What that evidence does NOT establish, and the reason this is a judgement call: a
+  job that processes a different product code every day also gives each code exactly
+  one day, so "seen once" cannot by itself license folding. What would license it is
+  POSITION -- digits inside a FROM/JOIN target name different tables, and folding
+  those discards real edges, while digits anywhere else leave the sources unchanged.
+  Report 5 of `12_ephemeral_sql_similarity.sql` measures exactly that, deliberately
+  overstating the risk (it counts CTE names as source references).
+  The decision to fold at 6 was taken by the operator with that cost stated: where a
+  source name does carry six or more digits, only the representative's lineage
+  survives. The measured `lossy` count is 58 at thresholds 6 and 8 alike, so within
+  what has been analyzed the merge discards nothing extra.
+  Expected effect: 4,814 ephemeral objects to 2,021, and 13,891,890 to 4,193,092
+  characters of SQL -- 70% less for STEP 3 -- against 10% at the previous floor.
+  test_v1_5_0_079 updated (6, 8, 10 and 20-digit runs fold; 1, 2 and 5-digit runs stay
+  distinct). Bundle rebuilt (sha256 eecd0bc8..., 478961 bytes); test:release 60 /
+  golden 48 PASS. Redeploy the bundle to GCS; no SQL change.
+
+- `12_ephemeral_sql_similarity.sql` gains report 5, which asks whether a digit run
+  sits inside a FROM/JOIN target -- the only property that decides whether folding it
+  can lose lineage, and one that neither run length nor recurrence can answer.
+
 - `10_pending_analysis_workload.sql` gains reports 6, 7 and 8, which measure whether
   the ephemeral population RECURS or CHURNS -- the question that decides what any
   optimization is worth, and one the registry alone cannot answer.
