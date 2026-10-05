@@ -121,7 +121,7 @@ BEGIN
       -- The newest row has no successor and reads NULL, because its batch ended with
       -- the run rather than with another notice.
       TIMESTAMP_DIFF(
-        LAG(creation_time) OVER (ORDER BY creation_time),
+        LEAD(creation_time) OVER (ORDER BY creation_time),
         creation_time,
         SECOND
       ) AS batch_seconds,
