@@ -1152,9 +1152,19 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 - **「古いのを残す」案は却下**：解析回数は生涯 1 回で済むが、実測の到着レート
   （新規 1,200〜1,350 指紋/日）だと**1 年で約 45 万オブジェクト**まで膨らみ、
   STEP 3 ではなく **STEP 4（impact 再構築）と static テーブルが際限なく重くなる**。
-- 既知の改善余地：job_registry の MERGE が matched 行の全列（`query_text` /
-  `definition_text` 込み）を無条件に書き戻しているため、8 日なら毎回 20 万行規模の
-  書き込みになる。「変わった行だけ更新」にすれば削れる。
+- **対処済み**：job_registry の MERGE が matched 行の全列（`query_text` /
+  `definition_text` 込み）を無条件に書き戻していた問題は `WHEN MATCHED AND (...)` で
+  **差分のある行だけ更新**するようにした（8 日窓で毎回 20 万行の無駄書きが消える）。
+  BigQuery の完了済み job は不変で、lookback は意図的に重複するので、matched 行の
+  ほとんどは完全に同一。実際に変わるのは「RUNNING 中に収集して後で完了した行
+  （`end_time`）」と「エンジン更新で抽出結果が変わった行（`definition_hash` など）」だけ。
+  比較に `query_text` / `definition_text` を**入れない**のが要点で、入れると MERGE が
+  両側のテキスト列を**読む**ことになり、削ったはずのコストが読み取りで戻る。
+  `definition_hash` がその代理になる。`labels` は ARRAY<STRUCT> で等価比較できないので
+  JSON 文字列で比較。`collected_at` / `updated_at` は毎回変わるので比較対象から除外
+  （結果として `collected_at` は「最後に変化した時刻」の意味になるが、読む箇所は無い）。
+  definition_registry 側の 2 つの MERGE は対象外（オブジェクト単位で行数が桁違いに
+  少なく、`last_seen_at` は毎回進む必要がある）。
 
 ## 5. 現在地（2026-08-22 更新）
 

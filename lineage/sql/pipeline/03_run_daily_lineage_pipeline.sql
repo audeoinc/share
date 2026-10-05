@@ -1664,7 +1664,37 @@ BEGIN
       USING recent_generated_table_jobs AS source
       ON target.job_project = source.job_project
       AND target.job_id = source.job_id
-      WHEN MATCHED THEN
+      -- Only write a matched row when something actually differs.
+      --
+      -- A finished BigQuery job is immutable, and the lookback window deliberately
+      -- overlaps, so nearly every matched row is identical to what is already stored:
+      -- at an 8-day window that is ~200k rows re-written per run, each carrying
+      -- query_text and definition_text, for no change at all. The rows that DO differ
+      -- are the few worth writing -- a job collected while still RUNNING and since
+      -- finished (end_time), or a row whose extraction changed because the engine was
+      -- upgraded (definition_hash, execution_source, destination).
+      --
+      -- definition_hash stands in for definition_text, and with it for query_text,
+      -- which the two are derived from: comparing the text columns themselves would
+      -- make the MERGE READ them on both sides, which is the cost this avoids.
+      -- labels is an ARRAY<STRUCT> and has no equality operator, so it is compared as
+      -- JSON. collected_at / updated_at are excluded on purpose -- they change on every
+      -- run by construction, and comparing them would skip nothing. The effect is that
+      -- collected_at now means "when this row last CHANGED", which nothing reads.
+      WHEN MATCHED AND (
+        target.creation_time IS DISTINCT FROM source.creation_time
+        OR target.start_time IS DISTINCT FROM source.start_time
+        OR target.end_time IS DISTINCT FROM source.end_time
+        OR target.execution_source IS DISTINCT FROM source.execution_source
+        OR target.source_detection_method IS DISTINCT FROM source.source_detection_method
+        OR target.user_email IS DISTINCT FROM source.user_email
+        OR TO_JSON_STRING(target.labels) IS DISTINCT FROM TO_JSON_STRING(source.labels)
+        OR target.statement_type IS DISTINCT FROM source.statement_type
+        OR target.definition_hash IS DISTINCT FROM source.definition_hash
+        OR target.destination_project IS DISTINCT FROM source.destination_project
+        OR target.destination_dataset IS DISTINCT FROM source.destination_dataset
+        OR target.destination_table IS DISTINCT FROM source.destination_table
+      ) THEN
         UPDATE SET
           target.creation_time = source.creation_time,
           target.start_time = source.start_time,
