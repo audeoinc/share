@@ -39,6 +39,24 @@
   arrival rate), which leaves STEP 3 unchanged but makes STEP 4's impact rebuild and
   the static report tables grow without bound.
 
+- 03 no longer creates repository tables. The two `CREATE TABLE IF NOT EXISTS`
+  statements -- the column-usage index and the job registry -- are replaced by a
+  PREFLIGHT that checks every repository table the run writes to and stops with the
+  missing names.
+  The self-healing was the wrong trade. A table missing at that point means something
+  DELETED it, and recreating it silently turns a question worth answering into a run
+  that finishes against an empty table and publishes a repository that looks complete
+  and is not. The run is cheap to repeat; the confidence is not.
+  One metadata query covers the registry, direct dependency, impact, diagnostic, job
+  registry and column-usage tables, and a `RAISE USING MESSAGE` names which are absent
+  and what to check -- deliberately a RAISE rather than an ASSERT, because ASSERT's
+  description must be a literal and could not carry the names. Views count as present
+  (INFORMATION_SCHEMA.TABLES lists them); STEP 4b's static tables are excluded because
+  this run builds them.
+  Creating the repository is now 01's job alone, which also removes the hazard of two
+  files holding the same schema and drifting apart. Three statements leave the run as
+  a side effect.
+
 - STEP 3 renders its per-batch SQL ONCE instead of once per batch, cutting ten
   statements per analysis batch and one per discovery batch.
   Every template in the two loops is a constant: the batch reaches the SQL through

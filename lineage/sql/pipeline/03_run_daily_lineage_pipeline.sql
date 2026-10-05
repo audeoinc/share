@@ -499,6 +499,10 @@ DECLARE repo_tables STRUCT<
   job_registry STRING
 >;
 
+-- Repository objects this run requires but does not create. Filled by the preflight
+-- below; a non-empty value stops the run before any work is done.
+DECLARE missing_repository_objects ARRAY<STRING>;
+
 -- Dynamic SQL work variables.
 -- Identifier replacement is centralized in lnge_render_dynamic_sql().
 DECLARE sql_template STRING;
@@ -726,46 +730,64 @@ ASSERT analysis_max_batches_per_run >= 0
 AS 'analysis_max_batches_per_run must be >= 0 (0 = no limit).';
 
 -- Column usage index table qualified name (not a lnge_render_dynamic_sql placeholder).
--- Built once and reused by STEP 3's publish. CREATE TABLE IF NOT EXISTS keeps a
--- deployment whose 01 setup predates this table self-healing (no-op once 01 has
--- created it); the authoritative schema lives in 01 -- keep the two in step.
+-- Built once and reused by STEP 3's publish.
 SET column_usage_fqn = FORMAT(
   '%s.%s.%s', repository_project_id, repository_dataset, table_column_usage
 );
--- Skipped in preview: a dry run must not create anything, not even idempotently.
-IF NOT preview_only THEN
+
+-- --------------------------------------------------------------------------
+-- PREFLIGHT: every repository table this run writes to must already exist.
+--
+-- 03 used to CREATE TABLE IF NOT EXISTS the column-usage index and the job registry,
+-- so that a repository predating them would heal itself. That is the wrong trade: a
+-- table missing at this point means something DELETED it, and recreating it silently
+-- turns a question worth answering ("why did it go?") into a run that finishes
+-- against an empty table and publishes a repository nobody should trust. The run is
+-- cheap to repeat; the confidence is not.
+--
+-- So this checks all of them in one metadata query and stops with the missing names.
+-- Creating them remains 01's job alone, which also removes the hazard of two files
+-- holding the same schema and drifting apart.
+--
+-- A VIEW counts as present: INFORMATION_SCHEMA.TABLES lists views too, and the two
+-- report views are legitimately views. STEP 4b's static tables are NOT listed here --
+-- they are built by this run, so their absence is normal on a first run.
+-- --------------------------------------------------------------------------
 EXECUTE IMMEDIATE FORMAT(
   """
-  CREATE TABLE IF NOT EXISTS `%s`
-  (
-    source_project STRING,
-    source_dataset STRING,
-    source_object STRING NOT NULL,
-    source_object_type STRING NOT NULL,
-    source_column STRING NOT NULL,
-    source_field_path STRING,
-    object_project STRING NOT NULL,
-    object_dataset STRING NOT NULL,
-    object_name STRING NOT NULL,
-    object_type STRING NOT NULL,
-    generation_type STRING NOT NULL,
-    definition_hash STRING NOT NULL,
-    usage_type STRING NOT NULL,
-    reference_name STRING,
-    line_number INT64,
-    column_number INT64,
-    line_text STRING,
-    resolution_status STRING,
-    usage_key STRING NOT NULL,
-    analyzed_at TIMESTAMP NOT NULL
-  )
-  CLUSTER BY source_project, source_dataset, source_object, source_column
-  OPTIONS (
-    description = 'Per-reference column usage index (all clauses) for impact review'
+  SELECT ARRAY_AGG(required_name ORDER BY required_name)
+  FROM UNNEST([%s]) AS required_name
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM `%s.%s.INFORMATION_SCHEMA.TABLES` AS repository_object
+    WHERE repository_object.table_name = required_name
   )
   """,
-  column_usage_fqn
-);
+  (
+    SELECT STRING_AGG(FORMAT('%T', name), ', ')
+    FROM UNNEST([
+      repo_tables.def_registry,
+      repo_tables.direct_dep,
+      repo_tables.impact,
+      repo_tables.diagnostic,
+      repo_tables.job_registry,
+      table_column_usage
+    ]) AS name
+  ),
+  repository_project_id,
+  repository_dataset
+) INTO missing_repository_objects;
+
+-- ARRAY_AGG over no rows returns NULL, so "nothing missing" is NULL, not an empty
+-- array. Both are checked rather than COALESCEd with an untyped [].
+IF missing_repository_objects IS NOT NULL
+   AND ARRAY_LENGTH(missing_repository_objects) > 0 THEN
+  RAISE USING MESSAGE = FORMAT(
+    'Repository objects are missing from `%s.%s`: %s. 03 does not create them -- run 01 to set the repository up, and if it was already set up, find out what removed them before re-running: a run against a recreated empty table publishes partial lineage that looks complete.',
+    repository_project_id,
+    repository_dataset,
+    ARRAY_TO_STRING(missing_repository_objects, ', ')
+  );
 END IF;
 
 -- Resolve target_datasets by scanning the target project's datasets in
@@ -1359,44 +1381,9 @@ BEGIN
   ASSERT ARRAY_LENGTH(dag_service_accounts) > 0
   AS 'dag_service_accounts must not be empty (see the STEP 2 parameter block).';
 
-  SET sql_template = """
-    CREATE TABLE IF NOT EXISTS
-      `__T_JOB_REGISTRY__`
-    (
-      job_project STRING NOT NULL,
-      job_id STRING NOT NULL,
-      creation_time TIMESTAMP NOT NULL,
-      start_time TIMESTAMP,
-      end_time TIMESTAMP,
-      execution_source STRING NOT NULL,
-      source_detection_method STRING NOT NULL,
-      user_email STRING,
-      labels ARRAY<STRUCT<key STRING, value STRING>>,
-      statement_type STRING,
-      query_text STRING,
-      definition_text STRING,
-      definition_hash STRING NOT NULL,
-      sql_fingerprint STRING,
-      destination_project STRING NOT NULL,
-      destination_dataset STRING NOT NULL,
-      destination_table STRING NOT NULL,
-      collected_at TIMESTAMP NOT NULL,
-      updated_at TIMESTAMP NOT NULL
-    )
-    PARTITION BY DATE(creation_time)
-    CLUSTER BY
-      destination_project,
-      destination_dataset,
-      destination_table,
-      execution_source
-  """;
-
-  EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-
-  ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-  AS 'Unresolved placeholder in lineage_job_registry CREATE SQL.';
-
-  EXECUTE IMMEDIATE rendered_sql;
+  -- The job registry is NOT created here. It is 01's, and the preflight at the top of
+  -- this file has already established that it exists -- see the note there on why a
+  -- missing repository table must stop the run rather than be recreated under it.
 
   SET sql_template = """
     SELECT COUNT(*)
