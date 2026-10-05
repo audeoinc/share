@@ -2157,6 +2157,19 @@ BEGIN
   -- run, which skips the metadata scan and the whole analysis loop. The units
   -- themselves live in the analysis_batches temp table built below.
   DECLARE analysis_batch_total INT64 DEFAULT 0;
+  DECLARE discovery_sql STRING;
+  -- The per-batch SQL, rendered once before the loop (see the hoist below). Declared
+  -- here, at STEP 3 scope, so the loop body and its EXCEPTION handlers can read them.
+  DECLARE pre_batch_sql_view_snapshot STRING;
+  DECLARE batch_sql_udf_analysis STRING;
+  DECLARE batch_sql_dependency_backup STRING;
+  DECLARE batch_sql_diagnostic_backup STRING;
+  DECLARE batch_sql_dependency_delete STRING;
+  DECLARE batch_sql_dependency_insert STRING;
+  DECLARE batch_sql_diagnostic_delete STRING;
+  DECLARE batch_sql_diagnostic_insert STRING;
+  DECLARE batch_sql_registry_completed STRING;
+  DECLARE batch_sql_registry_failed STRING;
   -- Batches this run COULD have taken, before analysis_max_batches_per_run is
   -- applied, and the number left for the next run. Reported, not acted on.
   DECLARE analysis_batch_available_total INT64 DEFAULT 0;
@@ -2423,6 +2436,32 @@ BEGIN
   );
   CREATE OR REPLACE TEMP TABLE referenced_source_datasets (dataset_name STRING);
 
+  -- Rendered once, not per batch: the template is constant and the render is a query
+  -- job of its own. Same reason as the analysis loop's templates below.
+  SET sql_template = """
+    CREATE OR REPLACE TEMP TABLE changed_definitions_with_discovery AS
+    SELECT
+      object_project,
+      object_dataset,
+      object_name,
+      object_type,
+      generation_type,
+      definition_text,
+      definition_hash,
+      script_variables,
+      `__UDF__`(
+        definition_text,
+        '[]',
+        @options_json,
+        NULL
+      ) AS source_discovery_json
+    FROM
+      changed_definitions_to_analyze
+  """;
+  EXECUTE IMMEDIATE render_call_sql INTO discovery_sql USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(discovery_sql, r'__[A-Z0-9_]+__')
+  AS 'Unresolved placeholder in batch source-discovery SQL.';
+
   FOR ds_row IN (
     SELECT
       batch_group AS grp,
@@ -2457,30 +2496,7 @@ BEGIN
     AND batch_no = ds_row.batch_no;
 
   -- Source discovery: single UDF query over this dataset's changed set.
-  SET sql_template = """
-    CREATE OR REPLACE TEMP TABLE changed_definitions_with_discovery AS
-    SELECT
-      object_project,
-      object_dataset,
-      object_name,
-      object_type,
-      generation_type,
-      definition_text,
-      definition_hash,
-      script_variables,
-      `__UDF__`(
-        definition_text,
-        '[]',
-        @options_json,
-        NULL
-      ) AS source_discovery_json
-    FROM
-      changed_definitions_to_analyze
-  """;
-  EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-  ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-  AS 'Unresolved placeholder in batch source-discovery SQL.';
-  EXECUTE IMMEDIATE rendered_sql
+  EXECUTE IMMEDIATE discovery_sql
   USING
     TO_JSON_STRING(STRUCT(TRUE AS source_discovery_only)) AS options_json;
 
@@ -2653,6 +2669,255 @@ BEGIN
   -- flat to bound the diff; every statement through the inner analysis block runs
   -- per dataset.
   -- --------------------------------------------------------------------------
+  -- --------------------------------------------------------------------------
+  -- Render the per-batch SQL ONCE, here, instead of once per batch.
+  --
+  -- Every one of these templates is a constant: the batch reaches them through temp
+  -- tables and query parameters, never through the SQL text, so rendering them inside
+  -- the loop produced the identical string every time. The render is not free -- it is
+  -- `SELECT lnge_render_dynamic_sql(...)`, a BigQuery query job of its own -- so at ten
+  -- templates it was ten jobs per batch spent rebuilding strings that had not changed.
+  -- Measured on this deployment, a statement costs ~3s of job startup regardless of
+  -- what it does, and a batch runs ~48 of them; this removes ten.
+  --
+  -- The two templates inside the EXCEPTION handlers are deliberately left where they
+  -- are: they run only when a batch fails, so they cost nothing on the normal path.
+  -- --------------------------------------------------------------------------
+  SET sql_template = """
+    CREATE OR REPLACE TEMP TABLE active_view_definitions AS
+    SELECT
+      object_project,
+      object_dataset,
+      object_name,
+      object_type,
+      is_active,
+      updated_at
+    FROM
+      `__T_DEF_REGISTRY__`
+    WHERE is_active = TRUE
+      AND object_type = 'VIEW'
+  """;
+  EXECUTE IMMEDIATE render_call_sql INTO pre_batch_sql_view_snapshot USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(pre_batch_sql_view_snapshot, r'__[A-Z0-9_]+__')
+  AS 'Unresolved placeholder in active_view_definitions snapshot SQL.';
+
+  SET sql_template = """
+      CREATE OR REPLACE TEMP TABLE batch_udf_results AS
+      SELECT
+        x.object_project,
+        x.object_dataset,
+        x.object_name,
+        x.object_type,
+        x.generation_type,
+        x.definition_hash,
+        x.analysis_id,
+        x.analyzed_at,
+        x.exported_json,
+        COALESCE(
+          JSON_VALUE(x.exported_json, '$.analysis.analysis_status'),
+          'UNKNOWN'
+        ) AS udf_analysis_status,
+        JSON_VALUE(x.exported_json, '$.analysis.message') AS udf_analysis_message
+      FROM (
+        SELECT
+          p.object_project,
+          p.object_dataset,
+          p.object_name,
+          p.object_type,
+          p.generation_type,
+          p.definition_hash,
+          p.analysis_id,
+          @analyzed_at AS analyzed_at,
+          `__UDF__`(
+            p.definition_text,
+            p.physical_columns_json,
+            TO_JSON_STRING(STRUCT(
+              @strict_mode AS strict_mode,
+              TRUE AS compact_export,
+              -- Parent-script DECLARE variable names (NULL/empty for non-script
+              -- objects). Lets the engine treat an unqualified script-variable
+              -- reference as an opaque value instead of a missing column.
+              p.script_variables AS script_variables
+            )),
+            TO_JSON_STRING(STRUCT(
+              p.analysis_id AS analysis_id,
+              p.object_project AS view_project,
+              p.object_dataset AS view_dataset,
+              p.object_name AS view_name,
+              @analyzed_at_iso AS analyzed_at
+            ))
+          ) AS exported_json
+        FROM batch_analysis_input AS p
+        WHERE p.is_analyzable
+      ) AS x
+    """;
+  EXECUTE IMMEDIATE render_call_sql INTO batch_sql_udf_analysis USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(batch_sql_udf_analysis, r'__[A-Z0-9_]+__')
+  AS 'Unresolved placeholder in batch UDF analysis SQL.';
+
+  SET sql_template = """
+      CREATE OR REPLACE TEMP TABLE batch_previous_direct_dependency AS
+      SELECT dependency.*
+      FROM `__T_DIRECT_DEP__` AS dependency
+      WHERE EXISTS (
+        SELECT 1
+        FROM batch_completed_objects AS obj
+        WHERE LOWER(dependency.target_project) = LOWER(obj.object_project)
+          AND LOWER(dependency.target_dataset) = LOWER(obj.object_dataset)
+          AND LOWER(dependency.target_object) = LOWER(obj.object_name)
+          AND dependency.target_object_type = obj.object_type
+          AND dependency.generation_type = obj.generation_type
+      )
+    """;
+  EXECUTE IMMEDIATE render_call_sql INTO batch_sql_dependency_backup USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(batch_sql_dependency_backup, r'__[A-Z0-9_]+__')
+  AS 'Unresolved placeholder in batch dependency backup SQL.';
+
+  SET sql_template = """
+      CREATE OR REPLACE TEMP TABLE batch_previous_lineage_diagnostic AS
+      SELECT diagnostic.*
+      FROM `__T_DIAGNOSTIC__` AS diagnostic
+      WHERE EXISTS (
+        SELECT 1
+        FROM batch_analyzed_objects AS obj
+        WHERE LOWER(diagnostic.object_project) = LOWER(obj.object_project)
+          AND LOWER(diagnostic.object_dataset) = LOWER(obj.object_dataset)
+          AND LOWER(diagnostic.object_name) = LOWER(obj.object_name)
+          AND diagnostic.object_type = obj.object_type
+      )
+    """;
+  EXECUTE IMMEDIATE render_call_sql INTO batch_sql_diagnostic_backup USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(batch_sql_diagnostic_backup, r'__[A-Z0-9_]+__')
+  AS 'Unresolved placeholder in batch diagnostic backup SQL.';
+
+  SET sql_template = """
+        DELETE FROM `__T_DIRECT_DEP__` AS dependency
+        WHERE EXISTS (
+          SELECT 1
+          FROM batch_completed_objects AS obj
+          WHERE LOWER(dependency.target_project) = LOWER(obj.object_project)
+            AND LOWER(dependency.target_dataset) = LOWER(obj.object_dataset)
+            AND LOWER(dependency.target_object) = LOWER(obj.object_name)
+            AND dependency.target_object_type = obj.object_type
+            AND dependency.generation_type = obj.generation_type
+        )
+      """;
+  EXECUTE IMMEDIATE render_call_sql INTO batch_sql_dependency_delete USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(batch_sql_dependency_delete, r'__[A-Z0-9_]+__')
+  AS 'Unresolved placeholder in batch dependency DELETE SQL.';
+
+  SET sql_template = """
+        INSERT INTO `__T_DIRECT_DEP__` (
+          definition_hash, source_project, source_dataset, source_object,
+          source_object_type, source_column, target_project, target_dataset,
+          target_object, target_object_type, target_column, generation_type,
+          dependency_type, expression, usage_type, resolution_status,
+          resolution_reason, edge_key, analyzed_at
+        )
+        SELECT
+          definition_hash, source_project, source_dataset, source_object,
+          source_object_type, source_column, target_project, target_dataset,
+          target_object, target_object_type, target_column, generation_type,
+          dependency_type, expression, usage_type, resolution_status,
+          resolution_reason, edge_key, analyzed_at
+        FROM batch_staged_direct_dependency
+      """;
+  EXECUTE IMMEDIATE render_call_sql INTO batch_sql_dependency_insert USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(batch_sql_dependency_insert, r'__[A-Z0-9_]+__')
+  AS 'Unresolved placeholder in batch dependency INSERT SQL.';
+
+  SET sql_template = """
+        DELETE FROM `__T_DIAGNOSTIC__` AS diagnostic
+        WHERE EXISTS (
+          SELECT 1
+          FROM batch_analyzed_objects AS obj
+          WHERE LOWER(diagnostic.object_project) = LOWER(obj.object_project)
+            AND LOWER(diagnostic.object_dataset) = LOWER(obj.object_dataset)
+            AND LOWER(diagnostic.object_name) = LOWER(obj.object_name)
+            AND diagnostic.object_type = obj.object_type
+        )
+      """;
+  EXECUTE IMMEDIATE render_call_sql INTO batch_sql_diagnostic_delete USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(batch_sql_diagnostic_delete, r'__[A-Z0-9_]+__')
+  AS 'Unresolved placeholder in batch diagnostic DELETE SQL.';
+
+  SET sql_template = """
+        INSERT INTO `__T_DIAGNOSTIC__` (
+          definition_hash, object_project, object_dataset, object_name,
+          object_type, generation_type, diagnostic_code, engine_stage, severity,
+          output_column, expression, message, diagnostic_json, analyzed_at
+        )
+        SELECT
+          definition_hash, object_project, object_dataset, object_name,
+          object_type, generation_type, diagnostic_code, engine_stage, severity,
+          output_column, expression, message, diagnostic_json, analyzed_at
+        FROM batch_staged_lineage_diagnostic
+        UNION ALL
+        SELECT
+          definition_hash, object_project, object_dataset, object_name,
+          object_type, generation_type, diagnostic_code, engine_stage, severity,
+          output_column, expression, message, diagnostic_json, analyzed_at
+        FROM batch_nonpublishable_diagnostic
+        UNION ALL
+        SELECT
+          definition_hash, object_project, object_dataset, object_name,
+          object_type, generation_type, diagnostic_code, engine_stage, severity,
+          output_column, expression, message, diagnostic_json, analyzed_at
+        FROM batch_preanalysis_diagnostic
+      """;
+  EXECUTE IMMEDIATE render_call_sql INTO batch_sql_diagnostic_insert USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(batch_sql_diagnostic_insert, r'__[A-Z0-9_]+__')
+  AS 'Unresolved placeholder in batch diagnostic INSERT SQL.';
+
+  SET sql_template = """
+        UPDATE `__T_DEF_REGISTRY__` AS reg
+        SET
+          is_changed = FALSE,
+          analysis_status = 'COMPLETED',
+          last_analyzed_hash = obj.definition_hash,
+          last_analyzed_at = @analyzed_at,
+          updated_at = @analyzed_at
+        FROM batch_completed_objects AS obj
+        WHERE LOWER(reg.object_project) = LOWER(obj.object_project)
+          AND LOWER(reg.object_dataset) = LOWER(obj.object_dataset)
+          AND LOWER(reg.object_name) = LOWER(obj.object_name)
+          AND reg.object_type = obj.object_type
+          AND reg.generation_type = obj.generation_type
+          AND reg.definition_hash = obj.definition_hash
+      """;
+  EXECUTE IMMEDIATE render_call_sql INTO batch_sql_registry_completed USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(batch_sql_registry_completed, r'__[A-Z0-9_]+__')
+  AS 'Unresolved placeholder in batch registry COMPLETED UPDATE SQL.';
+
+  SET sql_template = """
+        UPDATE `__T_DEF_REGISTRY__` AS reg
+        SET
+          is_changed = TRUE,
+          analysis_status = 'FAILED',
+          last_analyzed_at = @analyzed_at,
+          updated_at = @analyzed_at
+        FROM (
+          SELECT
+            object_project, object_dataset, object_name,
+            object_type, generation_type, definition_hash
+          FROM batch_udf_failed_objects
+          UNION DISTINCT
+          SELECT
+            object_project, object_dataset, object_name,
+            object_type, generation_type, definition_hash
+          FROM batch_preanalysis_failures
+        ) AS obj
+        WHERE LOWER(reg.object_project) = LOWER(obj.object_project)
+          AND LOWER(reg.object_dataset) = LOWER(obj.object_dataset)
+          AND LOWER(reg.object_name) = LOWER(obj.object_name)
+          AND reg.object_type = obj.object_type
+          AND reg.generation_type = obj.generation_type
+          AND reg.definition_hash = obj.definition_hash
+      """;
+  EXECUTE IMMEDIATE render_call_sql INTO batch_sql_registry_failed USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(batch_sql_registry_failed, r'__[A-Z0-9_]+__')
+  AS 'Unresolved placeholder in batch registry FAILED UPDATE SQL.';
+
   FOR ds_row IN (
     SELECT
       batch_group AS grp,
@@ -2681,27 +2946,8 @@ BEGIN
   -- Snapshot the active VIEW registry once so the per-object staging query can
   -- classify source object types without referencing the (configurable-named)
   -- repository table directly inside a static statement.
-  SET sql_template = """
-    CREATE OR REPLACE TEMP TABLE active_view_definitions AS
-    SELECT
-      object_project,
-      object_dataset,
-      object_name,
-      object_type,
-      is_active,
-      updated_at
-    FROM
-      `__T_DEF_REGISTRY__`
-    WHERE is_active = TRUE
-      AND object_type = 'VIEW'
-  """;
 
-  EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-
-  ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-  AS 'Unresolved placeholder in active_view_definitions snapshot SQL.';
-
-  EXECUTE IMMEDIATE rendered_sql;
+  EXECUTE IMMEDIATE pre_batch_sql_view_snapshot;
 
   -- --------------------------------------------------------------------------
   -- Reuse the source discovery already computed by the pre-pass. The pre-pass ran
@@ -3143,63 +3389,8 @@ BEGIN
     -- analysis_batch_max_sql_bytes. The result JSON lives in a table column (no
     -- 1 MiB script-variable limit).
     -- ------------------------------------------------------------------------
-    SET sql_template = """
-      CREATE OR REPLACE TEMP TABLE batch_udf_results AS
-      SELECT
-        x.object_project,
-        x.object_dataset,
-        x.object_name,
-        x.object_type,
-        x.generation_type,
-        x.definition_hash,
-        x.analysis_id,
-        x.analyzed_at,
-        x.exported_json,
-        COALESCE(
-          JSON_VALUE(x.exported_json, '$.analysis.analysis_status'),
-          'UNKNOWN'
-        ) AS udf_analysis_status,
-        JSON_VALUE(x.exported_json, '$.analysis.message') AS udf_analysis_message
-      FROM (
-        SELECT
-          p.object_project,
-          p.object_dataset,
-          p.object_name,
-          p.object_type,
-          p.generation_type,
-          p.definition_hash,
-          p.analysis_id,
-          @analyzed_at AS analyzed_at,
-          `__UDF__`(
-            p.definition_text,
-            p.physical_columns_json,
-            TO_JSON_STRING(STRUCT(
-              @strict_mode AS strict_mode,
-              TRUE AS compact_export,
-              -- Parent-script DECLARE variable names (NULL/empty for non-script
-              -- objects). Lets the engine treat an unqualified script-variable
-              -- reference as an opaque value instead of a missing column.
-              p.script_variables AS script_variables
-            )),
-            TO_JSON_STRING(STRUCT(
-              p.analysis_id AS analysis_id,
-              p.object_project AS view_project,
-              p.object_dataset AS view_dataset,
-              p.object_name AS view_name,
-              @analyzed_at_iso AS analyzed_at
-            ))
-          ) AS exported_json
-        FROM batch_analysis_input AS p
-        WHERE p.is_analyzable
-      ) AS x
-    """;
 
-    EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-
-    ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-    AS 'Unresolved placeholder in batch UDF analysis SQL.';
-
-    EXECUTE IMMEDIATE rendered_sql
+    EXECUTE IMMEDIATE batch_sql_udf_analysis
     USING
       strict_mode AS strict_mode,
       batch_analyzed_at AS analyzed_at,
@@ -3856,42 +4047,9 @@ BEGIN
     -- overwrite, so the EXCEPTION handler can restore them if any publish
     -- statement fails (batch equivalent of the loop's per-object backups).
     -- ------------------------------------------------------------------------
-    SET sql_template = """
-      CREATE OR REPLACE TEMP TABLE batch_previous_direct_dependency AS
-      SELECT dependency.*
-      FROM `__T_DIRECT_DEP__` AS dependency
-      WHERE EXISTS (
-        SELECT 1
-        FROM batch_completed_objects AS obj
-        WHERE LOWER(dependency.target_project) = LOWER(obj.object_project)
-          AND LOWER(dependency.target_dataset) = LOWER(obj.object_dataset)
-          AND LOWER(dependency.target_object) = LOWER(obj.object_name)
-          AND dependency.target_object_type = obj.object_type
-          AND dependency.generation_type = obj.generation_type
-      )
-    """;
-    EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-    ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-    AS 'Unresolved placeholder in batch dependency backup SQL.';
-    EXECUTE IMMEDIATE rendered_sql;
+    EXECUTE IMMEDIATE batch_sql_dependency_backup;
 
-    SET sql_template = """
-      CREATE OR REPLACE TEMP TABLE batch_previous_lineage_diagnostic AS
-      SELECT diagnostic.*
-      FROM `__T_DIAGNOSTIC__` AS diagnostic
-      WHERE EXISTS (
-        SELECT 1
-        FROM batch_analyzed_objects AS obj
-        WHERE LOWER(diagnostic.object_project) = LOWER(obj.object_project)
-          AND LOWER(diagnostic.object_dataset) = LOWER(obj.object_dataset)
-          AND LOWER(diagnostic.object_name) = LOWER(obj.object_name)
-          AND diagnostic.object_type = obj.object_type
-      )
-    """;
-    EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-    ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-    AS 'Unresolved placeholder in batch diagnostic backup SQL.';
-    EXECUTE IMMEDIATE rendered_sql;
+    EXECUTE IMMEDIATE batch_sql_diagnostic_backup;
 
     -- Column usage backup (real table, addressed by column_usage_fqn -- not a
     -- render placeholder). Keyed by the referencing object, matching the publish
@@ -3921,43 +4079,9 @@ BEGIN
     -- ------------------------------------------------------------------------
     BEGIN
       -- 7a. Replace direct dependencies for COMPLETED objects.
-      SET sql_template = """
-        DELETE FROM `__T_DIRECT_DEP__` AS dependency
-        WHERE EXISTS (
-          SELECT 1
-          FROM batch_completed_objects AS obj
-          WHERE LOWER(dependency.target_project) = LOWER(obj.object_project)
-            AND LOWER(dependency.target_dataset) = LOWER(obj.object_dataset)
-            AND LOWER(dependency.target_object) = LOWER(obj.object_name)
-            AND dependency.target_object_type = obj.object_type
-            AND dependency.generation_type = obj.generation_type
-        )
-      """;
-      EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-      ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-      AS 'Unresolved placeholder in batch dependency DELETE SQL.';
-      EXECUTE IMMEDIATE rendered_sql;
+      EXECUTE IMMEDIATE batch_sql_dependency_delete;
 
-      SET sql_template = """
-        INSERT INTO `__T_DIRECT_DEP__` (
-          definition_hash, source_project, source_dataset, source_object,
-          source_object_type, source_column, target_project, target_dataset,
-          target_object, target_object_type, target_column, generation_type,
-          dependency_type, expression, usage_type, resolution_status,
-          resolution_reason, edge_key, analyzed_at
-        )
-        SELECT
-          definition_hash, source_project, source_dataset, source_object,
-          source_object_type, source_column, target_project, target_dataset,
-          target_object, target_object_type, target_column, generation_type,
-          dependency_type, expression, usage_type, resolution_status,
-          resolution_reason, edge_key, analyzed_at
-        FROM batch_staged_direct_dependency
-      """;
-      EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-      ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-      AS 'Unresolved placeholder in batch dependency INSERT SQL.';
-      EXECUTE IMMEDIATE rendered_sql;
+      EXECUTE IMMEDIATE batch_sql_dependency_insert;
 
       -- 7a-2. Replace column usage rows for COMPLETED objects (keyed by the
       -- referencing object). Real table addressed by column_usage_fqn.
@@ -3999,105 +4123,17 @@ BEGIN
       -- 7b. Replace diagnostics for all analyzed objects, then insert the UDF
       -- diagnostics, the non-publishable markers, and (appended) the
       -- pre-analysis failure diagnostics.
-      SET sql_template = """
-        DELETE FROM `__T_DIAGNOSTIC__` AS diagnostic
-        WHERE EXISTS (
-          SELECT 1
-          FROM batch_analyzed_objects AS obj
-          WHERE LOWER(diagnostic.object_project) = LOWER(obj.object_project)
-            AND LOWER(diagnostic.object_dataset) = LOWER(obj.object_dataset)
-            AND LOWER(diagnostic.object_name) = LOWER(obj.object_name)
-            AND diagnostic.object_type = obj.object_type
-        )
-      """;
-      EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-      ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-      AS 'Unresolved placeholder in batch diagnostic DELETE SQL.';
-      EXECUTE IMMEDIATE rendered_sql;
+      EXECUTE IMMEDIATE batch_sql_diagnostic_delete;
 
-      SET sql_template = """
-        INSERT INTO `__T_DIAGNOSTIC__` (
-          definition_hash, object_project, object_dataset, object_name,
-          object_type, generation_type, diagnostic_code, engine_stage, severity,
-          output_column, expression, message, diagnostic_json, analyzed_at
-        )
-        SELECT
-          definition_hash, object_project, object_dataset, object_name,
-          object_type, generation_type, diagnostic_code, engine_stage, severity,
-          output_column, expression, message, diagnostic_json, analyzed_at
-        FROM batch_staged_lineage_diagnostic
-        UNION ALL
-        SELECT
-          definition_hash, object_project, object_dataset, object_name,
-          object_type, generation_type, diagnostic_code, engine_stage, severity,
-          output_column, expression, message, diagnostic_json, analyzed_at
-        FROM batch_nonpublishable_diagnostic
-        UNION ALL
-        SELECT
-          definition_hash, object_project, object_dataset, object_name,
-          object_type, generation_type, diagnostic_code, engine_stage, severity,
-          output_column, expression, message, diagnostic_json, analyzed_at
-        FROM batch_preanalysis_diagnostic
-      """;
-      EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-      ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-      AS 'Unresolved placeholder in batch diagnostic INSERT SQL.';
-      EXECUTE IMMEDIATE rendered_sql;
+      EXECUTE IMMEDIATE batch_sql_diagnostic_insert;
 
       -- 7c. Registry: COMPLETED objects.
-      SET sql_template = """
-        UPDATE `__T_DEF_REGISTRY__` AS reg
-        SET
-          is_changed = FALSE,
-          analysis_status = 'COMPLETED',
-          last_analyzed_hash = obj.definition_hash,
-          last_analyzed_at = @analyzed_at,
-          updated_at = @analyzed_at
-        FROM batch_completed_objects AS obj
-        WHERE LOWER(reg.object_project) = LOWER(obj.object_project)
-          AND LOWER(reg.object_dataset) = LOWER(obj.object_dataset)
-          AND LOWER(reg.object_name) = LOWER(obj.object_name)
-          AND reg.object_type = obj.object_type
-          AND reg.generation_type = obj.generation_type
-          AND reg.definition_hash = obj.definition_hash
-      """;
-      EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-      ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-      AS 'Unresolved placeholder in batch registry COMPLETED UPDATE SQL.';
-      EXECUTE IMMEDIATE rendered_sql
+      EXECUTE IMMEDIATE batch_sql_registry_completed
       USING batch_analyzed_at AS analyzed_at;
 
       -- 7d. Registry: FAILED objects (non-COMPLETED UDF results + pre-analysis
       -- failures).
-      SET sql_template = """
-        UPDATE `__T_DEF_REGISTRY__` AS reg
-        SET
-          is_changed = TRUE,
-          analysis_status = 'FAILED',
-          last_analyzed_at = @analyzed_at,
-          updated_at = @analyzed_at
-        FROM (
-          SELECT
-            object_project, object_dataset, object_name,
-            object_type, generation_type, definition_hash
-          FROM batch_udf_failed_objects
-          UNION DISTINCT
-          SELECT
-            object_project, object_dataset, object_name,
-            object_type, generation_type, definition_hash
-          FROM batch_preanalysis_failures
-        ) AS obj
-        WHERE LOWER(reg.object_project) = LOWER(obj.object_project)
-          AND LOWER(reg.object_dataset) = LOWER(obj.object_dataset)
-          AND LOWER(reg.object_name) = LOWER(obj.object_name)
-          AND reg.object_type = obj.object_type
-          AND reg.generation_type = obj.generation_type
-          AND reg.definition_hash = obj.definition_hash
-      """;
-      EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-      ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-      AS 'Unresolved placeholder in batch registry FAILED UPDATE SQL.';
-      EXECUTE IMMEDIATE rendered_sql
+      EXECUTE IMMEDIATE batch_sql_registry_failed
       USING batch_analyzed_at AS analyzed_at;
 
     EXCEPTION WHEN ERROR THEN

@@ -39,6 +39,23 @@
   arrival rate), which leaves STEP 3 unchanged but makes STEP 4's impact rebuild and
   the static report tables grow without bound.
 
+- STEP 3 renders its per-batch SQL ONCE instead of once per batch, cutting ten
+  statements per analysis batch and one per discovery batch.
+  Every template in the two loops is a constant: the batch reaches the SQL through
+  temp tables and query parameters, never through the text, so the loop was rebuilding
+  identical strings every iteration. The rebuild is not free -- rendering is
+  `SELECT lnge_render_dynamic_sql(...)`, a BigQuery query job of its own.
+  Measured on a real run: the discovery pass took 17 minutes for ~44 batches at ~7
+  statements each, i.e. ~3 SECONDS PER STATEMENT, almost all of it job startup rather
+  than work. At that rate the analysis loop's statement COUNT is the runtime, and ten
+  of its ~42 were pure string assembly. Per-batch normal-path statements drop from
+  ~42 to ~32.
+  The templates inside the two EXCEPTION handlers are deliberately left in place: they
+  run only when a batch fails, so they cost nothing on the normal path.
+  The rendered SQL is held in named variables (`batch_sql_dependency_insert`,
+  `batch_sql_registry_completed`, ...) declared at STEP 3 scope so the loop body and
+  its handlers can both read them.
+
 - A batch may now span datasets (`analysis_batch_group_datasets`, default TRUE), so a
   dataset holding one changed View no longer costs a whole iteration.
   The loop body runs about 60 BigQuery statements per batch -- the UDF call plus the
