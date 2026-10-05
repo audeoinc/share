@@ -27,6 +27,11 @@ DECLARE bootstrap_udf_dataset STRING DEFAULT 'dataset';
 -- UDF naming (prefix / suffix)
 DECLARE bootstrap_udf_name_prefix STRING DEFAULT '';
 DECLARE bootstrap_udf_name_suffix STRING DEFAULT '';
+-- Repository TABLE naming (prefix / suffix). Keep in step with 01 setup: the object
+-- names checked in section 3 are assembled from these, so a deployment that uses a
+-- prefix is validated against the names it actually has.
+DECLARE bootstrap_table_name_prefix STRING DEFAULT '';
+DECLARE bootstrap_table_name_suffix STRING DEFAULT '';
 -- UDF JS bundle location (GCS)
 DECLARE bootstrap_udf_library_uri STRING DEFAULT
   'gs://YOUR_BUCKET/YOUR_PATH/lineage_udf_bundle.js';
@@ -114,6 +119,10 @@ SET bootstrap_udf_name_prefix =
   REPLACE(bootstrap_udf_name_prefix, '{project_token}', bootstrap_project_token);
 SET bootstrap_udf_name_suffix =
   REPLACE(bootstrap_udf_name_suffix, '{project_token}', bootstrap_project_token);
+SET bootstrap_table_name_prefix =
+  REPLACE(bootstrap_table_name_prefix, '{project_token}', bootstrap_project_token);
+SET bootstrap_table_name_suffix =
+  REPLACE(bootstrap_table_name_suffix, '{project_token}', bootstrap_project_token);
 SET bootstrap_udf_library_uri =
   REPLACE(bootstrap_udf_library_uri, '{project_token}', bootstrap_project_token);
 SET bootstrap_target_datasets = ARRAY(
@@ -219,14 +228,42 @@ SELECT
 
 -- ============================================================================
 -- 3. Repository object validation
+--
+-- Three lists, because the objects differ in WHO creates them and so in what their
+-- absence means:
+--
+--   required_tables / required_views  created by 01. Missing is a FAIL: the pipeline
+--     cannot run, and 03 will refuse to start (its preflight checks the same tables).
+--   run_produced_tables  built by a 03 run -- the two static report tables and the
+--     unanalyzed snapshot. Missing is a WARN, not a FAIL: on a freshly set up
+--     repository they are legitimately absent until the first run.
+--
+-- Names are assembled from bootstrap_table_name_prefix/suffix, so a deployment that
+-- renames its tables is checked against the names it actually has.
 -- ============================================================================
 BEGIN
-  DECLARE required_tables ARRAY<STRING> DEFAULT [
-    'lnge_m_definition_registry',
-    'lnge_t_direct_dependency',
-    'lnge_t_impact',
-    'lnge_t_diagnostic',
-    'lnge_m_job_registry'
+  DECLARE required_tables ARRAY<STRING>;
+  DECLARE required_views ARRAY<STRING>;
+  DECLARE run_produced_tables ARRAY<STRING>;
+
+  SET required_tables = [
+    bootstrap_table_name_prefix || 'lnge_m_definition_registry' || bootstrap_table_name_suffix,
+    bootstrap_table_name_prefix || 'lnge_m_job_registry' || bootstrap_table_name_suffix,
+    bootstrap_table_name_prefix || 'lnge_t_direct_dependency' || bootstrap_table_name_suffix,
+    bootstrap_table_name_prefix || 'lnge_t_impact' || bootstrap_table_name_suffix,
+    bootstrap_table_name_prefix || 'lnge_t_diagnostic' || bootstrap_table_name_suffix,
+    bootstrap_table_name_prefix || 'lnge_t_column_usage' || bootstrap_table_name_suffix
+  ];
+
+  SET required_views = [
+    bootstrap_table_name_prefix || 'lnge_vw_t_column_usage_impact' || bootstrap_table_name_suffix,
+    bootstrap_table_name_prefix || 'lnge_vw_t_object_dependency' || bootstrap_table_name_suffix
+  ];
+
+  SET run_produced_tables = [
+    bootstrap_table_name_prefix || 'lnge_t_column_usage_impact' || bootstrap_table_name_suffix,
+    bootstrap_table_name_prefix || 'lnge_t_object_dependency' || bootstrap_table_name_suffix,
+    bootstrap_table_name_prefix || 'lnge_t_unanalyzed_definition' || bootstrap_table_name_suffix
   ];
 
   FOR required_table IN (
@@ -262,8 +299,90 @@ BEGIN
         '1',
         CAST(actual_count AS STRING),
         FORMAT(
-          'Repository table %s must exist.',
+          'Repository table %s must exist. Run 01 setup; 03 refuses to start without it.',
           required_table.table_name
+        ),
+        CURRENT_TIMESTAMP()
+      );
+    END;
+  END FOR;
+
+  FOR required_view IN (
+    SELECT view_name
+    FROM UNNEST(required_views) AS view_name
+  )
+  DO
+    BEGIN
+      DECLARE actual_count INT64 DEFAULT 0;
+
+      EXECUTE IMMEDIATE FORMAT(
+        '''
+        SELECT COUNT(*)
+        FROM `%s.INFORMATION_SCHEMA.TABLES`
+        WHERE table_name = @view_name
+          AND table_type = 'VIEW'
+        ''',
+        repository_dataset_full_name
+      )
+      INTO actual_count
+      USING required_view.view_name AS view_name;
+
+      INSERT INTO validation_result
+      VALUES (
+        120 + (
+          SELECT offset_value
+          FROM UNNEST(required_views) AS name WITH OFFSET AS offset_value
+          WHERE name = required_view.view_name
+        ),
+        'REPOSITORY_OBJECT',
+        FORMAT('%s view exists', required_view.view_name),
+        IF(actual_count = 1, 'PASS', 'FAIL'),
+        '1',
+        CAST(actual_count AS STRING),
+        FORMAT(
+          'Report view %s must exist. Created by 01 setup (recreate_views_only = TRUE rebuilds just the views).',
+          required_view.view_name
+        ),
+        CURRENT_TIMESTAMP()
+      );
+    END;
+  END FOR;
+
+  FOR produced_table IN (
+    SELECT table_name
+    FROM UNNEST(run_produced_tables) AS table_name
+  )
+  DO
+    BEGIN
+      DECLARE actual_count INT64 DEFAULT 0;
+
+      EXECUTE IMMEDIATE FORMAT(
+        '''
+        SELECT COUNT(*)
+        FROM `%s.INFORMATION_SCHEMA.TABLES`
+        WHERE table_name = @table_name
+          AND table_type = 'BASE TABLE'
+        ''',
+        repository_dataset_full_name
+      )
+      INTO actual_count
+      USING produced_table.table_name AS table_name;
+
+      INSERT INTO validation_result
+      VALUES (
+        140 + (
+          SELECT offset_value
+          FROM UNNEST(run_produced_tables) AS name WITH OFFSET AS offset_value
+          WHERE name = produced_table.table_name
+        ),
+        'REPOSITORY_OBJECT',
+        FORMAT('%s exists (built by a run)', produced_table.table_name),
+        IF(actual_count = 1, 'PASS', 'WARN'),
+        '1',
+        CAST(actual_count AS STRING),
+        FORMAT(
+          'Built by 03: %s. Absent until the first run finishes, which is why this is a WARN.',
+          produced_table.table_name
         ),
         CURRENT_TIMESTAMP()
       );
@@ -407,6 +526,56 @@ BEGIN
     FORMAT('Expected UDF: %s', udf_full_name),
     CURRENT_TIMESTAMP()
   );
+
+  -- The other persistent functions 01 creates. The analysis UDF above gets its own
+  -- check and a smoke test because it is the one that can be present but broken; these
+  -- four only need to exist, and their absence breaks 03 (fingerprint_sql,
+  -- render_dynamic_sql) or the report views (usage_sql_html, usage_sql_css) in ways
+  -- that are much easier to read here than at the point of failure.
+  FOR companion_udf IN (
+    SELECT routine_name
+    FROM UNNEST([
+      bootstrap_udf_name_prefix || 'lnge_fingerprint_sql' || bootstrap_udf_name_suffix,
+      bootstrap_udf_name_prefix || 'lnge_render_dynamic_sql' || bootstrap_udf_name_suffix,
+      bootstrap_udf_name_prefix || 'lnge_usage_sql_html' || bootstrap_udf_name_suffix,
+      bootstrap_udf_name_prefix || 'lnge_usage_sql_css' || bootstrap_udf_name_suffix
+    ]) AS routine_name WITH OFFSET AS offset_value
+    ORDER BY offset_value
+  )
+  DO
+    BEGIN
+      DECLARE companion_count INT64 DEFAULT 0;
+
+      EXECUTE IMMEDIATE FORMAT(
+        '''
+        SELECT COUNT(*)
+        FROM `%s.%s.INFORMATION_SCHEMA.ROUTINES`
+        WHERE routine_name = @routine_name
+          AND routine_type = 'FUNCTION'
+        ''',
+        bootstrap_udf_project_id,
+        bootstrap_udf_dataset
+      )
+      INTO companion_count
+      USING companion_udf.routine_name AS routine_name;
+
+      INSERT INTO validation_result
+      VALUES (
+        310,
+        'PERSISTENT_UDF',
+        FORMAT('%s exists', companion_udf.routine_name),
+        IF(companion_count = 1, 'PASS', 'FAIL'),
+        '1',
+        CAST(companion_count AS STRING),
+        FORMAT(
+          'Created by 01 setup in %s.%s.',
+          bootstrap_udf_project_id,
+          bootstrap_udf_dataset
+        ),
+        CURRENT_TIMESTAMP()
+      );
+    END;
+  END FOR;
 
   IF actual_count = 1 THEN
     BEGIN

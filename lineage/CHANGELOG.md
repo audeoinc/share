@@ -19,6 +19,25 @@
   The two definition-registry MERGEs are left alone: they carry one row per object
   rather than per job, and their `last_seen_at` is meant to advance on every run.
 
+- `04_validate_lineage_environment.sql` checks the objects the repository actually has
+  now. Its required-table list had not followed the repository: `lnge_t_column_usage`
+  and the two report views were missing from it, so a repository could pass validation
+  and then fail in STEP 3 or render an empty report.
+  The section is now three lists, split by who creates each object and therefore by
+  what its absence means. Tables and views created by 01 are a FAIL -- 03's own
+  preflight refuses to start without the same tables. The two static report tables and
+  the unanalyzed snapshot are built by a RUN, so their absence is a WARN: on a freshly
+  set up repository they are legitimately not there yet, and failing on them would
+  train the operator to ignore the output.
+  Section 5 gained the four companion UDFs (`fingerprint_sql`, `render_dynamic_sql`,
+  `usage_sql_html`, `usage_sql_css`). Only the analysis UDF was checked, though a
+  missing fingerprint or render function stops 03 outright and a missing HTML function
+  breaks the report views -- all three much easier to read here than at the point of
+  failure.
+  Object names are now assembled from `bootstrap_table_name_prefix`/`suffix` instead
+  of being hard-coded, so a deployment that renames its tables is validated against
+  the names it actually has rather than always failing.
+
 - Measured, and closed, the last compression idea. Report 6 of
   `12_ephemeral_sql_similarity.sql`, run against the registry AFTER the digit-aware
   fingerprint, returns 0 removable objects for the deployed rule -- confirming it is
