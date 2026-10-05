@@ -1,4 +1,5 @@
 import { makeStyles, mergeClasses, tokens } from '@fluentui/react-components'
+import { AddRegular } from '@fluentui/react-icons'
 import type { Cr854_deliverycards } from './generated/models/Cr854_deliverycardsModel'
 import { statusColor } from './status'
 import { locale, optionLabel, useT } from './i18n'
@@ -7,6 +8,8 @@ interface Props {
   month: Date
   cards: Cr854_deliverycards[]
   onSelect: (id: string) => void
+  /** 日付のマスの空いているところ(または「＋」)を押したとき。その日付で新規作成する(値は YYYY-MM-DD) */
+  onCreate: (day: string) => void
 }
 
 const pad = (n: number) => String(n).padStart(2, '0')
@@ -49,7 +52,28 @@ const useStyles = makeStyles({
     flexDirection: 'column',
     gap: tokens.spacingVerticalXS,
     minWidth: 0,
+    cursor: 'pointer',
     '@media (min-width: 900px)': { minHeight: '112px' },
+    // マスにマウスを乗せたときだけ「＋」を出して、押せば新規作成できることを示す
+    ':hover': { backgroundColor: tokens.colorNeutralBackground1Hover },
+    ':hover .cal-add': { opacity: 1 },
+  },
+  dayHead: { display: 'flex', alignItems: 'center', justifyContent: 'space-between' },
+  add: {
+    opacity: 0,
+    width: '22px',
+    height: '22px',
+    display: 'grid',
+    placeItems: 'center',
+    border: 'none',
+    borderRadius: tokens.borderRadiusCircular,
+    backgroundColor: 'transparent',
+    color: tokens.colorBrandForeground1,
+    cursor: 'pointer',
+    fontSize: '16px',
+    ':hover': { backgroundColor: tokens.colorBrandBackground2 },
+    // キーボードで移動してきたときも見えるようにする
+    ':focus-visible': { opacity: 1 },
   },
   outside: { opacity: 0.4 },
   dayNum: {
@@ -107,9 +131,9 @@ const useStyles = makeStyles({
   },
 })
 
-export function Calendar({ month, cards, onSelect }: Props) {
+export function Calendar({ month, cards, onSelect, onCreate }: Props) {
   const styles = useStyles()
-  useT()
+  const t = useT()
   const first = new Date(month.getFullYear(), month.getMonth(), 1)
   const daysInMonth = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate()
   const weeks = Math.ceil((first.getDay() + daysInMonth) / 7)
@@ -145,13 +169,32 @@ export function Calendar({ month, cards, onSelect }: Props) {
             <div
               key={k}
               className={mergeClasses(styles.cell, d.getMonth() !== month.getMonth() && styles.outside)}
+              onClick={() => onCreate(k)}
             >
-              <span className={mergeClasses(styles.dayNum, isToday && styles.today)}>{d.getDate()}</span>
+              <div className={styles.dayHead}>
+                <span className={mergeClasses(styles.dayNum, isToday && styles.today)}>{d.getDate()}</span>
+                <button
+                  type="button"
+                  className={mergeClasses('cal-add', styles.add)}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onCreate(k)
+                  }}
+                  aria-label={t(`${d.getMonth() + 1}月${d.getDate()}日に新規作成`, `New delivery on ${d.toLocaleDateString(locale(), { month: 'short', day: 'numeric' })}`)}
+                  title={t('この日に新規作成', 'New delivery on this day')}
+                >
+                  <AddRegular />
+                </button>
+              </div>
               {(byDay.get(k) ?? []).map((c) => (
                 <button
                   key={c.cr854_deliverycardid}
                   type="button"
-                  onClick={() => onSelect(c.cr854_deliverycardid)}
+                  // マスの「新規作成」まで届かないように止める(既存のカードを開くだけ)
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onSelect(c.cr854_deliverycardid)
+                  }}
                   title={`${c.cr854_name}(${optionLabel(c.cr854_statusname)})`}
                   className={styles.pill}
                   style={{
