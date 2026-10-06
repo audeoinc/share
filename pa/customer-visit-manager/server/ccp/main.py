@@ -31,7 +31,7 @@ register_errors(app)
 async def basic_auth(request: Request, call_next):
     # 死活確認(中身は何も返さない)と、Cloud Scheduler からの内部の呼び出し(下で、Google の署名つきトークンを確認する)は、Basic 認証の対象外
     path = request.url.path
-    if APP_PASSWORD and path != "/healthz" and not path.startswith("/internal/"):
+    if APP_PASSWORD and path != "/ping" and not path.startswith("/internal/"):
         header = request.headers.get("authorization", "")
         ok = False
         if header.startswith("Basic "):
@@ -45,7 +45,7 @@ async def basic_auth(request: Request, call_next):
     return await call_next(request)
 
 
-@app.get("/healthz")
+@app.get("/ping")
 async def healthz():
     return {"ok": True}
 

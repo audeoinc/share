@@ -46,6 +46,8 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(dbctl.classify(instance("RUNNABLE", "ALWAYS")), "running")
         self.assertEqual(dbctl.classify(instance("MAINTENANCE", "ALWAYS")), "starting")
         self.assertEqual(dbctl.classify(instance("STOPPED", "NEVER")), "stopped")
+        # 実際の API は、停止中でも state=RUNNABLE・稼働ポリシー=NEVER を返す
+        self.assertEqual(dbctl.classify(instance("RUNNABLE", "NEVER")), "stopped")
         self.assertEqual(dbctl.classify(instance("MAINTENANCE", "NEVER")), "stopping")
         self.assertEqual(dbctl.classify({}), "unknown")
 
@@ -57,7 +59,7 @@ class ControllerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(c.policies, [])
 
     async def test_stopped_requests_start_once_and_reports_not_ready(self) -> None:
-        c = Fake(instance("STOPPED", "NEVER"))
+        c = Fake(instance("RUNNABLE", "NEVER"))
         with self.assertRaises(dbctl.DbNotReady):
             await c.ensure_running()
         self.assertEqual(c.policies, ["ALWAYS"])
@@ -86,7 +88,7 @@ class ControllerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(c.policies, [])
 
     async def test_idle_check_does_nothing_when_not_running(self) -> None:
-        c = Fake(instance("STOPPED", "NEVER"), last=time.time() - 999 * 60)
+        c = Fake(instance("RUNNABLE", "NEVER"), last=time.time() - 999 * 60)
         r = await c.idle_check(30)
         self.assertEqual(r["action"], "none")
         self.assertEqual(c.policies, [])

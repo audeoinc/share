@@ -49,7 +49,8 @@ def classify(instance: dict[str, Any]) -> str:
     if policy == "ALWAYS":
         return "running" if state == "RUNNABLE" else "starting"
     if policy == "NEVER":
-        return "stopped" if state == "STOPPED" else "stopping"
+        # 停止中でも、API の state は RUNNABLE のまま(停止かどうかは、稼働ポリシーで決まる)。切り替えの途中だけ、別の state になる
+        return "stopped" if state in ("RUNNABLE", "STOPPED", "SUSPENDED") else "stopping"
     return "unknown"
 
 
