@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400">
-<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f4efe8"/><stop offset="1" stop-color="#e6dccd"/></linearGradient></defs>
-<rect width="300" height="400" fill="url(#bg)"/>
-<ellipse cx="150" cy="362" rx="98" ry="8" fill="#000" opacity=".10"/>
-<g><path d="M105 82 Q150 106 195 82 L255 112 L275 232 L238 242 L228 182 L228 320 L72 320 L72 182 L62 242 L25 232 L45 112 Z" fill="#7a8450" stroke="#5f663e" stroke-width="3" stroke-linejoin="round"/><path d="M150 96 L118 84 L108 130 L150 190 Z" fill="#869158" stroke="#575f39" stroke-width="2"/><path d="M150 96 L182 84 L192 130 L150 190 Z" fill="#869158" stroke="#575f39" stroke-width="2"/><line x1="150" y1="190" x2="150" y2="320" stroke="#575f39" stroke-width="3"/><rect x="88" y="240" width="40" height="34" rx="3" fill="none" stroke="#575f39" stroke-width="2"/><rect x="172" y="240" width="40" height="34" rx="3" fill="none" stroke="#575f39" stroke-width="2"/></g>
-<text x="150" y="390" text-anchor="middle" font-family="'Noto Sans JP','Yu Gothic UI',Meiryo,sans-serif" font-size="15" font-weight="700" fill="#4a4a4a">ライトジャケット</text>
-</svg>

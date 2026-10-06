@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400">
-<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f3f0ea"/><stop offset="1" stop-color="#e4ddd0"/></linearGradient></defs>
-<rect width="300" height="400" fill="url(#bg)"/>
-<ellipse cx="150" cy="362" rx="98" ry="8" fill="#000" opacity=".10"/>
-<g><path d="M55 255 Q55 200 108 206 L150 232 Q205 240 245 260 Q270 272 266 302 V318 H55 Z" fill="#f2f2f2" stroke="#919191" stroke-width="3"/><rect x="52" y="304" width="220" height="24" rx="10" fill="#ffffff" stroke="#919191" stroke-width="2"/><path d="M110 212 l30 22 M128 210 l30 24 M146 214 l30 22" stroke="#fff" stroke-width="4" stroke-linecap="round"/><path d="M62 270 Q120 280 150 250" fill="none" stroke="#e35d5d" stroke-width="6" stroke-linecap="round"/></g>
-<text x="150" y="390" text-anchor="middle" font-family="'Inter','Noto Sans JP','Yu Gothic UI',Meiryo,sans-serif" font-size="15" font-weight="700" fill="#4a4a4a">Sneakers</text>
-</svg>

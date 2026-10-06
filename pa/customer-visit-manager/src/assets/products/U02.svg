@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400">
-<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f4efe8"/><stop offset="1" stop-color="#e6dccd"/></linearGradient></defs>
-<rect width="300" height="400" fill="url(#bg)"/>
-<ellipse cx="150" cy="362" rx="98" ry="8" fill="#000" opacity=".10"/>
-<g><path d="M105 82 Q150 106 195 82 L255 112 L275 232 L238 242 L228 182 L228 320 L72 320 L72 182 L62 242 L25 232 L45 112 Z" fill="#2f4a6d" stroke="#243955" stroke-width="3" stroke-linejoin="round"/><path d="M30 126 Q150 134 270 126" fill="none" stroke="#20334c" stroke-width="2.5"/><path d="M30 160 Q150 168 270 160" fill="none" stroke="#20334c" stroke-width="2.5"/><path d="M72 194 Q150 202 228 194" fill="none" stroke="#20334c" stroke-width="2.5"/><path d="M72 228 Q150 236 228 228" fill="none" stroke="#20334c" stroke-width="2.5"/><path d="M72 262 Q150 270 228 262" fill="none" stroke="#20334c" stroke-width="2.5"/><path d="M72 296 Q150 304 228 296" fill="none" stroke="#20334c" stroke-width="2.5"/><path d="M118 84 Q150 116 182 84" fill="none" stroke="#20334c" stroke-width="7" stroke-linecap="round"/><line x1="150" y1="100" x2="150" y2="320" stroke="#20334c" stroke-width="3"/></g>
-<text x="150" y="390" text-anchor="middle" font-family="'Inter','Noto Sans JP','Yu Gothic UI',Meiryo,sans-serif" font-size="15" font-weight="700" fill="#4a4a4a">Down Jacket</text>
-</svg>

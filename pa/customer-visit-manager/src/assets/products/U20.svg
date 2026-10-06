@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400">
-<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f3f0ea"/><stop offset="1" stop-color="#e4ddd0"/></linearGradient></defs>
-<rect width="300" height="400" fill="url(#bg)"/>
-<ellipse cx="150" cy="362" rx="98" ry="8" fill="#000" opacity=".10"/>
-<g><path d="M100 40 H176 L180 240 Q182 264 218 272 Q264 280 268 314 V336 H98 Z" fill="#b58a5a" stroke="#795936" stroke-width="3" stroke-linejoin="round"/><rect x="96" y="332" width="176" height="16" rx="4" fill="#4a3721"/><path d="M176 100 L180 240" stroke="#795936" stroke-width="2" opacity=".6"/><circle cx="106" cy="40" r="11" fill="#f4ead8" stroke="#d8c9ad" stroke-width="2"/><circle cx="120" cy="40" r="11" fill="#f4ead8" stroke="#d8c9ad" stroke-width="2"/><circle cx="134" cy="40" r="11" fill="#f4ead8" stroke="#d8c9ad" stroke-width="2"/><circle cx="148" cy="40" r="11" fill="#f4ead8" stroke="#d8c9ad" stroke-width="2"/><circle cx="162" cy="40" r="11" fill="#f4ead8" stroke="#d8c9ad" stroke-width="2"/></g>
-<text x="150" y="390" text-anchor="middle" font-family="'Inter','Noto Sans JP','Yu Gothic UI',Meiryo,sans-serif" font-size="15" font-weight="700" fill="#4a4a4a">Shearling Boots</text>
-</svg>

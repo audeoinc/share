@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400">
-<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f3f0ea"/><stop offset="1" stop-color="#e4ddd0"/></linearGradient></defs>
-<rect width="300" height="400" fill="url(#bg)"/>
-<ellipse cx="150" cy="362" rx="98" ry="8" fill="#000" opacity=".10"/>
-<g><path d="M52 278 Q52 238 112 244 L170 258 Q232 262 258 288 V314 H52 Z" fill="#4a2c1a" stroke="#2c1a0f" stroke-width="3"/><rect x="50" y="308" width="212" height="16" rx="5" fill="#1d110a"/><path d="M118 248 Q150 262 180 260 Q168 282 132 282 Q116 268 118 248Z" fill="#3c2415" stroke="#2c1a0f" stroke-width="2"/><rect x="138" y="262" width="26" height="8" rx="3" fill="#d9b44a"/></g>
-<text x="150" y="390" text-anchor="middle" font-family="'Inter','Noto Sans JP','Yu Gothic UI',Meiryo,sans-serif" font-size="15" font-weight="700" fill="#4a4a4a">Loafers</text>
-</svg>

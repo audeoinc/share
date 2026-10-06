@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400">
-<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f4f1ec"/><stop offset="1" stop-color="#e6dfd3"/></linearGradient></defs>
-<rect width="300" height="400" fill="url(#bg)"/>
-<ellipse cx="150" cy="362" rx="98" ry="8" fill="#000" opacity=".10"/>
-<g><path d="M92 130 Q150 -10 208 130" fill="none" stroke="#222222" stroke-width="9" stroke-linecap="round"/><rect x="60" y="130" width="180" height="150" rx="18" fill="#3a3a3a" stroke="#222222" stroke-width="3"/><path d="M60 150 Q150 230 240 150 L240 130 H60 Z" fill="#454545" stroke="#222222" stroke-width="3"/><circle cx="150" cy="212" r="10" fill="#d9b44a" stroke="#222222" stroke-width="2"/></g>
-<text x="150" y="390" text-anchor="middle" font-family="'Noto Sans JP','Yu Gothic UI',Meiryo,sans-serif" font-size="15" font-weight="700" fill="#4a4a4a">ショルダーバッグ</text>
-</svg>

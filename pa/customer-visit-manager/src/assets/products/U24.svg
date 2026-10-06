@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400">
-<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#eff3ef"/><stop offset="1" stop-color="#dbe6dc"/></linearGradient></defs>
-<rect width="300" height="400" fill="url(#bg)"/>
-<ellipse cx="150" cy="362" rx="98" ry="8" fill="#000" opacity=".10"/>
-<g><rect x="92" y="96" width="30" height="130" rx="15" fill="#2b2b2b" stroke="#515151" stroke-width="2"/><rect x="124" y="70" width="30" height="150" rx="15" fill="#2b2b2b" stroke="#515151" stroke-width="2"/><rect x="156" y="76" width="30" height="146" rx="15" fill="#2b2b2b" stroke="#515151" stroke-width="2"/><rect x="188" y="102" width="30" height="120" rx="15" fill="#2b2b2b" stroke="#515151" stroke-width="2"/><path d="M92 210 L92 300 Q92 340 132 340 H178 Q218 340 218 300 V210 Z" fill="#2b2b2b" stroke="#515151" stroke-width="2"/><rect x="88" y="322" width="134" height="24" rx="6" fill="#3c3c3c" stroke="#515151" stroke-width="2"/><path d="M92 240 Q52 220 56 190 Q62 168 84 188 L100 220 Z" fill="#2b2b2b" stroke="#515151" stroke-width="2"/><circle cx="195" cy="298" r="6" fill="#515151"/></g>
-<text x="150" y="390" text-anchor="middle" font-family="'Inter','Noto Sans JP','Yu Gothic UI',Meiryo,sans-serif" font-size="15" font-weight="700" fill="#4a4a4a">Leather Gloves</text>
-</svg>

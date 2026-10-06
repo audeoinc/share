@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400">
-<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f4efe8"/><stop offset="1" stop-color="#e6dccd"/></linearGradient></defs>
-<rect width="300" height="400" fill="url(#bg)"/>
-<ellipse cx="150" cy="362" rx="98" ry="8" fill="#000" opacity=".10"/>
-<g><path d="M105 82 Q150 106 195 82 L255 112 L275 232 L238 242 L228 182 L228 350 L72 350 L72 182 L62 242 L25 232 L45 112 Z" fill="#c19a6b" stroke="#a47945" stroke-width="3" stroke-linejoin="round"/><path d="M150 96 L120 84 L100 150 L150 230 Z" fill="#cbab84" stroke="#9e7442" stroke-width="2"/><path d="M150 96 L180 84 L200 150 L150 230 Z" fill="#cbab84" stroke="#9e7442" stroke-width="2"/><line x1="150" y1="230" x2="150" y2="350" stroke="#9e7442" stroke-width="2"/><circle cx="142" cy="250" r="4.5" fill="#745530"/><circle cx="142" cy="285" r="4.5" fill="#745530"/><circle cx="142" cy="320" r="4.5" fill="#745530"/></g>
-<text x="150" y="390" text-anchor="middle" font-family="'Noto Sans JP','Yu Gothic UI',Meiryo,sans-serif" font-size="15" font-weight="700" fill="#4a4a4a">ウールコート</text>
-</svg>
