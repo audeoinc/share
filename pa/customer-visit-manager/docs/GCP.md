@@ -52,7 +52,7 @@ Dataverse の名前(画面が使う `cr854_scheduledat`、`_cr854_heroimage_valu
 
 - 画面側の `askAgent`(プロンプトの作成・JSON の解釈・やり直し・チャット・英語化)は、**Power Apps 版と共通のまま**。差し替えるのは、依頼文を送って返答のテキストを受け取る部分だけ(`src/gcp/ai.ts`)。
 - サーバーは、依頼文を Gemini に渡して、返答のテキストをそのまま返す(`server/ccp/ai.py`)。返答は JSON 形式で出力させる。
-- 設定(環境変数。営業支援システムと同じ Vertex AI): `GOOGLE_CLOUD_PROJECT`(コードには書かない)、`GOOGLE_CLOUD_LOCATION`(既定 global)、`GEMINI_MODEL`(既定 gemini-3.5-flash)、`GEMINI_THINKING`(minimal / low / medium / high。既定 low)。
+- 設定(環境変数。営業支援システムと同じ Vertex AI): `GOOGLE_CLOUD_PROJECT`(コードには書かない)、`GOOGLE_CLOUD_LOCATION`(既定 global)、`GEMINI_MODEL`(コードの既定は gemini-3.5-flash。本番は gemini-3.8-flash に設定)、`GEMINI_THINKING`(minimal / low / medium / high。既定 low)。
 - 1 回の「すべてAIで下書き」は、手元の確認で約 40 秒(Power Apps 版の、フロー経由のポーリングより速い)。
 
 ## 手元での動かし方
@@ -103,7 +103,7 @@ CCP_PASSWORD=<APP_PASSWORD> node scripts/gcp-smoke.mjs
 **前提(作成済みのもの)**: Cloud SQL インスタンス `contents-planner-db`(普段は停止)/ GCS バケット(最後のアクセスの時刻を置く)/ Secret Manager の `contents-planner-db-app-password` と `contents-planner-app-password`(Basic 認証のパスワード。ユーザー名は何でもよい)/ Scheduler 用のサービスアカウント `ccp-scheduler`。実行サービスアカウントに、2 つのシークレットの `secretmanager.secretAccessor` を付けてある。
 
 ```bash
-gcloud run deploy contents-planner --source . --project <プロジェクトID> --region asia-northeast1   --allow-unauthenticated --concurrency=8 --max-instances=1 --min-instances=0 --memory=512Mi --cpu=1 --timeout=300   --service-account=<実行サービスアカウント>   --set-env-vars "GOOGLE_CLOUD_PROJECT=<プロジェクトID>,GOOGLE_CLOUD_LOCATION=global,GEMINI_MODEL=gemini-3.5-flash,GEMINI_THINKING=low,CLOUD_SQL_INSTANCE=<プロジェクトID>:asia-northeast1:contents-planner-db,DB_USER=ccp_app,DB_NAME=ccp,DB_CONTROL=1,DB_IDLE_MINUTES=30,STATE_BUCKET=<バケット名>,IDLE_CHECK_AUDIENCE=<サービスの URL>,IDLE_CHECK_SA_EMAIL=ccp-scheduler@<プロジェクトID>.iam.gserviceaccount.com"   --set-secrets "DB_PASSWORD=contents-planner-db-app-password:latest,APP_PASSWORD=contents-planner-app-password:latest"
+gcloud run deploy contents-planner --source . --project <プロジェクトID> --region asia-northeast1   --allow-unauthenticated --concurrency=8 --max-instances=1 --min-instances=0 --memory=512Mi --cpu=1 --timeout=300   --service-account=<実行サービスアカウント>   --set-env-vars "GOOGLE_CLOUD_PROJECT=<プロジェクトID>,GOOGLE_CLOUD_LOCATION=global,GEMINI_MODEL=gemini-3.8-flash,GEMINI_THINKING=low,CLOUD_SQL_INSTANCE=<プロジェクトID>:asia-northeast1:contents-planner-db,DB_USER=ccp_app,DB_NAME=ccp,DB_CONTROL=1,DB_IDLE_MINUTES=30,STATE_BUCKET=<バケット名>,IDLE_CHECK_AUDIENCE=<サービスの URL>,IDLE_CHECK_SA_EMAIL=ccp-scheduler@<プロジェクトID>.iam.gserviceaccount.com"   --set-secrets "DB_PASSWORD=contents-planner-db-app-password:latest,APP_PASSWORD=contents-planner-app-password:latest"
 ```
 
 2 回目以降は、環境変数とシークレットが残るので、`gcloud run deploy contents-planner --source . --project <プロジェクトID> --region asia-northeast1` だけでよい(コードを変えても、Cloud Run は自動では更新されない)。
@@ -134,3 +134,13 @@ gcloud scheduler jobs create http ccp-idle-check --project <プロジェクトID
 - Cloud SQL の API は、停止中でも `state` を `RUNNABLE` と返す。**停止かどうかは、稼働ポリシー(`NEVER`)で見る**(`dbctl.classify`)。
 - 起動の途中は、状態が「稼働」でも接続できない時間がある。サーバーは、接続の失敗を 500 ではなく 503(`db_starting`)として返し、`/api/db/status` は、実際に接続できるかを確かめてから「稼働中」と返す。
 - パスワード・値の確認や変更は、Secret Manager と Cloud Run の環境変数で行う(リポジトリには置かない)。
+
+## 独自ドメイン(サブドメイン)
+
+営業支援システム(`proposal-sample.<ドメイン>`)と同じ、Cloud Run のドメインマッピング。CCP は `ccp.<ドメイン>`。
+
+1. `gcloud beta run domain-mappings create --service contents-planner --domain ccp.<ドメイン> --region asia-northeast1 --project <プロジェクトID>`
+2. DNS(レジストラ)に、CNAME を追加する: 名前 `ccp` → 値 `ghs.googlehosted.com.`
+3. 証明書の発行を待つ(数分〜1 時間)。状態は `gcloud beta run domain-mappings describe --domain ccp.<ドメイン> …` の `CertificateProvisioned` / `Ready` で確認する。
+
+Scheduler の宛先(`IDLE_CHECK_AUDIENCE`)は、独自ドメインではなく、`run.app` の URL のままにする。
