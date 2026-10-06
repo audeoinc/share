@@ -11,14 +11,21 @@
 -- fingerprint every day means something in the generated SQL CHANGES every day, and
 -- the fingerprint does not normalize it.
 --
--- THE HANDLE THIS REPORT USES IS THE DESTINATION. A model's destination table is
--- stable even when its SQL is not -- dbt writes `<model>__dbt_tmp`, a DAG writes a
--- fixed staging table -- so:
+-- THE HANDLE THIS REPORT USES IS SOMETHING THAT STAYS THE SAME WHILE THE SQL MOVES.
+-- By default that is the destination table, which is stable even when the SQL is not
+-- -- dbt writes `<model>__dbt_tmp`, a DAG writes a fixed staging table -- so:
 --
 --     same destination + many fingerprints = that model's SQL is drifting
 --
--- and the destination name says WHICH model, which is what makes the finding
--- actionable: it can be opened in the dbt project and compared against what is here.
+-- and the destination names WHICH model, which is what makes the finding actionable
+-- against the project that generates it.
+--
+-- WHEN THE DESTINATION DOES NOT WORK: a statement with no destination of its own
+-- lands in a per-job anonymous table, so every job becomes its own group and report 1
+-- comes back empty or all ones. Then group by a job LABEL instead
+-- (group_by_label_key): report 0 lists the label keys and how many distinct values
+-- each has, and a key with few values that recur daily is a model identifier. An
+-- invocation id has as many values as jobs and identifies the run, not the model.
 --
 -- Report 1 ranks destinations by how many fingerprints they produced. Report 2 opens
 -- one destination up, fingerprint by fingerprint, with first and last seen. Report 3
@@ -69,6 +76,16 @@ BEGIN
   DECLARE lookback_days INT64 DEFAULT 14;
   -- Rows in report 1.
   DECLARE row_limit INT64 DEFAULT 20;
+  -- HOW TO GROUP THE JOBS. NULL groups by destination table, which works when the
+  -- destination is stable (dbt's `<model>__dbt_tmp`, a DAG's staging table).
+  --
+  -- It does NOT work when the destination rotates -- a SELECT with no destination
+  -- lands in a per-job anonymous table, and then every job is its own group and
+  -- report 1 comes back empty or all ones. Set this to a job LABEL KEY instead, and
+  -- jobs are grouped by that label's value. Report 0 lists the keys available and how
+  -- many distinct values each has: a key with a handful of values that recur every day
+  -- is a model identifier, which is the handle wanted here.
+  DECLARE group_by_label_key STRING DEFAULT NULL;
   -- Which destination report 2 and 3 open up. NULL takes the worst offender from
   -- report 1 -- the destination with the most fingerprints. Set it to a table name to
   -- investigate a specific model.
@@ -91,6 +108,8 @@ BEGIN
   -- a literal only if the repository lives in a separate project.
   DECLARE repository_project_id STRING DEFAULT NULL;
   DECLARE job_registry_fqn STRING;
+  -- The SQL expression that groups jobs: a destination table, or a label's value.
+  DECLARE group_expression STRING;
   DECLARE rendered_sql STRING;
   -- Token extracted from the project id (see project_token_pattern).
   DECLARE project_token STRING;
@@ -121,6 +140,17 @@ BEGIN
   ASSERT difference_lead_in >= 0 AS 'difference_lead_in must be >= 0.';
   ASSERT difference_max_scan >= 100 AS 'difference_max_scan must be >= 100.';
 
+  -- What identifies "the same job, run again". Built once and inlined into the three
+  -- reports, so they all group the same way.
+  SET group_expression = IF(
+    group_by_label_key IS NULL,
+    'destination_table',
+    FORMAT(
+      '(SELECT label.value FROM UNNEST(labels) AS label WHERE label.key = %T)',
+      group_by_label_key
+    )
+  );
+
   SET job_registry_fqn = FORMAT(
     '%s.%s.%s',
     repository_project_id,
@@ -129,7 +159,35 @@ BEGIN
   );
 
   -- --------------------------------------------------------------------------
-  -- Report 1: destinations whose SQL is not stable.
+  -- Report 0: the job LABELS available, and how well each identifies a model.
+  --
+  -- Only useful when the destination does not work as a handle. A label key whose
+  -- distinct_values is small and stable across days names something that recurs -- a
+  -- model, a DAG task -- and is what to put in group_by_label_key. A key with as many
+  -- values as there are jobs (an invocation id) identifies the RUN, not the model, and
+  -- is useless for grouping.
+  -- --------------------------------------------------------------------------
+  SET rendered_sql = FORMAT(
+    """
+    SELECT
+      label.key AS label_key,
+      COUNT(DISTINCT label.value) AS distinct_values,
+      COUNT(DISTINCT DATE(creation_time)) AS days,
+      COUNT(*) AS jobs
+    FROM `%s`, UNNEST(labels) AS label
+    WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+    GROUP BY label_key
+    ORDER BY jobs DESC
+    LIMIT @max_rows
+    """,
+    job_registry_fqn
+  );
+
+  EXECUTE IMMEDIATE rendered_sql
+  USING lookback_days AS days, row_limit AS max_rows;
+
+  -- --------------------------------------------------------------------------
+  -- Report 1: job groups whose SQL is not stable.
   --
   -- fingerprints is the count of distinct sql_fingerprint values that wrote to this
   -- destination. days is how many distinct days it ran. The two together say which
@@ -143,19 +201,19 @@ BEGIN
   SET rendered_sql = FORMAT(
     """
     SELECT
-      destination_dataset,
-      destination_table,
+      %s AS job_group,
       COUNT(DISTINCT sql_fingerprint) AS fingerprints,
       COUNT(DISTINCT DATE(creation_time)) AS days,
       COUNT(*) AS jobs
     FROM `%s`
     WHERE sql_fingerprint IS NOT NULL
       AND creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
-    GROUP BY destination_dataset, destination_table
+    GROUP BY job_group
     HAVING fingerprints > 1
     ORDER BY fingerprints DESC, jobs DESC
     LIMIT @max_rows
     """,
+    group_expression,
     job_registry_fqn
   );
 
@@ -166,21 +224,23 @@ BEGIN
   IF inspect_destination_table IS NULL THEN
     EXECUTE IMMEDIATE FORMAT(
       """
-      SELECT destination_table
+      SELECT %s AS job_group
       FROM `%s`
       WHERE sql_fingerprint IS NOT NULL
         AND creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
-      GROUP BY destination_table
+      GROUP BY job_group
       ORDER BY COUNT(DISTINCT sql_fingerprint) DESC, COUNT(*) DESC
       LIMIT 1
       """,
+      group_expression,
       job_registry_fqn
     ) INTO inspect_destination_table USING lookback_days AS days;
   END IF;
 
   SELECT
     'INSPECTING' AS notice,
-    inspect_destination_table AS destination_table,
+    inspect_destination_table AS job_group,
+    IFNULL(group_by_label_key, 'destination_table') AS grouped_by,
     lookback_days AS lookback_days;
 
   -- --------------------------------------------------------------------------
@@ -199,14 +259,15 @@ BEGIN
       MAX(DATE(creation_time)) AS last_day,
       MAX(LENGTH(definition_text)) AS sql_length
     FROM `%s`
-    WHERE destination_table = @target
+    WHERE %s = @target
       AND sql_fingerprint IS NOT NULL
       AND creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
     GROUP BY sql_fingerprint
     ORDER BY last_day DESC, jobs DESC
     LIMIT @max_rows
     """,
-    job_registry_fqn
+    job_registry_fqn,
+    group_expression
   );
 
   EXECUTE IMMEDIATE rendered_sql
@@ -238,7 +299,7 @@ BEGIN
         ANY_VALUE(definition_text) AS sql_text,
         MAX(creation_time) AS last_seen
       FROM `%s`
-      WHERE destination_table = @target
+      WHERE %s = @target
         AND sql_fingerprint IS NOT NULL
         AND definition_text IS NOT NULL
         AND creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
@@ -277,7 +338,8 @@ BEGIN
       SUBSTR(older_sql, GREATEST(1, common_prefix - @lead_in), @text_window) AS older_text
     FROM divergence
     """,
-    job_registry_fqn
+    job_registry_fqn,
+    group_expression
   );
 
   EXECUTE IMMEDIATE rendered_sql
