@@ -61,6 +61,7 @@ class DbController:
         self._session: Any = None
         self._cached: tuple[float, str] = (0.0, "unknown")
         self._last_touch = 0.0
+        self._start_lock: asyncio.Lock | None = None
 
     # ---- Google Cloud の呼び出し(同期。asyncio.to_thread で呼ぶ。テストでは、差し替える)
     def _http(self) -> Any:
@@ -110,9 +111,14 @@ class DbController:
         if state == "running":
             return
         if state == "stopped":
-            log.info("DB を起動します")
-            await asyncio.to_thread(self._set_policy, "ALWAYS")
-            self._cached = (time.monotonic(), "starting")
+            # 画面を開いたときは、データの依頼が同時に何件も来る。起動の依頼は、1 回だけにする
+            if self._start_lock is None:
+                self._start_lock = asyncio.Lock()
+            async with self._start_lock:
+                if (await self.status()) == "stopped":
+                    log.info("DB を起動します")
+                    await asyncio.to_thread(self._set_policy, "ALWAYS")
+                    self._cached = (time.monotonic(), "starting")
         raise DbNotReady("starting" if state in ("stopped", "starting", "stopping") else state)
 
     async def touch(self) -> None:
