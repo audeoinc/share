@@ -27,6 +27,13 @@
 -- each has, and a key with few values that recur daily is a model identifier. An
 -- invocation id has as many values as jobs and identifies the run, not the model.
 --
+-- START WITH REPORT 4. It asks the question directly -- of the objects that arrived
+-- today, how many are a statement the repository has not seen, and how many are an
+-- old statement with different numbers in it -- and answers it with two counts.
+-- Report 5 then shows those differences, one row per object, with the text around the
+-- first character that differs. Reports 0 to 3 are the same investigation from the
+-- job side, for when the question is "which model is doing this".
+--
 -- Report 1 ranks destinations by how many fingerprints they produced. Report 2 opens
 -- one destination up, fingerprint by fingerprint, with first and last seen. Report 3
 -- is the one that ends the discussion: it takes that destination's two most recent
@@ -96,6 +103,10 @@ BEGIN
   -- changed.
   DECLARE difference_window INT64 DEFAULT 160;
   DECLARE difference_lead_in INT64 DEFAULT 40;
+  -- Reports 4 and 5: how many days back counts as "newly arrived". 1 is today only.
+  DECLARE new_object_days INT64 DEFAULT 1;
+  -- Report 5: how many of the new objects to print with their twin.
+  DECLARE new_object_examples INT64 DEFAULT 5;
   -- Report 3 compares character by character, which is linear in the text length, so
   -- the search is capped. Raise it only if two versions are identical for longer than
   -- this and the report says so.
@@ -108,6 +119,7 @@ BEGIN
   -- a literal only if the repository lives in a separate project.
   DECLARE repository_project_id STRING DEFAULT NULL;
   DECLARE job_registry_fqn STRING;
+  DECLARE registry_fqn STRING;
   -- The SQL expression that groups jobs: a destination table, or a label's value.
   DECLARE group_expression STRING;
   DECLARE rendered_sql STRING;
@@ -139,6 +151,8 @@ BEGIN
   ASSERT difference_window >= 20 AS 'difference_window must be >= 20.';
   ASSERT difference_lead_in >= 0 AS 'difference_lead_in must be >= 0.';
   ASSERT difference_max_scan >= 100 AS 'difference_max_scan must be >= 100.';
+  ASSERT new_object_days >= 1 AS 'new_object_days must be >= 1.';
+  ASSERT new_object_examples >= 1 AS 'new_object_examples must be >= 1.';
 
   -- What identifies "the same job, run again". Built once and inlined into the three
   -- reports, so they all group the same way.
@@ -156,6 +170,12 @@ BEGIN
     repository_project_id,
     repository_dataset,
     table_name_prefix || 'lnge_' || 'm_' || 'job_registry' || table_name_suffix
+  );
+  SET registry_fqn = FORMAT(
+    '%s.%s.%s',
+    repository_project_id,
+    repository_dataset,
+    table_name_prefix || 'lnge_' || 'm_' || 'definition_registry' || table_name_suffix
   );
 
   -- --------------------------------------------------------------------------
@@ -349,4 +369,179 @@ BEGIN
     difference_max_scan AS max_scan,
     difference_lead_in AS lead_in,
     difference_window AS text_window;
+
+  -- --------------------------------------------------------------------------
+  -- Report 4: OF THE OBJECTS THAT ARRIVED TODAY, HOW MANY ARE REALLY NEW?
+  --
+  -- This is the question behind all the others, asked directly. For every ephemeral
+  -- object first seen in the last new_object_days, it looks for an OLDER object whose
+  -- SQL is identical once every digit is folded away. If one exists, the new object is
+  -- not a new statement -- it is the same statement with different numbers in it, and
+  -- the fingerprint could in principle have collapsed them.
+  --
+  --   with_twin     arrived today, and an older object differs only in digits.
+  --                 This is the remaining opportunity, and report 5 shows what the
+  --                 digits are so it can be judged.
+  --   without_twin  arrived today and matches nothing older even with all digits
+  --                 folded. A genuinely new statement -- a new model, or an edited
+  --                 one. Nothing to fold; this is work the pipeline SHOULD do.
+  --
+  -- If without_twin accounts for nearly all of them, the daily arrivals are real and
+  -- the fingerprint is doing its job. If with_twin dominates, read report 5.
+  --
+  -- The key folds EVERY digit, including the short ones the deployed rule deliberately
+  -- keeps. That is on purpose: this report measures the opportunity, it does not
+  -- propose taking it -- short digit runs were measured to recur daily, which is what
+  -- a name does, not a parameter.
+  -- --------------------------------------------------------------------------
+  SET rendered_sql = FORMAT(
+    """
+    WITH ephemeral AS (
+      SELECT
+        object_name,
+        definition_text,
+        first_seen_at,
+        REGEXP_REPLACE(
+          UPPER(
+            REGEXP_REPLACE(
+              REGEXP_REPLACE(
+                REPLACE(definition_text, '`', ''),
+                "'[^']*'", "'?'"
+              ),
+              '[[:space:]]+', ' '
+            )
+          ),
+          '[0-9]+', '#'
+        ) AS digit_free_key
+      FROM `%s`
+      WHERE is_active = TRUE
+        AND is_ephemeral = TRUE
+        AND definition_text IS NOT NULL
+    ),
+    arrivals AS (
+      SELECT *
+      FROM ephemeral
+      WHERE first_seen_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+    )
+    SELECT
+      (SELECT COUNT(*) FROM arrivals) AS arrived,
+      (
+        SELECT COUNT(*)
+        FROM arrivals AS a
+        WHERE EXISTS (
+          SELECT 1
+          FROM ephemeral AS older
+          WHERE older.digit_free_key = a.digit_free_key
+            AND older.first_seen_at < a.first_seen_at
+        )
+      ) AS with_twin,
+      (
+        SELECT COUNT(*)
+        FROM arrivals AS a
+        WHERE NOT EXISTS (
+          SELECT 1
+          FROM ephemeral AS older
+          WHERE older.digit_free_key = a.digit_free_key
+            AND older.first_seen_at < a.first_seen_at
+        )
+      ) AS without_twin
+    """,
+    registry_fqn
+  );
+
+  EXECUTE IMMEDIATE rendered_sql
+  USING new_object_days AS days;
+
+  -- --------------------------------------------------------------------------
+  -- Report 5: the twins, with the difference shown.
+  --
+  -- One row per newly arrived object that has an older twin: the two names, where
+  -- their SQL first diverges, and a window from each around that point. The windows
+  -- start at the same offset and are the same length, so the differing token is the
+  -- one thing that is not the same on both lines.
+  --
+  -- What to look for, and what each answer means:
+  --   a date, a timestamp, a long id   should already fold -- if it does not, the
+  --                                    fingerprint has a gap and it is fixable here
+  --   a 1 or 2-digit number            folding it would also merge `_v1` with `_v2`;
+  --                                    measured to recur daily, so deliberately kept
+  --   a product code or similar        a real parameter. Whether to fold it is a
+  --                                    judgement about whether the lineage differs
+  --   nothing visible in the window    the difference is further in: raise
+  --                                    difference_lead_in or difference_window
+  -- --------------------------------------------------------------------------
+  SET rendered_sql = FORMAT(
+    """
+    WITH ephemeral AS (
+      SELECT
+        object_name,
+        definition_text,
+        first_seen_at,
+        REGEXP_REPLACE(
+          UPPER(
+            REGEXP_REPLACE(
+              REGEXP_REPLACE(
+                REPLACE(definition_text, '`', ''),
+                "'[^']*'", "'?'"
+              ),
+              '[[:space:]]+', ' '
+            )
+          ),
+          '[0-9]+', '#'
+        ) AS digit_free_key
+      FROM `%s`
+      WHERE is_active = TRUE
+        AND is_ephemeral = TRUE
+        AND definition_text IS NOT NULL
+    ),
+    paired AS (
+      SELECT
+        a.object_name AS new_object,
+        older.object_name AS twin_object,
+        a.definition_text AS new_sql,
+        older.definition_text AS twin_sql
+      FROM ephemeral AS a
+      INNER JOIN ephemeral AS older
+        ON  older.digit_free_key = a.digit_free_key
+        AND older.first_seen_at < a.first_seen_at
+      WHERE a.first_seen_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      QUALIFY ROW_NUMBER() OVER (PARTITION BY a.object_name ORDER BY older.first_seen_at)
+        = 1
+    ),
+    divergence AS (
+      SELECT
+        new_object,
+        twin_object,
+        new_sql,
+        twin_sql,
+        (
+          SELECT MAX(n)
+          FROM UNNEST(GENERATE_ARRAY(
+            0,
+            LEAST(LENGTH(new_sql), LENGTH(twin_sql), @max_scan)
+          )) AS n
+          WHERE SUBSTR(new_sql, 1, n) = SUBSTR(twin_sql, 1, n)
+        ) AS common_prefix
+      FROM paired
+    )
+    SELECT
+      SUBSTR(new_object, 1, 16) AS new_object,
+      SUBSTR(twin_object, 1, 16) AS twin_object,
+      common_prefix,
+      SUBSTR(new_sql, GREATEST(1, common_prefix - @lead_in), @text_window) AS new_text,
+      SUBSTR(twin_sql, GREATEST(1, common_prefix - @lead_in), @text_window) AS twin_text
+    FROM divergence
+    ORDER BY common_prefix
+    LIMIT @max_rows
+    """,
+    registry_fqn
+  );
+
+  EXECUTE IMMEDIATE rendered_sql
+  USING
+    new_object_days AS days,
+    difference_max_scan AS max_scan,
+    difference_lead_in AS lead_in,
+    difference_window AS text_window,
+    new_object_examples AS max_rows;
 END;
