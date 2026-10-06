@@ -7,15 +7,25 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, FastAPI, Query, Request
+from fastapi import APIRouter, Depends, FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
-from . import schema as sc
+from . import dbctl, schema as sc
 from .db import get_engine
 
-router = APIRouter(prefix="/api/data")
+
+
+async def require_db() -> None:
+    """DB が止まっていれば、起動を依頼して「準備中」と返す。使える間は、最後のアクセスの時刻を残す"""
+    if dbctl.enabled():
+        c = dbctl.controller()
+        await c.ensure_running()
+        await c.touch()
+
+
+router = APIRouter(prefix="/api/data", dependencies=[Depends(require_db)])
 SCHEMA = sc.load()
 
 
@@ -123,6 +133,10 @@ async def _body(request: Request) -> dict[str, Any]:
 
 
 def register_errors(app: FastAPI) -> None:
+    @app.exception_handler(dbctl.DbNotReady)
+    async def _starting(_: Request, e: dbctl.DbNotReady):
+        return fail(503, "データベースを起動しています(1〜3 分かかります)", "db_starting")
+
     @app.exception_handler(sc.BadRequest)
     async def _bad(_: Request, e: sc.BadRequest):
         return fail(400, str(e))

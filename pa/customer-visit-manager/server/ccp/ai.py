@@ -14,16 +14,25 @@ from __future__ import annotations
 import logging
 import os
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
+from . import dbctl
 from .creds import get_credentials
 
 log = logging.getLogger("ccp.ai")
-router = APIRouter(prefix="/api")
+
+
+async def note_activity() -> None:
+    """AI の利用も、アクセスとして数える(使っている間に、DB を止めないため)"""
+    if dbctl.enabled():
+        await dbctl.controller().touch()
+
+
+router = APIRouter(prefix="/api", dependencies=[Depends(note_activity)])
 
 _client: genai.Client | None = None
 

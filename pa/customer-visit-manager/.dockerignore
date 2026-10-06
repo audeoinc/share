@@ -1,0 +1,12 @@
+# Docker のビルドに含めないもの(.gcloudignore と同じ)
+.git
+.gitignore
+.github
+.claude
+node_modules/
+dist/
+dist-gcp/
+server/.venv/
+**/__pycache__/
+docs/screenshots/
+*.log

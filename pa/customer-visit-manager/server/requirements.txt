@@ -6,4 +6,5 @@ asyncpg>=0.30
 cloud-sql-python-connector[asyncpg]>=1.18
 google-genai>=1.0
 google-auth>=2.30
+requests>=2.31
 pydantic>=2.7

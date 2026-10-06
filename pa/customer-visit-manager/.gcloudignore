@@ -1,0 +1,12 @@
+# gcloud run deploy --source . でアップロードしないもの(ビルドは、クラウドの中で行う)
+.git
+.gitignore
+.github
+.claude
+node_modules/
+dist/
+dist-gcp/
+server/.venv/
+**/__pycache__/
+docs/screenshots/
+*.log
