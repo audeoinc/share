@@ -33,7 +33,7 @@ try {
     }
     await sleep(500)
   }
-  const browser = await puppeteer.connect({ browserURL: `http://127.0.0.1:${PORT}`, defaultViewport: { width: 1600, height: 960, deviceScaleFactor: 1 } })
+  const browser = await puppeteer.connect({ browserURL: `http://127.0.0.1:${PORT}`, defaultViewport: { width: 1600, height: Number(process.env.CCP_VIEW_H ?? 960), deviceScaleFactor: 1 } })
   const page = await browser.newPage()
   const errors = []
   page.on('pageerror', (e) => errors.push(String(e)))

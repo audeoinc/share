@@ -23,9 +23,10 @@ interface Props {
   onClear: () => void
 }
 
-const HEIGHT_KEY = 'chat.paneHeight'
-const MIN_H = 140
-const DEFAULT_H = 260
+// 既定の高さを変えたので、保存のキーも変える(以前の、大きい高さを引き継がない)
+const HEIGHT_KEY = 'chat.paneHeight.v2'
+const MIN_H = 110
+const DEFAULT_H = 150
 
 const clampHeight = (h: number) => Math.min(Math.round(window.innerHeight * 0.65), Math.max(MIN_H, h))
 
@@ -48,6 +49,10 @@ const useStyles = makeStyles({
     minWidth: 0,
     minHeight: 0,
     backgroundColor: tokens.colorNeutralBackground1,
+    // 上の内容より手前に浮かせる。上端の影で、別のパネルだと分かるようにする(上の内容は、スクロールして、この下に隠れる)
+    position: 'relative',
+    zIndex: 1,
+    boxShadow: `0 -6px 10px -6px ${tokens.colorNeutralShadowKey}`,
   },
   split: {
     flexShrink: 0,

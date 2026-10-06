@@ -90,7 +90,15 @@ const useStyles = makeStyles({
   // グリッドの子は、中身が長くても列を押し広げない(帯や長い文がペインからはみ出さないように)
   // 中ペイン全体: 上は内容(スクロール)、下は AI チャット(固定)
   shell: { flexGrow: 1, minHeight: 0, minWidth: 0, display: 'flex', flexDirection: 'column' },
-  scroll: { flexGrow: 1, minHeight: 0, overflowY: 'auto', padding: '16px' },
+  // 下端を、余白の高さ(16px)だけ薄く消す: まだ下に続きがあるとき、途中で切れた内容が、はっきり切れずに消えていく(末尾までスクロールしたときは、余白の部分なので、見た目は変わらない)
+  scroll: {
+    flexGrow: 1,
+    minHeight: 0,
+    overflowY: 'auto',
+    padding: '16px',
+    maskImage: 'linear-gradient(to bottom, #000 calc(100% - 16px), transparent)',
+    WebkitMaskImage: 'linear-gradient(to bottom, #000 calc(100% - 16px), transparent)',
+  },
   grid12: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', rowGap: '12px', minWidth: 0 },
   grid8: { display: 'grid', rowGap: '8px', minWidth: 0 },
   grid4: { display: 'grid', rowGap: '4px', minWidth: 0 },
