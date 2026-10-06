@@ -24,9 +24,15 @@
   (1,439) are identical to another once every digit is removed, and every pair
   diverges at the same place -- character 16, the first line of the statement. So the
   opportunity is real in the arithmetic.
-  Inspected, the differing numbers turn out to identify objects that have to be kept
-  apart. The remaining duplication is not duplication, and the daily arrivals are
-  legitimate work: 11:22 for a seed and 4 minutes for a daily run stand as the floor.
+  Inspected, the differing number is a single digit inside a CTE NAME -- `lvl_1`
+  against `lvl_2`. Different levels of a hierarchy read different data, so folding
+  them would delete one side's lineage. They have to be kept apart.
+  That is also the 6-digit floor working as designed. The recurrence census had found
+  1-digit values appearing on seven days out of eight and called them names rather than
+  parameters; this is what those names are. Folding from one digit up would have merged
+  hierarchy levels.
+  The remaining duplication is not duplication, and the daily arrivals are legitimate
+  work: 11:22 for a seed and 4 minutes for a daily run stand as the floor.
   Worth recording as a pattern, since this is the third time it has come up: a count of
   what WOULD collapse is a count of candidates, not of things to do. Only someone who
   knows what the values mean can close that gap, which is why these reports measure the
