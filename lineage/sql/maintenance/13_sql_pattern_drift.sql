@@ -1,0 +1,290 @@
+-- ============================================================================
+-- 13_sql_pattern_drift.sql
+-- BigQuery Physical Lineage Repository - Why the same model keeps arriving as new SQL
+-- ============================================================================
+-- Answers one operational question: a scheduler (dbt, a DAG) runs the SAME model every
+-- day, so after the first run it should produce no new work -- why does the pipeline
+-- keep registering new ephemeral objects?
+--
+-- An ephemeral object's identity is its sql_fingerprint. If a model's SQL is
+-- byte-identical every day, it keeps one fingerprint and is analyzed once. A new
+-- fingerprint every day means something in the generated SQL CHANGES every day, and
+-- the fingerprint does not normalize it.
+--
+-- THE HANDLE THIS REPORT USES IS THE DESTINATION. A model's destination table is
+-- stable even when its SQL is not -- dbt writes `<model>__dbt_tmp`, a DAG writes a
+-- fixed staging table -- so:
+--
+--     same destination + many fingerprints = that model's SQL is drifting
+--
+-- and the destination name says WHICH model, which is what makes the finding
+-- actionable: it can be opened in the dbt project and compared against what is here.
+--
+-- Report 1 ranks destinations by how many fingerprints they produced. Report 2 opens
+-- one destination up, fingerprint by fingerprint, with first and last seen. Report 3
+-- is the one that ends the discussion: it takes that destination's two most recent
+-- fingerprints and prints the text AROUND THE FIRST CHARACTER THAT DIFFERS, so what
+-- varies is visible without reading kilobytes of SQL.
+--
+-- Read-only; touches no repository table other than reading the job registry.
+--
+-- SCOPE NOTE: this reads the JOB REGISTRY, which holds what 03 collected, so it sees
+-- as far back as the lookback windows have reached -- not the whole history of JOBS.
+-- ============================================================================
+SET @@location = 'asia-northeast1';
+
+BEGIN
+  -- --------------------------------------------------------------------------
+  -- [A] REQUIRED per deployment / region -- set these
+  -- --------------------------------------------------------------------------
+  -- Variables are grouped by purpose below; each group is labeled with a one-line
+  -- header. Full descriptions follow the block under "Variable notes".
+  -- GCP project: auto-detected at runtime; its DECLARE lives in [B] (pin it there
+  -- only to run against a different project).
+  -- Project-token substitution
+  DECLARE project_token_pattern STRING DEFAULT r'^([^-]+)';
+  -- Repository dataset & table naming
+  DECLARE repository_dataset STRING DEFAULT 'lineage_repository';
+  DECLARE table_name_prefix STRING DEFAULT '';
+  DECLARE table_name_suffix STRING DEFAULT '';
+  --
+  -- Variable notes (keyed by name):
+  --   project_token_pattern
+  --     Project-token substitution regex (keep in step with 01). A token extracted
+  --     from the auto-detected project id replaces every '{project_token}'
+  --     placeholder in the dataset name and the table prefix/suffix. Default: first
+  --     hyphen segment.
+  --   repository_dataset / table_name_prefix / table_name_suffix
+  --     Lineage repository dataset and its table naming. The job registry name is
+  --     assembled from the prefix/suffix -- keep them in step with 01 setup.
+
+  -- --------------------------------------------------------------------------
+  -- [B] BEHAVIOR OPTIONS -- defaults are safe; tune as needed
+  -- --------------------------------------------------------------------------
+  -- GCP project. Declared here (not in [A]) because it is normally not set by hand:
+  -- it is auto-detected in [C] from INFORMATION_SCHEMA.SCHEMATA (the project the job
+  -- runs in). To pin it, set a literal in [C].
+  DECLARE default_project_id STRING;
+  -- How much job history to read. Bounded by what 03 has collected.
+  DECLARE lookback_days INT64 DEFAULT 14;
+  -- Rows in report 1.
+  DECLARE row_limit INT64 DEFAULT 20;
+  -- Which destination report 2 and 3 open up. NULL takes the worst offender from
+  -- report 1 -- the destination with the most fingerprints. Set it to a table name to
+  -- investigate a specific model.
+  DECLARE inspect_destination_table STRING DEFAULT NULL;
+  -- Report 3: how many characters to print around the first difference, and how many
+  -- of them sit BEFORE it. The lead-in is what makes the difference readable -- the
+  -- same clause is shown from both versions, so the eye lands on the one token that
+  -- changed.
+  DECLARE difference_window INT64 DEFAULT 160;
+  DECLARE difference_lead_in INT64 DEFAULT 40;
+  -- Report 3 compares character by character, which is linear in the text length, so
+  -- the search is capped. Raise it only if two versions are identical for longer than
+  -- this and the report says so.
+  DECLARE difference_max_scan INT64 DEFAULT 20000;
+
+  -- --------------------------------------------------------------------------
+  -- [C] DERIVED / INTERNAL -- from [A]/[B]; DO NOT edit
+  -- --------------------------------------------------------------------------
+  -- The repository project takes default_project_id (auto-detected below); pin it to
+  -- a literal only if the repository lives in a separate project.
+  DECLARE repository_project_id STRING DEFAULT NULL;
+  DECLARE job_registry_fqn STRING;
+  DECLARE rendered_sql STRING;
+  -- Token extracted from the project id (see project_token_pattern).
+  DECLARE project_token STRING;
+
+  -- Auto-detect the running GCP project from INFORMATION_SCHEMA.SCHEMATA
+  -- (catalog_name). The region-qualified identifier is built from @@location.
+  EXECUTE IMMEDIATE FORMAT(
+    "SELECT DISTINCT catalog_name FROM `region-%s`.INFORMATION_SCHEMA.SCHEMATA LIMIT 1",
+    @@location
+  ) INTO default_project_id;
+  ASSERT default_project_id IS NOT NULL AS
+    'Could not auto-detect the project id from INFORMATION_SCHEMA.SCHEMATA; set default_project_id to a literal.';
+  SET repository_project_id = COALESCE(repository_project_id, default_project_id);
+  SET project_token =
+    COALESCE(REGEXP_EXTRACT(default_project_id, project_token_pattern), '');
+  SET repository_dataset =
+    REPLACE(repository_dataset, '{project_token}', project_token);
+  SET table_name_prefix =
+    REPLACE(table_name_prefix, '{project_token}', project_token);
+  SET table_name_suffix =
+    REPLACE(table_name_suffix, '{project_token}', project_token);
+
+  ASSERT REGEXP_CONTAINS(repository_dataset, r'^[A-Za-z0-9_]+$')
+    AS 'repository_dataset must be letters/digits/underscore only (check for an unsubstituted {project_token}).';
+  ASSERT lookback_days >= 1 AS 'lookback_days must be >= 1.';
+  ASSERT row_limit >= 1 AS 'row_limit must be >= 1.';
+  ASSERT difference_window >= 20 AS 'difference_window must be >= 20.';
+  ASSERT difference_lead_in >= 0 AS 'difference_lead_in must be >= 0.';
+  ASSERT difference_max_scan >= 100 AS 'difference_max_scan must be >= 100.';
+
+  SET job_registry_fqn = FORMAT(
+    '%s.%s.%s',
+    repository_project_id,
+    repository_dataset,
+    table_name_prefix || 'lnge_' || 'm_' || 'job_registry' || table_name_suffix
+  );
+
+  -- --------------------------------------------------------------------------
+  -- Report 1: destinations whose SQL is not stable.
+  --
+  -- fingerprints is the count of distinct sql_fingerprint values that wrote to this
+  -- destination. days is how many distinct days it ran. The two together say which
+  -- kind of drift it is:
+  --   fingerprints = 1                 stable. Analyzed once, costs nothing after.
+  --   fingerprints close to days       a NEW fingerprint every run. This is what
+  --                                    makes a daily run expensive, and report 3 says
+  --                                    what changes.
+  --   fingerprints small but > 1       the model was edited that many times. Normal.
+  -- --------------------------------------------------------------------------
+  SET rendered_sql = FORMAT(
+    """
+    SELECT
+      destination_dataset,
+      destination_table,
+      COUNT(DISTINCT sql_fingerprint) AS fingerprints,
+      COUNT(DISTINCT DATE(creation_time)) AS days,
+      COUNT(*) AS jobs
+    FROM `%s`
+    WHERE sql_fingerprint IS NOT NULL
+      AND creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+    GROUP BY destination_dataset, destination_table
+    HAVING fingerprints > 1
+    ORDER BY fingerprints DESC, jobs DESC
+    LIMIT @max_rows
+    """,
+    job_registry_fqn
+  );
+
+  EXECUTE IMMEDIATE rendered_sql
+  USING lookback_days AS days, row_limit AS max_rows;
+
+  -- Pick the destination to open up: the one with the most fingerprints.
+  IF inspect_destination_table IS NULL THEN
+    EXECUTE IMMEDIATE FORMAT(
+      """
+      SELECT destination_table
+      FROM `%s`
+      WHERE sql_fingerprint IS NOT NULL
+        AND creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY destination_table
+      ORDER BY COUNT(DISTINCT sql_fingerprint) DESC, COUNT(*) DESC
+      LIMIT 1
+      """,
+      job_registry_fqn
+    ) INTO inspect_destination_table USING lookback_days AS days;
+  END IF;
+
+  SELECT
+    'INSPECTING' AS notice,
+    inspect_destination_table AS destination_table,
+    lookback_days AS lookback_days;
+
+  -- --------------------------------------------------------------------------
+  -- Report 2: that destination's fingerprints, newest first.
+  --
+  -- One row per distinct version of the SQL, with when it was first and last seen and
+  -- how long the text is. A column of single-job rows, each seen on one day, is a
+  -- model whose SQL is rewritten every run.
+  -- --------------------------------------------------------------------------
+  SET rendered_sql = FORMAT(
+    """
+    SELECT
+      SUBSTR(sql_fingerprint, 1, 12) AS fingerprint,
+      COUNT(*) AS jobs,
+      MIN(DATE(creation_time)) AS first_day,
+      MAX(DATE(creation_time)) AS last_day,
+      MAX(LENGTH(definition_text)) AS sql_length
+    FROM `%s`
+    WHERE destination_table = @target
+      AND sql_fingerprint IS NOT NULL
+      AND creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+    GROUP BY sql_fingerprint
+    ORDER BY last_day DESC, jobs DESC
+    LIMIT @max_rows
+    """,
+    job_registry_fqn
+  );
+
+  EXECUTE IMMEDIATE rendered_sql
+  USING
+    inspect_destination_table AS target,
+    lookback_days AS days,
+    row_limit AS max_rows;
+
+  -- --------------------------------------------------------------------------
+  -- Report 3: WHAT ACTUALLY DIFFERS, between the two most recent versions.
+  --
+  -- Takes that destination's two newest fingerprints and finds the first character
+  -- where their SQL diverges, then prints a window from each around that point. The
+  -- two strings line up, so the differing token is the one thing that is not the same
+  -- on both lines -- a date, a run id, an ORDER BY, a reordered column list.
+  --
+  -- common_prefix is where they stop matching. Compared with sql_length it also says
+  -- WHERE the change is: near the start is a header or a configuration line, near the
+  -- end is often a trailing filter or a partition clause.
+  --
+  -- If common_prefix equals difference_max_scan, the two are identical for longer than
+  -- the search went: raise difference_max_scan.
+  -- --------------------------------------------------------------------------
+  SET rendered_sql = FORMAT(
+    """
+    WITH versions AS (
+      SELECT
+        sql_fingerprint,
+        ANY_VALUE(definition_text) AS sql_text,
+        MAX(creation_time) AS last_seen
+      FROM `%s`
+      WHERE destination_table = @target
+        AND sql_fingerprint IS NOT NULL
+        AND definition_text IS NOT NULL
+        AND creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY sql_fingerprint
+      ORDER BY last_seen DESC
+      LIMIT 2
+    ),
+    pair AS (
+      SELECT
+        ARRAY_AGG(sql_text ORDER BY last_seen DESC)[SAFE_OFFSET(0)] AS newer_sql,
+        ARRAY_AGG(sql_text ORDER BY last_seen DESC)[SAFE_OFFSET(1)] AS older_sql
+      FROM versions
+    ),
+    divergence AS (
+      SELECT
+        newer_sql,
+        older_sql,
+        -- The longest prefix the two share. Linear in the text, capped by
+        -- difference_max_scan so a pair of very long statements cannot run away.
+        (
+          SELECT MAX(n)
+          FROM UNNEST(GENERATE_ARRAY(
+            0,
+            LEAST(LENGTH(newer_sql), LENGTH(older_sql), @max_scan)
+          )) AS n
+          WHERE SUBSTR(newer_sql, 1, n) = SUBSTR(older_sql, 1, n)
+        ) AS common_prefix
+      FROM pair
+      WHERE older_sql IS NOT NULL
+    )
+    SELECT
+      common_prefix,
+      LENGTH(newer_sql) AS newer_length,
+      LENGTH(older_sql) AS older_length,
+      SUBSTR(newer_sql, GREATEST(1, common_prefix - @lead_in), @text_window) AS newer_text,
+      SUBSTR(older_sql, GREATEST(1, common_prefix - @lead_in), @text_window) AS older_text
+    FROM divergence
+    """,
+    job_registry_fqn
+  );
+
+  EXECUTE IMMEDIATE rendered_sql
+  USING
+    inspect_destination_table AS target,
+    lookback_days AS days,
+    difference_max_scan AS max_scan,
+    difference_lead_in AS lead_in,
+    difference_window AS text_window;
+END;

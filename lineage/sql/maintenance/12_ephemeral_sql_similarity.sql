@@ -119,12 +119,13 @@ BEGIN
   -- folding from one digit up also merges things that are genuinely different:
   -- `table_v1` and `table_v2` are two tables, and a 6-digit product code is not a
   -- date, while a 20-digit run in a temp table name is a per-run id and nothing else.
-  -- The default floor of 10 comes from report 4 on the real registry: it folds the
-  -- machine-generated ids and leaves every shorter run alone.
+  -- The deployed floor is 6, set from report 4 and the recurrence census: 6, 8 and
+  -- 18-20 digit runs are all minted once and never reused, while 1, 2 and 9-digit ones
+  -- come back every day and therefore name things.
   -- Report 1 reports EVERY threshold in this array, one row each, so the cost of being
   -- cautious is visible instead of assumed. Reports 2 and 3 use detail_min_digit_run.
   DECLARE digit_run_thresholds ARRAY<INT64> DEFAULT [1, 2, 4, 6, 8, 10, 12];
-  DECLARE detail_min_digit_run INT64 DEFAULT 10;
+  DECLARE detail_min_digit_run INT64 DEFAULT 6;
 
   -- --------------------------------------------------------------------------
   -- [C] DERIVED / INTERNAL -- from [A]; DO NOT edit

@@ -19,6 +19,23 @@
   The two definition-registry MERGEs are left alone: they carry one row per object
   rather than per job, and their `last_seen_at` is meant to advance on every run.
 
+- Added `sql/maintenance/13_sql_pattern_drift.sql`, which answers "a scheduler runs the
+  same model every day, so why does the pipeline keep registering new objects?".
+  An ephemeral object's identity is its fingerprint, so a new fingerprint every day
+  means the generated SQL changes every day in a way the fingerprint does not
+  normalize. The report's handle is the DESTINATION: a model's destination table is
+  stable even when its SQL is not (dbt writes `<model>__dbt_tmp`), so same destination
+  plus many fingerprints identifies the drifting model BY NAME, which is what makes
+  the finding actionable against the dbt project.
+  Report 1 ranks destinations by distinct fingerprints against distinct days --
+  fingerprints near days is a new version every run, a small count is just edits.
+  Report 2 lists one destination's versions with first and last seen. Report 3 takes
+  its two newest versions, finds the first character at which they diverge, and prints
+  a window from each around that point, so the differing token is visible without
+  reading kilobytes of SQL. The search is linear and capped by `difference_max_scan`.
+  Also corrects `12_ephemeral_sql_similarity.sql`, whose `detail_min_digit_run` still
+  defaulted to 10 after the engine moved to 6.
+
 - `04_validate_lineage_environment.sql` checks the objects the repository actually has
   now. Its required-table list had not followed the repository: `lnge_t_column_usage`
   and the two report views were missing from it, so a repository could pass validation
