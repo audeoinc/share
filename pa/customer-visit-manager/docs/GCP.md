@@ -20,7 +20,7 @@ Power Apps 版と**同じ画面のコード**を、GCP でも動かす仕組み�
 |---|---|---|
 | 設定 | `vite.config.ts` | `vite.gcp.config.ts` |
 | データの入出力 | 生成された `Cr854_…Service`(Dataverse) | `src/gcp/services.ts`(`/api/data` を呼ぶ互換サービス) |
-| AI | `airequest` テーブル + Power Automate + Copilot Studio | (段階 2)`/api/ask` → Gemini |
+| AI | `airequest` テーブル + Power Automate + Copilot Studio | `src/gcp/ai.ts` が、同じ呼び出しを `/api/ask`(Vertex AI の Gemini)に置き換える |
 | 出力 | `dist/` | `dist-gcp/` |
 
 - GCP 版は、`generated/services/*` の import を、ビルド時に互換サービスへ差し替える(撮影用のモックと同じ手法)。**画面側に、GCP 用の分岐は入れない**。
@@ -48,6 +48,13 @@ Dataverse の名前(画面が使う `cr854_scheduledat`、`_cr854_heroimage_valu
 - 書き込みの参照は、Dataverse と同じ `cr854_xxx@odata.bind: "/cr854_yyys(<id>)"`(`null` で参照を外す)。
 - DB に接続できないときは 503 + `code: "db_unavailable"`。
 
+## AI(`/api/ask`)
+
+- 画面側の `askAgent`(プロンプトの作成・JSON の解釈・やり直し・チャット・英語化)は、**Power Apps 版と共通のまま**。差し替えるのは、依頼文を送って返答のテキストを受け取る部分だけ(`src/gcp/ai.ts`)。
+- サーバーは、依頼文を Gemini に渡して、返答のテキストをそのまま返す(`server/ccp/ai.py`)。返答は JSON 形式で出力させる。
+- 設定(環境変数。営業支援システムと同じ Vertex AI): `GOOGLE_CLOUD_PROJECT`(コードには書かない)、`GOOGLE_CLOUD_LOCATION`(既定 global)、`GEMINI_MODEL`(既定 gemini-3.5-flash)、`GEMINI_THINKING`(minimal / low / medium / high。既定 low)。
+- 1 回の「すべてAIで下書き」は、手元の確認で約 40 秒(Power Apps 版の、フロー経由のポーリングより速い)。
+
 ## 手元での動かし方
 
 必要なもの: Python 3.12 以上、Node、`gcloud`(ログイン済み)。
@@ -60,6 +67,7 @@ cd server && python -m venv .venv && .venv/Scripts/python.exe -m pip install -r 
 #    CLOUD_SQL_INSTANCE=<プロジェクトID>:<リージョン>:<インスタンス名>
 #    DB_PASSWORD=<Secret Manager のアプリ用パスワード>
 #    APP_PASSWORD=<Basic 認証のパスワード。手元では任意>
+#    GOOGLE_CLOUD_PROJECT=<プロジェクトID>   ← AI(Vertex AI)用
 #    CCP_DEV_GCLOUD=1   ← 手元だけ。gcloud の短期トークンで Cloud SQL / Vertex AI に接続する
 # 別の PostgreSQL を使うなら DATABASE_URL=postgresql+asyncpg://user:pass@host/db
 
@@ -74,6 +82,8 @@ cd server && .venv/Scripts/python.exe -m uvicorn ccp.main:app --port 8080
 
 # 動作確認(画面を開いて、カードを開けるかを見る)
 CCP_PASSWORD=<APP_PASSWORD> node scripts/gcp-smoke.mjs
+#   CCP_SMOKE_AI=1    … テーマ案を、実際に Gemini に頼む(費用がかかる)
+#   CCP_SMOKE_AI=full … 空のカードを開いて、すべて AI で下書きさせる(約 40 秒。保存はしない)
 ```
 
 画面を直しながら動かすときは、サーバーを 8080 で起動したまま `npm run dev:gcp`(5191。`/api` は 8080 に中継)。
@@ -92,6 +102,6 @@ CCP_PASSWORD=<APP_PASSWORD> node scripts/gcp-smoke.mjs
 |---|---|---|
 | 0 | Cloud SQL・GCS バケットの作成(DB は停止状態で運用) | 完了 |
 | 1 | データ層(定義・変換・`/api/data`・互換サービス・初期データ) | 完了(手元のサーバー + Cloud SQL で確認) |
-| 2 | AI(`/api/ask` → Gemini、画面側の差し替え) | 未着手 |
+| 2 | AI(`/api/ask` → Gemini、画面側の差し替え) | 完了(手元で、テーマ案・すべて AI で下書きまで確認) |
 | 3 | Cloud Run へのデプロイ・Basic 認証・画像(GCS)・DB の自動起動/停止 | 未着手 |
 | 4 | 両ビルドの契約テスト・CI の拡充 | 一部(`verify` と CI に、GCP ビルド・データ定義の突き合わせ・サーバーのテストを追加済み) |

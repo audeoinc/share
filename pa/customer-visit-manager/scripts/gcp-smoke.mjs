@@ -58,6 +58,41 @@ try {
   console.log('カードを開いて、商品(クルーネックニット)が出ている:', opened)
   if (!opened) failed = true
 
+  // AI(Gemini)の確認。CCP_SMOKE_AI=1(テーマ案だけ)/ full(空のカードを、すべて AI で下書き)のときだけ(実際に Gemini を呼ぶので、費用がかかる)
+  if (process.env.CCP_SMOKE_AI === '1' || process.env.CCP_SMOKE_AI === 'full') {
+    const started = Date.now()
+    await page.evaluate(() => {
+      const b = [...document.querySelectorAll('[role=dialog] button')].find((e) => /^(AIで案を出す|案を作り直す)/.test((e.textContent ?? '').trim()))
+      b?.click()
+    })
+    let ideas = false
+    for (let i = 0; i < 90 && !ideas; i++) {
+      await sleep(1000)
+      ideas = await page.evaluate(() => document.body.innerText.includes('AIの案(未採用)'))
+    }
+    console.log(`AI のテーマ案が出た: ${ideas}(${Math.round((Date.now() - started) / 1000)} 秒)`)
+    if (!ideas) failed = true
+  }
+
+  if (process.env.CCP_SMOKE_AI === 'full') {
+    // 空のカードを開くと、「開いたとき自動で下書き」(既定でオン)が、テーマ → … → 制作指示まで、続けて AI に頼む
+    await page.keyboard.press('Escape')
+    await sleep(800)
+    await page.evaluate(() => {
+      const el = [...document.querySelectorAll('div,span')].find((e) => e.children.length === 0 && (e.textContent ?? '').trim() === '冬支度スタート')
+      el?.click()
+    })
+    const started = Date.now()
+    let done = false
+    for (let i = 0; i < 300 && !done; i++) {
+      await sleep(1000)
+      done = await page.evaluate(() => /工程 5 \/ 5/.test(document.body.innerText))
+    }
+    console.log(`すべて AI で下書き: ${done ? '完了(工程 5 / 5)' : '終わらなかった'}(${Math.round((Date.now() - started) / 1000)} 秒)`)
+    if (!done) failed = true
+    if (outImage) await page.screenshot({ path: outImage.replace(/\.png$/, '-full.png') })
+  }
+
   const banner = await page.evaluate(() => [...document.querySelectorAll('[role=alert],.fui-MessageBar')].map((e) => e.textContent?.trim()).filter(Boolean))
   if (banner.length) console.log('お知らせの帯:', banner)
   if (errors.length) {

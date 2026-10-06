@@ -14,6 +14,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
+from .ai import router as ai_router
 from .data_api import register_errors, router as data_router
 
 APP_PASSWORD = os.getenv("APP_PASSWORD")
@@ -46,6 +47,7 @@ async def healthz():
 
 
 app.include_router(data_router)
+app.include_router(ai_router)
 
 if STATIC_DIR.is_dir():
     # 画面。API より後に登録して、/api が先に処理されるようにする

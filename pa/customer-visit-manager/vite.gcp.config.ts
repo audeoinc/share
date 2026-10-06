@@ -15,6 +15,10 @@ const gcpServices = (): Plugin => ({
   load(id) {
     if (!id.startsWith('\0gcp:')) return
     const name = id.slice('\0gcp:'.length)
+    // AI要求は、テーブルではなく、サーバーの /api/ask(Gemini)に置き換える
+    if (name === 'Cr854_airequestsService') return `import { makeAiRequestService } from '/src/gcp/ai.ts'
+export const ${name} = makeAiRequestService()
+`
     const table = name.replace(/Service$/, '').replace(/^C/, 'c') // Cr854_deliverycardsService → cr854_deliverycards
     return `import { makeService } from '/src/gcp/services.ts'\nexport const ${name} = makeService('${table}')\n`
   },
