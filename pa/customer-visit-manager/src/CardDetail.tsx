@@ -197,7 +197,10 @@ const encodeCopies = (a: string[]) => (a.some(Boolean) ? JSON.stringify(a) : '')
 
 const useStyles = makeStyles({
   surface: {
-    position: 'relative',
+    // fixed + inset 0 + margin auto で、画面の中央に置く(relative にすると、標準の中央寄せが効かず、上端に貼りつく)。中の絶対配置の基準にもなる
+    position: 'fixed',
+    inset: 0,
+    margin: 'auto',
     padding: 0,
     overflow: 'hidden',
     maxWidth: 'none',
