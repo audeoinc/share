@@ -10,7 +10,7 @@ Power Apps 版と**同じ画面のコード**を、GCP でも動かす仕組み�
 - サーバーは **Python / FastAPI**。DB は **Cloud SQL(PostgreSQL)**。画像は **GCS**。
 - AI は **Vertex AI の Gemini**(`google-genai` SDK で直接呼ぶ。ADK は使わない)。プロンプト・JSON の解釈・リトライは**画面側(TypeScript)に残し**、Power Apps 版と共有する。
 - **データは Power Apps 版(Dataverse)と別**。同じ初期データから始める。同期するのは「コードと機能」。
-- DB は**普段は停止**。アクセス時に自動で起動(画面に「準備中」)、最後のアクセスから 30 分で自動停止(Cloud Scheduler)。
+- DB は**普段は停止**。アクセス時に自動で起動(画面に「準備中」。起動は**実測で 10〜13 分**かかる。停止は 1 分未満)、最後のアクセスから 30 分で自動停止(Cloud Scheduler。5 分おきに確認)。
 
 ## 2 つのビルドを同期させる仕組み
 
@@ -116,7 +116,7 @@ gcloud scheduler jobs create http ccp-idle-check --project <プロジェクトID
 
 **パスワードの確認**: Secret Manager の `contents-planner-app-password`(`gcloud secrets versions access latest --secret=contents-planner-app-password`)。
 
-**DB の自動起動**: 画面が `/api/data` を呼んだとき DB が停止中なら、サーバーが起動を依頼して 503(`db_starting`)を返し、画面に「準備中」を出す(1〜3 分。準備ができると自動で読み込み直す)。手動で止める・起動するときは、`gcloud sql instances patch contents-planner-db --activation-policy=NEVER`(停止)/ `ALWAYS`(起動)。
+**DB の自動起動**: 画面が `/api/data` を呼んだとき DB が停止中なら、サーバーが起動を依頼して 503(`db_starting`)を返し、画面に「準備中」を出す(**実測で 10〜13 分**。準備ができると自動で読み込み直す)。手動で止める・起動するときは、`gcloud sql instances patch contents-planner-db --activation-policy=NEVER`(停止)/ `ALWAYS`(起動)。
 
 ## 進み具合
 
@@ -125,5 +125,12 @@ gcloud scheduler jobs create http ccp-idle-check --project <プロジェクトID
 | 0 | Cloud SQL・GCS バケットの作成(DB は停止状態で運用) | 完了 |
 | 1 | データ層(定義・変換・`/api/data`・互換サービス・初期データ) | 完了(手元のサーバー + Cloud SQL で確認) |
 | 2 | AI(`/api/ask` → Gemini、画面側の差し替え) | 完了(手元で、テーマ案・すべて AI で下書きまで確認) |
-| 3 | Cloud Run へのデプロイ・Basic 認証・DB の自動起動/停止(画像の GCS 化は、必要になったときに) | コードと手順は完了。**デプロイと Scheduler の作成は、未実施** |
+| 3 | Cloud Run へのデプロイ・Basic 認証・DB の自動起動/停止(画像の GCS 化は、必要になったときに) | 完了(`contents-planner` を公開、Scheduler `ccp-idle-check` を作成。自動停止・自動起動を実機で確認) |
 | 4 | 両ビルドの契約テスト・CI の拡充 | 一部(`verify` と CI に、GCP ビルド・データ定義の突き合わせ・サーバーのテストを追加済み) |
+
+## 運用メモ
+
+- **Cloud Run の `/healthz` は、Google が予約していて使えない**(404 になる)。死活確認は `/ping`。
+- Cloud SQL の API は、停止中でも `state` を `RUNNABLE` と返す。**停止かどうかは、稼働ポリシー(`NEVER`)で見る**(`dbctl.classify`)。
+- 起動の途中は、状態が「稼働」でも接続できない時間がある。サーバーは、接続の失敗を 500 ではなく 503(`db_starting`)として返し、`/api/db/status` は、実際に接続できるかを確かめてから「稼働中」と返す。
+- パスワード・値の確認や変更は、Secret Manager と Cloud Run の環境変数で行う(リポジトリには置かない)。
