@@ -413,19 +413,36 @@ DECLARE process_generated_tables BOOL DEFAULT TRUE;
 -- with the window is a handful of set-based statements over a bigger partition range.
 -- STEP 3, which costs ~60 statements per batch, does not grow at all -- it is driven
 -- by is_changed, and a longer window REMOVES the weekly re-analysis churn.
---
--- THE TWO ARE NOT INDEPENDENT. The initial window only decides how much history the
--- FIRST run carries; the incremental window is what the repository then settles at.
--- Setting initial BELOW incremental is legitimate and sometimes wanted -- the second
--- run simply collects the missing days and is heavier than a steady-state run, which
--- splits a large seed across two runs instead of one. Setting initial far ABOVE
--- incremental buys nothing lasting for ephemeral objects: anything outside the
--- incremental window is deactivated on the very next run, and its analysis is thrown
--- away. It still matters for PERSISTENT destinations, whose identity is the table
--- name rather than the fingerprint, so a long initial window is worth paying when
--- seeding their lineage and not when seeding ephemeral ones.
 DECLARE initial_lookback_days INT64 DEFAULT 60;
-DECLARE incremental_lookback_days INT64 DEFAULT 8;
+
+-- How far back to COLLECT jobs on an incremental run. Small on purpose: a job older
+-- than the last run was already collected and is already in the registry, so
+-- re-reading it only costs a wider INFORMATION_SCHEMA scan and a larger MERGE.
+--
+-- This is a FLOOR, not the window. The window actually used is extended to cover
+-- everything since the newest job already collected, so a pipeline that did not run
+-- for a week collects the week -- a fixed small window would silently lose the jobs
+-- from the gap, and nothing downstream could recover them because they would never
+-- enter the registry at all.
+DECLARE job_collection_lookback_days INT64 DEFAULT 3;
+
+-- How long an EPHEMERAL object stays alive without being seen again. This is the
+-- retention window, and it answers one question: WHICH SCHEDULES STAY REPRESENTED IN
+-- THE REPOSITORY.
+--   8   daily and weekly statements
+--   40  also monthly -- 31 days between runs plus room for a month-end schedule that
+--       slips a few days, which is why this is not 30
+-- An ephemeral object is kept alive by its fingerprint reappearing in the job registry
+-- inside this window; when it stops appearing the object is deactivated and its
+-- dependency rows are deleted. A statement that runs monthly and a window of 8 days
+-- means its lineage is absent for three weeks of every four, and it is re-analyzed
+-- every month when it returns.
+--
+-- The cost of a longer window is the size of the ACTIVE population, which STEP 4's
+-- impact rebuild and the static report tables scale with -- not the cost of collection,
+-- which job_collection_lookback_days governs. The two were one knob until now, which
+-- forced a choice between scanning too much and forgetting too soon.
+DECLARE object_retention_days INT64 DEFAULT 40;
 
 -- statement_type values collected from JOBS; jobs of other types are ignored.
 -- The remaining JOBS filters (job_type = 'QUERY', state = 'DONE',
@@ -737,6 +754,18 @@ ASSERT analysis_batch_max_objects >= 1
 AS 'analysis_batch_max_objects must be >= 1.';
 ASSERT analysis_max_batches_per_run >= 0
 AS 'analysis_max_batches_per_run must be >= 0 (0 = no limit).';
+ASSERT initial_lookback_days >= 1
+AS 'initial_lookback_days must be >= 1.';
+ASSERT job_collection_lookback_days >= 1
+AS 'job_collection_lookback_days must be >= 1.';
+ASSERT object_retention_days >= 1
+AS 'object_retention_days must be >= 1.';
+-- Retaining for less time than a run collects is self-defeating: objects would be
+-- registered and aged out inside the same run. The run resolves the first-run case
+-- with GREATEST, so this only guards a deliberate misconfiguration of the two
+-- incremental knobs.
+ASSERT object_retention_days >= job_collection_lookback_days
+AS 'object_retention_days must be >= job_collection_lookback_days (otherwise objects are aged out as fast as they are collected).';
 
 -- Column usage index table qualified name (not a lnge_render_dynamic_sql placeholder).
 -- Built once and reused by STEP 3's publish.
@@ -1261,7 +1290,7 @@ BEGIN
             -- it active and edgeless until its SQL happens to change -- silently
             -- missing lineage rather than visibly unanalyzed. This matters most for
             -- ephemeral objects on a WEEKLY schedule: they age out after
-            -- incremental_lookback_days, come back on the next run with an identical
+            -- object_retention_days, come back on the next run with an identical
             -- fingerprint, and would never be analyzed again.
             OR target.is_active = FALSE
           ),
@@ -1379,8 +1408,14 @@ IF process_generated_tables AND NOT preview_only THEN
     AS processing_step;
 BEGIN
   DECLARE step_started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP();
+  -- Resolved below from the parameters: how far back to COLLECT, and how long an
+  -- object stays alive without being seen. They are separate windows.
   DECLARE lookback_days INT64;
+  DECLARE retention_days INT64;
   DECLARE job_registry_row_count INT64;
+  -- The newest job already collected. The collection window is extended to cover
+  -- everything since then, so a gap in the schedule does not lose the jobs in it.
+  DECLARE latest_collected_job_time TIMESTAMP;
 
   -- Service accounts and lookback windows are declared in the top-level
   -- parameter block; STEP 2 only validates them here.
@@ -1406,11 +1441,41 @@ BEGIN
 
   EXECUTE IMMEDIATE rendered_sql INTO job_registry_row_count;
 
-  SET lookback_days = IF(
-    job_registry_row_count = 0,
-    initial_lookback_days,
-    incremental_lookback_days
-  );
+  IF job_registry_row_count = 0 THEN
+    -- First run: collect the whole initial window, and keep everything it brings in --
+    -- retaining less than was just collected would deactivate most of the seed before
+    -- STEP 3 ever looked at it.
+    SET lookback_days = initial_lookback_days;
+    SET retention_days = GREATEST(initial_lookback_days, object_retention_days);
+  ELSE
+    SET sql_template = """
+      SELECT MAX(creation_time)
+      FROM `__T_JOB_REGISTRY__`
+    """;
+
+    EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+
+    ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
+    AS 'Unresolved placeholder in job registry high-water mark SQL.';
+
+    EXECUTE IMMEDIATE rendered_sql INTO latest_collected_job_time;
+
+    -- The floor, extended to cover the gap since the newest collected job. The extra
+    -- day is slack: jobs are collected by creation_time, and a run that starts before
+    -- a job finishes would otherwise leave it just outside the next window too.
+    SET lookback_days = GREATEST(
+      job_collection_lookback_days,
+      COALESCE(
+        CAST(
+          CEIL(
+            TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), latest_collected_job_time, HOUR) / 24
+          ) AS INT64
+        ) + 1,
+        job_collection_lookback_days
+      )
+    );
+    SET retention_days = object_retention_days;
+  END IF;
 
   SET sql_template = """
     CREATE OR REPLACE TEMP TABLE raw_generated_table_jobs AS
@@ -1833,6 +1898,15 @@ BEGIN
       -- the MERGE below COALESCEs so a miss never erases a stored value).
       LEFT JOIN job_script_variables AS svars
         ON svars.job_id = jobs.job_id
+      -- Only the retention window. The registry keeps every job ever collected, so
+      -- without this the MERGE below would re-register every fingerprint ever seen on
+      -- every run -- re-activating objects the age-out then deactivates again, and
+      -- doing it over a set that only grows. The age-out uses the same window, so this
+      -- is the same population seen from the other side.
+      WHERE jobs.creation_time >= TIMESTAMP_SUB(
+        CURRENT_TIMESTAMP(),
+        INTERVAL @retention_days DAY
+      )
     )
     SELECT
       IF(destination_is_persistent, destination_project, @target_project)
@@ -1881,7 +1955,8 @@ BEGIN
   EXECUTE IMMEDIATE rendered_sql
   USING
     target_project_id AS target_project,
-    ephemeral_object_dataset_label AS ephemeral_dataset;
+    ephemeral_object_dataset_label AS ephemeral_dataset,
+    retention_days AS retention_days;
 
   SET sql_template = """
       MERGE
@@ -1922,7 +1997,7 @@ BEGIN
             -- it active and edgeless until its SQL happens to change -- silently
             -- missing lineage rather than visibly unanalyzed. This matters most for
             -- ephemeral objects on a WEEKLY schedule: they age out after
-            -- incremental_lookback_days, come back on the next run with an identical
+            -- object_retention_days, come back on the next run with an identical
             -- fingerprint, and would never be analyzed again.
             OR target.is_active = FALSE
           ),
@@ -2041,10 +2116,15 @@ BEGIN
   USING target_project_id AS target_project_id;
 
   -- Age out ephemeral (fingerprint-identified) objects whose fingerprint has not
-  -- appeared in JOBS within the lookback window. The synthetic identity is stable
-  -- per fingerprint, so a recurring job keeps refreshing the same row (no
-  -- churn); this only deactivates fingerprints that have stopped running. The
-  -- lookback matches the JOBS collection window used above.
+  -- appeared in the job registry within the RETENTION window. The synthetic identity
+  -- is stable per fingerprint, so a recurring job keeps refreshing the same row (no
+  -- churn); this only deactivates fingerprints that have stopped running.
+  --
+  -- The window is object_retention_days, NOT the collection window: the check reads
+  -- the registry, which already holds everything collected on earlier runs, so how far
+  -- back THIS run scanned INFORMATION_SCHEMA has nothing to do with how long an object
+  -- should be kept. Tying the two together is what used to force a monthly statement
+  -- out of the repository three weeks out of four.
   SET sql_template = """
     UPDATE
       `__T_DEF_REGISTRY__` AS registry
@@ -2061,7 +2141,7 @@ BEGIN
         WHERE jobs.sql_fingerprint = registry.sql_fingerprint
           AND jobs.creation_time >= TIMESTAMP_SUB(
             CURRENT_TIMESTAMP(),
-            INTERVAL @lookback_days DAY
+            INTERVAL @retention_days DAY
           )
       );
   """;
@@ -2072,13 +2152,18 @@ BEGIN
   AS 'Unresolved placeholder in ephemeral fingerprint age-out UPDATE SQL.';
 
   EXECUTE IMMEDIATE rendered_sql
-  USING lookback_days AS lookback_days;
+  USING retention_days AS retention_days;
 
   SELECT
     'SYNC_GENERATED_TABLE_REGISTRY' AS step_name,
     step_started_at,
     CURRENT_TIMESTAMP() AS step_finished_at,
-    lookback_days,
+    -- Two windows, reported separately: how far back this run SCANNED, and how long an
+    -- object survives without being seen. collection_lookback_days larger than
+    -- job_collection_lookback_days means the run extended it to cover a gap.
+    lookback_days AS collection_lookback_days,
+    retention_days AS object_retention_days,
+    latest_collected_job_time AS previous_newest_job,
     (SELECT COUNT(*) FROM recent_generated_table_jobs)
       AS recent_target_job_count;
 END;
