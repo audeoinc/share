@@ -11,6 +11,7 @@ import secrets
 from pathlib import Path
 
 import asyncio
+import logging
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
@@ -18,7 +19,11 @@ from fastapi.staticfiles import StaticFiles
 
 from . import dbctl
 from .ai import router as ai_router
-from .data_api import register_errors, router as data_router
+from sqlalchemy import text
+
+from .data_api import db, register_errors, router as data_router
+
+logging.basicConfig(level=logging.INFO)  # DB の起動・停止の記録(ccp.dbctl)などを、Cloud Run のログに出す
 
 APP_PASSWORD = os.getenv("APP_PASSWORD")
 STATIC_DIR = Path(os.getenv("STATIC_DIR") or Path(__file__).resolve().parents[2] / "dist-gcp")
@@ -60,7 +65,15 @@ async def db_status():
         await c.ensure_running()
     except dbctl.DbNotReady:
         pass
-    return {"state": await c.status(fresh=True)}
+    state = await c.status(fresh=True)
+    if state == "running":
+        # 状態が「稼働中」でも、接続できるようになるまでには、少し間がある。実際に接続できるかを確かめる
+        try:
+            async with db() as conn:
+                await asyncio.wait_for(conn.execute(text("SELECT 1")), 8)
+        except Exception:  # noqa: BLE001 — 接続できなければ、準備中のまま
+            state = "starting"
+    return {"state": state}
 
 
 @app.post("/internal/idle-check")

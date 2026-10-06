@@ -7,13 +7,20 @@ from __future__ import annotations
 
 from typing import Any
 
+import aiohttp
+
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import APIRouter, Depends, FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from . import dbctl, schema as sc
-from .db import get_engine
+from .db import get_engine, reset_engine
 
 
 
@@ -23,6 +30,25 @@ async def require_db() -> None:
         c = dbctl.controller()
         await c.ensure_running()
         await c.touch()
+
+
+@asynccontextmanager
+async def db(write: bool = False) -> AsyncIterator[AsyncConnection]:
+    """DB に接続する(write=True なら、トランザクションつき)。起動の途中などで接続できないときは、500 ではなく「準備中」として扱う"""
+    conn = (await get_engine()).connect()
+    try:
+        await conn.start()
+    except (SQLAlchemyError, OSError, aiohttp.ClientError, asyncio.TimeoutError, KeyError) as e:
+        await reset_engine()
+        raise dbctl.DbNotReady("starting") from e
+    try:
+        if write:
+            async with conn.begin():
+                yield conn
+        else:
+            yield conn
+    finally:
+        await conn.close()
 
 
 router = APIRouter(prefix="/api/data", dependencies=[Depends(require_db)])
@@ -70,7 +96,7 @@ async def list_rows(
     if skip:
         sql += " OFFSET :_skip"
         params["_skip"] = skip
-    async with (await get_engine()).connect() as conn:
+    async with db() as conn:
         rows = (await conn.execute(text(sql), params)).mappings().all()
     return ok([t.to_api(dict(r)) for r in rows])
 
@@ -79,7 +105,7 @@ async def list_rows(
 async def get_row(table: str, row_id: str):
     t = SCHEMA.table(table)
     rid = sc.coerce("uuid", row_id)
-    async with (await get_engine()).connect() as conn:
+    async with db() as conn:
         row = (await conn.execute(text(f"SELECT {_columns_sql(t, None)} FROM {t.pg} WHERE id = :id"), {"id": rid})).mappings().first()
     if row is None:
         return fail(404, "レコードが見つかりません")
@@ -96,7 +122,7 @@ async def create_row(table: str, request: Request):
         sql = f"INSERT INTO {t.pg} ({', '.join(cols)}) VALUES ({', '.join(':' + c for c in cols)}) RETURNING {returning}"
     else:
         sql = f"INSERT INTO {t.pg} DEFAULT VALUES RETURNING {returning}"
-    async with (await get_engine()).begin() as conn:
+    async with db(write=True) as conn:
         row = (await conn.execute(text(sql), values)).mappings().one()
     return ok(t.to_api(dict(row)))
 
@@ -107,7 +133,7 @@ async def update_row(table: str, row_id: str, request: Request):
     values = t.to_db(await _body(request))
     sets = [f"{c} = :{c}" for c in values] + ["modified_on = now()"]
     sql = f"UPDATE {t.pg} SET {', '.join(sets)} WHERE id = :_id RETURNING {_columns_sql(t, None)}"
-    async with (await get_engine()).begin() as conn:
+    async with db(write=True) as conn:
         row = (await conn.execute(text(sql), {**values, "_id": sc.coerce("uuid", row_id)})).mappings().first()
     if row is None:
         return fail(404, "レコードが見つかりません")
@@ -117,7 +143,7 @@ async def update_row(table: str, row_id: str, request: Request):
 @router.delete("/{table}/{row_id}")
 async def delete_row(table: str, row_id: str):
     t = SCHEMA.table(table)
-    async with (await get_engine()).begin() as conn:
+    async with db(write=True) as conn:
         await conn.execute(text(f"DELETE FROM {t.pg} WHERE id = :id"), {"id": sc.coerce("uuid", row_id)})
     return ok(None)
 
@@ -135,7 +161,7 @@ async def _body(request: Request) -> dict[str, Any]:
 def register_errors(app: FastAPI) -> None:
     @app.exception_handler(dbctl.DbNotReady)
     async def _starting(_: Request, e: dbctl.DbNotReady):
-        return fail(503, "データベースを起動しています(1〜3 分かかります)", "db_starting")
+        return fail(503, "データベースを起動しています(10 分ほどかかることがあります)", "db_starting")
 
     @app.exception_handler(sc.BadRequest)
     async def _bad(_: Request, e: sc.BadRequest):

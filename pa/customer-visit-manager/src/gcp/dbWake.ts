@@ -5,7 +5,7 @@
 // 画面のコード(React)には手を入れず、ここで、画面の上に直接かぶせる(Power Apps 版との同期を保つため)。
 
 const POLL_MS = 4000
-const GIVE_UP_MS = 6 * 60 * 1000
+const GIVE_UP_MS = 25 * 60 * 1000
 let shown = false
 
 const lang = (): 'ja' | 'en' => {
@@ -17,8 +17,8 @@ const lang = (): 'ja' | 'en' => {
 }
 
 const TEXT = {
-  ja: { title: 'データベースを起動しています', body: '使っていない間は停止しているため、起動に 1〜3 分ほどかかります。準備ができると、自動で読み込み直します。', slow: '時間がかかっています。しばらくしてから、ページを読み込み直してください。' },
-  en: { title: 'Starting the database', body: 'The database is stopped while idle, so it takes 1–3 minutes to start. This page reloads automatically when it is ready.', slow: 'This is taking longer than expected. Please reload the page in a little while.' },
+  ja: { title: 'データベースを起動しています', body: '使っていない間は停止しているため、起動に 10 分ほどかかることがあります。準備ができると、自動で読み込み直します。', slow: '時間がかかっています。しばらくしてから、ページを読み込み直してください。' },
+  en: { title: 'Starting the database', body: 'The database is stopped while idle, so it can take around 10 minutes to start. This page reloads automatically when it is ready.', slow: 'This is taking longer than expected. Please reload the page in a little while.' },
 }
 
 export function showDbWake(): void {

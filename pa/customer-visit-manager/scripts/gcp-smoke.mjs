@@ -44,11 +44,11 @@ try {
   await page.goto(BASE, { waitUntil: 'networkidle0', timeout: 60000 })
   await sleep(1500)
 
-  // DB が停止中なら、「準備中」の表示が出て、起動したら自動で読み込み直される(最大 6 分待つ)
+  // DB が停止中なら、「準備中」の表示が出て、起動したら自動で読み込み直される(最大 30 分待つ)
   let sawWake = false
   let cards = false
   const waitStarted = Date.now()
-  for (let i = 0; i < 360 && !cards; i++) {
+  for (let i = 0; i < 1800 && !cards; i++) {
     const st = await page.evaluate(() => ({
       wake: !!document.querySelector('[role=status]') && document.body.innerText.includes('データベースを起動'),
       cards: document.body.innerText.includes('秋の新作ニット') || document.body.innerText.includes('Fall Arrivals'),

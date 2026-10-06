@@ -18,6 +18,17 @@ _engine: AsyncEngine | None = None
 _lock: asyncio.Lock | None = None
 
 
+async def reset_engine() -> None:
+    """接続に失敗したとき、次の接続を、作り直した状態から始める(DB の再起動前の接続情報を、引きずらないため)"""
+    global _engine
+    engine, _engine = _engine, None
+    if engine is not None:
+        try:
+            await engine.dispose()
+        except Exception:  # noqa: BLE001 — 後始末の失敗は無視する
+            pass
+
+
 async def get_engine() -> AsyncEngine:
     global _engine, _lock
     if _lock is None:
