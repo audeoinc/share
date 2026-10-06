@@ -108,8 +108,10 @@ try {
 
   const banner = await page.evaluate(() => [...document.querySelectorAll('[role=alert],.fui-MessageBar')].map((e) => e.textContent?.trim()).filter(Boolean))
   if (banner.length) console.log('お知らせの帯:', banner)
-  if (errors.length) {
-    console.log('エラー:', errors)
+  // 準備中の表示が出たときの 503(db_starting)は、想定どおりの動きなので、エラーに数えない
+  const unexpected = sawWake ? errors.filter((e) => !e.startsWith('503 ')) : errors
+  if (unexpected.length) {
+    console.log('エラー:', unexpected)
     failed = true
   }
   if (outImage) await page.screenshot({ path: outImage })
