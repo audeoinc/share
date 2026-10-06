@@ -19,6 +19,18 @@
   The two definition-registry MERGEs are left alone: they carry one row per object
   rather than per job, and their `last_seen_at` is meant to advance on every run.
 
+- Confirmed from the job side what the fingerprint change bought: NEW FINGERPRINTS PER
+  DAY FELL FROM 1,200-1,350 TO BETWEEN 3 AND 22. Around 2,600 distinct statements run
+  every day and almost none of them are new, which is what a scheduler running the same
+  models is supposed to look like.
+  The first two days of the window read 1,702 and 1,053 because everything is new when
+  there is nothing to compare against, and the 76-121 of the next three days are weekly
+  jobs appearing in the window for the first time. From the fourth day on the rate is
+  single digits.
+  This also explains the 4-minute daily run: STEP 3 analyzes a handful of objects, so
+  essentially all of it is fixed cost -- collecting JOBS, rebuilding impact, refreshing
+  the static report tables.
+
 - Investigation closed: the ephemeral objects that LOOK foldable must not be folded.
   Measured on a repository rebuilt the day before, half of the 2,880 ephemeral objects
   (1,439) are identical to another once every digit is removed, and every pair
