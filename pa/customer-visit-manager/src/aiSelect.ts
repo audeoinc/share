@@ -263,6 +263,8 @@ export async function askAgent(prompt: string, payload: unknown): Promise<Record
     const text = await askText((getLang() === 'en' ? EN_NOTE : '') + JSON_NOTE + (chat && chat.length > 0 ? chatNote() : '') + localizePrompt(prompt) + JSON.stringify(body))
     try {
       const parsed = extractJson(text) as Record<string, unknown>
+      // 理由のないエラーは、モデルの一時的な取りこぼし。やり直す(理由があるエラーは、入力の不備なので、そのまま知らせる)
+      if (typeof parsed.error === 'string' && parsed.error.trim() === '') throw new SyntaxError('empty error from the agent')
       if (typeof parsed.error === 'string') throw new Error(tr(`エージェントからのエラー: ${parsed.error}`, `Error from the agent: ${parsed.error}`))
       if (chat && chat.length > 0) {
         lastReply = typeof parsed.reply === 'string' ? parsed.reply.trim() : ''
