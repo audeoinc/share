@@ -96,6 +96,28 @@ CCP_PASSWORD=<APP_PASSWORD> node scripts/gcp-smoke.mjs
 - `node scripts/check-schema.mjs`(データ定義と生成モデルの突き合わせ)
 - `node scripts/gcp-smoke.mjs`(サーバーと DB をつないだ画面の確認)
 
+## Cloud Run へのデプロイ(段階 3)
+
+サービス名 `contents-planner`(営業支援システムと同じプロジェクト・リージョン・実行サービスアカウント)。値は `<…>` で示す。
+
+**前提(作成済みのもの)**: Cloud SQL インスタンス `contents-planner-db`(普段は停止)/ GCS バケット(最後のアクセスの時刻を置く)/ Secret Manager の `contents-planner-db-app-password` と `contents-planner-app-password`(Basic 認証のパスワード。ユーザー名は何でもよい)/ Scheduler 用のサービスアカウント `ccp-scheduler`。実行サービスアカウントに、2 つのシークレットの `secretmanager.secretAccessor` を付けてある。
+
+```bash
+gcloud run deploy contents-planner --source . --project <プロジェクトID> --region asia-northeast1   --allow-unauthenticated --concurrency=8 --max-instances=1 --min-instances=0 --memory=512Mi --cpu=1 --timeout=300   --service-account=<実行サービスアカウント>   --set-env-vars "GOOGLE_CLOUD_PROJECT=<プロジェクトID>,GOOGLE_CLOUD_LOCATION=global,GEMINI_MODEL=gemini-3.5-flash,GEMINI_THINKING=low,CLOUD_SQL_INSTANCE=<プロジェクトID>:asia-northeast1:contents-planner-db,DB_USER=ccp_app,DB_NAME=ccp,DB_CONTROL=1,DB_IDLE_MINUTES=30,STATE_BUCKET=<バケット名>,IDLE_CHECK_AUDIENCE=<サービスの URL>,IDLE_CHECK_SA_EMAIL=ccp-scheduler@<プロジェクトID>.iam.gserviceaccount.com"   --set-secrets "DB_PASSWORD=contents-planner-db-app-password:latest,APP_PASSWORD=contents-planner-app-password:latest"
+```
+
+2 回目以降は、環境変数とシークレットが残るので、`gcloud run deploy contents-planner --source . --project <プロジェクトID> --region asia-northeast1` だけでよい(コードを変えても、Cloud Run は自動では更新されない)。
+
+**自動停止(Cloud Scheduler)**: 数分おきに `/internal/idle-check` を、Scheduler 用のサービスアカウントの署名つきトークン(OIDC。宛先はサービスの URL)で呼ぶ。サーバーが、最後のアクセスから `DB_IDLE_MINUTES`(既定 30)分たっていれば、DB の停止を依頼する。
+
+```bash
+gcloud scheduler jobs create http ccp-idle-check --project <プロジェクトID> --location asia-northeast1   --schedule="*/5 * * * *" --http-method=POST --uri="<サービスの URL>/internal/idle-check"   --oidc-service-account-email=ccp-scheduler@<プロジェクトID>.iam.gserviceaccount.com --oidc-token-audience="<サービスの URL>"
+```
+
+**パスワードの確認**: Secret Manager の `contents-planner-app-password`(`gcloud secrets versions access latest --secret=contents-planner-app-password`)。
+
+**DB の自動起動**: 画面が `/api/data` を呼んだとき DB が停止中なら、サーバーが起動を依頼して 503(`db_starting`)を返し、画面に「準備中」を出す(1〜3 分。準備ができると自動で読み込み直す)。手動で止める・起動するときは、`gcloud sql instances patch contents-planner-db --activation-policy=NEVER`(停止)/ `ALWAYS`(起動)。
+
 ## 進み具合
 
 | 段階 | 内容 | 状態 |
@@ -103,5 +125,5 @@ CCP_PASSWORD=<APP_PASSWORD> node scripts/gcp-smoke.mjs
 | 0 | Cloud SQL・GCS バケットの作成(DB は停止状態で運用) | 完了 |
 | 1 | データ層(定義・変換・`/api/data`・互換サービス・初期データ) | 完了(手元のサーバー + Cloud SQL で確認) |
 | 2 | AI(`/api/ask` → Gemini、画面側の差し替え) | 完了(手元で、テーマ案・すべて AI で下書きまで確認) |
-| 3 | Cloud Run へのデプロイ・Basic 認証・画像(GCS)・DB の自動起動/停止 | 未着手 |
+| 3 | Cloud Run へのデプロイ・Basic 認証・DB の自動起動/停止(画像の GCS 化は、必要になったときに) | コードと手順は完了。**デプロイと Scheduler の作成は、未実施** |
 | 4 | 両ビルドの契約テスト・CI の拡充 | 一部(`verify` と CI に、GCP ビルド・データ定義の突き合わせ・サーバーのテストを追加済み) |
