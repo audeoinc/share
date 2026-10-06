@@ -1,4 +1,4 @@
-# 配信コンテンツプランナー
+# Campaign Contents Planner(CCP)— 配信コンテンツプランナー
 
 メール・プッシュの**配信コンテンツ**(テーマ、メイン画像、ヘッドライン・コピー、セクションごとの商品、制作指示)を、AI の提案を選びながら企画するアプリ。
 Power Apps **Code App**(React + TypeScript + Vite)で、データは **Dataverse**、AI は **Copilot Studio** のエージェント(Power Automate 経由)。

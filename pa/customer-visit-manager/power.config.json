@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "appId": "cceaa26e-616d-4d4f-8a2b-8329eae1fc50",
-  "appDisplayName": "配信コンテンツプランナー",
+  "appDisplayName": "Campaign Contents Planner",
   "region": "prod",
   "appType": "CodeApp",
   "environmentId": "b6b84b0a-d553-ed76-9c1c-970175f9d1be",

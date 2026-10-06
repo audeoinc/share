@@ -1,4 +1,4 @@
-# CLAUDE.md — 配信コンテンツプランナー(AI コーディングアシスタント向け)
+# CLAUDE.md — Campaign Contents Planner(CCP / 配信コンテンツプランナー)(AI コーディングアシスタント向け)
 
 Power Apps Code App(React 19 + TypeScript + Vite + Fluent UI v9)。全体像は [README.md](README.md)、設計の約束事は [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)、Dataverse の定義は [docs/DATAVERSE.md](docs/DATAVERSE.md)。作業の前に、この 3 つと [docs/BACKLOG.md](docs/BACKLOG.md) を読むこと。
 
