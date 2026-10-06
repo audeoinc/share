@@ -8,9 +8,12 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "verify": "tsc -b && eslint . --ignore-pattern \"src/generated/**\" && vite build",
+    "verify": "node scripts/check-schema.mjs && tsc -b && eslint . --ignore-pattern \"src/generated/**\" && vite build && vite build --config vite.gcp.config.ts",
     "deploy": "node scripts/deploy.mjs",
-    "screenshots": "node scripts/screenshots.mjs"
+    "screenshots": "node scripts/screenshots.mjs",
+    "dev:gcp": "vite --config vite.gcp.config.ts",
+    "build:gcp": "vite build --config vite.gcp.config.ts",
+    "seed:export": "node scripts/export-seed.mjs"
   },
   "dependencies": {
     "@fluentui/react-components": "^9.74.9",

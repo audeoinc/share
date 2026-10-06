@@ -1,0 +1,9 @@
+# CCP(Campaign Contents Planner)の GCP 版サーバー。本番は Python 3.12(Cloud Run)。
+fastapi>=0.115
+uvicorn>=0.30
+sqlalchemy[asyncio]>=2.0
+asyncpg>=0.30
+cloud-sql-python-connector[asyncpg]>=1.18
+google-genai>=1.0
+google-auth>=2.30
+pydantic>=2.7
