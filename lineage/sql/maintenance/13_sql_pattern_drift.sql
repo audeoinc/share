@@ -374,10 +374,15 @@ BEGIN
   -- Report 4: OF THE OBJECTS THAT ARRIVED TODAY, HOW MANY ARE REALLY NEW?
   --
   -- This is the question behind all the others, asked directly. For every ephemeral
-  -- object first seen in the last new_object_days, it looks for an OLDER object whose
+  -- object first seen in the last new_object_days, it looks for ANOTHER object whose
   -- SQL is identical once every digit is folded away. If one exists, the new object is
   -- not a new statement -- it is the same statement with different numbers in it, and
   -- the fingerprint could in principle have collapsed them.
+  --
+  -- The twin is any other object, NOT an older one. first_seen_at is set by the MERGE
+  -- that registered the row, so every object a rebuilt repository holds carries the
+  -- same value and "older" would match nothing -- the report would answer 0 by
+  -- construction, which is the opposite of the truth.
   --
   --   with_twin     arrived today, and an older object differs only in digits.
   --                 This is the remaining opportunity, and report 5 shows what the
@@ -430,9 +435,9 @@ BEGIN
         FROM arrivals AS a
         WHERE EXISTS (
           SELECT 1
-          FROM ephemeral AS older
-          WHERE older.digit_free_key = a.digit_free_key
-            AND older.first_seen_at < a.first_seen_at
+          FROM ephemeral AS twin
+          WHERE twin.digit_free_key = a.digit_free_key
+            AND twin.object_name != a.object_name
         )
       ) AS with_twin,
       (
@@ -440,11 +445,18 @@ BEGIN
         FROM arrivals AS a
         WHERE NOT EXISTS (
           SELECT 1
-          FROM ephemeral AS older
-          WHERE older.digit_free_key = a.digit_free_key
-            AND older.first_seen_at < a.first_seen_at
+          FROM ephemeral AS twin
+          WHERE twin.digit_free_key = a.digit_free_key
+            AND twin.object_name != a.object_name
         )
-      ) AS without_twin
+      ) AS without_twin,
+      -- The guard. first_seen_at is set by the MERGE that registered the row, so a
+      -- repository rebuilt from 01 gives EVERY object the same value. When that is the
+      -- case, "arrived in the last N days" is the whole population and arrived says
+      -- nothing about a daily rate -- which these two columns make visible instead of
+      -- leaving it to be inferred.
+      (SELECT COUNT(DISTINCT DATE(first_seen_at)) FROM ephemeral) AS first_seen_days,
+      (SELECT MIN(DATE(first_seen_at)) FROM ephemeral) AS oldest_first_seen
     """,
     registry_fqn
   );
@@ -503,9 +515,9 @@ BEGIN
       FROM ephemeral AS a
       INNER JOIN ephemeral AS older
         ON  older.digit_free_key = a.digit_free_key
-        AND older.first_seen_at < a.first_seen_at
+        AND older.object_name != a.object_name
       WHERE a.first_seen_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
-      QUALIFY ROW_NUMBER() OVER (PARTITION BY a.object_name ORDER BY older.first_seen_at)
+      QUALIFY ROW_NUMBER() OVER (PARTITION BY a.object_name ORDER BY older.object_name)
         = 1
     ),
     divergence AS (
