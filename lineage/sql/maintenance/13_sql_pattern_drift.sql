@@ -465,22 +465,22 @@ BEGIN
   USING new_object_days AS days;
 
   -- --------------------------------------------------------------------------
-  -- Report 5: the twins, with the difference shown.
+  -- Report 5: WHAT THE DIFFERING NUMBER IS, for each twin.
   --
-  -- One row per newly arrived object that has an older twin: the two names, where
-  -- their SQL first diverges, and a window from each around that point. The windows
-  -- start at the same offset and are the same length, so the differing token is the
-  -- one thing that is not the same on both lines.
+  -- A twin matched because the two statements are identical once digits are removed.
+  -- So the difference IS a number, and there is no need to read SQL to find it: the
+  -- digit runs that appear in one and not the other ARE the difference.
   --
-  -- What to look for, and what each answer means:
-  --   a date, a timestamp, a long id   should already fold -- if it does not, the
-  --                                    fingerprint has a gap and it is fixable here
-  --   a 1 or 2-digit number            folding it would also merge `_v1` with `_v2`;
-  --                                    measured to recur daily, so deliberately kept
-  --   a product code or similar        a real parameter. Whether to fold it is a
-  --                                    judgement about whether the lineage differs
-  --   nothing visible in the window    the difference is further in: raise
-  --                                    difference_lead_in or difference_window
+  -- new_digit / twin_digit are those numbers, and digit_length is what decides the
+  -- case:
+  --   8, or 6 with a century   a date. Should already fold -- if these appear, the
+  --                            fingerprint has a gap and it is fixable.
+  --   10 or more               a timestamp or a generated id. Should already fold.
+  --   6, not date-shaped       a code. Folding it is a judgement about whether the
+  --                            two statements read different data.
+  --   1 or 2                   measured to recur daily, which is what a name does
+  --                            (`_v1` and `_v2`), not a parameter. Deliberately kept.
+  -- context shows where the number sits, which is usually enough to recognize it.
   -- --------------------------------------------------------------------------
   SET rendered_sql = FORMAT(
     """
@@ -509,41 +509,52 @@ BEGIN
     paired AS (
       SELECT
         a.object_name AS new_object,
-        older.object_name AS twin_object,
+        other.object_name AS twin_object,
         a.definition_text AS new_sql,
-        older.definition_text AS twin_sql
+        other.definition_text AS twin_sql
       FROM ephemeral AS a
-      INNER JOIN ephemeral AS older
-        ON  older.digit_free_key = a.digit_free_key
-        AND older.object_name != a.object_name
+      INNER JOIN ephemeral AS other
+        ON  other.digit_free_key = a.digit_free_key
+        AND other.object_name != a.object_name
       WHERE a.first_seen_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
-      QUALIFY ROW_NUMBER() OVER (PARTITION BY a.object_name ORDER BY older.object_name)
+      QUALIFY ROW_NUMBER() OVER (PARTITION BY a.object_name ORDER BY other.object_name)
         = 1
     ),
-    divergence AS (
+    differing AS (
       SELECT
         new_object,
         twin_object,
         new_sql,
-        twin_sql,
+        -- The digit runs present in one statement and not the other. No character
+        -- scan: the pair already matched with digits removed, so these ARE the
+        -- difference.
         (
-          SELECT MAX(n)
-          FROM UNNEST(GENERATE_ARRAY(
-            0,
-            LEAST(LENGTH(new_sql), LENGTH(twin_sql), @max_scan)
-          )) AS n
-          WHERE SUBSTR(new_sql, 1, n) = SUBSTR(twin_sql, 1, n)
-        ) AS common_prefix
+          SELECT value
+          FROM UNNEST(REGEXP_EXTRACT_ALL(new_sql, '[0-9]+')) AS value
+          WHERE value NOT IN UNNEST(REGEXP_EXTRACT_ALL(twin_sql, '[0-9]+'))
+          LIMIT 1
+        ) AS new_digit,
+        (
+          SELECT value
+          FROM UNNEST(REGEXP_EXTRACT_ALL(twin_sql, '[0-9]+')) AS value
+          WHERE value NOT IN UNNEST(REGEXP_EXTRACT_ALL(new_sql, '[0-9]+'))
+          LIMIT 1
+        ) AS twin_digit
       FROM paired
     )
     SELECT
       SUBSTR(new_object, 1, 16) AS new_object,
-      SUBSTR(twin_object, 1, 16) AS twin_object,
-      common_prefix,
-      SUBSTR(new_sql, GREATEST(1, common_prefix - @lead_in), @text_window) AS new_text,
-      SUBSTR(twin_sql, GREATEST(1, common_prefix - @lead_in), @text_window) AS twin_text
-    FROM divergence
-    ORDER BY common_prefix
+      new_digit,
+      twin_digit,
+      LENGTH(new_digit) AS digit_length,
+      SUBSTR(
+        REGEXP_REPLACE(new_sql, '[[:space:]]+', ' '),
+        GREATEST(1, STRPOS(new_sql, new_digit) - @lead_in),
+        @text_window
+      ) AS context
+    FROM differing
+    WHERE new_digit IS NOT NULL
+    ORDER BY digit_length DESC
     LIMIT @max_rows
     """,
     registry_fqn
@@ -552,8 +563,96 @@ BEGIN
   EXECUTE IMMEDIATE rendered_sql
   USING
     new_object_days AS days,
-    difference_max_scan AS max_scan,
     difference_lead_in AS lead_in,
     difference_window AS text_window,
     new_object_examples AS max_rows;
+
+  -- --------------------------------------------------------------------------
+  -- Report 6: the same differences, counted -- the answer in one small table.
+  --
+  -- Report 5 shows examples; this shows the DISTRIBUTION, which is what the decision
+  -- rests on. One row per length of the differing number, with how many twin pairs
+  -- differ by a number of that length and two example values.
+  --
+  --   weight on 8 / 10+ digits   dates and ids are escaping the fingerprint. Fixable,
+  --                              and worth fixing: those pairs are the same statement.
+  --   weight on 1-2 digits       the remaining duplication is name-shaped. Folding it
+  --                              would merge objects that are genuinely different, and
+  --                              the earlier recurrence census said exactly that.
+  --   weight on 6 digits         codes. The question becomes whether two codes mean
+  --                              two different sets of source data.
+  --
+  -- date_shaped counts how many of that length parse as a date, which separates
+  -- `20261006` from a numeric code of the same length.
+  -- --------------------------------------------------------------------------
+  SET rendered_sql = FORMAT(
+    """
+    WITH ephemeral AS (
+      SELECT
+        object_name,
+        definition_text,
+        first_seen_at,
+        REGEXP_REPLACE(
+          UPPER(
+            REGEXP_REPLACE(
+              REGEXP_REPLACE(
+                REPLACE(definition_text, '`', ''),
+                "'[^']*'", "'?'"
+              ),
+              '[[:space:]]+', ' '
+            )
+          ),
+          '[0-9]+', '#'
+        ) AS digit_free_key
+      FROM `%s`
+      WHERE is_active = TRUE
+        AND is_ephemeral = TRUE
+        AND definition_text IS NOT NULL
+    ),
+    paired AS (
+      SELECT
+        a.object_name AS new_object,
+        a.definition_text AS new_sql,
+        other.definition_text AS twin_sql
+      FROM ephemeral AS a
+      INNER JOIN ephemeral AS other
+        ON  other.digit_free_key = a.digit_free_key
+        AND other.object_name != a.object_name
+      WHERE a.first_seen_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      QUALIFY ROW_NUMBER() OVER (PARTITION BY a.object_name ORDER BY other.object_name)
+        = 1
+    ),
+    differing AS (
+      SELECT
+        new_object,
+        (
+          SELECT value
+          FROM UNNEST(REGEXP_EXTRACT_ALL(new_sql, '[0-9]+')) AS value
+          WHERE value NOT IN UNNEST(REGEXP_EXTRACT_ALL(twin_sql, '[0-9]+'))
+          LIMIT 1
+        ) AS new_digit
+      FROM paired
+    )
+    SELECT
+      LENGTH(new_digit) AS digit_length,
+      COUNT(*) AS twin_pairs,
+      COUNTIF(
+        REGEXP_CONTAINS(
+          new_digit,
+          '^(19|20)[0-9][0-9](0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])?$'
+        )
+      ) AS date_shaped,
+      ARRAY_TO_STRING(
+        ARRAY_AGG(DISTINCT new_digit ORDER BY new_digit LIMIT 3), ' '
+      ) AS examples
+    FROM differing
+    WHERE new_digit IS NOT NULL
+    GROUP BY digit_length
+    ORDER BY twin_pairs DESC
+    """,
+    registry_fqn
+  );
+
+  EXECUTE IMMEDIATE rendered_sql
+  USING new_object_days AS days;
 END;
