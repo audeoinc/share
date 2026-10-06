@@ -30,5 +30,14 @@ jobs:
         run: npx tsc -b
       - name: Lint
         run: npx eslint . --ignore-pattern "src/generated/**"
+      - name: Schema (GCP data definition vs. generated models)
+        run: node scripts/check-schema.mjs
       - name: Build
         run: npm run build
+      - name: Build (GCP)
+        run: npm run build:gcp
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Server tests
+        run: python -m unittest discover server/tests
