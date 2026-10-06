@@ -23,10 +23,9 @@ interface Props {
   onClear: () => void
 }
 
-// 既定の高さを変えたので、保存のキーも変える(以前の、大きい高さを引き継がない)
-const HEIGHT_KEY = 'chat.paneHeight.v2'
-const MIN_H = 110
-const DEFAULT_H = 150
+const HEIGHT_KEY = 'chat.paneHeight'
+const MIN_H = 140
+const DEFAULT_H = 260
 
 const clampHeight = (h: number) => Math.min(Math.round(window.innerHeight * 0.65), Math.max(MIN_H, h))
 
@@ -54,15 +53,30 @@ const useStyles = makeStyles({
     zIndex: 1,
     boxShadow: `0 -6px 10px -6px ${tokens.colorNeutralShadowKey}`,
   },
+  // 高さを変える境目: 線を少し濃くし、中央に「つまみ」を付けて、ここをドラッグして伸ばせると分かるようにする
   split: {
     flexShrink: 0,
     position: 'relative',
     height: '1px',
-    backgroundColor: tokens.colorNeutralStroke2,
+    backgroundColor: tokens.colorNeutralStroke1,
     cursor: 'ns-resize',
     touchAction: 'none',
-    '::after': { content: '""', position: 'absolute', left: 0, right: 0, top: '-4px', bottom: '-4px' },
+    '::before': {
+      content: '""',
+      position: 'absolute',
+      left: '50%',
+      top: '-3px',
+      width: '44px',
+      height: '5px',
+      marginLeft: '-22px',
+      borderRadius: '3px',
+      backgroundColor: tokens.colorNeutralStroke1Pressed,
+      boxShadow: `0 0 0 2px ${tokens.colorNeutralBackground1}`,
+    },
+    // つかみやすいよう、見た目より広く反応させる
+    '::after': { content: '""', position: 'absolute', left: 0, right: 0, top: '-7px', bottom: '-7px' },
     ':hover': { backgroundColor: tokens.colorBrandStroke1 },
+    ':hover::before': { backgroundColor: tokens.colorBrandStroke1 },
   },
   // 見出しの帯: ペインの見出しと同じ、平らな作り
   band: {
