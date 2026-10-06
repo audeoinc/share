@@ -48,10 +48,6 @@ const useStyles = makeStyles({
     minWidth: 0,
     minHeight: 0,
     backgroundColor: tokens.colorNeutralBackground1,
-    // 上の内容より手前に浮かせる。上端の影で、別のパネルだと分かるようにする(上の内容は、スクロールして、この下に隠れる)
-    position: 'relative',
-    zIndex: 1,
-    boxShadow: `0 -6px 10px -6px ${tokens.colorNeutralShadowKey}`,
   },
   // 高さを変える境目: 線を少し濃くし、中央に「つまみ」を付けて、ここをドラッグして伸ばせると分かるようにする
   split: {
