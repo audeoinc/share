@@ -19,6 +19,28 @@
   The two definition-registry MERGEs are left alone: they carry one row per object
   rather than per job, and their `last_seen_at` is meant to advance on every run.
 
+- The collection window and the retention window are now separate knobs. One value used
+  to decide both how far back JOBS are read and how long an ephemeral object survives
+  without being seen, and the two want opposite lengths.
+  `job_collection_lookback_days` (default 3) is how far back to READ. Anything older
+  was collected on an earlier run and is already in the registry, so re-reading it only
+  widens the INFORMATION_SCHEMA scan and the MERGE -- measured at roughly 40 seconds of
+  a 4-minute daily run at the old 8-day setting. It is a FLOOR, not the window: the run
+  extends it to cover everything since the newest job already collected, because a
+  fixed short window would silently lose the jobs from any gap in the schedule and
+  nothing downstream could recover them -- they would never enter the registry.
+  `object_retention_days` (default 40) is how long an object stays alive, and it
+  answers which schedules stay represented. 8 covers daily and weekly; 40 covers
+  monthly, with 31 days between runs plus room for a month-end schedule that slips --
+  which is why it is not 30. At the old 8, a monthly statement had no lineage in the
+  repository for three weeks of every four and was re-analyzed every month.
+  The retention window now also bounds the MERGE input
+  (`latest_generated_table_definitions`), which read the WHOLE job registry. The
+  registry keeps everything ever collected, so every run was re-registering every
+  fingerprint ever seen -- re-activating objects the age-out then deactivated again,
+  over a set that only grows. Harmless, because the age-out clears is_changed before
+  STEP 3 looks, but paid every run.
+
 - Confirmed from the job side what the fingerprint change bought: NEW FINGERPRINTS PER
   DAY FELL FROM 1,200-1,350 TO BETWEEN 3 AND 22. Around 2,600 distinct statements run
   every day and almost none of them are new, which is what a scheduler running the same

@@ -73,8 +73,9 @@ SQL 側の変更は不要です。
 
 | 変数 | 現在値 | 意味と注意 |
 |---|---|---|
-| `initial_lookback_days` | 60 | **初回のみ**（job registry が空のとき）。長くしても ephemeral には無意味（下記） |
-| `incremental_lookback_days` | **8** | 2 回目以降。**ephemeral の保持期間でもある**。3 なら日次のみ、8 で週次まで、32 で月次まで |
+| `initial_lookback_days` | 60 | **初回のみ**（job registry が空のとき）。収集と保持を兼ねる |
+| `job_collection_lookback_days` | **3** | 2 回目以降の**収集**範囲の下限。実際の窓は「前回収集した最新 job 以降」まで自動延長される |
+| `object_retention_days` | **40** | **ephemeral の保持期間**。8 で週次まで、40 で月次まで（31 日＋月末のずれ分の余裕） |
 | `analysis_batch_max_sql_bytes` | **3,000,000** | バッチの大きさ。**バッチ数＝実行時間**なので最重要 |
 | `analysis_batch_max_objects` | **3,000** | 同上。片方だけ上げても意味がない（`GREATEST(DIV(bytes,…), DIV(count,…))` で切るため） |
 | `analysis_batch_group_datasets` | TRUE | バッチがデータセットをまたぐことを許可 |
@@ -82,14 +83,23 @@ SQL 側の変更は不要です。
 | `analysis_skip_on_udf_resource_error` | TRUE | UDF の OOM でそのバッチだけスキップして継続 |
 | `build_static_report_tables` | TRUE | レポート用ビューを物理テーブルにスナップショット |
 
-### `incremental_lookback_days` が二役であることの重要性
+### 収集の窓と保持の窓は別物（2026-10-06 に分離）
 
-この値は「JOBS を何日分収集するか」と「**ephemeral をいつまで active に保つか**」の
-両方を決めます。ephemeral は、指紋がこの窓の中で再出現し続ける限り active で、
-出なくなると `is_active = FALSE` になり**依存行も削除**されます。
+以前は 1 つの値が両方を決めていましたが、**それぞれ最適な長さが逆方向**なので分けました。
 
-つまり **「どの周期の SQL をリネージに載せたいか」がこの 1 つの値で決まります**。
-週次ジョブを常時載せたいなら 8 以上が必要です（3 だと毎週 age-out → 再登場で再解析）。
+- **収集（`job_collection_lookback_days` = 3）は短いほどよい**。前回より古い job は
+  すでに registry にあるので、再度 INFORMATION_SCHEMA から読む意味がありません。
+  ただし**固定の短い窓は危険**（止まっていた期間の job を永久に取りこぼす）なので、
+  実際の窓は registry の `MAX(creation_time)` から自動延長されます。普段は 3 日、
+  1 週間止まっていれば自動で 8 日になります。
+- **保持（`object_retention_days` = 40）は「載せたい周期」で決める**。ephemeral は
+  指紋がこの窓の中で再出現し続ける限り active で、出なくなると `is_active = FALSE` に
+  なり**依存行も削除**されます。月次ジョブを常時載せるには 31 日＋余裕が必要で、
+  30 だと月末のずれで外れるため 40。
+
+保持窓は age-out だけでなく、**MERGE の入力（`latest_generated_table_definitions`）の
+絞り込みにも使われます**。registry は収集した job を保持し続けるので、絞らないと
+「これまでに収集した全指紋」を毎回 MERGE することになります。
 
 ---
 
