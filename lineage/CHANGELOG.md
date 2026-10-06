@@ -19,6 +19,19 @@
   The two definition-registry MERGEs are left alone: they carry one row per object
   rather than per job, and their `last_seen_at` is meant to advance on every run.
 
+- Investigation closed: the ephemeral objects that LOOK foldable must not be folded.
+  Measured on a repository rebuilt the day before, half of the 2,880 ephemeral objects
+  (1,439) are identical to another once every digit is removed, and every pair
+  diverges at the same place -- character 16, the first line of the statement. So the
+  opportunity is real in the arithmetic.
+  Inspected, the differing numbers turn out to identify objects that have to be kept
+  apart. The remaining duplication is not duplication, and the daily arrivals are
+  legitimate work: 11:22 for a seed and 4 minutes for a daily run stand as the floor.
+  Worth recording as a pattern, since this is the third time it has come up: a count of
+  what WOULD collapse is a count of candidates, not of things to do. Only someone who
+  knows what the values mean can close that gap, which is why these reports measure the
+  opportunity and say in as many words that they do not propose taking it.
+
 - Added `sql/maintenance/13_sql_pattern_drift.sql`, which answers "a scheduler runs the
   same model every day, so why does the pipeline keep registering new objects?".
   An ephemeral object's identity is its fingerprint, so a new fingerprint every day
