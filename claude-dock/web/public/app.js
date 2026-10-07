@@ -1,5 +1,5 @@
 import { renderMarkdown } from './md.js';
-// cdock web — フロントエンド (依存なし)
+// Claude Rogue — フロントエンド (依存なし)
 const $ = (s) => document.querySelector(s);
 const NL = String.fromCharCode(10);
 const chat = $('#chat'), input = $('#input'), sendBtn = $('#send'), stopBtn = $('#stop'), statusEl = $('#status');
@@ -18,7 +18,15 @@ const mdLive = (t) => md((t.match(/^```/gm) || []).length % 2 ? `${t}\n${'`'.rep
 
 // ---------- 描画ヘルパー ----------
 function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
-function scrollDown(force) { const near = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 160; if (near || force) chat.scrollTop = chat.scrollHeight; }
+// 末尾に張り付くか: 「内容が増えたあと」の位置では判定せず、利用者が最後にスクロールした位置で決める
+// (長い出力が一度に増えると、増えたあとの距離が大きくなり、自動で下まで行かなくなるため)
+let stick = true;
+chat.addEventListener('scroll', () => { stick = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 80; }, { passive: true });
+function scrollDown(force) { if (force) stick = true; if (stick) chat.scrollTop = chat.scrollHeight; }
+let scrollQueued = false;
+const queueScroll = () => { if (scrollQueued) return; scrollQueued = true; setTimeout(() => { scrollQueued = false; scrollDown(); }, 30); };
+new MutationObserver(queueScroll).observe(chat, { childList: true, subtree: true, characterData: true }); // 文字が流れて増えたとき、カードが開いたとき
+chat.addEventListener('load', queueScroll, true); // 画像が読み込まれて高さが増えたとき
 function add(node) { $('#empty')?.remove(); chat.insertBefore(node, progressEl); scrollDown(); return node; }
 // ---------- 進行中の表示 (スピナー + 状態 + 経過秒数)。会話の最後に出る ----------
 const progressEl = el('div', 'progress'); progressEl.hidden = true; chat.appendChild(progressEl);
@@ -558,7 +566,7 @@ async function undoMove(j) {
   } catch (e) { toast(`元に戻せませんでした: ${e.message}`, { bad: true }); }
 }
 
-// ---------- 削除 (cdock のごみ箱へ。30 日保管) ----------
+// ---------- 削除 (Rogue のごみ箱へ。30 日保管) ----------
 function forgetPath(rel) {
   const hit = (p) => p === rel || p.startsWith(`${rel}/`);
   attachments = attachments.filter((a) => !(a.rel && hit(a.rel))); renderAttach();
@@ -620,7 +628,7 @@ $('#pane-files').addEventListener('scroll', closeCtx);
 async function openTrash() {
   let items; try { items = await api('/api/trash', {}); } catch (e) { toast(e.message, { bad: true }); return; }
   const box = el('div', 'dlg'); const card = el('div', 'dlg-card trash'); card.setAttribute('role', 'dialog');
-  const head = el('div', 'dlg-head'); head.append(el('span', '', 'ごみ箱 (cdock)')); const x = el('button', 'ghost', '✕'); x.type = 'button'; head.append(x); card.append(head);
+  const head = el('div', 'dlg-head'); head.append(el('span', '', 'ごみ箱 (Rogue)')); const x = el('button', 'ghost', '✕'); x.type = 'button'; head.append(x); card.append(head);
   card.append(el('div', 'dlg-sub trash-note', '消したファイルは 30 日間ここに保管されます。このフォルダにあったものだけ、ここから復元できます。'));
   const list = el('div', 'dlg-list trash-list'); card.append(list);
   const foot = el('div', 'dlg-foot'); const cnt = el('span', 'dlg-cur', ''); const emptyBtn = el('button', 'danger', 'ごみ箱を空にする'); emptyBtn.type = 'button'; const closeBtn = el('button', 'ghost', '閉じる'); closeBtn.type = 'button';

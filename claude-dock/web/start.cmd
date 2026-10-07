@@ -1,5 +1,5 @@
 @echo off
-rem cdock web launcher: start.cmd [folder]  (installs dependencies on first run)
+rem Claude Rogue launcher: start.cmd [folder]  (installs dependencies on first run)
 setlocal
 cd /d "%~dp0"
 if not exist node_modules (call npm install --no-audit --no-fund)

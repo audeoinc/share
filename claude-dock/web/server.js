@@ -1,4 +1,4 @@
-// cdock web — Claude Code をブラウザで使うローカル UI (Claude Agent SDK)
+// Claude Rogue — Claude Code をブラウザで使うローカル UI (Claude Agent SDK)
 // 起動: node server.js [--port 8787] [--cwd <作業フォルダ>]
 import http from 'node:http';
 import fs from 'node:fs';
@@ -506,7 +506,7 @@ function readBody(req, limit = 8192) {
   });
 }
 
-// ---- エクスプローラ内でのファイル / フォルダの移動・削除 (作業フォルダの中だけ。削除は cdock のごみ箱へ) ----
+// ---- エクスプローラ内でのファイル / フォルダの移動・削除 (作業フォルダの中だけ。削除は Rogue のごみ箱へ) ----
 const lc = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
 const inside = (root, p) => { const a = lc(root), b = lc(p); return b === a || b.startsWith(a + path.sep); };
 const fail = (message, extra = {}) => Object.assign(new Error(message), extra);
@@ -1002,6 +1002,6 @@ wss.on('connection', (ws) => {
 
 server.listen(PORT, HOST, () => {
   const url = `http://${HOST}:${PORT}/?t=${TOKEN}`;
-  console.log(`cdock web  ${url}`);
+  console.log(`Claude Rogue  ${url}`);
   console.log(`作業フォルダ: ${DEFAULT_CWD}`);
 });
