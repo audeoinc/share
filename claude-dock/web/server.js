@@ -283,17 +283,22 @@ async function suggestCommitMessage(cwd) {
 const BRANCH_RE = /^[A-Za-z0-9._\/@+-]+$/;
 const validBranch = (n) => typeof n === 'string' && n.length <= 200 && BRANCH_RE.test(n) && !n.startsWith('-') && !n.startsWith('/') && !n.endsWith('/') && !n.includes('..') && !n.endsWith('.lock');
 async function gitBranches(cwd) {
-  const st = await gitRepo(cwd);
-  const raw = await git(st.top, ['for-each-ref', '--format=%(refname)\t%(refname:short)\t%(HEAD)', 'refs/heads', 'refs/remotes']);
+  // 変更の一覧 (重い) は取らない。トップと現在のブランチと一覧を、同時に取る
+  const [top, current, raw] = await Promise.all([
+    git(cwd, ['rev-parse', '--show-toplevel']).then((x) => x.trim()).catch(() => null),
+    git(cwd, ['symbolic-ref', '--short', '-q', 'HEAD']).then((x) => x.trim()).catch(() => ''),
+    git(cwd, ['for-each-ref', '--format=%(refname)\t%(refname:short)\t%(HEAD)', 'refs/heads', 'refs/remotes']).catch(() => ''),
+  ]);
+  if (!top) throw new Error('Git リポジトリではありません');
   const local = []; const remotes = [];
   for (const line of raw.split('\n')) {
     const [ref, short] = line.split('\t'); if (!ref) continue;
     if (ref.startsWith('refs/heads/')) local.push(short);
     else if (ref.startsWith('refs/remotes/') && !ref.endsWith('/HEAD')) remotes.push(short);
   }
-  local.sort((a, b) => (a === st.branch ? -1 : b === st.branch ? 1 : a.localeCompare(b)));
+  local.sort((a, b) => (a === current ? -1 : b === current ? 1 : a.localeCompare(b)));
   const remoteOnly = remotes.filter((r) => !local.includes(r.slice(r.indexOf('/') + 1))).sort();
-  return { current: st.branch, detached: !st.branch || st.branch === 'HEAD', local, remoteOnly, dirty: st.files.length };
+  return { current, detached: !current, local, remoteOnly };
 }
 async function gitSwitch(cwd, branch, create) {
   const st = await gitRepo(cwd);
@@ -318,10 +323,13 @@ async function gitCommit(cwd, message) {
   return { hash, summary: out.split('\n')[0] };
 }
 async function gitStatus(cwd) {
-  let top;
-  try { top = (await git(cwd, ['rev-parse', '--show-toplevel'])).trim(); } catch { return { repo: false }; }
-  const branch = (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']).catch(() => '')).trim();
-  const raw = await git(cwd, ['status', '--porcelain=v1', '-z', '-uall']);
+  // 互いに関係のないコマンドは、同時に実行する (Windows では 1 回の起動が遅く、順番に実行すると積み重なる)
+  const [top, branch, raw] = await Promise.all([
+    git(cwd, ['rev-parse', '--show-toplevel']).then((x) => x.trim()).catch(() => null),
+    git(cwd, ['symbolic-ref', '--short', '-q', 'HEAD']).then((x) => x.trim()).catch(() => ''), // detached HEAD は ''
+    git(cwd, ['status', '--porcelain=v1', '-z', '-uall']).catch(() => ''),
+  ]);
+  if (!top) return { repo: false };
   const parts = raw.split('\0'); const files = [];
   for (let i = 0; i < parts.length; i++) {
     const e = parts[i]; if (e.length < 4) continue;
@@ -570,9 +578,20 @@ async function api(url, res, req) {
         if (isDir) dirs.push(e.name);
       }
       dirs.sort((a, b) => a.localeCompare(b, 'ja'));
-      const up = path.dirname(p);
+      // Git のリポジトリのフォルダには、印とブランチ名を付ける (.git の HEAD を読むだけ。コマンドは実行しない)
+      const headOf = (dir) => {
+        try {
+          const g = path.join(dir, '.git'); const st = fs.statSync(g);
+          if (!st.isDirectory()) return '(worktree)';
+          const head = fs.readFileSync(path.join(g, 'HEAD'), 'utf8').trim();
+          const m = /^ref: refs\/heads\/(.+)$/.exec(head); return m ? m[1] : head.slice(0, 7);
+        } catch { return null; }
+      };
+      const repos = {}; for (const n of dirs.slice(0, 3000)) { const b = headOf(path.join(p, n)); if (b) repos[n] = b; }
+      const upDir = path.dirname(p);
+      const up = upDir;
       const drives = process.platform === 'win32' ? 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').map((l) => `${l}:\\`).filter((d) => fs.existsSync(d)) : ['/'];
-      return json(res, { path: p, parent: up !== p ? up : null, dirs, home, drives, sep: path.sep, fellBack });
+      return json(res, { path: p, parent: up !== p ? up : null, dirs, home, drives, sep: path.sep, fellBack, repos, isRepo: headOf(p) !== null });
     }
     if (url.pathname === '/api/slides') return json(res, await slidesStatus(cwd, url.searchParams.get('path') || ''));
     if (url.pathname === '/api/slide') {

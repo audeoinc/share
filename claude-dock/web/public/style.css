@@ -32,8 +32,6 @@ html, body { height: 100%; margin: 0; }
 body { background: var(--bg); color: var(--text); font: calc(var(--fs, 14px) + 1px)/var(--lh-ui) var(--sans); display: flex; flex-direction: column; }
 .top { display: flex; gap: 12px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--rule); }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 600; letter-spacing: .02em; }
-.cwd { flex: 1; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: calc(var(--fs, 14px) - 1px); min-width: 0; }
-.cwd input { flex: 1; min-width: 0; font: calc(var(--fs, 14px) - 1px) var(--sans); color: var(--text); background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 6px 10px; }
 select, button { font: inherit; font-size: calc(var(--fs, 14px) - 1px); color: var(--text); background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 6px 10px; cursor: pointer; }
 button.ghost:hover, select:hover { border-color: var(--muted); }
 .chat { flex: 1; overflow-y: auto; padding: 24px 16px 8px; display: flex; flex-direction: column; align-items: center; }
@@ -96,7 +94,6 @@ textarea { width: 100%; border: 0; outline: 0; resize: none; background: transpa
 .row .ch { width: 1.25em; flex: none; color: var(--muted); text-align: center; font-size: calc(var(--fs, 14px) + 3px); line-height: 1; }
 .row:hover .ch { color: var(--text); }
 .row.file { color: var(--text); } .row.dir { font-weight: 500; }
-@media (max-width: 820px) { .side { display: none; } .cwd span { display: none; } }
 
 /* ---- 段階3: プレビュー / 差分 ---- */
 .preview { width: var(--prev-w, min(46%, 640px)); flex: 0 1 auto; min-width: 260px; position: relative; border-left: 1px solid var(--rule); display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
@@ -168,7 +165,6 @@ body.resizing iframe { pointer-events: none; }
 .fs { display: inline-flex; gap: 2px; } .fs button { padding: 4px 8px; font-size: calc(var(--fs, 14px) - 2px); }
 
 /* ---- フォルダ選択 ---- */
-.cwd input.invalid { border-color: var(--bad); background: rgba(192,57,43,.06); }
 .dlg { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: flex; align-items: center; justify-content: center; z-index: 20; }
 .dlg[hidden] { display: none; }
 .dlg-card { width: min(780px, 94vw); height: min(560px, 88vh); background: var(--bg); border: 1px solid var(--rule); border-radius: 14px; box-shadow: 0 16px 48px rgba(0,0,0,.25); display: flex; flex-direction: column; overflow: hidden; }
@@ -360,3 +356,38 @@ button.danger:disabled { opacity: .45; cursor: default; }
 .row.picked { background: var(--user); }
 .row.picked.sel { background: var(--hit-bg); }
 .fsearch #trashbtn { padding: 4px 8px; }
+
+/* ---- 場所のバー (サイドバーの一番上): クリックできるパス + Git のチップ ---- */
+.top .spacer { flex: 1; }
+.locbar { position: relative; padding: 8px 8px 6px; border-bottom: 1px solid var(--rule); flex: none; }
+.cwdbar { display: flex; gap: 6px; align-items: center; }
+.cwdbar .cwdup, .cwdbar .cwdbrowse { flex: none; padding: 4px 8px; font-size: calc(var(--fs, 14px) - 1px); line-height: 1.2; }
+.crumbs { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: flex-end; overflow: hidden; background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 2px 4px; cursor: text; font-size: calc(var(--fs, 14px) - 1px); }
+.crumbs.clip { -webkit-mask-image: linear-gradient(to right, transparent 0, #000 22px); mask-image: linear-gradient(to right, transparent 0, #000 22px); }
+.crumbs.invalid { border-color: var(--bad); background: color-mix(in srgb, var(--bad) 7%, var(--panel)); }
+.crumbs[hidden] { display: none; }
+.crumb { flex: none; border: 0; background: none; padding: 1px 4px; border-radius: 5px; color: var(--muted); cursor: pointer; white-space: nowrap; font: inherit; }
+.crumb:hover { background: var(--user); color: var(--text); }
+.crumb.cur { color: var(--text); font-weight: 600; }
+.crumbsep { flex: none; color: var(--rule); user-select: none; }
+.crumb-empty { color: var(--muted); padding: 1px 4px; }
+.cwdbar input#cwd { flex: 1; min-width: 0; font: calc(var(--fs, 14px) - 1px) var(--sans); color: var(--text); background: var(--panel); border: 1px solid var(--accent); border-radius: 8px; padding: 4px 8px; }
+.cwdbar input#cwd.invalid { border-color: var(--bad); background: color-mix(in srgb, var(--bad) 7%, var(--panel)); }
+.cwdbar input#cwd:focus { outline: none; }
+.cwdbar input#cwd[hidden] { display: none; }
+.repoline { margin-top: 6px; display: flex; }
+.repoline[hidden] { display: none; }
+.repoline button.gitbranch { flex: 1; font-size: calc(var(--fs, 14px) - 1px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.locbar .branchmenu { left: 8px; right: 8px; top: calc(100% - 2px); max-height: 60vh; }
+.gitnote { flex: 1; color: var(--muted); font-size: calc(var(--fs, 14px) - 2px); }
+.dlg-opts { display: flex; gap: 16px; flex-wrap: wrap; }
+.dlg-it .dn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dlg-it .rb { flex: none; color: var(--muted); font: calc(var(--fs, 14px) - 3px) var(--mono); background: var(--user); border-radius: 999px; padding: 0 8px; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dlg-it .pick { flex: none; display: none; padding: 1px 10px; font-size: calc(var(--fs, 14px) - 2px); }
+.dlg-it:hover .pick, .dlg-it.on .pick { display: inline-block; }
+/* 狭い画面では、サイドバーを上に積んで、場所のバーを使えるようにする */
+@media (max-width: 820px) {
+  .shell { flex-direction: column; }
+  .side { display: flex !important; width: 100% !important; max-height: 44vh; border-right: 0; border-bottom: 1px solid var(--rule); }
+  .grip-r { display: none; }
+}

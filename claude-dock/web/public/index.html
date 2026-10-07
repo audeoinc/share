@@ -10,8 +10,7 @@
 <body>
 <header class="top">
   <div class="brand"><img src="icon.png" alt="" width="20" height="20"><span>cdock</span></div>
-  <label class="cwd"><span>フォルダ</span><button type="button" id="cwd-up" class="ghost cwdup" title="一つ上のフォルダへ (Alt+↑)">↑</button><input id="cwd" list="recent-dirs" spellcheck="false" autocomplete="off"><datalist id="recent-dirs"></datalist></label>
-  <button id="cwd-browse" class="ghost" title="フォルダを選択">📁 選択</button>
+  <div class="spacer"></div>
   <span class="fs" title="文字サイズ (画面全体)"><button id="fs-down" class="ghost">A−</button><button id="fs-up" class="ghost">A＋</button></span>
   <button id="density" class="ghost" title="行間">≡</button>
   <button id="theme" class="ghost theme" title="テーマ: 自動 / ライト / ダーク">◐</button>
@@ -31,6 +30,17 @@
 <div class="shell">
   <aside class="side" id="side">
     <div class="grip grip-r" id="grip-side" role="separator" aria-orientation="vertical" aria-label="サイドバーの幅" tabindex="0" title="ドラッグで幅を変更 / ダブルクリックで元に戻す"></div>
+    <div class="locbar">
+      <div class="cwdbar">
+        <button type="button" id="cwd-up" class="ghost cwdup" title="一つ上のフォルダへ (Alt+↑)">↑</button>
+        <div id="crumbs" class="crumbs" title="作業フォルダ (空いている所をクリックすると、パスを入力できます)"></div>
+        <input id="cwd" list="recent-dirs" spellcheck="false" autocomplete="off" placeholder="作業フォルダのパス" hidden>
+        <datalist id="recent-dirs"></datalist>
+        <button type="button" id="cwd-browse" class="ghost cwdbrowse" title="作業フォルダを選択">📁</button>
+      </div>
+      <div class="repoline" hidden><button id="gitbranch" class="gitbranch" type="button" title="ブランチを切り替え / 新規作成" disabled></button></div>
+      <div id="branchmenu" class="branchmenu" hidden></div>
+    </div>
     <div class="tabs"><button id="tab-sessions" class="on">会話</button><button id="tab-files">ファイル</button><button id="tab-git">変更 <span id="gitcount" class="badge" hidden></span></button></div>
     <div id="pane-sessions" class="pane"><button id="new" class="newbtn">＋ 新しい会話</button><div id="sessions"></div></div>
     <div id="pane-files" class="pane" hidden>
@@ -38,7 +48,7 @@
       <div id="fresults" hidden></div>
       <div id="tree"></div>
     </div>
-    <div id="pane-git" class="pane" hidden><div class="githead"><button id="gitbranch" class="gitbranch" type="button" title="ブランチを切り替え / 新規作成" disabled></button><button id="gitrefresh" class="ghost" title="更新">↻</button></div><div id="branchmenu" class="branchmenu" hidden></div>
+    <div id="pane-git" class="pane" hidden><div class="githead"><span class="gitnote">Git の変更 (ブランチは上のバーで切り替え)</span><button id="gitrefresh" class="ghost" title="更新">↻</button></div>
       <div id="gitlist"></div>
       <div id="commitbox" class="commitbox" hidden>
         <textarea id="commitmsg" rows="2" placeholder="コミットメッセージ (Ctrl+Enter で確定)"></textarea>
@@ -72,7 +82,7 @@
         <div id="dlg-note" class="dlg-note" hidden></div>
         <input id="dlg-filter" class="dlg-filter" placeholder="フォルダ名で絞り込み (Enter で先頭を開く)" autocomplete="off">
         <div id="dlg-list" class="dlg-list"></div>
-        <label class="dlg-hid"><input type="checkbox" id="dlg-hidden"> 隠しフォルダを表示</label>
+        <div class="dlg-opts"><label class="dlg-hid"><input type="checkbox" id="dlg-hidden"> 隠しフォルダを表示</label><label class="dlg-hid" id="dlg-onlyrepos-label" hidden><input type="checkbox" id="dlg-onlyrepos"> 🔀 Git のリポジトリだけ表示</label></div>
       </section>
     </div>
     <div class="dlg-foot"><span id="dlg-cur" class="dlg-cur"></span><button id="dlg-cancel" class="ghost">キャンセル</button><button id="dlg-ok" class="send">このフォルダを開く</button></div>

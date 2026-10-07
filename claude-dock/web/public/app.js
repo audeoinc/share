@@ -154,7 +154,7 @@ function connect() {
   ws.onmessage = (e) => handle(JSON.parse(e.data));
 }
 function handle(m) {
-  if (m.type === 'hello') { serverFeatures = new Set(m.features || []); if (!cwdEl.value) cwdEl.value = store.get('cwd', m.cwd); lastGoodCwd = cwdEl.value; refreshParent(); loadSessions(); loadRoot(); loadCommands(); loadGit(); watchCwd(); }
+  if (m.type === 'hello') { serverFeatures = new Set(m.features || []); if (!cwdEl.value) cwdEl.value = store.get('cwd', m.cwd); lastGoodCwd = cwdEl.value; renderCrumbs(); refreshParent(); loadSessions(); loadRoot(); loadCommands(); loadGit(); watchCwd(); }
   else if (m.type === 'busy') setBusy(m.value);
   else if (m.type === 'notice') add(el('div', 'err-box', m.message));
   else if (m.type === 'fs') onFsChange(m);
@@ -402,6 +402,7 @@ async function fillDir(container, rel, depth) {
   let data;
   try { data = await api('/api/tree', { dir: rel }); }
   catch (e) { if (rel !== '.') openDirs.delete(rel); container.replaceChildren(el('div', 'hint', e.message)); return; }
+  if (rel === '.') treeRoot = data.root || treeRoot;
   const holder = document.createElement('div'); const pending = []; // 裏で組み立ててから、一度に差し替える (ちらつき防止)
   if (!data.entries.length) holder.append(el('div', 'hint', '(空)'));
   for (const ent of data.entries) {
@@ -597,7 +598,7 @@ function closeCtx() { $('#ctxmenu')?.remove(); }
 function showCtx(x, y, rel, isDir, row) {
   closeCtx(); const m = el('div', 'ctxmenu'); m.id = 'ctxmenu';
   const item = (label, act, cls) => { const b = el('div', `ci ${cls || ''}`, label); b.onclick = () => { closeCtx(); act(); }; m.append(b); };
-  if (isDir) item('開く / 閉じる', () => row.click());
+  if (isDir) { item('開く / 閉じる', () => row.click()); item('このフォルダを作業フォルダにする', () => switchCwd(absPath(rel))); }
   else { item('プレビュー', () => openPreview(rel, row)); item('＠ 入力欄に挿入', () => insertAtCursor(atRef(rel))); item('添付する', () => addRef(rel)); }
   item('パスをコピー', async () => { try { await navigator.clipboard.writeText(rel); toast(`コピーしました: ${rel}`); } catch { toast('コピーできませんでした', { bad: true }); } });
   m.append(el('div', 'csep')); item('ごみ箱へ移動…', () => deleteRels([rel]), 'danger');
@@ -784,7 +785,7 @@ showTab(store.get('tab', 'sessions'));
 
 // ---------- サイドバー: Git の変更 ----------
 const GIT_LABEL = { M: '変更', A: '追加', D: '削除', R: '名前変更', C: 'コピー', U: '競合', '?': '未追跡' };
-const gitState = { staged: 0 };
+const gitState = { staged: 0, count: 0 };
 let gitSel = null;
 const isConflict = (xy) => xy.includes('U') || xy === 'AA' || xy === 'DD';
 async function gitPost(action, body) {
@@ -823,15 +824,23 @@ async function loadGit() {
   const list = $('#gitlist'), br = $('#gitbranch'), badge = $('#gitcount'), box = $('#commitbox');
   let d; try { d = await api('/api/git/status', {}); } catch (e) { list.textContent = ''; list.append(el('div', 'hint', e.message)); box.hidden = true; return; }
   list.textContent = ''; badge.hidden = true;
-  if (!d.repo) { br.textContent = ''; br.disabled = true; closeBranchMenu(); box.hidden = true; list.append(el('div', 'hint', 'このフォルダは Git リポジトリではありません')); return; }
-  br.textContent = `⎇ ${d.branch && d.branch !== 'HEAD' ? d.branch : '(detached HEAD)'} ▾`; br.disabled = false;
+  if (!d.repo) { br.textContent = ''; br.disabled = true; $('.repoline').hidden = true; closeBranchMenu(); box.hidden = true; list.append(el('div', 'hint', 'このフォルダは Git リポジトリではありません')); return; }
+  const bname = d.branch && d.branch !== 'HEAD' ? d.branch : '(detached HEAD)';
+  const BS = String.fromCharCode(92);
+  const norm = (x) => String(x || '').split(BS).join('/').replace(/\/+$/, '').toLowerCase();
+  const repoName = d.top && norm(d.top) !== norm(cwdEl.value) ? String(d.top).split(BS).join('/').replace(/\/+$/, '').split('/').pop() : ''; // 作業フォルダが、リポジトリの中のサブフォルダのとき
+  br.textContent = `${repoName ? `${repoName} · ` : ''}⎇ ${bname}${d.files.length ? ' ●' : ''} ▾`; br.disabled = false;
+  br.title = `リポジトリ: ${d.top}
+ブランチ: ${bname}${d.files.length ? `
+未コミットの変更: ${d.files.length} 件` : ''}
+(クリックでブランチを切り替え / 新規作成)`; $('.repoline').hidden = false;
   const tracked = d.files.filter((f) => f.xy !== '??');
   const conflict = tracked.filter((f) => isConflict(f.xy));
   const ok = tracked.filter((f) => !isConflict(f.xy));
   const staged = ok.filter((f) => f.xy[0] !== ' ');
   const changed = ok.filter((f) => f.xy[1] !== ' ');
   const untracked = d.files.filter((f) => f.xy === '??');
-  box.hidden = false; gitState.staged = staged.length; updateCommitBtn();
+  box.hidden = false; gitState.staged = staged.length; gitState.count = d.files.length; updateCommitBtn();
   if (!d.files.length) { list.append(el('div', 'hint', '変更はありません')); return; }
   badge.textContent = d.files.length; badge.hidden = false;
   gitSection(list, '競合', conflict, 'conflict');
@@ -877,9 +886,12 @@ async function switchBranch(name, create) {
 }
 async function openBranchMenu() {
   if (!brMenu.hidden) { closeBranchMenu(); return; }
-  let b; try { b = await api('/api/git/branches', {}); } catch (e) { gitMsg(e.message, true); return; }
-  brMenu.textContent = ''; brMenu.hidden = false;
-  if (b.dirty) brMenu.append(el('div', 'bnote', `未コミットの変更が ${b.dirty} 件あります。切り替えで衝突する場合は Git が拒否します`));
+  brMenu.textContent = ''; brMenu.hidden = false; brMenu.append(el('div', 'hint', 'ブランチを読み込み中…')); // 押した瞬間に開く (Git の応答を待たない)
+  let b; try { b = await api('/api/git/branches', {}); } catch (e) { closeBranchMenu(); gitMsg(e.message, true); return; }
+  if (brMenu.hidden) return; // 読み込み中に閉じられた
+  brMenu.textContent = '';
+  const dirty = gitState.count || 0;
+  if (dirty) brMenu.append(el('div', 'bnote', `未コミットの変更が ${dirty} 件あります。切り替えで衝突する場合は Git が拒否します`));
   const filter = el('input', 'bfilter'); filter.placeholder = '検索 / 新しいブランチ名を入力'; filter.spellcheck = false; filter.autocomplete = 'off';
   const list = el('div', 'blist'); brMenu.append(filter, list);
   let items = []; let sel = 0;
@@ -1146,8 +1158,8 @@ document.addEventListener('keydown', (e) => {
 async function switchCwd(raw) {
   const value = raw.trim(); if (!value) return false;
   if (busy) { cwdEl.value = lastGoodCwd; return false; }
-  try { const d = await api('/api/dirs', { path: value }); cwdEl.classList.remove('invalid'); cwdEl.title = ''; cwdEl.value = d.path; setParent(d.parent); }
-  catch (e) { cwdEl.classList.add('invalid'); cwdEl.title = `フォルダが見つかりません: ${e.message}`; return false; }
+  try { const d = await api('/api/dirs', { path: value }); cwdEl.classList.remove('invalid'); cwdEl.title = ''; cwdEl.value = d.path; setParent(d.parent); renderCrumbs(); }
+  catch (e) { cwdEl.classList.add('invalid'); cwdEl.title = `フォルダが見つかりません: ${e.message}`; renderCrumbs(); return false; }
   if (cwdEl.value === lastGoodCwd) return true;
   lastGoodCwd = cwdEl.value; store.set('cwd', cwdEl.value); pushRecent(cwdEl.value); invalidateIndex(); clearSearch();
   ws.send(JSON.stringify({ type: 'newSession' })); currentSession = null; clearChat(); loadSessions(); loadRoot(); loadCommands(); loadGit(); watchCwd();
@@ -1156,12 +1168,53 @@ async function switchCwd(raw) {
 cwdEl.addEventListener('change', () => switchCwd(cwdEl.value));
 fillRecentList();
 
-const dlg = { box: $('#dlg'), list: $('#dlg-list'), pathIn: $('#dlg-pathinput'), filter: $('#dlg-filter'), cur: '', parent: null, dirs: [], sep: '/', first: null };
+// ---------- 場所のバー: クリックできるパス (パンくず) / パスの入力 / Git のチップ ----------
+// 作業フォルダ = 会話・ファイル・変更 (Git) の前提。パスの各部分を押すと、そこを作業フォルダにする
+function pathParts(p) {
+  const unc = /^\\\\[^\\/]+[\\/][^\\/]+/.exec(p); // \\server\share
+  const win = /^[A-Za-z]:/.test(p);
+  const sep = p.includes('\\') || win || unc ? '\\' : '/';
+  const names = p.split(/[\\/]+/).filter(Boolean);
+  const parts = [];
+  if (unc) { const root = `\\\\${names[0]}\\${names[1]}`; parts.push({ label: root, path: `${root}\\` }); names.splice(0, 2); let acc = root; for (const n of names) { acc += `\\${n}`; parts.push({ label: n, path: acc }); } return parts; }
+  if (win) { const drive = names.shift(); parts.push({ label: `${drive}\\`, path: `${drive}\\` }); let acc = drive; for (const n of names) { acc += `\\${n}`; parts.push({ label: n, path: acc }); } return parts; }
+  parts.push({ label: '/', path: '/' }); let acc = '';
+  for (const n of names) { acc += `/${n}`; parts.push({ label: n, path: acc }); }
+  return parts;
+}
+const crumbsEl = $('#crumbs');
+function renderCrumbs() {
+  const p = cwdEl.value.trim(); crumbsEl.textContent = ''; crumbsEl.classList.toggle('invalid', cwdEl.classList.contains('invalid'));
+  crumbsEl.title = p ? `作業フォルダ: ${p}\n(各部分をクリックでそのフォルダへ / 空いている所をクリックでパスを入力)` : '作業フォルダが未設定です (クリックして入力)';
+  if (!p) { crumbsEl.append(el('span', 'crumb-empty', 'フォルダを選んでください')); return; }
+  const parts = pathParts(p);
+  parts.forEach((part, i) => {
+    if (i > 0) crumbsEl.append(el('span', 'crumbsep', '›'));
+    const b = el('button', `crumb${i === parts.length - 1 ? ' cur' : ''}`, part.label); b.type = 'button'; b.title = part.path;
+    b.onclick = (e) => { e.stopPropagation(); if (i < parts.length - 1) switchCwd(part.path); else startCwdEdit(); }; // 現在の場所を押すと、パスの入力へ
+    crumbsEl.append(b);
+  });
+  crumbsEl.classList.toggle('clip', crumbsEl.scrollWidth > crumbsEl.clientWidth + 1);
+}
+function startCwdEdit() { crumbsEl.hidden = true; cwdEl.hidden = false; cwdEl.focus(); cwdEl.select(); }
+function endCwdEdit() { cwdEl.hidden = true; crumbsEl.hidden = false; renderCrumbs(); }
+crumbsEl.addEventListener('click', startCwdEdit);
+cwdEl.addEventListener('blur', () => setTimeout(endCwdEdit, 120)); // 変更の処理 (change) が先に走るよう、少し待つ
+cwdEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { e.preventDefault(); cwdEl.value = lastGoodCwd || cwdEl.value; cwdEl.classList.remove('invalid'); endCwdEdit(); }
+  else if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); const v = cwdEl.value; switchCwd(v).then(endCwdEdit); } // 確定したら、パンくずの表示に戻る
+});
+window.addEventListener('resize', () => { if (!crumbsEl.hidden) renderCrumbs(); });
+// ツリーのフォルダを、作業フォルダにする (右クリックメニューから)
+let treeRoot = '';
+function absPath(rel) { const sep = treeRoot.includes('\\') || /^[A-Za-z]:/.test(treeRoot) ? '\\' : '/'; return treeRoot + (treeRoot.endsWith(sep) ? '' : sep) + rel.split('/').join(sep); }
+
+const dlg = { box: $('#dlg'), list: $('#dlg-list'), pathIn: $('#dlg-pathinput'), filter: $('#dlg-filter'), cur: '', parent: null, dirs: [], sep: '/', first: null, repos: {}, isRepo: false };
 const dlgJoin = (base, name) => (base.endsWith('\\') || base.endsWith('/') ? base + name : base + dlg.sep + name);
 async function dlgLoad(p, fallback) {
   try {
     const d = await api('/api/dirs', { path: p, hidden: $('#dlg-hidden').checked ? '1' : '0', fallback: fallback ? '1' : '0' });
-    Object.assign(dlg, { cur: d.path, parent: d.parent, dirs: d.dirs, sep: d.sep });
+    Object.assign(dlg, { cur: d.path, parent: d.parent, dirs: d.dirs, sep: d.sep, repos: d.repos || {}, isRepo: !!d.isRepo });
     const note = $('#dlg-note'); note.hidden = !d.fellBack;
     if (d.fellBack) note.textContent = `「${p}」はフォルダとして開けないため、いちばん近いフォルダを表示しています`;
     dlg.pathIn.value = d.path; $('#dlg-cur').textContent = d.path; $('#dlg-up').disabled = !d.parent; dlg.filter.value = '';
@@ -1177,11 +1230,21 @@ function dlgPlaces(d) {
   for (const p of list) { const x = el('div', 'dlg-pl', p.split(/[\\/]/).filter(Boolean).pop() || p); x.title = p; x.onclick = () => dlgLoad(p); rec.append(x); }
 }
 function dlgRender() {
-  const q = dlg.filter.value.trim().toLowerCase();
-  const items = dlg.dirs.filter((n) => !q || n.toLowerCase().includes(q));
+  const q = dlg.filter.value.trim().toLowerCase(); const only = $('#dlg-onlyrepos').checked;
+  const items = dlg.dirs.filter((n) => (!q || n.toLowerCase().includes(q)) && (!only || dlg.repos[n]));
+  const repoCount = Object.keys(dlg.repos).length;
+  $('#dlg-cur').textContent = `${dlg.cur}${dlg.isRepo ? '  (Git リポジトリ)' : ''}`;
+  $('#dlg-onlyrepos-label').hidden = !repoCount; // このフォルダの下にリポジトリがあるときだけ、絞り込みを出す
   dlg.list.textContent = '';
-  if (!items.length) dlg.list.append(el('div', 'hint', q ? '一致するフォルダがありません' : 'サブフォルダはありません'));
-  for (const n of items) { const it = el('div', 'dlg-it'); it.append(el('span', '', '📁'), el('span', '', n)); it.onclick = () => dlgLoad(dlgJoin(dlg.cur, n)); dlg.list.append(it); }
+  if (!items.length) dlg.list.append(el('div', 'hint', only ? 'リポジトリがありません' : q ? '一致するフォルダがありません' : 'サブフォルダはありません'));
+  for (const n of items) {
+    const full = dlgJoin(dlg.cur, n); const it = el('div', 'dlg-it');
+    it.append(el('span', '', dlg.repos[n] ? '🔀' : '📁'), el('span', 'dn', n));
+    if (dlg.repos[n]) { const rb = el('span', 'rb', `⎇ ${dlg.repos[n]}`); rb.title = 'Git のリポジトリ (現在のブランチ)'; it.append(rb); }
+    const pick = el('button', 'ghost pick', '選ぶ'); pick.type = 'button'; pick.title = 'このフォルダを作業フォルダにして閉じる';
+    pick.onclick = async (e) => { e.stopPropagation(); if (await switchCwd(full)) dlgClose(); };
+    it.append(pick); it.onclick = () => dlgLoad(full); dlg.list.append(it);
+  }
   dlg.first = items[0] ? dlgJoin(dlg.cur, items[0]) : null;
 }
 function dlgClose() { dlg.box.hidden = true; cwdEl.focus(); }
@@ -1189,6 +1252,7 @@ $('#cwd-browse').onclick = () => { dlg.box.hidden = false; dlgLoad(cwdEl.value.t
 $('#dlg-close').onclick = dlgClose; $('#dlg-cancel').onclick = dlgClose;
 $('#dlg-up').onclick = () => { if (dlg.parent) dlgLoad(dlg.parent); };
 $('#dlg-hidden').onchange = () => dlgLoad(dlg.cur);
+$('#dlg-onlyrepos').onchange = dlgRender;
 dlg.filter.oninput = dlgRender;
 dlg.filter.onkeydown = (e) => { if (e.key === 'Enter' && !e.isComposing && dlg.first) { e.preventDefault(); dlgLoad(dlg.first); } };
 dlg.pathIn.onkeydown = (e) => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); dlgLoad(dlg.pathIn.value); } };
