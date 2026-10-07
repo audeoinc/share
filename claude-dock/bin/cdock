@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# cdock — Claude Code + Files + Shell を1つのターミナルに並べるランチャー
+# usage: cdock [dir] [-- claude args...]
+set -euo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+ROOT="$(dirname "$(dirname "$SELF")")"
+CLAUDE_BIN="${CDOCK_CLAUDE:-claude}"
+SOCK="cdock"                       # 専用ソケット: 既存の tmux 設定/セッションと干渉しない
+TMUX_="tmux -L $SOCK -f $ROOT/lib/tmux.conf"
+
+command -v tmux >/dev/null    || { echo "tmux が必要です (brew/apt install tmux)" >&2; exit 1; }
+command -v python3 >/dev/null || { echo "python3 が必要です" >&2; exit 1; }
+command -v "$CLAUDE_BIN" >/dev/null || { echo "claude コマンドが見つかりません (CDOCK_CLAUDE で指定可)" >&2; exit 1; }
+
+DIR="."
+if [[ $# -gt 0 && "$1" != "--" ]]; then DIR="$1"; shift; fi
+[[ "${1:-}" == "--" ]] && shift
+DIR="$(cd "$DIR" && pwd)"
+SESSION="cdock-$(printf '%s' "$DIR" | cksum | cut -d' ' -f1)"
+
+# 既存セッションがあればアタッチ
+if $TMUX_ has-session -t "$SESSION" 2>/dev/null; then
+  exec $TMUX_ attach -t "$SESSION"
+fi
+
+EXPLORER_W="${CDOCK_EXPLORER_WIDTH:-28}"
+SHELL_H="${CDOCK_SHELL_HEIGHT:-30}"   # %
+SHELL_POS="${CDOCK_SHELL_POS:-bottom}" # bottom | right
+
+CLAUDE_CMD="$(printf '%q ' "$CLAUDE_BIN" "$@")"
+
+# 1) Claude ペイン
+CLAUDE_PANE="$($TMUX_ new-session -d -s "$SESSION" -c "$DIR" -x 200 -y 50 -P -F '#{pane_id}' "$CLAUDE_CMD; exec \$SHELL")"
+$TMUX_ set-option -t "$SESSION" -g @cdock_claude "$CLAUDE_PANE"
+
+# 2) Shell ペイン
+if [[ "$SHELL_POS" == "right" ]]; then
+  SH_PANE="$($TMUX_ split-window -t "$CLAUDE_PANE" -h -l "${SHELL_H}%" -c "$DIR" -P -F '#{pane_id}')"
+else
+  SH_PANE="$($TMUX_ split-window -t "$CLAUDE_PANE" -v -l "${SHELL_H}%" -c "$DIR" -P -F '#{pane_id}')"
+fi
+
+# 3) Files ペイン (左端・全高)
+EXP_PANE="$($TMUX_ split-window -t "$CLAUDE_PANE" -hb -f -l "$EXPLORER_W" -c "$DIR" -P -F '#{pane_id}' \
+  "CDOCK_TARGET=$CLAUDE_PANE CDOCK_TMUX='tmux -L $SOCK' CDOCK_FOCUS=$CLAUDE_PANE python3 $ROOT/lib/explorer.py $DIR")"
+
+$TMUX_ set-option -t "$SESSION" -g @cdock_files  "$EXP_PANE"
+$TMUX_ set-option -t "$SESSION" -g @cdock_shell  "$SH_PANE"
+$TMUX_ select-pane -t "$EXP_PANE" -T "Files (Alt+1)"
+$TMUX_ select-pane -t "$SH_PANE" -T "Shell (Alt+3)"
+$TMUX_ select-pane -t "$CLAUDE_PANE" -T "Claude (Alt+2)"
+exec $TMUX_ attach -t "$SESSION"
