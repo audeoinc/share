@@ -413,3 +413,4 @@ button.danger:disabled { opacity: .45; cursor: default; }
 .runstat.ok { color: var(--ok); } .runstat.bad { color: var(--bad); } .runstat.busy { color: var(--blue); }
 .runout { flex: 1; min-height: 120px; margin: 0; padding: 8px 10px; overflow: auto; background: var(--code); border: 1px solid var(--rule); border-radius: 8px; font: calc(var(--fs, 14px) - 2px)/var(--lh-code) var(--mono); white-space: pre-wrap; word-break: break-all; }
 .runmeta { flex-wrap: wrap; } .runmeta .runstat { flex: 1 1 100%; } .runmeta .sp { display: none; } .runmeta button { white-space: nowrap; }
+.phead .pname { font-family: var(--sans); }
