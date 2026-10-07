@@ -106,6 +106,62 @@ function previewFile(file, name) {
   return { ...base, kind: /\.(md|markdown)$/i.test(name) ? 'markdown' : 'text', text: decodeText(buf), truncated: st.size > MAX_TEXT };
 }
 
+// ---- 添付ファイル (ドラッグ＆ドロップ / 貼り付け / 選択) ----
+// ブラウザはファイルの場所を教えないので、中身を一時フォルダに保存して Claude が読めるようにする。作業フォルダは汚さない。
+const UPLOAD_ROOT = path.join(os.tmpdir(), 'cdock-uploads');
+const MAX_UPLOAD = Number(process.env.CDOCK_MAX_UPLOAD_MB || 50) * 1024 * 1024;
+const UPLOAD_KEEP_MS = 7 * 24 * 3600 * 1000;
+fs.mkdirSync(UPLOAD_ROOT, { recursive: true });
+(function cleanOldUploads() { // 7 日より古い添付は起動時に削除
+  try {
+    for (const d of fs.readdirSync(UPLOAD_ROOT)) {
+      const p = path.join(UPLOAD_ROOT, d);
+      try { if (Date.now() - fs.statSync(p).mtimeMs > UPLOAD_KEEP_MS) fs.rmSync(p, { recursive: true, force: true }); } catch { /* 無視 */ }
+    }
+  } catch { /* 無視 */ }
+})();
+function safeName(raw) {
+  let n = path.basename(String(raw || '').replace(/\\/g, '/')); // パス区切りを除く
+  n = n.replace(/[\u0000-\u001f<>:"/\\|?*]/g, '_').replace(/^[. ]+|[. ]+$/g, '');
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(n)) n = `_${n}`; // Windows の予約名
+  if (n.length > 120) { const ext = path.extname(n).slice(0, 12); n = n.slice(0, 120 - ext.length) + ext; }
+  return n || 'file';
+}
+// クライアントから来たパスが、アップロード用フォルダの中のファイルか確かめる
+function uploadedPath(p) {
+  if (typeof p !== 'string' || !p) return null;
+  try {
+    const real = fs.realpathSync(p); const root = fs.realpathSync(UPLOAD_ROOT);
+    return real.startsWith(root + path.sep) && fs.statSync(real).isFile() ? real : null;
+  } catch { return null; }
+}
+// 左のエクスプローラからドロップされたプロジェクト内のファイル: 作業フォルダの外 (リンク経由を含む) は受け付けない
+function projectFile(root, rel) {
+  if (typeof rel !== 'string' || !rel) return null;
+  try {
+    const base = fs.realpathSync(root); const real = fs.realpathSync(path.resolve(base, rel));
+    return real.startsWith(base + path.sep) && fs.statSync(real).isFile() ? real : null;
+  } catch { return null; }
+}
+function receiveUpload(req, res) {
+  const name = safeName(new URL(req.url, 'http://x').searchParams.get('name'));
+  const declared = Number(req.headers['content-length'] || 0);
+  if (declared > MAX_UPLOAD) { res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ error: `ファイルが大きすぎます (上限 ${Math.round(MAX_UPLOAD / 1048576)}MB)` })); req.resume(); return; }
+  const dir = path.join(UPLOAD_ROOT, crypto.randomBytes(6).toString('hex'));
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, name);
+  const out = fs.createWriteStream(file, { flags: 'wx' });
+  let size = 0, failed = false;
+  const fail = (code, msg) => {
+    if (failed) return; failed = true; out.destroy(); fs.rmSync(dir, { recursive: true, force: true });
+    if (!res.headersSent) { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ error: msg })); }
+  };
+  req.on('data', (c) => { size += c.length; if (size > MAX_UPLOAD) { fail(413, `ファイルが大きすぎます (上限 ${Math.round(MAX_UPLOAD / 1048576)}MB)`); req.destroy(); } else out.write(c); });
+  req.on('end', () => { if (failed) return; out.end(() => { res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ ok: true, path: file, name, size })); }); });
+  req.on('error', () => fail(400, 'アップロードに失敗しました'));
+  out.on('error', () => fail(500, '保存に失敗しました'));
+}
+
 // ---- Git (読み取りのみ。シェルを通さず引数配列で実行) ----
 function git(cwd, args, max = 2 * 1024 * 1024, timeout = 15000, writes = false) {
   return new Promise((resolve, reject) => {
@@ -230,17 +286,22 @@ async function grepFiles(cwd, q, caseSensitive) {
 // ---- スラッシュコマンド一覧 (SDK から取得して作業フォルダごとに保存) ----
 const cmdCache = new Map();
 const FALLBACK_COMMANDS = [{ name: 'compact', description: '会話を要約して、コンテキストを小さくする', argumentHint: '[指示]' }, { name: 'context', description: 'コンテキストの使用状況を表示', argumentHint: '' }, { name: 'cost', description: '使用量を表示', argumentHint: '' }];
-async function listCommands(cwd) {
+// コマンド一覧とモデル一覧は、同じ初期化から取れる。「既定」が実際にどのモデルになるか (resolvedModel) も分かる
+async function getInit(cwd) {
   if (cmdCache.has(cwd)) return cmdCache.get(cwd);
   async function* idle() { await new Promise(() => {}); }
   const q = query({ prompt: idle(), options: { cwd, settingSources: ['user', 'project', 'local'], systemPrompt: { type: 'preset', preset: 'claude_code' } } });
-  let list = FALLBACK_COMMANDS;
+  let result = { commands: FALLBACK_COMMANDS, models: [] };
   try {
-    const cmds = await Promise.race([q.supportedCommands(), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 20000))]);
-    if (Array.isArray(cmds) && cmds.length) list = cmds.map((c) => ({ name: c.name, description: c.description || '', argumentHint: c.argumentHint || '' }));
-    cmdCache.set(cwd, list);
+    const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 20000));
+    const [cmds, models] = await Promise.race([Promise.all([q.supportedCommands(), q.supportedModels()]), timeout]);
+    result = {
+      commands: Array.isArray(cmds) && cmds.length ? cmds.map((c) => ({ name: c.name, description: c.description || '', argumentHint: c.argumentHint || '' })) : FALLBACK_COMMANDS,
+      models: (Array.isArray(models) ? models : []).map((m) => ({ value: m.value, resolved: m.resolvedModel || m.value, name: m.displayName || m.value, description: m.description || '' })),
+    };
+    cmdCache.set(cwd, result);
   } catch { /* フォールバックを返す (キャッシュしない) */ } finally { try { q.close(); } catch { /* 無視 */ } }
-  return list;
+  return result;
 }
 function readBody(req, limit = 8192) {
   return new Promise((resolve, reject) => {
@@ -288,7 +349,8 @@ async function api(url, res, req) {
       if (q.trim().length < 2) return json(res, { hits: [], truncated: false, short: true });
       return json(res, await grepFiles(cwd, q, url.searchParams.get('case') === '1'));
     }
-    if (url.pathname === '/api/commands') return json(res, await listCommands(cwd));
+    if (url.pathname === '/api/commands') return json(res, (await getInit(cwd)).commands);
+    if (url.pathname === '/api/models') return json(res, (await getInit(cwd)).models);
     if (url.pathname === '/api/git/status') return json(res, await gitStatus(cwd));
     if (url.pathname === '/api/git/diff') return json(res, await gitDiff(cwd, url.searchParams.get('path') || ''));
     if (url.pathname.startsWith('/api/git/') && req.method === 'POST') {
@@ -347,6 +409,7 @@ const server = http.createServer((req, res) => {
     return res.end();
   }
   if (!safeEqual(cookieToken(req), TOKEN)) { res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' }); return res.end('起動時に表示された URL (?t=...) から開いてください。'); }
+  if (url.pathname === '/api/upload' && req.method === 'POST') return receiveUpload(req, res);
   if (url.pathname.startsWith('/api/')) return api(url, res, req);
   let rel = decodeURIComponent(url.pathname); if (rel === '/') rel = '/index.html';
   const file = path.normalize(path.join(pub, rel));
@@ -371,14 +434,20 @@ wss.on('connection', (ws) => {
   let running = null;        // { q, abort }
   let sessionId = null;
 
-  send({ type: 'hello', cwd: DEFAULT_CWD });
+  send({ type: 'hello', cwd: DEFAULT_CWD, features: ['attach'] });
 
-  async function runTurn({ text, cwd, permissionMode, model }) {
+  async function runTurn({ text, cwd, permissionMode, model, attachments }) {
     if (running) return send({ type: 'error', message: '前の応答がまだ実行中です' });
     const abort = new AbortController();
     const workDir = cwd && fs.existsSync(cwd) ? path.resolve(cwd) : DEFAULT_CWD;
+    // 添付: アップロード用フォルダの中のファイルだけを受け付け、プロンプトの末尾に一覧として付ける
+    const files = (Array.isArray(attachments) ? attachments : []).map((a) => (a && a.rel ? projectFile(workDir, a.rel) : uploadedPath(a && a.path))).filter(Boolean).slice(0, 30);
+    const requested = Array.isArray(attachments) ? attachments.length : 0;
+    if (files.length < requested) send({ type: 'notice', message: `${requested - files.length} 件の添付を読み込めませんでした (見つからない、または許可された場所の外のファイルです)` });
+    if (files.length) text = `${text}\n\n<attachments>\n添付ファイル (ユーザーが添付したもの。Read ツールで開けます):\n${files.map((f) => `- ${f}`).join('\n')}\n</attachments>`;
     const options = {
       cwd: workDir,
+      additionalDirectories: [UPLOAD_ROOT],
       abortController: abort,
       includePartialMessages: true,
       settingSources: ['user', 'project', 'local'],
@@ -446,8 +515,7 @@ wss.on('connection', (ws) => {
 
   ws.on('message', async (data) => {
     let m; try { m = JSON.parse(data.toString()); } catch { return; }
-    if (m.type === 'send' && typeof m.text === 'string' && m.text.trim()) runTurn(m);
-    else if (m.type === 'permission') {
+    if (m.type === 'send' && typeof m.text === 'string' && m.text.trim()) runTurn(m);    else if (m.type === 'permission') {
       const p = pending.get(m.id); if (!p) return;
       pending.delete(m.id);
       if (m.allow) p.resolve({ behavior: 'allow', updatedInput: p.input, ...(m.remember && p.suggestions ? { updatedPermissions: p.suggestions } : {}) });

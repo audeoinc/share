@@ -71,14 +71,19 @@ function renderAssistantBlocks(box, blocks) {
 }
 const META_USER = /^\s*(<(command-|local-command|system-reminder|user-prompt-submit-hook)|This session is being continued)/;
 function renderUserContent(content) {
-  if (typeof content === 'string') { if (!META_USER.test(content)) add(el('div', 'msg user', content)); return; }
+  if (typeof content === 'string') { if (!META_USER.test(content)) historyUser(content); return; }
   for (const b of content || []) {
     if (b.type === 'tool_result') fillResult(b);
-    else if (b.type === 'text' && b.text.trim() && !META_USER.test(b.text)) add(el('div', 'msg user', b.text));
+    else if (b.type === 'text' && b.text.trim() && !META_USER.test(b.text)) historyUser(b.text);
   }
+}
+function historyUser(text) {
+  const s = splitAttachments(text);
+  add(userBubble(s.text, s.files.map((p) => ({ name: p.split('/').pop().split(String.fromCharCode(92)).pop(), status: 'ready' }))));
 }
 
 // ---------- 通信 ----------
+let serverFeatures = new Set();
 let ws, busy = false, live = null, sessionLabel = '', turnFailed = false, currentSession = null;
 function setBusy(v) {
   const was = busy; busy = v; sendBtn.hidden = v; stopBtn.hidden = !v;
@@ -92,15 +97,16 @@ function connect() {
   ws.onmessage = (e) => handle(JSON.parse(e.data));
 }
 function handle(m) {
-  if (m.type === 'hello') { if (!cwdEl.value) cwdEl.value = store.get('cwd', m.cwd); lastGoodCwd = cwdEl.value; refreshParent(); loadSessions(); loadRoot(); loadCommands(); loadGit(); }
+  if (m.type === 'hello') { serverFeatures = new Set(m.features || []); if (!cwdEl.value) cwdEl.value = store.get('cwd', m.cwd); lastGoodCwd = cwdEl.value; refreshParent(); loadSessions(); loadRoot(); loadCommands(); loadGit(); }
   else if (m.type === 'busy') setBusy(m.value);
+  else if (m.type === 'notice') add(el('div', 'err-box', m.message));
   else if (m.type === 'error') { if (!turnFailed) add(el('div', 'err-box', m.message)); }
   else if (m.type === 'permission_request') askPermission(m);
   else if (m.type === 'sdk') onSdk(m.msg);
 }
 
 function onSdk(msg) {
-  if (msg.type === 'system' && msg.subtype === 'init') { currentSession = msg.session_id; sessionLabel = `${msg.model}`; statusEl.textContent = busy ? '応答中…' : sessionLabel; return; }
+  if (msg.type === 'system' && msg.subtype === 'init') { currentSession = msg.session_id; lastModelId = msg.model || ''; sessionLabel = modelName(lastModelId); statusEl.title = lastModelId; if (modelEl.value === '') setDefaultLabel(lastModelId); statusEl.textContent = busy ? '応答中…' : sessionLabel; return; }
   if (msg.type === 'system' && msg.subtype === 'local_command_output') { add(el('pre', 'localout', msg.content)); return; }
   if (msg.type === 'system' && msg.subtype === 'compact_boundary') {
     const md = msg.compact_metadata || {};
@@ -166,21 +172,25 @@ function askPermission(p) {
 
 // ---------- 入力 ----------
 function send() {
-  const text = input.value.trim(); if (!text || busy || ws.readyState !== 1) return;
+  const ready = attachments.filter((a) => a.status === 'ready');
+  if (attachments.some((a) => a.status === 'uploading')) return; // アップロード中は送らない
+  const text = input.value.trim() || (ready.length ? '添付したファイルを確認してください。' : '');
+  if (!text || busy || ws.readyState !== 1) return;
+  if (ready.length && !serverFeatures.has('attach')) { add(el('div', 'err-box', 'サーバーが古いため、添付を送れません。start.cmd で起動し直してください。')); return; }
   if (cwdEl.classList.contains('invalid')) { add(el('div', 'err-box', 'フォルダが見つかりません。上部の「フォルダ」を確認してください。')); return; }
   if (text === '/clear') { input.value = ''; autosize(); hideSlash(); $('#new').onclick(); return; } // 新しい会話
   hideSlash();
   store.set('cwd', cwdEl.value); store.set('mode', modeEl.value); store.set('model', modelEl.value);
   turnFailed = false;
-  add(el('div', 'msg user', text));
-  ws.send(JSON.stringify({ type: 'send', text, cwd: cwdEl.value.trim(), permissionMode: modeEl.value, model: modelEl.value || undefined }));
-  input.value = ''; autosize();
+  add(userBubble(text, ready));
+  ws.send(JSON.stringify({ type: 'send', text, cwd: cwdEl.value.trim(), permissionMode: modeEl.value, model: modelEl.value || undefined, attachments: ready.map((a) => (a.rel ? { rel: a.rel } : { path: a.path })) }));
+  input.value = ''; autosize(); attachments = []; renderAttach();
 }
 function autosize() { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 220) + 'px'; }
 // ---------- スラッシュコマンド ----------
 let commands = [], slashItems = [], slashIdx = 0;
 const slashBox = $('#slash');
-async function loadCommands() { try { commands = await api('/api/commands', {}); } catch { commands = []; } }
+async function loadCommands() { try { commands = await api('/api/commands', {}); } catch { commands = []; } loadModels(); }
 function hideSlash() { slashBox.hidden = true; slashItems = []; }
 function updateSlash() {
   const m = /^\/([^\s]*)$/.exec(input.value);
@@ -216,7 +226,33 @@ input.addEventListener('keydown', (e) => {
 sendBtn.onclick = send;
 stopBtn.onclick = () => ws.send(JSON.stringify({ type: 'interrupt' }));
 modeEl.onchange = () => { store.set('mode', modeEl.value); if (busy) ws.send(JSON.stringify({ type: 'setMode', mode: modeEl.value })); };
-modelEl.onchange = () => store.set('model', modelEl.value);
+modelEl.onchange = () => { store.set('model', modelEl.value); if (modelEl.value === '' && lastModelId) setDefaultLabel(lastModelId); };
+
+// ---------- モデルの選択 (SDK が返す実際の一覧。「既定」が何になるかも表示する) ----------
+let models = [], lastModelId = '';
+const modelName = (id) => { const m = models.find((x) => x.value !== 'default' && (x.resolved === id || x.value === id)) || models.find((x) => x.resolved === id); return m ? m.name : id; };
+function defaultName() {
+  const d = models.find((x) => x.value === 'default'); if (!d) return '';
+  const hit = models.find((x) => x.value !== 'default' && x.resolved === d.resolved);
+  return hit ? hit.name : (d.description || '').split(' · ')[0] || d.resolved;
+}
+function setDefaultLabel(id) { const o = modelEl.querySelector('option[value=""]'); if (o) o.textContent = `既定 → ${modelName(id)}`; }
+function fillModels() {
+  if (!models.length) return;
+  const keep = modelEl.value || store.get('model', '');
+  modelEl.textContent = '';
+  const opt = (m, label) => { const o = el('option', '', label); o.value = m.value; o.title = `${m.resolved} — ${m.description}`; return o; };
+  const def = el('option', '', `既定 → ${defaultName()}`); def.value = ''; def.title = '設定に従う (サブスクリプション / 設定ファイルの指定)'; modelEl.append(def);
+  const featured = ['opus', 'fable', 'sonnet', 'haiku']; const rest = models.filter((m) => m.value !== 'default' && !featured.includes(m.value));
+  for (const v of featured) { const m = models.find((x) => x.value === v); if (m) modelEl.append(opt(m, m.name)); }
+  if (rest.length) { const g = el('optgroup'); g.label = 'ほかのモデル'; for (const m of rest) g.append(opt(m, m.name)); modelEl.append(g); }
+  // 以前の保存値 (完全なモデル ID) も、一覧の別名に対応づけて引き継ぐ
+  const byResolved = models.find((m) => m.value !== 'default' && keep && (m.resolved === keep || m.resolved.startsWith(keep)));
+  const target = [...modelEl.options].some((o) => o.value === keep) ? keep : byResolved ? byResolved.value : '';
+  modelEl.value = target; store.set('model', target);
+  if (lastModelId && !target) setDefaultLabel(lastModelId);
+}
+async function loadModels() { try { models = await api('/api/models', {}); } catch { models = []; } fillModels(); }
 
 // ---------- サイドバー: 会話 ----------
 const api = async (path, params) => {
@@ -238,7 +274,7 @@ async function loadSessions() {
     if (!list.length) box.append(el('div', 'hint', 'このフォルダの会話はまだありません'));
     for (const s of list) {
       const d = el('div', 'sess' + (s.sessionId === currentSession ? ' on' : ''));
-      const t = el('div', 't', s.title);
+      const t = el('div', 't', splitAttachments(s.title).text.trim() || s.title);
       const ed = el('span', 'ed', '✎'); ed.title = '名前を変更';
       ed.onclick = (ev) => { ev.stopPropagation(); renameStart(d, t, s); };
       d.append(t, el('div', 'd', ago(s.lastModified)), ed);
@@ -248,12 +284,12 @@ async function loadSessions() {
   } catch (e) { box.textContent = ''; box.append(el('div', 'hint', '一覧を取得できませんでした: ' + e.message)); }
 }
 function renameStart(row, titleEl, s) {
-  const inp = el('input', 'rn'); inp.value = s.title; titleEl.replaceWith(inp); inp.focus(); inp.select();
+  const inp = el('input', 'rn'); inp.value = splitAttachments(s.title).text.trim() || s.title; titleEl.replaceWith(inp); inp.focus(); inp.select();
   let done = false;
   const finish = async (save) => {
     if (done) return; done = true;
     const v = inp.value.trim();
-    if (save && v && v !== s.title) {
+    if (save && v && v !== (splitAttachments(s.title).text.trim() || s.title)) {
       try {
         const r = await fetch(`/api/rename?${new URLSearchParams({ cwd: cwdEl.value.trim() })}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: s.sessionId, title: v }) });
         if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.status);
@@ -296,9 +332,9 @@ async function fillDir(container, rel, depth) {
   if (!data.entries.length) container.append(el('div', 'hint', '(空)'));
   for (const ent of data.entries) {
     const childRel = rel === '.' ? ent.name : `${rel}/${ent.name}`;
-    const row = el('div', `row ${ent.dir ? 'dir' : 'file'}`); row.style.paddingLeft = `${6 + depth * 14}px`;
+    const row = el('div', `row ${ent.dir ? 'dir' : 'file'}`); row.style.paddingLeft = `${6 + depth * 18}px`;
     row.append(el('span', 'ch', ent.dir ? '▸' : ''), el('span', '', ent.name)); row.title = childRel;
-    if (!ent.dir) { row.draggable = true; row.ondragstart = (ev) => ev.dataTransfer.setData('text/plain', atRef(childRel) + ' '); }
+    if (!ent.dir) dragSource(row, childRel);
     container.append(row);
     if (ent.dir) {
       const sub = el('div'); sub.hidden = true; container.append(sub); let loaded = false;
@@ -513,7 +549,7 @@ function nameItem(path) {
   it.append(el('span', 'fb', base), el('span', 'fd', dir));
   const at = el('span', 'at2', '＠'); at.title = '入力欄に @パス を挿入';
   at.onclick = (ev) => { ev.stopPropagation(); insertAtCursor(atRef(path)); };
-  it.append(at); it.onclick = () => openPreview(path); it.dataset.path = path;
+  it.append(at); it.onclick = () => openPreview(path); it.dataset.path = path; dragSource(it, path);
   return it;
 }
 async function runSearch() {
@@ -542,7 +578,7 @@ async function runSearch() {
       if (h.path !== cur) { cur = h.path; const t = el('div', 'fres-file', h.path); t.title = h.path; fres.append(t); }
       const it = el('div', 'fres-it hit'); it.dataset.path = h.path; it.dataset.line = h.line;
       it.append(el('span', 'ln', String(h.line)), el('span', 'ltx', h.text.trim()));
-      it.onclick = () => openPreview(h.path, null, h.line); fres.append(it);
+      it.onclick = () => openPreview(h.path, null, h.line); dragSource(it, h.path); fres.append(it);
     }
     if (d.truncated) fres.append(el('div', 'hint', '先頭 200 件のみ表示しています。語を増やして絞り込んでください'));
     setSel(0);
@@ -566,6 +602,110 @@ $('#fsmode').onclick = () => {
 document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'p') { e.preventDefault(); showTab('files'); fsInput.focus(); fsInput.select(); }
 });
+
+// ---------- 添付 (ドラッグ＆ドロップ / Ctrl+V の貼り付け / 📎) ----------
+// ブラウザはファイルの場所を教えないので、中身をサーバーの一時フォルダへ送り、その場所を Claude に伝える。
+const MAX_UPLOAD_MB = 50, MAX_ATTACH = 20;
+let attachments = []; // { name, size, path, status: 'uploading' | 'ready' | 'error', error, thumb }
+const attachBox = $('#attach');
+function chipEl(a, removable) {
+  const chip = el('div', `chip ${a.status || 'ready'}`);
+  if (a.thumb) { const im = el('img'); im.src = a.thumb; im.alt = ''; chip.append(im); } else chip.append(el('span', 'ci', '📄'));
+  const sub = a.status === 'uploading' ? 'アップロード中…' : a.status === 'error' ? (a.error || 'エラー') : (a.sub || (a.size != null ? fmtSize(a.size) : ''));
+  const meta = el('span', 'cm'); meta.append(el('span', 'cn', a.name), ...(sub ? [el('span', 'cs', sub)] : []));
+  chip.title = a.name; chip.append(meta);
+  if (removable) {
+    const x = el('button', 'cx', '✕'); x.title = '外す'; x.type = 'button';
+    x.onclick = () => { attachments = attachments.filter((z) => z !== a); renderAttach(); };
+    chip.append(x);
+  }
+  return chip;
+}
+function renderAttach() {
+  attachBox.textContent = ''; attachBox.hidden = !attachments.length;
+  for (const a of attachments) attachBox.append(chipEl(a, true));
+  const uploading = attachments.some((a) => a.status === 'uploading');
+  sendBtn.disabled = uploading; sendBtn.title = uploading ? 'アップロードが終わるまでお待ちください' : '';
+}
+async function addFiles(fileList) {
+  for (const f of [...fileList]) {
+    if (attachments.length >= MAX_ATTACH) { add(el('div', 'err-box', `添付は ${MAX_ATTACH} 件までです`)); break; }
+    const a = { name: f.name || 'file', size: f.size, status: 'uploading', thumb: f.type && f.type.startsWith('image/') ? URL.createObjectURL(f) : null };
+    attachments.push(a);
+    if (f.size > MAX_UPLOAD_MB * 1048576) { a.status = 'error'; a.error = `大きすぎます (上限 ${MAX_UPLOAD_MB}MB)`; renderAttach(); continue; }
+    renderAttach();
+    try {
+      const r = await fetch(`/api/upload?name=${encodeURIComponent(a.name)}`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: f });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.path) throw new Error(j.error || `エラー ${r.status}`);
+      a.path = j.path; a.status = 'ready';
+    } catch (e) { a.status = 'error'; a.error = e.message; }
+    renderAttach();
+  }
+}
+// 左のエクスプローラ / 検索結果からドロップされたファイル (プロジェクト内。アップロード不要)
+function dragSource(node, rel) {
+  node.draggable = true;
+  node.ondragstart = (ev) => {
+    ev.dataTransfer.setData(REF_TYPE, rel);
+    ev.dataTransfer.setData('text/plain', `${atRef(rel)} `); // 他のアプリへ落とした場合は @パス の文字になる
+    ev.dataTransfer.effectAllowed = 'copy';
+  };
+}
+function addRef(rel) {
+  if (attachments.some((a) => a.rel === rel)) return;
+  if (attachments.length >= MAX_ATTACH) { add(el('div', 'err-box', `添付は ${MAX_ATTACH} 件までです`)); return; }
+  const slash = rel.lastIndexOf('/');
+  attachments.push({ name: rel.slice(slash + 1), sub: slash >= 0 ? rel.slice(0, slash) : 'プロジェクト内', rel, status: 'ready' });
+  renderAttach();
+}
+const stamp = () => { const d = new Date(); const p = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`; };
+// 貼り付けられた画像は名前が "image.png" になるので、日時入りの名前にする
+const namePasted = (f) => (/^image\.[a-z]+$/i.test(f.name) ? new File([f], `貼り付け-${stamp()}.${f.name.split('.').pop()}`, { type: f.type }) : f);
+input.addEventListener('paste', (e) => {
+  const files = [...((e.clipboardData && e.clipboardData.files) || [])];
+  if (!files.length) return; e.preventDefault(); addFiles(files.map(namePasted));
+});
+$('#attbtn').onclick = () => $('#filepick').click();
+$('#filepick').onchange = () => { addFiles($('#filepick').files); $('#filepick').value = ''; };
+
+// ドラッグ中は画面全体に「ここにドロップ」を表示する
+const dropzone = $('#dropzone'); let dragDepth = 0;
+const REF_TYPE = 'application/x-cdock-path';
+const hasFiles = (e) => !!(e.dataTransfer && [...e.dataTransfer.types].some((t) => t === 'Files' || t === REF_TYPE));
+const dragEnd = () => { dragDepth = 0; dropzone.hidden = true; document.body.classList.remove('dragging'); };
+window.addEventListener('dragenter', (e) => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth++; dropzone.hidden = false; document.body.classList.add('dragging'); });
+window.addEventListener('dragover', (e) => { if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
+window.addEventListener('dragleave', (e) => { if (!hasFiles(e)) return; dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) dragEnd(); });
+window.addEventListener('drop', (e) => {
+  if (!hasFiles(e)) return; e.preventDefault(); dragEnd();
+  const ref = e.dataTransfer.getData(REF_TYPE);
+  if (ref) { addRef(ref); input.focus(); return; } // 左のエクスプローラから: アップロードせず、プロジェクト内のファイルとして添付
+  const files = []; let folders = 0;
+  for (const it of [...e.dataTransfer.items]) {
+    if (it.kind !== 'file') continue;
+    const entry = it.webkitGetAsEntry && it.webkitGetAsEntry();
+    if (entry && entry.isDirectory) { folders++; continue; }
+    const f = it.getAsFile(); if (f) files.push(f);
+  }
+  if (folders) add(el('div', 'err-box', 'フォルダは添付できません (ファイルだけ受け付けます)'));
+  if (files.length) { input.focus(); addFiles(files); }
+});
+window.addEventListener('dragend', dragEnd);
+
+// 履歴から開いたときは、末尾の <attachments> ブロックをチップに戻して表示する
+function splitAttachments(t) {
+  const i = t.indexOf('<attachments>');
+  if (i < 0) return { text: t, files: [] };
+  const rest = t.slice(i + '<attachments>'.length).split('</attachments>')[0];
+  const files = rest.split(NL).filter((l) => l.startsWith('- ')).map((l) => l.slice(2).trim()).filter(Boolean);
+  return { text: t.slice(0, i).trimEnd(), files };
+}
+function userBubble(text, files) {
+  const b = el('div', 'msg user'); b.append(el('div', 'ut', text));
+  if (files && files.length) { const row = el('div', 'uchips'); for (const a of files) row.append(chipEl(a, false)); b.append(row); }
+  return b;
+}
 
 // ---------- フォルダの切り替え / 選択 ----------
 const recentDirs = () => { try { return JSON.parse(store.get('recentDirs', '[]')); } catch { return []; } };

@@ -93,7 +93,8 @@ textarea { width: 100%; border: 0; outline: 0; resize: none; background: transpa
 .hint { color: var(--muted); font-size: calc(var(--fs, 14px) - 2px); padding: 6px 10px; }
 .row { display: flex; align-items: center; gap: 4px; padding: var(--pad-s) 6px; border-radius: 6px; cursor: pointer; font: calc(var(--fs, 14px) - 1px)/var(--lh-ui) var(--mono); white-space: nowrap; user-select: none; }
 .row:hover { background: var(--user); }
-.row .ch { width: 12px; color: var(--muted); text-align: center; font-size: calc(var(--fs, 14px) - 4px); }
+.row .ch { width: 1.25em; flex: none; color: var(--muted); text-align: center; font-size: calc(var(--fs, 14px) + 3px); line-height: 1; }
+.row:hover .ch { color: var(--text); }
 .row.file { color: var(--text); } .row.dir { font-weight: 500; }
 @media (max-width: 820px) { .side { display: none; } .cwd span { display: none; } }
 
@@ -255,3 +256,24 @@ body.resizing iframe { pointer-events: none; }
 /* 「一つ上へ」ボタン */
 .cwdup { padding: 4px 9px; font-size: var(--fs, 14px); line-height: 1; }
 .cwdup:disabled { opacity: .4; cursor: default; }
+
+/* ---- 添付 (ドラッグ＆ドロップ / 貼り付け) ---- */
+.attach { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 0 8px; }
+.attach[hidden] { display: none; }
+.chip { display: flex; align-items: center; gap: 8px; max-width: 260px; padding: 4px 6px 4px 6px; background: var(--user); border: 1px solid var(--rule); border-radius: 10px; font-size: calc(var(--fs, 14px) - 1px); }
+.chip img { width: 28px; height: 28px; object-fit: cover; border-radius: 6px; flex: none; }
+.chip .ci { width: 28px; text-align: center; flex: none; }
+.chip .cm { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.chip .cn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.chip .cs { color: var(--muted); font-size: calc(var(--fs, 14px) - 3px); }
+.chip.error { border-color: var(--bad); } .chip.error .cs { color: var(--bad); }
+.chip.uploading { opacity: .7; }
+.chip .cx { flex: none; border: 0; background: none; padding: 0 4px; color: var(--muted); font-size: 12px; cursor: pointer; }
+.chip .cx:hover { color: var(--bad); }
+.uchips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.uchips .chip { background: var(--panel); }
+.attbtn { padding: 3px 8px; font-size: 14px; }
+.dropzone { position: fixed; inset: 0; z-index: 40; pointer-events: none; display: flex; align-items: center; justify-content: center; background: color-mix(in srgb, var(--bg) 78%, transparent); backdrop-filter: blur(2px); }
+.dropzone[hidden] { display: none; }
+.dropzone > div { padding: 22px 34px; border: 2px dashed var(--accent); border-radius: 16px; color: var(--accent); background: var(--panel); font-weight: 600; font-size: calc(var(--fs, 14px) + 3px); }
+body.dragging iframe { pointer-events: none; }
