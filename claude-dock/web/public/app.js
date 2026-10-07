@@ -162,7 +162,7 @@ function connect() {
   ws.onmessage = (e) => handle(JSON.parse(e.data));
 }
 function handle(m) {
-  if (m.type === 'hello') { serverFeatures = new Set(m.features || []); setupShells(m.shells || []); if (!cwdEl.value) cwdEl.value = store.get('cwd', m.cwd); lastGoodCwd = cwdEl.value; renderCrumbs(); refreshParent(); loadSessions(); loadRoot(); loadCommands(); loadGit(); watchCwd(); }
+  if (m.type === 'hello') { serverFeatures = new Set(m.features || []); setupShells(m.shells || []); if (m.claude && m.claude.warn) add(el('div', 'err-box', m.claude.warn)); if (m.claude) statusEl.dataset.cc = `${m.claude.source === 'installed' ? 'PC の' : '同梱の'} Claude Code ${m.claude.version}`; if (!cwdEl.value) cwdEl.value = store.get('cwd', m.cwd); lastGoodCwd = cwdEl.value; renderCrumbs(); refreshParent(); loadSessions(); loadRoot(); loadCommands(); loadGit(); watchCwd(); }
   else if (m.type === 'busy') setBusy(m.value);
   else if (m.type === 'notice') add(el('div', 'err-box', m.message));
   else if (m.type === 'fs') onFsChange(m);

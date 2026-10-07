@@ -16,7 +16,8 @@ import { query, listSessions, getSessionMessages, renameSession, deleteSession }
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pub = path.join(here, 'public');
 const arg = (name, def) => { const i = process.argv.indexOf(`--${name}`); return i > 0 ? process.argv[i + 1] : def; };
-const PORT = Number(arg('port', process.env.CDOCK_WEB_PORT || 8787));
+const PORT_EXPLICIT = process.argv.includes('--port') || !!process.env.CDOCK_WEB_PORT; // 指定があれば、使用中でも別のポートへは移らない
+let PORT = Number(arg('port', process.env.CDOCK_WEB_PORT || 8787));
 const HOST = '127.0.0.1';
 const DEFAULT_CWD = path.resolve(arg('cwd', process.cwd()));
 const TOKEN = process.env.CDOCK_WEB_TOKEN || crypto.randomBytes(24).toString('hex');
@@ -327,7 +328,7 @@ async function suggestCommitMessage(cwd) {
   const abort = new AbortController(); const timer = setTimeout(() => abort.abort(), 60000);
   let text = '';
   try {
-    for await (const msg of query({ prompt, options: { cwd: st.top, model: 'haiku', tools: [], persistSession: false, settingSources: [], maxTurns: 1, systemPrompt: SUGGEST_SYSTEM, abortController: abort } })) {
+    for await (const msg of query({ prompt, options: { ...claudeOpt, cwd: st.top, model: 'haiku', tools: [], persistSession: false, settingSources: [], maxTurns: 1, systemPrompt: SUGGEST_SYSTEM, abortController: abort } })) {
       if (msg.type === 'result') { if (msg.is_error || msg.subtype !== 'success') throw new Error(msg.result || '提案を作れませんでした'); text = msg.result || ''; }
     }
   } catch (e) { throw new Error(abort.signal.aborted ? '時間がかかりすぎたため中止しました' : String((e && e.message) || e)); } finally { clearTimeout(timer); }
@@ -492,7 +493,7 @@ const FALLBACK_COMMANDS = [{ name: 'compact', description: '会話を要約し�
 async function getInit(cwd) {
   if (cmdCache.has(cwd)) return cmdCache.get(cwd);
   async function* idle() { await new Promise(() => {}); }
-  const q = query({ prompt: idle(), options: { cwd, settingSources: ['user', 'project', 'local'], systemPrompt: { type: 'preset', preset: 'claude_code' } } });
+  const q = query({ prompt: idle(), options: { ...claudeOpt, cwd, settingSources: ['user', 'project', 'local'], systemPrompt: { type: 'preset', preset: 'claude_code' } } });
   let result = { commands: FALLBACK_COMMANDS, models: [] };
   try {
     const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 20000));
@@ -795,6 +796,42 @@ const server = http.createServer((req, res) => {
   });
 });
 
+// ---- Claude Code 本体。既定は SDK に同梱のもの。環境変数 CDOCK_CLAUDE_PATH で、PC にインストール済みのものを使える
+//      (パスを指定、または auto で探す)。start-light.cmd は同梱のコピーを入れず (約 250MB 減)、この指定で起動する
+const SDK_CC_VERSION = (() => { try { return JSON.parse(fs.readFileSync(path.join(here, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'package.json'), 'utf8')).claudeCodeVersion || ''; } catch { return ''; } })();
+function resolveClaude() {
+  const want = (process.env.CDOCK_CLAUDE_PATH || '').trim();
+  if (!want) return { source: 'bundled', path: '', version: SDK_CC_VERSION, warn: '' };
+  let exe = want;
+  if (/^auto$/i.test(want)) {
+    try {
+      const out = execFileSync(process.platform === 'win32' ? 'where' : 'which', ['claude'], { encoding: 'utf8', windowsHide: true, timeout: 10000 }).split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+      exe = (process.platform === 'win32' ? out.find((x) => /\.exe$/i.test(x)) : out[0]) || '';
+      if (!exe) return { source: 'bundled', path: '', version: SDK_CC_VERSION, warn: 'PC の Claude Code (claude.exe) が見つかりませんでした。同梱のものを使います' };
+    } catch { return { source: 'bundled', path: '', version: SDK_CC_VERSION, warn: 'PC の Claude Code が見つかりませんでした。同梱のものを使います' }; }
+  }
+  if (!fs.existsSync(exe)) return { source: 'bundled', path: '', version: SDK_CC_VERSION, warn: `CDOCK_CLAUDE_PATH のファイルが見つかりません: ${exe}。同梱のものを使います` };
+  let ver = '';
+  try { ver = (/(\d+\.\d+\.\d+)/.exec(execFileSync(exe, ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 15000 })) || [])[1] || ''; }
+  catch { return { source: 'bundled', path: '', version: SDK_CC_VERSION, warn: `指定の Claude Code を実行できませんでした (${exe})。.cmd ではなく実行ファイル (claude.exe) を指定してください。同梱のものを使います` }; }
+  const cmp = (x, y) => { const p = x.split('.').map(Number), q = y.split('.').map(Number); for (let i = 0; i < 3; i++) { if ((p[i] || 0) !== (q[i] || 0)) return (p[i] || 0) - (q[i] || 0); } return 0; };
+  const warn = !(SDK_CC_VERSION && ver) || !cmp(ver, SDK_CC_VERSION) ? ''
+    : cmp(ver, SDK_CC_VERSION) < 0 ? `PC の Claude Code (${ver}) は、この画面が想定するバージョン (${SDK_CC_VERSION}) より古いです。一部の機能が動かない場合は、Claude Code を更新してください`
+      : `PC の Claude Code (${ver}) は、この画面が想定するバージョン (${SDK_CC_VERSION}) より新しいです。通常は動きますが、新しい機能が画面に出ないことがあります。動作がおかしい場合は、Claude Code を ${SDK_CC_VERSION} にそろえるか、この画面の新しい版を入手してください`;
+  return { source: 'installed', path: exe, version: ver, warn };
+}
+const LIGHT = process.env.CDOCK_LIGHT === '1'; // ライト版 (同梱の Claude Code なし): PC の Claude Code が必須
+const CLAUDE = resolveClaude();
+if (LIGHT && CLAUDE.source !== 'installed') {
+  console.error(`
+Claude Code (claude.exe) が見つかりません。${CLAUDE.warn ? `
+  ${CLAUDE.warn.replace(/。?同梱のものを使います$/, '')}` : ''}
+  このライト版は、PC にインストール済みの Claude Code を使います (バージョン ${SDK_CC_VERSION} を推奨)。
+  Claude Code をインストールしてから、もう一度起動してください。インストール先が特殊な場合は、環境変数 CDOCK_CLAUDE_PATH に claude.exe のパスを指定してください。`);
+  process.exit(1);
+}
+const claudeOpt = CLAUDE.path ? { pathToClaudeCodeExecutable: CLAUDE.path } : {};
+
 // ---- WebSocket: 1 接続 = 1 画面。ターンごとに query() を起動し、session_id で resume する
 // 「実行」タブで使うシェル。Windows は PowerShell。CDOCK_WEB_SHELL=cmd で既定を cmd に、=pwsh で PowerShell 7 にできる
 let _runShell;
@@ -915,7 +952,7 @@ wss.on('connection', (ws) => {
     } catch { send({ type: 'watch_state', active: false, reason: 'この環境ではフォルダの監視ができません (「↻」かウィンドウに戻ったときに更新します)' }); }
   }
 
-  send({ type: 'hello', cwd: DEFAULT_CWD, features: ['attach', 'watch', 'move', 'trash', 'run'], shells: runShell().kind === 'ps' ? [{ id: 'ps', label: runShell().exe === 'pwsh' ? 'PowerShell 7' : 'PowerShell' }, { id: 'cmd', label: 'cmd' }] : [] });
+  send({ type: 'hello', cwd: DEFAULT_CWD, features: ['attach', 'watch', 'move', 'trash', 'run'], claude: { source: CLAUDE.source, version: CLAUDE.version, warn: CLAUDE.warn }, shells: runShell().kind === 'ps' ? [{ id: 'ps', label: runShell().exe === 'pwsh' ? 'PowerShell 7' : 'PowerShell' }, { id: 'cmd', label: 'cmd' }] : [] });
 
   async function runTurn({ text, cwd, permissionMode, model, effort, attachments }) {
     if (running) return send({ type: 'error', message: '前の応答がまだ実行中です' });
@@ -927,6 +964,7 @@ wss.on('connection', (ws) => {
     if (files.length < requested) send({ type: 'notice', message: `${requested - files.length} 件の添付を読み込めませんでした (見つからない、または許可された場所の外のファイルです)` });
     if (files.length) text = `${text}\n\n<attachments>\n添付 (ユーザーが添付したもの。ファイルは Read ツールで開けます。末尾が \\ か / のものはディレクトリで、Glob / Grep / Read で中身を確認できます):\n${files.map((f) => `- ${f}`).join('\n')}\n</attachments>`;
     const options = {
+      ...claudeOpt,
       cwd: workDir,
       additionalDirectories: [UPLOAD_ROOT],
       abortController: abort,
@@ -1017,8 +1055,23 @@ wss.on('connection', (ws) => {
   ws.on('close', () => { for (const c of runs.values()) killTree(c); stopWatch(); if (running) running.abort.abort(); });
 });
 
-server.listen(PORT, HOST, () => {
+const onListening = () => {
   const url = `http://${HOST}:${PORT}/?t=${TOKEN}`;
   console.log(`Claude Rogue  ${url}`);
+  console.log(`Claude Code: ${CLAUDE.source === 'installed' ? `PC のもの (${CLAUDE.path}, ${CLAUDE.version})` : `SDK 同梱 (${CLAUDE.version})`}${CLAUDE.warn ? `
+  注意: ${CLAUDE.warn}` : ''}`);
   console.log(`作業フォルダ: ${DEFAULT_CWD}`);
-});
+};
+// ポートが使用中のとき (すでに起動している画面があるなど): 指定がなければ、次の空きポートで起動する
+function listenFrom(port, left) {
+  const onError = (e) => {
+    if (e.code !== 'EADDRINUSE') throw e;
+    if (!PORT_EXPLICIT && left > 0) { console.log(`ポート ${port} は使用中です (すでに起動している画面があるかもしれません)。${port + 1} で起動します`); return listenFrom(port + 1, left - 1); }
+    console.error(`ポート ${port} は、すでに使われています。すでに起動している画面があれば、それを使ってください。別のポートで起動するには:  node server.js --port ${port + 1}`);
+    process.exit(1);
+  };
+  server.once('error', onError);
+  PORT = port;
+  server.listen(port, HOST, () => { server.off('error', onError); onListening(); });
+}
+listenFrom(PORT, 20);

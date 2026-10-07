@@ -103,6 +103,19 @@ URL には起動ごとのトークン (`?t=...`) が付きます。`127.0.0.1` �
 `release/crogue.zip` を渡します (git に置いてあります。`node_modules` は含みません)。移行先で展開し、`crogue\start.cmd [作業フォルダ]` を実行します (初回は `npm install` が走ります。Node.js が必要)。
 ソースを変えたら `pwsh -File pack.ps1` で作り直し、ZIP もあわせてコミットします。ZIP は作るたびに中身の日付が変わるので、ソースを変えたときだけ作り直してください (履歴が増えます)。
 
+## 容量が厳しい環境 (ライト版)
+既定 (通常版) では、Claude Agent SDK が **Claude Code 本体を同梱**します (Windows 用で約 244MB。`node_modules` 全体で約 580MB)。
+その PC にすでに Claude Code が入っている場合は、同梱のコピーを入れない **ライト版** が使えます (`node_modules` は約 340MB)。
+
+- **配布**: `release/crogue-light.zip` を渡します。展開して `crogue\start.cmd [作業フォルダ]` を実行するだけです (ZIP の中の `start.cmd` がライト版の起動です。通常版の案内は入っていません)。通常版は `release/crogue.zip` です。
+- **必要なもの**: Node.js、Claude Code (`claude.exe`。2.1.292 を推奨)。初回は `npm install --omit=optional` が走ります。
+- Claude Code は、`claude.exe` を自動で探します (`where claude`)。使うものを決めたいときは、環境変数 `CDOCK_CLAUDE_PATH` に `claude.exe` のパスを入れてください (`.cmd` は不可)。
+- **見つからないとき**: メッセージを出して終了します (同梱のコピーがないため)。
+- **バージョンをそろえてください。** この画面は、Claude Code 2.1.292 に対応する SDK で作ってあります。違うバージョンのときは、起動時と画面に警告が出ます (使うことは使います)。PC のほうが古いときは、一部の機能が動かないことがあるので、Claude Code を更新してください。PC のほうが新しいときは、通常は動きますが、新しい機能が画面に出ないことがあります。
+- 起動時のコンソールに、どの Claude Code を使っているかが出ます。
+- 通常版でも、`CDOCK_CLAUDE_PATH` を設定すれば PC の Claude Code を使えます (ただし同梱のコピーは入ったままです)。リポジトリには `start-light.cmd` (ライト版の起動) もあります。
+- ポート 8787 が使用中のときは、次の空きポートで起動します (`--port` を指定した場合は、別のポートへは移らず終了します)。止めたいサーバーは、起動したウィンドウを閉じるか、`Get-NetTCPConnection -LocalPort 8787 -State Listen | % { Stop-Process -Id $_.OwningProcess -Force }`。
+
 ## 予定
 .ppt / .docx のページ画像、ブランチの削除・マージ、リモートへの push など
 
