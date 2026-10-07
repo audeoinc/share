@@ -34,14 +34,15 @@
     <div class="tabs"><button id="tab-sessions" class="on">会話</button><button id="tab-files">ファイル</button><button id="tab-git">変更 <span id="gitcount" class="badge" hidden></span></button></div>
     <div id="pane-sessions" class="pane"><button id="new" class="newbtn">＋ 新しい会話</button><div id="sessions"></div></div>
     <div id="pane-files" class="pane" hidden>
-      <div class="fsearch"><input id="fsearch" placeholder="ファイルを検索 (Ctrl+P)" autocomplete="off" spellcheck="false"><button id="fsmode" class="ghost" title="ファイル名 / 中身 を切り替え">名前</button></div>
+      <div class="fsearch"><input id="fsearch" placeholder="ファイルを検索 (Ctrl+P)" autocomplete="off" spellcheck="false"><button id="fsmode" class="ghost" title="ファイル名 / 中身 を切り替え">名前</button><button id="treerefresh" class="ghost" type="button" title="更新">↻</button><button id="trashbtn" class="ghost" type="button" title="ごみ箱 (削除したファイルの復元)">🗑</button></div>
       <div id="fresults" hidden></div>
       <div id="tree"></div>
     </div>
-    <div id="pane-git" class="pane" hidden><div class="githead"><span id="gitbranch" class="gitbranch"></span><button id="gitrefresh" class="ghost" title="更新">↻</button></div><div id="gitlist"></div>
+    <div id="pane-git" class="pane" hidden><div class="githead"><button id="gitbranch" class="gitbranch" type="button" title="ブランチを切り替え / 新規作成" disabled></button><button id="gitrefresh" class="ghost" title="更新">↻</button></div><div id="branchmenu" class="branchmenu" hidden></div>
+      <div id="gitlist"></div>
       <div id="commitbox" class="commitbox" hidden>
         <textarea id="commitmsg" rows="2" placeholder="コミットメッセージ (Ctrl+Enter で確定)"></textarea>
-        <div class="crow"><span id="commitnote" class="cnote"></span><button id="commitbtn" class="send" disabled>コミット</button></div>
+        <div class="crow"><span id="commitnote" class="cnote"></span><button id="suggestbtn" class="ghost" type="button" disabled title="ステージ済みの差分を Claude (Haiku) に送って、メッセージの案を作ります">✨ 提案</button><button id="commitbtn" class="send" disabled>コミット</button></div>
       </div></div>
   </aside>
   <section class="main">

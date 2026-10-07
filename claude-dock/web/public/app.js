@@ -19,12 +19,68 @@ const mdLive = (t) => md((t.match(/^```/gm) || []).length % 2 ? `${t}\n${'`'.rep
 // ---------- 描画ヘルパー ----------
 function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
 function scrollDown(force) { const near = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 160; if (near || force) chat.scrollTop = chat.scrollHeight; }
-function add(node) { $('#empty')?.remove(); chat.appendChild(node); scrollDown(); return node; }
+function add(node) { $('#empty')?.remove(); chat.insertBefore(node, progressEl); scrollDown(); return node; }
+// ---------- 進行中の表示 (スピナー + 状態 + 経過秒数)。会話の最後に出る ----------
+const progressEl = el('div', 'progress'); progressEl.hidden = true; chat.appendChild(progressEl);
+const prog = { running: new Map(), phase: 'idle', phaseT0: 0, compact: false, perm: 0, open: false, timer: null, key: '' };
+const fmtSec = (ms) => { const s = Math.max(0, Math.floor(ms / 1000)); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`; };
+function progSetPhase(p) { if (prog.phase !== p) { prog.phase = p; prog.phaseT0 = Date.now(); } renderProgress(); }
+function progStart() {
+  prog.running.clear(); prog.compact = false; prog.perm = 0; prog.open = false; prog.phase = 'wait'; prog.phaseT0 = Date.now(); prog.key = '';
+  clearInterval(prog.timer); prog.timer = setInterval(renderProgress, 1000); renderProgress();
+}
+function progStop() { clearInterval(prog.timer); prog.timer = null; prog.running.clear(); prog.phase = 'idle'; prog.perm = 0; prog.compact = false; prog.key = ''; progressEl.hidden = true; progressEl.textContent = ''; }
+function progToolStart(b) { prog.running.set(b.id, { name: b.name, summary: toolSummary(b.name, b.input), input: b.input, t0: Date.now(), detail: '' }); renderProgress(); }
+function progToolDone(id) { prog.running.delete(id); renderProgress(); }
+function progToolProgress(m) {
+  let t = prog.running.get(m.tool_use_id);
+  if (!t) { t = { name: m.tool_name, summary: '', input: null, t0: Date.now(), detail: '' }; prog.running.set(m.tool_use_id, t); }
+  t.t0 = Date.now() - (m.elapsed_time_seconds || 0) * 1000; renderProgress(); // 実際の経過時間に合わせる
+}
+function progTask(m) { const t = m.tool_use_id && prog.running.get(m.tool_use_id); if (t && m.description) { t.detail = m.description; renderProgress(); } }
+function currentActivity() {
+  if (prog.perm > 0) return { label: '許可の確認待ち', detail: 'ボタンで許可・拒否してください', t0: prog.phaseT0, still: true };
+  if (prog.running.size) {
+    const all = [...prog.running.values()]; const t = all[all.length - 1];
+    const sub = t.name === 'Task' || t.name === 'Agent';
+    return { label: sub ? 'サブエージェント実行中' : '実行中', name: t.name, detail: t.detail || t.summary, t0: t.t0, more: all.length - 1, input: all };
+  }
+  if (prog.compact) return { label: '会話を要約中…', detail: '', t0: prog.phaseT0 };
+  if (prog.phase === 'prep') return { label: '準備中', name: prog.prepName || '', detail: '', t0: prog.phaseT0 };
+  if (prog.phase === 'text') return { label: '回答中…', detail: '', t0: prog.phaseT0 };
+  return { label: prog.phase === 'think' ? '考え中…' : '応答を待っています…', detail: '', t0: prog.phaseT0 };
+}
+function renderProgress() {
+  if (!busy && prog.phase === 'idle') { progressEl.hidden = true; return; }
+  const a = currentActivity(); progressEl.hidden = false;
+  const key = `${a.label}|${a.name || ''}|${a.detail}|${a.more || 0}|${a.still ? 1 : 0}|${prog.open ? 1 : 0}`;
+  if (key !== prog.key) { // 状態が変わったときだけ組み立て直す (秒数は下で更新するだけ)
+    prog.key = key; progressEl.textContent = ''; progressEl.classList.toggle('still', !!a.still);
+    const row = el('div', 'prow');
+    const spin = el('span', 'spin'); for (let i = 0; i < 4; i++) spin.append(el('i'));
+    row.append(spin, el('span', 'plab', a.label));
+    if (a.name) row.append(el('span', 'pname', a.name));
+    if (a.detail) row.append(el('span', 'pdet', a.detail));
+    if (a.more > 0) row.append(el('span', 'pmore', `＋${a.more}`));
+    row.append(el('span', 'psec', ''), el('span', `pchev${prog.open ? ' open' : ''}`, '›'));
+    row.onclick = () => { if (!a.input) return; prog.open = !prog.open; prog.key = ''; renderProgress(); };
+    row.style.cursor = a.input ? 'pointer' : 'default';
+    progressEl.append(row);
+    if (prog.open && a.input) {
+      const pre = el('pre', 'pdetail');
+      pre.textContent = a.input.map((t) => `${t.name}  ${typeof t.input === 'object' && t.input ? (t.input.command ?? t.input.file_path ?? t.input.pattern ?? JSON.stringify(t.input, null, 2)) : t.summary}`).join('\n\n');
+      progressEl.append(pre);
+    }
+    scrollDown();
+  }
+  const sec = progressEl.querySelector('.psec'); if (sec) sec.textContent = fmtSec(Date.now() - a.t0);
+}
+
 function clearChat() {
   chat.textContent = ''; cards.clear(); live = null;
   const e = el('div', 'empty'); e.id = 'empty';
   e.innerHTML = '<img src="icon.png" width="44" height="44" alt=""><h1>何をしましょうか？</h1><p>「ファイル」タブでクリックするとプレビュー、＠ で入力欄に @パス を入れられます。</p>';
-  chat.appendChild(e);
+  chat.appendChild(e); chat.appendChild(progressEl); progStop();
 }
 
 function toolSummary(name, inp = {}) {
@@ -88,7 +144,8 @@ let ws, busy = false, live = null, sessionLabel = '', turnFailed = false, curren
 function setBusy(v) {
   const was = busy; busy = v; sendBtn.hidden = v; stopBtn.hidden = !v;
   statusEl.textContent = v ? '応答中…' : sessionLabel;
-  if (was && !v) { loadSessions(); loadGit(); invalidateIndex(); }
+  if (v && !was) progStart(); else if (!v) progStop();
+  if (was && !v) { loadSessions(); loadGit(); invalidateIndex(); refreshTree(); }
 }
 function connect() {
   ws = new WebSocket(`ws://${location.host}/ws`);
@@ -97,9 +154,11 @@ function connect() {
   ws.onmessage = (e) => handle(JSON.parse(e.data));
 }
 function handle(m) {
-  if (m.type === 'hello') { serverFeatures = new Set(m.features || []); if (!cwdEl.value) cwdEl.value = store.get('cwd', m.cwd); lastGoodCwd = cwdEl.value; refreshParent(); loadSessions(); loadRoot(); loadCommands(); loadGit(); }
+  if (m.type === 'hello') { serverFeatures = new Set(m.features || []); if (!cwdEl.value) cwdEl.value = store.get('cwd', m.cwd); lastGoodCwd = cwdEl.value; refreshParent(); loadSessions(); loadRoot(); loadCommands(); loadGit(); watchCwd(); }
   else if (m.type === 'busy') setBusy(m.value);
   else if (m.type === 'notice') add(el('div', 'err-box', m.message));
+  else if (m.type === 'fs') onFsChange(m);
+  else if (m.type === 'watch_state') { $('#treerefresh').title = m.active ? '更新 (自動でも更新されます)' : (m.reason || '更新'); }
   else if (m.type === 'error') { if (!turnFailed) add(el('div', 'err-box', m.message)); }
   else if (m.type === 'permission_request') askPermission(m);
   else if (m.type === 'sdk') onSdk(m.msg);
@@ -112,11 +171,16 @@ function onSdk(msg) {
     const md = msg.compact_metadata || {};
     add(el('div', 'sysnote', `会話を要約しました${md.pre_tokens ? ` (${md.pre_tokens.toLocaleString()} → ${md.post_tokens ? md.post_tokens.toLocaleString() : '?'} トークン)` : ''}`)); return;
   }
+  if (msg.type === 'tool_progress') { progToolProgress(msg); return; }
+  if (msg.type === 'system' && msg.subtype === 'status') { prog.compact = msg.status === 'compacting'; renderProgress(); return; }
+  if (msg.type === 'system' && (msg.subtype === 'task_started' || msg.subtype === 'task_progress')) { progTask(msg); return; }
   if (msg.type === 'stream_event') {
     if (msg.parent_tool_use_id) return;
     const ev = msg.event;
-    if (ev.type === 'message_start') { live = { box: add(el('div', 'msg assistant')), text: '', md: null }; }
-    else if (ev.type === 'content_block_start' && live && ev.content_block.type === 'text') { live.text = ''; live.md = live.box.appendChild(el('div', 'md')); }
+    if (ev.type === 'message_start') { live = { box: add(el('div', 'msg assistant')), text: '', md: null }; progSetPhase('wait'); }
+    else if (ev.type === 'content_block_start' && ev.content_block && ev.content_block.type === 'thinking') progSetPhase('think');
+    else if (ev.type === 'content_block_start' && ev.content_block && ev.content_block.type === 'tool_use') { prog.prepName = ev.content_block.name; progSetPhase('prep'); }
+    else if (ev.type === 'content_block_start' && live && ev.content_block.type === 'text') { live.text = ''; live.md = live.box.appendChild(el('div', 'md')); progSetPhase('text'); }
     else if (ev.type === 'content_block_delta' && live && ev.delta.type === 'text_delta') {
       if (!live.md) live.md = live.box.appendChild(el('div', 'md'));
       live.text += ev.delta.text;
@@ -128,12 +192,14 @@ function onSdk(msg) {
     let box;
     if (!msg.parent_tool_use_id && live) { box = live.box; box.textContent = ''; live = null; } else { box = add(el('div', 'msg assistant')); }
     renderAssistantBlocks(box, msg.message.content);
+    for (const b of msg.message.content || []) if (b.type === 'tool_use') progToolStart(b);
+    if (!msg.parent_tool_use_id) progSetPhase('wait');
     if (!box.childNodes.length) box.remove();
     scrollDown(); return;
   }
   if (msg.type === 'user') {
     const c = msg.message && msg.message.content;
-    if (Array.isArray(c)) for (const b of c) if (b.type === 'tool_result') fillResult(b);
+    if (Array.isArray(c)) for (const b of c) if (b.type === 'tool_result') { fillResult(b); progToolDone(b.tool_use_id); }
     return;
   }
   if (msg.type === 'result') {
@@ -153,6 +219,7 @@ function onSdk(msg) {
 }
 
 function askPermission(p) {
+  prog.perm++; renderProgress();
   const card = el('div', 'card perm');
   const body = el('div', 'body');
   body.append(el('div', 'ask', p.title || `${p.displayName || p.toolName} の実行を許可しますか？`));
@@ -160,7 +227,7 @@ function askPermission(p) {
   body.append(el('pre', '', p.input.command ?? p.input.file_path ?? JSON.stringify(p.input, null, 2)));
   const btns = el('div', 'btns');
   const decide = (allow, remember, label) => {
-    ws.send(JSON.stringify({ type: 'permission', id: p.id, allow, remember }));
+    ws.send(JSON.stringify({ type: 'permission', id: p.id, allow, remember })); prog.perm = Math.max(0, prog.perm - 1); prog.phaseT0 = Date.now(); prog.running.forEach((t) => { t.t0 = Date.now(); }); renderProgress(); // 許可を待っていた時間は含めない
     btns.remove(); card.classList.add('done'); body.append(el('div', 'meta', label));
   };
   const ok = el('button', 'primary', '許可'); ok.onclick = () => decide(true, false, '許可しました');
@@ -326,31 +393,276 @@ function insertAtCursor(text) {
   const pos = (pre + sp + text + ' ').length; input.setSelectionRange(pos, pos); input.focus(); autosize();
 }
 const atRef = (rel) => (/\s/.test(rel) ? `@"${rel}"` : `@${rel}`);
+// ---------- ファイルツリー: 自動更新 / ドラッグで移動 / 元に戻す ----------
+const openDirs = new Set(); // 開いているフォルダ (更新しても開いたままにする)
+const MOVE_TYPE = 'application/x-cdock-move';
+let treeBusy = false, treeAgain = false;
+
 async function fillDir(container, rel, depth) {
-  container.textContent = '';
-  let data; try { data = await api('/api/tree', { dir: rel }); } catch (e) { container.append(el('div', 'hint', e.message)); return; }
-  if (!data.entries.length) container.append(el('div', 'hint', '(空)'));
+  let data;
+  try { data = await api('/api/tree', { dir: rel }); }
+  catch (e) { if (rel !== '.') openDirs.delete(rel); container.replaceChildren(el('div', 'hint', e.message)); return; }
+  const holder = document.createElement('div'); const pending = []; // 裏で組み立ててから、一度に差し替える (ちらつき防止)
+  if (!data.entries.length) holder.append(el('div', 'hint', '(空)'));
   for (const ent of data.entries) {
     const childRel = rel === '.' ? ent.name : `${rel}/${ent.name}`;
-    const row = el('div', `row ${ent.dir ? 'dir' : 'file'}`); row.style.paddingLeft = `${6 + depth * 18}px`;
+    const row = el('div', `row ${ent.dir ? 'dir' : 'file'}${previewRel === childRel ? ' sel' : ''}${treeSelRel === childRel ? ' picked' : ''}`); row.style.paddingLeft = `${6 + depth * 18}px`;
     row.append(el('span', 'ch', ent.dir ? '▸' : ''), el('span', '', ent.name)); row.title = childRel;
-    if (!ent.dir) dragSource(row, childRel);
-    container.append(row);
+    moveSource(row, childRel, !ent.dir);
+    row.oncontextmenu = (ev) => { ev.preventDefault(); pickRow(row, childRel); showCtx(ev.clientX, ev.clientY, childRel, ent.dir, row); };
+    holder.append(row);
     if (ent.dir) {
-      const sub = el('div'); sub.hidden = true; container.append(sub); let loaded = false;
-      row.onclick = async () => {
-        sub.hidden = !sub.hidden; row.querySelector('.ch').textContent = sub.hidden ? '▸' : '▾';
-        if (!sub.hidden && !loaded) { loaded = true; await fillDir(sub, childRel, depth + 1); }
+      const sub = el('div'); sub.hidden = true; holder.append(sub); let loaded = false;
+      const setOpen = async (open) => {
+        sub.hidden = !open; row.querySelector('.ch').textContent = open ? '▾' : '▸';
+        if (open) openDirs.add(childRel); else openDirs.delete(childRel);
+        if (open && !loaded) { loaded = true; await fillDir(sub, childRel, depth + 1); }
       };
+      row.onclick = () => { pickRow(row, childRel); setOpen(sub.hidden); };
+      dropTarget(row, childRel);
+      if (openDirs.has(childRel)) { sub.hidden = false; row.querySelector('.ch').textContent = '▾'; loaded = true; pending.push(fillDir(sub, childRel, depth + 1)); }
     } else {
       const at = el('span', 'at', '＠'); at.title = '入力欄に @パス を挿入';
       at.onclick = (ev) => { ev.stopPropagation(); insertAtCursor(atRef(childRel)); };
       row.append(at);
-      row.onclick = () => openPreview(childRel, row);
+      row.onclick = () => { pickRow(row, childRel); openPreview(childRel, row); };
       row.ondblclick = () => insertAtCursor(atRef(childRel));
+      row.addEventListener('dragover', (e) => { if (e.dataTransfer.types.includes(MOVE_TYPE)) e.stopPropagation(); }); // ファイルの上は移動先にならない
     }
   }
+  await Promise.all(pending);
+  container.replaceChildren(...holder.childNodes);
 }
+async function refreshTree() {
+  if (treeBusy) { treeAgain = true; return; }
+  treeBusy = true; const pane = $('#pane-files'); const top = pane.scrollTop;
+  try { await fillDir($('#tree'), '.', 0); } finally { treeBusy = false; }
+  pane.scrollTop = top;
+  if (treeAgain) { treeAgain = false; refreshTree(); }
+}
+function loadRoot(keep) { if (!keep) openDirs.clear(); return refreshTree(); }
+dropTarget($('#tree'), '.'); // ツリーの空いている場所へドロップ = 最上位のフォルダへ移動
+
+// ファイル / フォルダを、ドラッグで別のフォルダへ移動する (ファイルは、会話欄へのドロップで添付にもなる)
+function moveSource(node, rel, isFile) {
+  node.draggable = true;
+  node.ondragstart = (ev) => {
+    ev.dataTransfer.setData(MOVE_TYPE, rel);
+    if (isFile) { ev.dataTransfer.setData(REF_TYPE, rel); ev.dataTransfer.setData('text/plain', `${atRef(rel)} `); }
+    ev.dataTransfer.effectAllowed = isFile ? 'copyMove' : 'move';
+  };
+}
+function dropTarget(node, destRel) {
+  node.addEventListener('dragover', (e) => {
+    if (!e.dataTransfer.types.includes(MOVE_TYPE)) return;
+    e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'move'; node.classList.add('drop-target'); $('#dropzone').hidden = true;
+  });
+  node.addEventListener('dragleave', () => node.classList.remove('drop-target'));
+  node.addEventListener('drop', (e) => {
+    const from = e.dataTransfer.getData(MOVE_TYPE); if (!from) return;
+    e.preventDefault(); e.stopPropagation(); node.classList.remove('drop-target'); dragEnd(); doMove(from, destRel);
+  });
+}
+const parentOf = (p) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '');
+// 移動したパスを、開いているプレビュー・添付・開いているフォルダにも反映する
+function remapPaths(oldRel, newRel) {
+  const remap = (p) => (p === oldRel ? newRel : p.startsWith(`${oldRel}/`) ? newRel + p.slice(oldRel.length) : p);
+  const opened = [...openDirs].map(remap); openDirs.clear(); opened.forEach((p) => openDirs.add(p));
+  for (const a of attachments) if (a.rel) { const n = remap(a.rel); if (n !== a.rel) { a.rel = n; a.name = n.slice(n.lastIndexOf('/') + 1); a.sub = parentOf(n) || 'プロジェクト内'; } }
+  renderAttach();
+  if (gitSel) gitSel = remap(gitSel);
+  if (previewRel) { const n = remap(previewRel); if (n !== previewRel) openPreview(n); }
+}
+// 一時的なお知らせ (画面左下)。ボタンを付けられる
+let toastTimer = null;
+function toast(text, opt = {}) {
+  let t = $('#toast'); if (!t) { t = el('div', 'toast'); t.id = 'toast'; document.body.append(t); }
+  clearTimeout(toastTimer); t.textContent = ''; t.className = `toast${opt.bad ? ' bad' : ''}`;
+  t.append(el('span', 'tt', text));
+  if (opt.label) { const b = el('button', '', opt.label); b.type = 'button'; b.onclick = () => { t.remove(); opt.act(); }; t.append(b); }
+  const x = el('button', 'tx', '✕'); x.type = 'button'; x.title = '閉じる'; x.onclick = () => t.remove(); t.append(x);
+  toastTimer = setTimeout(() => t.remove(), opt.bad ? 12000 : 10000);
+}
+
+// ---------- 確認ダイアログ (選択肢つき)。Esc で null、Enter で既定のボタン ----------
+function askChoice({ title, body, buttons }) {
+  return new Promise((resolve) => {
+    const box = el('div', 'dlg'); const card = el('div', 'dlg-card small'); card.setAttribute('role', 'dialog');
+    card.append(el('div', 'dlg-head', title));
+    const msg = el('div', 'dlg-msg'); if (typeof body === 'string') msg.textContent = body; else msg.append(body); card.append(msg);
+    const foot = el('div', 'dlg-foot dlg-choices'); let def = null;
+    const done = (v) => { box.remove(); document.removeEventListener('keydown', onKey, true); resolve(v); };
+    for (const b of buttons) {
+      const btn = el('button', b.danger ? 'danger' : b.primary ? 'send' : 'ghost', b.label); btn.type = 'button'; btn.onclick = () => done(b.value);
+      if (b.def) def = btn; foot.append(btn);
+    }
+    card.append(foot); box.append(card);
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(null); }
+      else if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); e.stopPropagation(); (document.activeElement && foot.contains(document.activeElement) ? document.activeElement : def)?.click(); }
+    };
+    document.addEventListener('keydown', onKey, true);
+    box.addEventListener('mousedown', (e) => { if (e.target === box) done(null); });
+    document.body.append(box); (def || foot.lastChild).focus();
+  });
+}
+const baseName = (p) => p.slice(p.lastIndexOf('/') + 1);
+async function postJson(path, body) {
+  const r = await fetch(`${path}?${new URLSearchParams({ cwd: cwdEl.value.trim() })}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.error) throw Object.assign(new Error(j.error || `エラー ${r.status}`), { code: j.code, info: j.info });
+  return j;
+}
+
+// ---------- 移動 (同名があるときは選ぶ) / 元に戻す ----------
+const fsMovePost = (from, toDir, opt = {}) => postJson('/api/fs/move', { from, toDir, ...opt });
+async function doMove(from, destRel, opt) {
+  const toDir = destRel === '.' ? '' : destRel;
+  if (parentOf(from) === toDir) return; // すでにそのフォルダ: 何もしない
+  try {
+    const j = await fsMovePost(from, toDir, opt);
+    remapPaths(j.from, j.to); if (toDir) openDirs.add(toDir);
+    toast(`移動しました: ${j.from} → ${toDir || '(最上位)'}${j.to !== (toDir ? `${toDir}/` : '') + baseName(j.from) ? ` (${baseName(j.to)} に改名)` : ''}`, { label: '元に戻す', act: () => undoMove(j) });
+    refreshTree(); loadGit(); invalidateIndex();
+  } catch (e) {
+    if (e.code === 'exists' && !opt) {
+      const what = (d) => (d ? 'フォルダ' : 'ファイル');
+      const choice = await askChoice({
+        title: '同じ名前のものがあります',
+        body: `移動先に、同じ名前の${what(e.info.destIsDir)}「${e.info.name}」があります。どうしますか？`,
+        buttons: [
+          { label: '両方残す (名前を変えて移動)', value: 'rename', primary: true },
+          { label: '置き換える (元のものはごみ箱へ)', value: 'overwrite', danger: true },
+          { label: 'キャンセル', value: null, def: true },
+        ],
+      });
+      if (choice) doMove(from, destRel, { onConflict: choice });
+      return;
+    }
+    toast(e.message, { bad: true });
+  }
+}
+async function undoMove(j) {
+  try {
+    const back = await fsMovePost(j.to, parentOf(j.from), { name: baseName(j.from) }); // 改名していても、元の名前で戻す
+    remapPaths(back.from, back.to);
+    if (j.replacedId) await postJson('/api/trash/restore', { id: j.replacedId }); // 置き換えられたものも、ごみ箱から戻す
+    toast(`元に戻しました: ${back.to}${j.replacedId ? ' (置き換えられたものも復元)' : ''}`); refreshTree(); loadGit(); invalidateIndex();
+  } catch (e) { toast(`元に戻せませんでした: ${e.message}`, { bad: true }); }
+}
+
+// ---------- 削除 (cdock のごみ箱へ。30 日保管) ----------
+function forgetPath(rel) {
+  const hit = (p) => p === rel || p.startsWith(`${rel}/`);
+  attachments = attachments.filter((a) => !(a.rel && hit(a.rel))); renderAttach();
+  [...openDirs].filter(hit).forEach((p) => openDirs.delete(p));
+  if (previewRel && hit(previewRel)) { pv.box.hidden = true; previewRel = null; }
+  if (gitSel && hit(gitSel)) gitSel = null;
+  if (treeSelRel && hit(treeSelRel)) treeSelRel = null;
+}
+async function restoreItems(items) {
+  let renamed = 0; let failedMsg = '';
+  for (const it of items) { try { const r = await postJson('/api/trash/restore', { id: it.id }); if (r.renamed) renamed++; } catch (e) { failedMsg = e.message; } }
+  if (failedMsg) toast(`元に戻せませんでした: ${failedMsg}`, { bad: true });
+  else toast(`元に戻しました${renamed ? ` (同名があったため ${renamed} 件は名前を変えて復元)` : ''}`);
+  refreshTree(); loadGit(); invalidateIndex();
+}
+async function deleteRels(rels) {
+  if (!rels.length) return;
+  if (!serverFeatures.has('trash')) { toast('サーバーが古いため、削除できません。start.cmd で起動し直してください。', { bad: true }); return; }
+  const list = el('div'); list.append(el('div', '', `${rels.length === 1 ? '次のものを' : `${rels.length} 件を`}ごみ箱へ移動します。`));
+  const ul = el('ul', 'dlg-list2'); for (const r of rels.slice(0, 6)) ul.append(el('li', '', r)); if (rels.length > 6) ul.append(el('li', '', `ほか ${rels.length - 6} 件`)); list.append(ul);
+  list.append(el('div', 'dlg-sub', 'フォルダは、中身ごと移動します。「ファイル」タブのごみ箱ボタンか、お知らせの「元に戻す」で戻せます (30 日保管)。'));
+  const ok = await askChoice({ title: 'ごみ箱へ移動しますか？', body: list, buttons: [{ label: 'ごみ箱へ移動', value: true, danger: true }, { label: 'キャンセル', value: false, def: true }] });
+  if (!ok) return;
+  try {
+    const j = await postJson('/api/fs/delete', { paths: rels });
+    for (const it of j.items) forgetPath(it.rel);
+    if (j.items.length) toast(`ごみ箱へ移動しました: ${baseName(j.items[0].rel)}${j.items.length > 1 ? ` ほか ${j.items.length - 1} 件` : ''}`, { label: '元に戻す', act: () => restoreItems(j.items) });
+    if (j.failed.length) toast(`${j.failed.length} 件は移動できませんでした: ${j.failed[0].error}`, { bad: true });
+    refreshTree(); loadGit(); invalidateIndex();
+  } catch (e) { toast(e.message, { bad: true }); }
+}
+// 選択した行 (ファイルツリーで、最後にクリックしたもの)。Delete キーと右クリックメニューの対象
+let treeSelRel = null;
+function pickRow(row, rel) { document.querySelectorAll('#tree .row.picked').forEach((r) => r.classList.remove('picked')); row.classList.add('picked'); treeSelRel = rel; }
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Delete' || e.ctrlKey || e.altKey || e.metaKey || !treeSelRel || $('#pane-files').hidden) return;
+  const t = e.target; if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+  if (document.querySelector('.dlg:not([hidden])')) return;
+  e.preventDefault(); deleteRels([treeSelRel]);
+});
+// 右クリックメニュー
+function closeCtx() { $('#ctxmenu')?.remove(); }
+function showCtx(x, y, rel, isDir, row) {
+  closeCtx(); const m = el('div', 'ctxmenu'); m.id = 'ctxmenu';
+  const item = (label, act, cls) => { const b = el('div', `ci ${cls || ''}`, label); b.onclick = () => { closeCtx(); act(); }; m.append(b); };
+  if (isDir) item('開く / 閉じる', () => row.click());
+  else { item('プレビュー', () => openPreview(rel, row)); item('＠ 入力欄に挿入', () => insertAtCursor(atRef(rel))); item('添付する', () => addRef(rel)); }
+  item('パスをコピー', async () => { try { await navigator.clipboard.writeText(rel); toast(`コピーしました: ${rel}`); } catch { toast('コピーできませんでした', { bad: true }); } });
+  m.append(el('div', 'csep')); item('ごみ箱へ移動…', () => deleteRels([rel]), 'danger');
+  document.body.append(m);
+  const r = m.getBoundingClientRect(); m.style.left = `${Math.max(4, Math.min(x, innerWidth - r.width - 4))}px`; m.style.top = `${Math.max(4, Math.min(y, innerHeight - r.height - 4))}px`;
+}
+document.addEventListener('mousedown', (e) => { if (!e.target.closest || !e.target.closest('#ctxmenu')) closeCtx(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeCtx(); });
+window.addEventListener('blur', closeCtx);
+$('#pane-files').addEventListener('scroll', closeCtx);
+
+// ---------- ごみ箱の画面 (復元 / 完全に削除 / 空にする) ----------
+async function openTrash() {
+  let items; try { items = await api('/api/trash', {}); } catch (e) { toast(e.message, { bad: true }); return; }
+  const box = el('div', 'dlg'); const card = el('div', 'dlg-card trash'); card.setAttribute('role', 'dialog');
+  const head = el('div', 'dlg-head'); head.append(el('span', '', 'ごみ箱 (cdock)')); const x = el('button', 'ghost', '✕'); x.type = 'button'; head.append(x); card.append(head);
+  card.append(el('div', 'dlg-sub trash-note', '消したファイルは 30 日間ここに保管されます。このフォルダにあったものだけ、ここから復元できます。'));
+  const list = el('div', 'dlg-list trash-list'); card.append(list);
+  const foot = el('div', 'dlg-foot'); const cnt = el('span', 'dlg-cur', ''); const emptyBtn = el('button', 'danger', 'ごみ箱を空にする'); emptyBtn.type = 'button'; const closeBtn = el('button', 'ghost', '閉じる'); closeBtn.type = 'button';
+  foot.append(cnt, emptyBtn, closeBtn); card.append(foot); box.append(card);
+  const close = () => { box.remove(); document.removeEventListener('keydown', onKey, true); };
+  const onKey = (e) => { if (e.key === 'Escape' && !document.querySelector('.dlg + .dlg')) { e.preventDefault(); e.stopPropagation(); close(); } };
+  document.addEventListener('keydown', onKey, true); x.onclick = close; closeBtn.onclick = close; box.addEventListener('mousedown', (e) => { if (e.target === box) close(); });
+  const render = () => {
+    list.textContent = ''; cnt.textContent = `${items.length} 件`; emptyBtn.disabled = !items.length;
+    if (!items.length) list.append(el('div', 'hint', 'ごみ箱は空です'));
+    for (const it of items) {
+      const row = el('div', 'trow'); const info = el('div', 'tinfo');
+      info.append(el('div', 'tname', `${it.isDir ? '📁 ' : ''}${it.name}`), el('div', 'tpath', `${it.rel ?? it.orig} · ${ago(it.deletedAt)}`));
+      const rb = el('button', 'ghost', '復元'); rb.type = 'button'; rb.disabled = !it.here; rb.title = it.here ? '元の場所へ戻します' : 'このフォルダの外にあったものは、ここからは復元できません';
+      rb.onclick = async () => { try { const r = await postJson('/api/trash/restore', { id: it.id }); items = items.filter((z) => z.id !== it.id); render(); toast(`復元しました: ${r.path}${r.renamed ? ' (同名があったため名前を変更)' : ''}`); refreshTree(); loadGit(); invalidateIndex(); } catch (e) { toast(e.message, { bad: true }); } };
+      const db = el('button', 'danger', '完全に削除'); db.type = 'button';
+      db.onclick = async () => {
+        const ok = await askChoice({ title: '完全に削除しますか？', body: `「${it.name}」を完全に削除します。この操作は取り消せません。`, buttons: [{ label: '完全に削除', value: true, danger: true }, { label: 'キャンセル', value: false, def: true }] });
+        if (ok) { try { await postJson('/api/trash/purge', { id: it.id }); items = items.filter((z) => z.id !== it.id); render(); } catch (e) { toast(e.message, { bad: true }); } }
+      };
+      row.append(info, rb, db); list.append(row);
+    }
+  };
+  emptyBtn.onclick = async () => {
+    const ok = await askChoice({ title: 'ごみ箱を空にしますか？', body: `${items.length} 件を完全に削除します (ほかのフォルダのものも含みます)。この操作は取り消せません。`, buttons: [{ label: '空にする', value: true, danger: true }, { label: 'キャンセル', value: false, def: true }] });
+    if (ok) { try { await postJson('/api/trash/empty', {}); items = []; render(); } catch (e) { toast(e.message, { bad: true }); } }
+  };
+  render(); document.body.append(box); closeBtn.focus();
+}
+$('#trashbtn').onclick = openTrash;
+
+// フォルダの変化 (自作のファイル・移動・削除・外部の git 操作) をサーバーから受け取って、画面を更新する
+let fsTimer = null, diffState = null;
+function watchCwd() { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'watch', cwd: cwdEl.value.trim() })); }
+function onFsChange(m) {
+  clearTimeout(fsTimer);
+  fsTimer = setTimeout(async () => {
+    invalidateIndex();
+    if (!m.dirs || m.dirs.some((d) => d === '' || openDirs.has(d))) refreshTree(); // 見えているフォルダに変化があるときだけ
+    loadGit();
+    if (fsearch_active()) runSearch();
+    if (previewRel && (m.files || []).includes(previewRel)) { const top = pv.body.scrollTop; await openPreview(previewRel); pv.body.scrollTop = top; }
+    else if (diffState && m.git) { const top = pv.body.scrollTop; await openDiff(diffState.rel, diffState.untracked); pv.body.scrollTop = top; }
+  }, 150);
+}
+const fsearch_active = () => !$('#fresults').hidden && !!$('#fsearch').value.trim();
+let focusAt = 0;
+window.addEventListener('focus', () => { if (Date.now() - focusAt < 1500) return; focusAt = Date.now(); invalidateIndex(); refreshTree(); loadGit(); }); // 取りこぼしの保険
+
 // ---------- プレビュー ----------
 let previewRel = null;
 const pv = { box: $('#preview'), name: $('#pname'), body: $('#pbody') };
@@ -377,8 +689,58 @@ function renderMdPreview() {
 $('#pmode').onclick = () => { if (!mdState) return; mdRaw = !mdRaw; renderMdPreview(); };
 pv.body.addEventListener('click', (e) => { const a = e.target.closest('a[data-rel]'); if (a) { e.preventDefault(); openPreview(a.dataset.rel); } });
 
+// PowerPoint: スライド画像 (PowerPoint がある Windows のみ) / テキスト の切り替え
+function pptxTextView(d) {
+  const box = el('div');
+  box.append(el('div', 'note', `${d.slides.length} スライド (テキストのみ。画像・図形は表示されません)`));
+  for (const sl of d.slides) {
+    const c = el('div', 'slide'); c.append(el('h4', '', `SLIDE ${sl.n}`));
+    sl.lines.forEach((t, i) => c.append(el('div', i === 0 ? 'l1' : 'ln', t)));
+    if (!sl.lines.length) c.append(el('div', 'ln note', '(テキストなし)'));
+    box.append(c);
+  }
+  return box;
+}
+function renderPptx(rel, d) {
+  const wrap = el('div', 'pptx'); const bar = el('div', 'pptbar');
+  const bSlides = el('button', 'ghost', 'スライド'), bText = el('button', 'ghost', 'テキスト'); bSlides.type = bText.type = 'button';
+  bar.append(bSlides, bText);
+  const status = el('div', 'note'); const imgs = el('div', 'slides'); const text = pptxTextView(d);
+  wrap.append(bar, status, imgs, text); pv.body.append(wrap);
+  const show = (m) => {
+    imgs.hidden = m !== 'slides'; text.hidden = m !== 'text'; status.hidden = m !== 'slides' || !status.textContent;
+    bSlides.classList.toggle('on', m === 'slides'); bText.classList.toggle('on', m === 'text');
+  };
+  let started = false;
+  async function poll() {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    for (let k = 0; k < 120; k++) {
+      if (previewRel !== rel) return;
+      let s; try { s = await api('/api/slides', { path: rel }); } catch (e) { status.textContent = e.message; started = false; show('slides'); return; }
+      if (!s.available) { status.textContent = ''; bSlides.disabled = true; bSlides.title = 'PowerPoint が見つからないため、スライド画像は表示できません'; show('text'); return; }
+      if (s.status === 'ready') {
+        status.textContent = ''; imgs.textContent = '';
+        for (let n = 1; n <= s.count; n++) {
+          const fig = el('figure', 'slide-fig'); const im = el('img'); im.loading = 'lazy'; im.alt = `スライド ${n}`;
+          im.src = `/api/slide?${new URLSearchParams({ cwd: cwdEl.value.trim(), path: rel, n: String(n), k: s.key })}`;
+          fig.append(im, el('figcaption', '', `SLIDE ${n} / ${s.count}`)); imgs.append(fig);
+        }
+        show('slides'); return;
+      }
+      if (s.status === 'error') { status.textContent = `スライド画像を作れませんでした: ${s.error || ''}`; started = false; show('slides'); return; }
+      status.textContent = 'スライド画像を作成中… (PowerPoint を裏で動かしています。初回は数秒〜数十秒かかります)'; show('slides');
+      await wait(1500);
+    }
+    status.textContent = '時間がかかっています。しばらくしてから、もう一度開いてください'; started = false; show('slides');
+  }
+  const startSlides = () => { if (!started) { started = true; poll(); } };
+  bText.onclick = () => show('text');
+  bSlides.onclick = () => { show('slides'); startSlides(); };
+  show('slides'); startSlides(); // 既定はスライド。PowerPoint が無ければ自動でテキストに戻る
+}
+
 async function openPreview(rel, row, line) {
-  $('#pmode').hidden = true; mdState = null;
+  $('#pmode').hidden = true; mdState = null; diffState = null;
   document.querySelectorAll('.row.sel').forEach((r) => r.classList.remove('sel')); row?.classList.add('sel');
   previewRel = rel; pv.box.hidden = false; pv.name.textContent = line ? `${rel}:${line}` : rel; pv.body.textContent = '読み込み中…';
   let d; try { d = await api('/api/file', { path: rel }); } catch (e) { pv.body.textContent = ''; pv.body.append(el('div', 'note', e.message)); return; }
@@ -399,13 +761,7 @@ async function openPreview(rel, row, line) {
   } else if (d.kind === 'pdf') {
     const f = el('iframe'); f.src = rawUrl(rel); pv.body.append(f);
   } else if (d.kind === 'pptx') {
-    pv.body.append(el('div', 'note', `PowerPoint · ${d.slides.length} スライド (テキストのみ。画像・図形は表示されません)`));
-    for (const sl of d.slides) {
-      const c = el('div', 'slide'); c.append(el('h4', '', `SLIDE ${sl.n}`));
-      sl.lines.forEach((t, i) => c.append(el('div', i === 0 ? 'l1' : 'ln', t)));
-      if (!sl.lines.length) c.append(el('div', 'ln note', '(テキストなし)'));
-      pv.body.append(c);
-    }
+    renderPptx(rel, d);
   } else if (d.kind === 'docx') {
     pv.body.append(el('div', 'note', 'Word · テキストのみ'));
     for (const t of d.lines) pv.body.append(el('p', '', t));
@@ -416,7 +772,6 @@ async function openPreview(rel, row, line) {
 $('#pclose').onclick = () => { pv.box.hidden = true; previewRel = null; document.querySelectorAll('.row.sel').forEach((r) => r.classList.remove('sel')); };
 $('#pinsert').onclick = () => { if (previewRel) insertAtCursor(atRef(previewRel)); };
 
-function loadRoot() { fillDir($('#tree'), '.', 0); }
 
 const TABS = ['sessions', 'files', 'git'];
 function showTab(which) {
@@ -468,8 +823,8 @@ async function loadGit() {
   const list = $('#gitlist'), br = $('#gitbranch'), badge = $('#gitcount'), box = $('#commitbox');
   let d; try { d = await api('/api/git/status', {}); } catch (e) { list.textContent = ''; list.append(el('div', 'hint', e.message)); box.hidden = true; return; }
   list.textContent = ''; badge.hidden = true;
-  if (!d.repo) { br.textContent = ''; box.hidden = true; list.append(el('div', 'hint', 'このフォルダは Git リポジトリではありません')); return; }
-  br.textContent = `⎇ ${d.branch || '(detached)'}`;
+  if (!d.repo) { br.textContent = ''; br.disabled = true; closeBranchMenu(); box.hidden = true; list.append(el('div', 'hint', 'このフォルダは Git リポジトリではありません')); return; }
+  br.textContent = `⎇ ${d.branch && d.branch !== 'HEAD' ? d.branch : '(detached HEAD)'} ▾`; br.disabled = false;
   const tracked = d.files.filter((f) => f.xy !== '??');
   const conflict = tracked.filter((f) => isConflict(f.xy));
   const ok = tracked.filter((f) => !isConflict(f.xy));
@@ -484,7 +839,22 @@ async function loadGit() {
   gitSection(list, '変更', changed, 'changed');
   gitSection(list, '未追跡', untracked, 'untracked');
 }
+let suggesting = false;
+function updateSuggestBtn() { $('#suggestbtn').disabled = suggesting || gitState.staged === 0; }
+$('#suggestbtn').onclick = async () => {
+  if (suggesting || gitState.staged === 0) return;
+  const box = $('#commitmsg');
+  if (box.value.trim() && !confirm('入力中のメッセージを、AI の提案で置き換えますか？')) return;
+  suggesting = true; const btn = $('#suggestbtn'); btn.textContent = '考え中…'; updateSuggestBtn(); gitMsg('');
+  try {
+    const r = await gitPost('suggest', {});
+    box.value = r.message; gitMsg(r.truncated ? '✓ 提案しました (差分が長いため、一部のみ参照)。内容を確認して、必要なら直してください' : '✓ 提案しました。内容を確認して、必要なら直してください');
+    box.focus(); box.setSelectionRange(0, 0);
+  } catch (e) { gitMsg(e.message, true); }
+  suggesting = false; btn.textContent = '✨ 提案'; updateSuggestBtn(); updateCommitBtn();
+};
 function updateCommitBtn() {
+  updateSuggestBtn();
   const b = $('#commitbtn'); b.textContent = gitState.staged ? `コミット (${gitState.staged})` : 'コミット';
   b.disabled = !($('#commitmsg').value.trim() && gitState.staged > 0);
 }
@@ -496,9 +866,53 @@ $('#commitbtn').onclick = async () => {
   catch (e) { gitMsg(e.message, true); }
   await loadGit();
 };
+// ---------- ブランチの切り替え (一覧から選ぶ / 新規作成) ----------
+const brBtn = $('#gitbranch'), brMenu = $('#branchmenu');
+function closeBranchMenu() { brMenu.hidden = true; brMenu.textContent = ''; }
+async function switchBranch(name, create) {
+  closeBranchMenu();
+  try { await gitPost('switch', { branch: name, create }); gitMsg(`✓ ${create ? '作成して切り替えました' : '切り替えました'}: ${name}`); }
+  catch (e) { gitMsg(e.message, true); }
+  await loadGit(); refreshTree(); invalidateIndex(); // ブランチが変わるとファイルも変わる
+}
+async function openBranchMenu() {
+  if (!brMenu.hidden) { closeBranchMenu(); return; }
+  let b; try { b = await api('/api/git/branches', {}); } catch (e) { gitMsg(e.message, true); return; }
+  brMenu.textContent = ''; brMenu.hidden = false;
+  if (b.dirty) brMenu.append(el('div', 'bnote', `未コミットの変更が ${b.dirty} 件あります。切り替えで衝突する場合は Git が拒否します`));
+  const filter = el('input', 'bfilter'); filter.placeholder = '検索 / 新しいブランチ名を入力'; filter.spellcheck = false; filter.autocomplete = 'off';
+  const list = el('div', 'blist'); brMenu.append(filter, list);
+  let items = []; let sel = 0;
+  const render = () => {
+    const q = filter.value.trim(); const ql = q.toLowerCase(); list.textContent = ''; items = [];
+    const push = (label, sub, act, cls) => items.push({ label, sub, act, cls });
+    for (const n of b.local) if (!ql || n.toLowerCase().includes(ql)) push(n, n === b.current && !b.detached ? '現在' : '', () => (n === b.current && !b.detached ? closeBranchMenu() : switchBranch(n, false)), n === b.current && !b.detached ? 'cur' : '');
+    for (const n of b.remoteOnly) if (!ql || n.toLowerCase().includes(ql)) push(n, 'リモート', () => switchBranch(n, false), 'remote');
+    const exists = b.local.includes(q) || b.remoteOnly.includes(q);
+    if (q && !exists) push(`＋ 「${q}」を新しいブランチとして作成`, b.detached ? '現在の位置から' : `${b.current} から`, () => switchBranch(q, true), 'create');
+    if (!items.length) list.append(el('div', 'hint', '一致するブランチがありません'));
+    sel = Math.min(sel, Math.max(0, items.length - 1));
+    items.forEach((it, i) => {
+      const row = el('div', `bit ${it.cls}${i === sel ? ' on' : ''}`); row.append(el('span', 'bn', it.label), ...(it.sub ? [el('span', 'bs', it.sub)] : []));
+      row.onclick = it.act; list.append(row);
+    });
+    list.querySelector('.bit.on')?.scrollIntoView({ block: 'nearest' });
+  };
+  filter.addEventListener('input', () => { sel = 0; render(); });
+  filter.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); sel = (sel + 1) % Math.max(1, items.length); render(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); sel = (sel - 1 + items.length) % Math.max(1, items.length); render(); }
+    else if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); items[sel]?.act(); }
+    else if (e.key === 'Escape') { e.preventDefault(); closeBranchMenu(); brBtn.focus(); }
+  });
+  render(); filter.focus();
+}
+brBtn.onclick = (e) => { e.stopPropagation(); openBranchMenu(); };
+document.addEventListener('mousedown', (e) => { if (!brMenu.hidden && !brMenu.contains(e.target) && e.target !== brBtn) closeBranchMenu(); });
+
 $('#gitrefresh').onclick = loadGit;
 async function openDiff(rel, untracked) {
-  $('#pmode').hidden = true; mdState = null;
+  $('#pmode').hidden = true; mdState = null; diffState = { rel, untracked };
   previewRel = null; pv.box.hidden = false; pv.name.textContent = `${untracked ? '未追跡' : '差分'}: ${rel}`; pv.body.textContent = '読み込み中…';
   let d; try { d = await api('/api/git/diff', { path: rel }); } catch (e) { pv.body.textContent = ''; pv.body.append(el('div', 'note', e.message)); return; }
   pv.body.textContent = ''; pv.body.scrollTop = 0;
@@ -593,6 +1007,7 @@ fsInput.addEventListener('keydown', (e) => {
     if (e.shiftKey && it.dataset.path) insertAtCursor(atRef(it.dataset.path)); else it.click();
   } else if (e.key === 'Escape') { e.preventDefault(); clearSearch(); }
 });
+$('#treerefresh').onclick = () => { invalidateIndex(); refreshTree(); loadGit(); };
 $('#fsmode').onclick = () => {
   searchMode = searchMode === 'name' ? 'content' : 'name';
   $('#fsmode').textContent = searchMode === 'name' ? '名前' : '中身';
@@ -674,10 +1089,12 @@ const dropzone = $('#dropzone'); let dragDepth = 0;
 const REF_TYPE = 'application/x-cdock-path';
 const hasFiles = (e) => !!(e.dataTransfer && [...e.dataTransfer.types].some((t) => t === 'Files' || t === REF_TYPE));
 const dragEnd = () => { dragDepth = 0; dropzone.hidden = true; document.body.classList.remove('dragging'); };
-window.addEventListener('dragenter', (e) => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth++; dropzone.hidden = false; document.body.classList.add('dragging'); });
+const overTree = (e) => !!(e.target && e.target.closest && e.target.closest('#pane-files')) && [...e.dataTransfer.types].includes(MOVE_TYPE);
+window.addEventListener('dragenter', (e) => { if (overTree(e)) { dropzone.hidden = true; return; } if (!hasFiles(e)) return; e.preventDefault(); dragDepth++; dropzone.hidden = false; document.body.classList.add('dragging'); });
 window.addEventListener('dragover', (e) => { if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
-window.addEventListener('dragleave', (e) => { if (!hasFiles(e)) return; dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) dragEnd(); });
+window.addEventListener('dragleave', (e) => { if (overTree(e)) return; if (!hasFiles(e)) return; dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) dragEnd(); });
 window.addEventListener('drop', (e) => {
+  if (overTree(e)) { dragEnd(); return; } // ツリーの上のドロップは、ツリー側 (移動) が処理する
   if (!hasFiles(e)) return; e.preventDefault(); dragEnd();
   const ref = e.dataTransfer.getData(REF_TYPE);
   if (ref) { addRef(ref); input.focus(); return; } // 左のエクスプローラから: アップロードせず、プロジェクト内のファイルとして添付
@@ -733,7 +1150,7 @@ async function switchCwd(raw) {
   catch (e) { cwdEl.classList.add('invalid'); cwdEl.title = `フォルダが見つかりません: ${e.message}`; return false; }
   if (cwdEl.value === lastGoodCwd) return true;
   lastGoodCwd = cwdEl.value; store.set('cwd', cwdEl.value); pushRecent(cwdEl.value); invalidateIndex(); clearSearch();
-  ws.send(JSON.stringify({ type: 'newSession' })); currentSession = null; clearChat(); loadSessions(); loadRoot(); loadCommands(); loadGit();
+  ws.send(JSON.stringify({ type: 'newSession' })); currentSession = null; clearChat(); loadSessions(); loadRoot(); loadCommands(); loadGit(); watchCwd();
   return true;
 }
 cwdEl.addEventListener('change', () => switchCwd(cwdEl.value));
