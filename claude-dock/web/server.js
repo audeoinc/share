@@ -193,6 +193,14 @@ function projectFile(root, rel) {
     return real.startsWith(base + path.sep) && fs.statSync(real).isFile() ? real : null;
   } catch { return null; }
 }
+// プロジェクト内のフォルダ (rel の末尾が / か \ のもの)。ファイルは projectFile を使う
+function projectDir(root, rel) {
+  if (typeof rel !== 'string' || !/[\\/]$/.test(rel) || !rel.replace(/[\\/]+$/, '')) return null;
+  try {
+    const base = fs.realpathSync(root); const real = fs.realpathSync(path.resolve(base, rel));
+    return real.startsWith(base + path.sep) && fs.statSync(real).isDirectory() ? real : null;
+  } catch { return null; }
+}
 function receiveUpload(req, res) {
   const name = safeName(new URL(req.url, 'http://x').searchParams.get('name'));
   const declared = Number(req.headers['content-length'] || 0);
@@ -914,10 +922,10 @@ wss.on('connection', (ws) => {
     const abort = new AbortController();
     const workDir = cwd && fs.existsSync(cwd) ? path.resolve(cwd) : DEFAULT_CWD;
     // 添付: アップロード用フォルダの中のファイルだけを受け付け、プロンプトの末尾に一覧として付ける
-    const files = (Array.isArray(attachments) ? attachments : []).map((a) => (a && a.rel ? projectFile(workDir, a.rel) : uploadedPath(a && a.path))).filter(Boolean).slice(0, 30);
+    const files = (Array.isArray(attachments) ? attachments : []).map((a) => (a && a.rel ? (projectDir(workDir, a.rel) ? projectDir(workDir, a.rel) + path.sep : projectFile(workDir, a.rel)) : uploadedPath(a && a.path))).filter(Boolean).slice(0, 30);
     const requested = Array.isArray(attachments) ? attachments.length : 0;
     if (files.length < requested) send({ type: 'notice', message: `${requested - files.length} 件の添付を読み込めませんでした (見つからない、または許可された場所の外のファイルです)` });
-    if (files.length) text = `${text}\n\n<attachments>\n添付ファイル (ユーザーが添付したもの。Read ツールで開けます):\n${files.map((f) => `- ${f}`).join('\n')}\n</attachments>`;
+    if (files.length) text = `${text}\n\n<attachments>\n添付 (ユーザーが添付したもの。ファイルは Read ツールで開けます。末尾が \\ か / のものはディレクトリで、Glob / Grep / Read で中身を確認できます):\n${files.map((f) => `- ${f}`).join('\n')}\n</attachments>`;
     const options = {
       cwd: workDir,
       additionalDirectories: [UPLOAD_ROOT],

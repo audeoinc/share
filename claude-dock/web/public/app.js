@@ -143,7 +143,7 @@ function renderUserContent(content) {
 }
 function historyUser(text) {
   const s = splitAttachments(text);
-  add(userBubble(s.text, s.files.map((p) => ({ name: p.split('/').pop().split(String.fromCharCode(92)).pop(), status: 'ready' }))));
+  add(userBubble(s.text, s.files.map((p) => { const dir = /[\\/]$/.test(p); const q = dir ? p.slice(0, -1) : p; return { name: q.split('/').pop().split(String.fromCharCode(92)).pop() + (dir ? '/' : ''), dir, status: 'ready' }; })));
 }
 
 // ---------- 通信 ----------
@@ -594,8 +594,9 @@ function moveSource(node, rel, isFile) {
   node.draggable = true;
   node.ondragstart = (ev) => {
     ev.dataTransfer.setData(MOVE_TYPE, rel);
-    if (isFile) { ev.dataTransfer.setData(REF_TYPE, rel); ev.dataTransfer.setData('text/plain', `${atRef(rel)} `); }
-    ev.dataTransfer.effectAllowed = isFile ? 'copyMove' : 'move';
+    const ref = isFile ? rel : `${rel}/`; // フォルダは末尾に / を付けて、会話欄へのドロップでディレクトリの添付になる
+    ev.dataTransfer.setData(REF_TYPE, ref); ev.dataTransfer.setData('text/plain', `${atRef(ref)} `);
+    ev.dataTransfer.effectAllowed = 'copyMove';
   };
 }
 function dropTarget(node, destRel) {
@@ -743,7 +744,7 @@ function closeCtx() { $('#ctxmenu')?.remove(); }
 function showCtx(x, y, rel, isDir, row) {
   closeCtx(); const m = el('div', 'ctxmenu'); m.id = 'ctxmenu';
   const item = (label, act, cls) => { const b = el('div', `ci ${cls || ''}`, label); b.onclick = () => { closeCtx(); act(); }; m.append(b); };
-  if (isDir) { item('開く / 閉じる', () => row.click()); item('このフォルダを作業フォルダにする', () => switchCwd(absPath(rel))); }
+  if (isDir) { item('開く / 閉じる', () => row.click()); item('このフォルダを作業フォルダにする', () => switchCwd(absPath(rel))); item('＠ 入力欄に挿入', () => insertAtCursor(atRef(`${rel}/`))); item('会話に添付する (フォルダ)', () => addRef(`${rel}/`)); }
   else { item('プレビュー', () => openPreview(rel, row)); item('＠ 入力欄に挿入', () => insertAtCursor(atRef(rel))); item('添付する', () => addRef(rel)); }
   item('パスをコピー', async () => { try { await navigator.clipboard.writeText(rel); toast(`コピーしました: ${rel}`); } catch { toast('コピーできませんでした', { bad: true }); } });
   m.append(el('div', 'csep')); item('ごみ箱へ移動…', () => deleteRels([rel]), 'danger');
@@ -1412,7 +1413,7 @@ let attachments = []; // { name, size, path, status: 'uploading' | 'ready' | 'er
 const attachBox = $('#attach');
 function chipEl(a, removable) {
   const chip = el('div', `chip ${a.status || 'ready'}`);
-  if (a.thumb) { const im = el('img'); im.src = a.thumb; im.alt = ''; chip.append(im); } else chip.append(el('span', 'ci', '📄'));
+  if (a.thumb) { const im = el('img'); im.src = a.thumb; im.alt = ''; chip.append(im); } else chip.append(el('span', 'ci', a.dir ? '📁' : '📄'));
   const sub = a.status === 'uploading' ? 'アップロード中…' : a.status === 'error' ? (a.error || 'エラー') : (a.sub || (a.size != null ? fmtSize(a.size) : ''));
   const meta = el('span', 'cm'); meta.append(el('span', 'cn', a.name), ...(sub ? [el('span', 'cs', sub)] : []));
   chip.title = a.name; chip.append(meta);
@@ -1457,8 +1458,8 @@ function dragSource(node, rel) {
 function addRef(rel) {
   if (attachments.some((a) => a.rel === rel)) return;
   if (attachments.length >= MAX_ATTACH) { add(el('div', 'err-box', `添付は ${MAX_ATTACH} 件までです`)); return; }
-  const slash = rel.lastIndexOf('/');
-  attachments.push({ name: rel.slice(slash + 1), sub: slash >= 0 ? rel.slice(0, slash) : 'プロジェクト内', rel, status: 'ready' });
+  const dir = rel.endsWith('/'); const clean = dir ? rel.slice(0, -1) : rel; const slash = clean.lastIndexOf('/'); // 末尾が / のものはディレクトリ
+  attachments.push({ name: clean.slice(slash + 1) + (dir ? '/' : ''), sub: slash >= 0 ? clean.slice(0, slash) : 'プロジェクト内', rel, dir, status: 'ready' });
   renderAttach();
 }
 const stamp = () => { const d = new Date(); const p = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`; };
