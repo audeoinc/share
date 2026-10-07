@@ -34,7 +34,6 @@ BigQuery の SQL を解析して「**出力列 ← 物理テーブル.物理列*
 
 | 項目 | 値 |
 |---|---|
-| ブランチ | `claude/lineage-project-resume-tqwrp9` |
 | 版 | `1.5.0-032`（`release_manifest.json` / `javascript/package.json`） |
 | バンドル | `sha256 = eecd0bc82f1d2ca01db8b4f727ee0c35510057afefe086a6f9ef33b92d655ba4` / 478,961 bytes |
 | テスト | `test:release` 60 本 ＋ ゴールデン 48 ケース PASS |
@@ -224,6 +223,9 @@ static テーブルが際限なく重くなる**ためです。
 
 1. **識別子の匿名化を維持**。実プロジェクト名・データセット名はコードに書かない
    （`project_id` / `dataset` を使う）。**自社環境を特定させないためのセキュリティ方針**です
+   - 同じ理由で**リポジトリ名・ブランチ名・ホスティング先も書かない**。この一式は別
+     プロジェクトへ移して使うため、環境固有の名前が残ると移行先で混乱する。ファイル名・
+     ディレクトリ名も同様（版数由来の `lineage_v<version>` は環境固有ではないので可）
 2. **1 変更 = 実装 ＋ 番号付き回帰テスト ＋ CHANGELOG 追記**。
    テストは `javascript/test/test_v1_5_0_0XX.js` を新規作成し、`package.json` の
    `test:release` チェーンの**先頭**に追加（現在の最新は 079）
