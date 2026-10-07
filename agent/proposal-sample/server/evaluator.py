@@ -1,4 +1,4 @@
-"""提案品質の審査（LLM-as-judge）。　変更の確認サンプル編集
+"""提案品質の審査（LLM-as-judge）。
 
 ADK の LlmAgent + 構造化出力（output_schema）を審査員に使い、提案を採点する。
 - Web の `/api/evaluate`（server/main.py）から呼ばれる
