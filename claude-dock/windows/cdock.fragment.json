@@ -9,7 +9,8 @@
       "padding": "12, 8, 12, 8",
       "scrollbarState": "hidden",
       "cursorShape": "bar",
-      "font": { "face": "Cascadia Mono", "size": 11 }
+      "icon": "%LOCALAPPDATA%\\Microsoft\\Windows Terminal\\Fragments\\cdock\\cdock-icon.png",
+      "font": { "face": "IBM Plex Mono, BIZ UDGothic", "size": 8, "weight": "normal", "lineHeight": 1.2 }
     }
   ],
   "schemes": [

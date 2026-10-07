@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cdock web</title>
+<link rel="icon" href="icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><img src="icon.png" alt="" width="20" height="20"><span>cdock</span></div>
+  <label class="cwd"><span>フォルダ</span><input id="cwd" spellcheck="false" autocomplete="off"></label>
+  <select id="model" title="モデル">
+    <option value="">モデル: 既定</option>
+    <option value="claude-opus-5-5">Opus 5.5 (高性能)</option>
+    <option value="claude-sonnet-5-5">Sonnet 5.5 (軽快)</option>
+    <option value="claude-haiku-4-5">Haiku 4.5 (最軽量)</option>
+  </select>
+  <select id="mode" title="権限モード">
+    <option value="default">確認しながら進める</option>
+    <option value="acceptEdits">編集は自動で許可</option>
+    <option value="plan">プランモード</option>
+    <option value="auto">自動 (分類器が判断)</option>
+  </select>
+</header>
+<div class="shell">
+  <aside class="side">
+    <div class="tabs"><button id="tab-sessions" class="on">会話</button><button id="tab-files">ファイル</button></div>
+    <div id="pane-sessions" class="pane"><button id="new" class="newbtn">＋ 新しい会話</button><div id="sessions"></div></div>
+    <div id="pane-files" class="pane" hidden><div id="tree"></div></div>
+  </aside>
+  <section class="main">
+    <main id="chat" class="chat"><div class="empty" id="empty"><img src="icon.png" width="44" height="44" alt=""><h1>何をしましょうか？</h1><p>左の「ファイル」をクリックすると、入力欄に @パス が入ります。</p></div></main>
+    <footer class="composer">
+      <div class="box">
+        <textarea id="input" rows="1" placeholder="Claude に指示する (Enter で送信 / Shift+Enter で改行)"></textarea>
+        <div class="actions"><span id="status" class="status"></span><button id="stop" class="stop" hidden>■ 停止</button><button id="send" class="send">送信</button></div>
+      </div>
+    </footer>
+  </section>
+</div>
+<script src="app.js" type="module"></script>
+</body>
+</html>

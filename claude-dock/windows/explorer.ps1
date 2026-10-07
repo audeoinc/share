@@ -69,13 +69,13 @@ function Git-Color($st) {
 
 $script:lastW = 0; $script:lastH = 0
 function Draw {
-    $w = [Console]::WindowWidth; $h = [Console]::WindowHeight; $body = [Math]::Max(1, $h - 6)
+    $w = [Console]::WindowWidth; $h = [Console]::WindowHeight; $body = [Math]::Max(1, $h - 7)
     if ($w -ne $script:lastW -or $h -ne $script:lastH) { [Console]::Out.Write("$bgBase$esc[2J"); $script:lastW = $w; $script:lastH = $h }
     if ($sel -lt $top) { $script:top = $sel }
     if ($sel -ge $top + $body) { $script:top = $sel - $body + 1 }
     $sb = [System.Text.StringBuilder]::new()
     $title = Cut (Split-Path $Root -Leaf) ($w - 6)
-    [void]$sb.Append("$esc[?25l$esc[H$bgBase $cAccent$([char]0x25C6) $cText$esc[1m$title$rst$esc[K`n")
+    [void]$sb.Append("$esc[?25l$esc[H$bgBase $cAccent$([char]0x25C6) $cText$title$rst$esc[K`n")
     [void]$sb.Append("$bgBase$cRule$([string][char]0x2500 * $w)$rst`n")
     for ($i = 0; $i -lt $body; $i++) {
         $idx = $top + $i
@@ -90,35 +90,89 @@ function Draw {
         $pad = ' ' * [Math]::Max(0, $avail - (Wd $name))
         $st = $git[$r.Path]
         $stc = if ($st) { "$(Git-Color $st)$st" } else { ' ' }
-        $nameStyle = if ($r.Dir) { "$cText$esc[1m" } else { $cText }
+        $nameStyle = $cText
         $bg = if ($isSel) { $bgSel } else { $bgBase }
         [void]$sb.Append("$bg$bar$mk$(' ' * (2 * $r.Depth))$cMuted$ch $nameStyle$name$rst$bg$pad$stc $rst$esc[K`n")
     }
     [void]$sb.Append("$bgBase$cRule$([string][char]0x2500 * $w)$rst`n")
     $line1 = if ($msg) { "$cAccent$(Cut $msg ($w - 2))" }
              elseif ($marked.Count) { "$cAccent$(Cut "$($marked.Count) marked  A:copy all" ($w - 2))" }
-             else { "$cMuted$(Cut 'Enter:copy  Space:mark' ($w - 2))" }
+             else { "$cMuted$(Cut 'Enter:copy' ($w - 2))" }
     [void]$sb.Append("$bgBase $line1$rst$esc[K`n")
-    [void]$sb.Append("$bgBase $cMuted$(Cut "$([char]0x2190)$([char]0x2192):open  .:hidden" ($w - 2))$rst$esc[K`n")
-    [void]$sb.Append("$bgBase $cMuted$(Cut 'R:refresh  Q:quit' ($w - 2))$rst$esc[K")
+    [void]$sb.Append("$bgBase $cMuted$(Cut 'Space:mark' ($w - 2))$rst$esc[K`n")
+    [void]$sb.Append("$bgBase $cMuted$(Cut "$([char]0x2190)$([char]0x2192):open  .:hide" ($w - 2))$rst$esc[K`n")
+    [void]$sb.Append("$bgBase $cMuted$(Cut 'R:refresh Q:quit' ($w - 2))$rst$esc[K")
     [Console]::Out.Write($sb.ToString())
 }
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+# コンソール入力 (キー + マウス)。ReadConsoleInput を直接使う
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class CdockCon {
+    [StructLayout(LayoutKind.Explicit)] public struct KEY { [FieldOffset(0)] public int down; [FieldOffset(4)] public ushort repeat; [FieldOffset(6)] public ushort vk; [FieldOffset(8)] public ushort scan; [FieldOffset(10)] public char ch; [FieldOffset(12)] public uint ctrl; }
+    [StructLayout(LayoutKind.Explicit)] public struct MOUSE { [FieldOffset(0)] public short x; [FieldOffset(2)] public short y; [FieldOffset(4)] public uint buttons; [FieldOffset(8)] public uint ctrl; [FieldOffset(12)] public uint flags; }
+    [StructLayout(LayoutKind.Explicit)] public struct REC { [FieldOffset(0)] public ushort type; [FieldOffset(4)] public KEY key; [FieldOffset(4)] public MOUSE mouse; }
+    [DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int n);
+    [DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr h, out uint m);
+    [DllImport("kernel32.dll")] public static extern bool SetConsoleMode(IntPtr h, uint m);
+    [DllImport("kernel32.dll")] public static extern bool GetNumberOfConsoleInputEvents(IntPtr h, out uint n);
+    [DllImport("kernel32.dll", EntryPoint="ReadConsoleInputW")] public static extern bool ReadConsoleInput(IntPtr h, [Out] REC[] b, uint len, out uint read);
+}
+"@
+$hIn = [CdockCon]::GetStdHandle(-10)
+[uint32]$oldMode = 0; [void][CdockCon]::GetConsoleMode($hIn, [ref]$oldMode)
+# マウス入力 ON / クイック編集 OFF / VT 入力 OFF
+[void][CdockCon]::SetConsoleMode($hIn, (($oldMode -bor 0x10 -bor 0x80) -band (-bnot 0x40) -band (-bnot 0x200)))
+$recBuf = New-Object 'CdockCon+REC[]' 1
+
+function Copy-Ref($p) { Set-Clipboard -Value ((Ref $p) + ' '); $script:msg = "$([char]0x2713) copied $(Ref $p)  -  Ctrl+V in Claude" }
+function Move-Sel($d) { $script:sel = [Math]::Max(0, [Math]::Min($script:sel + $d, $script:rows.Count - 1)) }
+
 [Console]::Out.Write("$bgBase$esc[2J"); Refresh
+$dirty = $true
 try {
     while ($true) {
-        Draw; $msg = ''
-        if (-not [Console]::KeyAvailable) { Start-Sleep -Milliseconds 30; if (-not [Console]::KeyAvailable) { continue } }
-        $k = [Console]::ReadKey($true)
+        if ($dirty) { Draw; $dirty = $false }
+        [uint32]$n = 0; [void][CdockCon]::GetNumberOfConsoleInputEvents($hIn, [ref]$n)
+        if ($n -eq 0) { Start-Sleep -Milliseconds 20; continue }
+        [uint32]$read = 0; [void][CdockCon]::ReadConsoleInput($hIn, $recBuf, 1, [ref]$read)
+        if ($read -eq 0) { continue }
+        $ev = $recBuf[0]
+        $dirty = $true; $msg = ''
         $cur = if ($rows.Count) { $rows[$sel] } else { $null }
+
+        if ($ev.type -eq 2) {
+            # マウス: クリックで選択/フォルダ開閉、ダブルクリックでファイルをコピー、ホイールでスクロール
+            $m = $ev.mouse
+            if (($m.flags -band 4) -ne 0) {
+                $delta = [int][int16]($m.buttons -shr 16)
+                if ($delta -gt 0) { Move-Sel -3 } else { Move-Sel 3 }
+            }
+            elseif (($m.buttons -band 1) -ne 0 -and ($m.flags -band 1) -eq 0) {
+                $idx = $top + ($m.y - [Console]::WindowTop) - 2
+                if ($idx -ge $top -and $idx -lt $rows.Count -and ($idx - $top) -lt ([Console]::WindowHeight - 7)) {
+                    $sel = $idx; $r = $rows[$idx]
+                    if ($r.Dir) {
+                        if (($m.flags -band 2) -eq 0) { if (-not $open.Remove($r.Path)) { [void]$open.Add($r.Path) }; Refresh }
+                    }
+                    elseif (($m.flags -band 2) -ne 0) { Copy-Ref $r.Path }
+                }
+            }
+            continue
+        }
+        if ($ev.type -ne 1 -or $ev.key.down -eq 0) { $dirty = $false; continue }
+
+        $k = [pscustomobject]@{ Key = [System.ConsoleKey][int]$ev.key.vk; KeyChar = $ev.key.ch }
         switch ($k.Key) {
             'Q' { return }
             'Escape' { return }
-            'DownArrow' { $sel = [Math]::Min($sel + 1, $rows.Count - 1) }
-            'J' { $sel = [Math]::Min($sel + 1, $rows.Count - 1) }
-            'UpArrow' { $sel = [Math]::Max($sel - 1, 0) }
-            'K' { $sel = [Math]::Max($sel - 1, 0) }
+            'DownArrow' { Move-Sel 1 }
+            'J' { Move-Sel 1 }
+            'UpArrow' { Move-Sel -1 }
+            'K' { Move-Sel -1 }
             { $_ -in 'RightArrow', 'L' } { if ($cur -and $cur.Dir) { [void]$open.Add($cur.Path); Refresh } }
             { $_ -in 'LeftArrow', 'H' } {
                 if ($cur) {
@@ -130,13 +184,13 @@ try {
             'Enter' {
                 if ($cur) {
                     if ($cur.Dir) { if (-not $open.Remove($cur.Path)) { [void]$open.Add($cur.Path) }; Refresh }
-                    else { Set-Clipboard -Value ((Ref $cur.Path) + ' '); $msg = "$([char]0x2713) copied $(Ref $cur.Path)  -  Ctrl+V in Claude" }
+                    else { Copy-Ref $cur.Path }
                 }
             }
-            'Spacebar' { if ($cur) { if (-not $marked.Remove($cur.Path)) { $marked.Add($cur.Path) }; $sel = [Math]::Min($sel + 1, $rows.Count - 1) } }
+            'Spacebar' { if ($cur) { if (-not $marked.Remove($cur.Path)) { $marked.Add($cur.Path) }; Move-Sel 1 } }
             'A' { if ($marked.Count) { Set-Clipboard -Value ((($marked | ForEach-Object { Ref $_ }) -join ' ') + ' '); $msg = "$([char]0x2713) copied $($marked.Count) files  -  Ctrl+V in Claude"; $marked.Clear() } }
             'R' { Refresh }
         }
         if ($k.KeyChar -eq '.') { $showHidden = -not $showHidden; Refresh }
     }
-} finally { [Console]::Out.Write("$esc[?25h$esc[0m") }
+} finally { [void][CdockCon]::SetConsoleMode($hIn, $oldMode); [Console]::Out.Write("$esc[?25h$esc[0m") }
