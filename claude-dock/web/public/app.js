@@ -154,7 +154,7 @@ function connect() {
   ws.onmessage = (e) => handle(JSON.parse(e.data));
 }
 function handle(m) {
-  if (m.type === 'hello') { serverFeatures = new Set(m.features || []); if (!cwdEl.value) cwdEl.value = store.get('cwd', m.cwd); lastGoodCwd = cwdEl.value; renderCrumbs(); refreshParent(); loadSessions(); loadRoot(); loadCommands(); loadGit(); watchCwd(); }
+  if (m.type === 'hello') { serverFeatures = new Set(m.features || []); setupShells(m.shells || []); if (!cwdEl.value) cwdEl.value = store.get('cwd', m.cwd); lastGoodCwd = cwdEl.value; renderCrumbs(); refreshParent(); loadSessions(); loadRoot(); loadCommands(); loadGit(); watchCwd(); }
   else if (m.type === 'busy') setBusy(m.value);
   else if (m.type === 'notice') add(el('div', 'err-box', m.message));
   else if (m.type === 'fs') onFsChange(m);
@@ -244,6 +244,10 @@ function send() {
   const ready = attachments.filter((a) => a.status === 'ready');
   if (attachments.some((a) => a.status === 'uploading')) return; // アップロード中は送らない
   const text = input.value.trim() || (ready.length ? '添付したファイルを確認してください。' : '');
+  if (text.startsWith('!') && !ready.length && text.slice(1).trim()) { // 「!コマンド」は Claude に送らず、「実行」タブで実行する (Claude の応答中でも可)
+    if (run.id) { showTab('run'); runStatus('実行中のコマンドがあります。終わるのを待つか、停止してください', 'bad'); return; }
+    input.value = ''; autosize(); hideSlash(); showTab('run'); $('#runcmd').value = text.slice(1).trim(); runStart(); return;
+  }
   if (!text || busy || ws.readyState !== 1) return;
   if (ready.length && !serverFeatures.has('attach')) { add(el('div', 'err-box', 'サーバーが古いため、添付を送れません。start.cmd で起動し直してください。')); return; }
   if (cwdEl.classList.contains('invalid')) { add(el('div', 'err-box', 'フォルダが見つかりません。上部の「フォルダ」を確認してください。')); return; }
@@ -934,11 +938,17 @@ function runAppend(data) {
     o.textContent = run.text; if (near) o.scrollTop = o.scrollHeight;
   }, 50);
 }
+function setupShells(list) {
+  const sel = $('#runshell'); sel.textContent = ''; sel.hidden = list.length < 2; if (list.length < 2) return;
+  for (const o of list) { const op = el('option', '', o.label); op.value = o.id; sel.append(op); }
+  const saved = store.get('runShell', list[0].id); sel.value = list.some((o) => o.id === saved) ? saved : list[0].id;
+  sel.onchange = () => store.set('runShell', sel.value);
+}
 function runStatus(text, cls) { const s = $('#runstat'); s.textContent = text; s.className = `runstat ${cls || ''}`; }
 function runUi() {
   const going = !!run.id; const b = $('#runbtn');
   b.textContent = going ? '停止' : '実行'; b.classList.toggle('send', !going); b.classList.toggle('danger', going);
-  $('#runcmd').disabled = going; $('#runsend').disabled = going || !run.text; $('#runclear').disabled = going || !run.text;
+  $('#runcmd').disabled = going; $('#runshell').disabled = going; $('#runsend').disabled = going || !run.text; $('#runclear').disabled = going || !run.text;
 }
 function runStart() {
   const cmd = $('#runcmd').value.trim(); if (!cmd || run.id) return;
@@ -946,7 +956,7 @@ function runStart() {
   if (!ws || ws.readyState !== 1) { runStatus('接続されていません', 'bad'); return; }
   run.hist = [cmd, ...run.hist.filter((h) => h !== cmd)].slice(0, 30); store.set('runHist', JSON.stringify(run.hist)); run.hi = -1;
   run.id = `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; run.cmd = cmd; run.text = ''; run.t0 = Date.now(); $('#runout').textContent = '';
-  ws.send(JSON.stringify({ type: 'run', id: run.id, cmd, cwd: cwdEl.value.trim() }));
+  ws.send(JSON.stringify({ type: 'run', id: run.id, cmd, cwd: cwdEl.value.trim(), shell: $('#runshell').hidden ? undefined : $('#runshell').value }));
   clearInterval(run.timer); const tick = () => runStatus(`実行中… ${Math.round((Date.now() - run.t0) / 1000)} 秒`, 'busy'); tick(); run.timer = setInterval(tick, 500);
   runUi();
 }
@@ -977,7 +987,7 @@ function showTab(which) {
   for (const t of TABS) { $(`#pane-${t}`).hidden = t !== which; $(`#tab-${t}`).classList.toggle('on', t === which); }
   store.set('tab', which);
   if (which === 'git') loadGit();
-  if (which === 'run') $('#runcmd').focus();
+  if (which === 'run') { $('#runcmd').focus(); if (ws && ws.readyState === 1 && serverFeatures.has('run')) ws.send(JSON.stringify({ type: 'run_warm' })); } // PowerShell を先に起動しておく
 }
 for (const t of TABS) $(`#tab-${t}`).onclick = () => showTab(t);
 showTab(store.get('tab', 'sessions'));

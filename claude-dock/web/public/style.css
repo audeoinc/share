@@ -40,7 +40,7 @@ button.ghost:hover, select:hover { border-color: var(--muted); }
 .empty h1 { font: 500 calc(var(--fs, 14px) + 12px) var(--serif); color: var(--text); margin: 14px 0 4px; }
 .msg { margin: 0 0 18px; }
 .msg.user { background: var(--user); border-radius: 14px; padding: 10px 14px; white-space: pre-wrap; font-size: var(--fs, 14px); }
-.chat > .msg.user { width: fit-content; max-width: min(780px, 100%); align-self: flex-start; margin-left: max(0px, calc((100% - 780px) / 2)); }
+.chat > .msg.user { width: fit-content; max-width: min(640px, 100%); align-self: flex-end; margin-right: max(0px, calc((100% - 780px) / 2)); } /* 自分の発言は右 (Claude Desktop と同じ) */
 .msg.assistant { font-family: var(--serif); font-size: var(--fs, 14px); line-height: var(--lh-chat); }
 .md > :first-child { margin-top: 0; } .md > :last-child { margin-bottom: 0; }
 .md p { margin: var(--gap-p) 0; } .md h1, .md h2, .md h3 { font-family: var(--serif); line-height: 1.2; margin: .7em 0 .25em; }
@@ -414,3 +414,4 @@ button.danger:disabled { opacity: .45; cursor: default; }
 .runout { flex: 1; min-height: 120px; margin: 0; padding: 8px 10px; overflow: auto; background: var(--code); border: 1px solid var(--rule); border-radius: 8px; font: calc(var(--fs, 14px) - 2px)/var(--lh-code) var(--mono); white-space: pre-wrap; word-break: break-all; }
 .runmeta { flex-wrap: wrap; } .runmeta .runstat { flex: 1 1 100%; } .runmeta .sp { display: none; } .runmeta button { white-space: nowrap; }
 .phead .pname { font-family: var(--sans); }
+.runbar select { flex: none; max-width: 110px; padding: 6px 4px; }

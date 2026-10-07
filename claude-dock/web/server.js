@@ -10,7 +10,7 @@ import iconv from 'iconv-lite';
 import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
-import { execFile, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { query, listSessions, getSessionMessages, renameSession } from '@anthropic-ai/claude-agent-sdk';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -780,6 +780,51 @@ const server = http.createServer((req, res) => {
 });
 
 // ---- WebSocket: 1 接続 = 1 画面。ターンごとに query() を起動し、session_id で resume する
+// 「実行」タブで使うシェル。Windows は PowerShell。CDOCK_WEB_SHELL=cmd で既定を cmd に、=pwsh で PowerShell 7 にできる
+let _runShell;
+function runShell() {
+  if (_runShell) return _runShell;
+  if (process.platform !== 'win32' || /^cmd$/i.test(process.env.CDOCK_WEB_SHELL || '')) return (_runShell = { kind: 'default' });
+  let exe = 'powershell.exe'; // 既定は Windows PowerShell (どの PC にもある)。CDOCK_WEB_SHELL=pwsh で PowerShell 7 を使う
+  if (/^pwsh$/i.test(process.env.CDOCK_WEB_SHELL || '')) { try { execFileSync('where', ['pwsh'], { stdio: 'ignore', windowsHide: true }); exe = 'pwsh'; } catch { /* 無ければ Windows PowerShell */ } }
+  return (_runShell = { kind: 'ps', exe });
+}
+// 起動に 1〜3 秒かかるので、PowerShell を 1 つ先に起動して待たせておく (1 回の実行ごとに使い捨て、使ったら次を用意する)
+let spare = null;
+function warmShell() {
+  const sh = runShell(); if (sh.kind !== 'ps' || (spare && spare.exitCode === null)) return;
+  try {
+    const c = spawn(sh.exe, ['-NoLogo', '-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-Command', '-'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const drop = () => { if (spare === c) spare = null; };
+    c.on('error', drop); c.on('exit', drop); c.stdin.on('error', () => {}); c.stdout.resume(); c.stderr.resume(); spare = c;
+    // 出力の整形機能は、最初に使うときに 0.5 秒ほどかかる。待機中に済ませておく (結果は捨てる)
+    c.stdin.write("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $null = (Get-Item . | Format-List | Out-String); $null = (Get-Item . | Format-Table | Out-String); $null = (Get-Date | Out-String)\n");
+  } catch { spare = null; }
+}
+process.on('exit', () => { try { if (spare) spare.kill(); } catch { /* 無視 */ } });
+function runSpawn(cmd, opts, pref) {
+  const sh = runShell();
+  if (sh.kind === 'default' || pref === 'cmd') return spawn(cmd, { ...opts, shell: true });
+  // 出力は UTF-8 に揃え、進捗バーと色は出さない。コマンドは文字化けしないよう Base64 で渡す
+  const q = (x) => `'${String(x).replace(/'/g, "''")}'`;
+  const body = `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $OutputEncoding=[System.Text.Encoding]::UTF8; $ProgressPreference='SilentlyContinue'; try { $PSStyle.OutputRendering='PlainText' } catch {}
+${cmd}
+exit $(if ($?) { 0 } elseif ($LASTEXITCODE) { $LASTEXITCODE } else { 1 })`;
+  const ready = spare && spare.exitCode === null ? spare : null;
+  if (ready) { // 先に起動してあった PowerShell に、フォルダと環境を設定してから渡す。標準入力はすぐ閉じる (入力待ちにならない)
+    spare = null;
+    const env = Object.entries(opts.env || {}).filter(([k]) => /^(NO_COLOR|FORCE_COLOR|GIT_TERMINAL_PROMPT|PYTHONUNBUFFERED|PYTHONIOENCODING)$/.test(k)).map(([k, v]) => `$env:${k}=${q(v)}`).join('; ');
+    const script = `Set-Location -LiteralPath ${q(opts.cwd)}; ${env}
+${body}`;
+    ready.stdin.end(`iex ([System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(script, 'utf8').toString('base64')}')))
+`);
+    setTimeout(warmShell, 300);
+    return ready;
+  }
+  warmShell(); // 今回は間に合わないので普通に起動し、次回のために 1 つ用意する
+  return spawn(sh.exe, ['-NoLogo', '-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-EncodedCommand', Buffer.from(body, 'utf16le').toString('base64')], opts);
+}
+
 const wss = new WebSocketServer({ noServer: true });
 server.on('upgrade', (req, socket, head) => {
   if (!originOk(req) || !safeEqual(cookieToken(req), TOKEN)) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); return socket.destroy(); }
@@ -806,7 +851,7 @@ wss.on('connection', (ws) => {
     }
     return { text: process.platform === 'win32' ? new TextDecoder('shift_jis').decode(buf) : buf.toString('latin1'), rest: Buffer.alloc(0) };
   }
-  function startRun(id, cmd, cwdRaw) {
+  function startRun(id, cmd, cwdRaw, pref) {
     const end = (o) => send({ type: 'run_end', id, ...o });
     if (typeof id !== 'string' || id.length > 60 || typeof cmd !== 'string' || !cmd.trim() || cmd.length > 8000) return;
     if (runs.size) return end({ error: '実行中のコマンドがあります。終わるのを待つか、停止してください' });
@@ -814,8 +859,8 @@ wss.on('connection', (ws) => {
     if (!cwd) return end({ error: '作業フォルダが見つかりません' });
     const t0 = Date.now(); let child;
     try {
-      child = spawn(cmd, { cwd, shell: true, windowsHide: true, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0', GIT_TERMINAL_PROMPT: '0', PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8' } });
+      child = runSpawn(cmd, { cwd, windowsHide: true, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0', GIT_TERMINAL_PROMPT: '0', PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8' } }, pref);
     } catch (e) { return end({ error: String(e.message || e) }); }
     runs.set(id, child); let sent = 0, capped = false; const tails = { out: Buffer.alloc(0), err: Buffer.alloc(0) };
     const feed = (key) => (chunk) => {
@@ -855,7 +900,7 @@ wss.on('connection', (ws) => {
     } catch { send({ type: 'watch_state', active: false, reason: 'この環境ではフォルダの監視ができません (「↻」かウィンドウに戻ったときに更新します)' }); }
   }
 
-  send({ type: 'hello', cwd: DEFAULT_CWD, features: ['attach', 'watch', 'move', 'trash', 'run'] });
+  send({ type: 'hello', cwd: DEFAULT_CWD, features: ['attach', 'watch', 'move', 'trash', 'run'], shells: runShell().kind === 'ps' ? [{ id: 'ps', label: runShell().exe === 'pwsh' ? 'PowerShell 7' : 'PowerShell' }, { id: 'cmd', label: 'cmd' }] : [] });
 
   async function runTurn({ text, cwd, permissionMode, model, attachments }) {
     if (running) return send({ type: 'error', message: '前の応答がまだ実行中です' });
@@ -947,8 +992,9 @@ wss.on('connection', (ws) => {
     else if (m.type === 'interrupt' && running) { try { await running.q.interrupt(); } catch { running.abort.abort(); } }
     else if (m.type === 'setMode' && running) { try { await running.q.setPermissionMode(m.mode); } catch {} }
     else if (m.type === 'newSession') { if (!running) sessionId = null; }
-    else if (m.type === 'run') startRun(m.id, m.cmd, m.cwd);
+    else if (m.type === 'run') startRun(m.id, m.cmd, m.cwd, m.shell);
     else if (m.type === 'run_stop') killTree(runs.get(m.id));
+    else if (m.type === 'run_warm') warmShell();
     else if (m.type === 'watch') startWatch(typeof m.cwd === 'string' ? m.cwd : '');
     else if (m.type === 'resume' && typeof m.sessionId === 'string' && /^[0-9a-f-]{36}$/i.test(m.sessionId) && !running) { sessionId = m.sessionId; }
   });
