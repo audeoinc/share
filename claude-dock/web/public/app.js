@@ -822,7 +822,8 @@ const editDirty = () => !!editState && editState.model.getAlternativeVersionId()
 function editMarks() {
   if (!editState) return; const dirty = editDirty();
   pv.name.textContent = `${dirty ? '● ' : ''}${editState.rel}`; pv.name.title = dirty ? '未保存の変更があります' : '';
-  $('#psave').disabled = !dirty;
+  const b = $('#psave'); b.disabled = !dirty; b.classList.toggle('send', dirty); b.classList.toggle('ghost', !dirty); b.classList.toggle('saved', !dirty);
+  b.textContent = editState.saving ? '保存中…' : dirty ? '保存' : '✓ 保存済み';
 }
 function editBanner(text, buttons) {
   const b = editState?.banner; if (!b) return; b.textContent = ''; b.hidden = !text; if (!text) return;
@@ -870,10 +871,12 @@ async function confirmLeaveEdit() {
 async function saveEdit(opt = {}) {
   const s = editState; if (!s) return false;
   const text = s.model.getValue(); const ver = s.model.getAlternativeVersionId();
+  s.saving = true; editMarks();
   try {
     const r = await postJson('/api/file/save', { path: s.rel, text, mtimeMs: s.mtimeMs, eol: s.d.eol, ...opt });
-    s.mtimeMs = r.mtimeMs; s.cleanVer = ver; s.d.enc = r.enc || s.d.enc; s.d.text = text; editBanner(''); editMarks(); toast('保存しました'); return true;
+    s.mtimeMs = r.mtimeMs; s.cleanVer = ver; s.d.enc = r.enc || s.d.enc; s.d.text = text; s.saving = false; editBanner(''); editMarks(); toast('保存しました'); return true;
   } catch (e) {
+    s.saving = false; editMarks();
     if (e.code === 'changed') {
       const c = await askChoice({ title: 'ファイルが変更されています', body: `${s.rel} は、開いたあとに別の場所 (Claude や他のツール) で変更されました。`, buttons: [
         { label: 'キャンセル', value: 'cancel', def: true }, { label: '外部の内容を読み込む (編集を破棄)', value: 'reload', danger: true }, { label: '自分の内容で上書き', value: 'force', primary: true }] });

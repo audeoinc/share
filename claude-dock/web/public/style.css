@@ -400,3 +400,4 @@ button.danger:disabled { opacity: .45; cursor: default; }
 .pbody .diffsw { float: right; margin: 0 0 6px 8px; }
 .pbody.editing > .note { padding: 6px 12px; margin: 0; }
 .pbody.editing > .diffsw { float: none; align-self: flex-end; margin: 6px 12px; }
+#psave.saved { color: var(--ok, #2e7d32); border-color: transparent; background: transparent; opacity: 1; }
