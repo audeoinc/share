@@ -11,6 +11,7 @@
 <header class="top">
   <div class="brand"><img src="icon.png" alt="" width="20" height="20"><span>cdock</span></div>
   <label class="cwd"><span>フォルダ</span><input id="cwd" spellcheck="false" autocomplete="off"></label>
+  <span class="fs" title="チャットの文字サイズ"><button id="fs-down" class="ghost">A−</button><button id="fs-up" class="ghost">A＋</button></span>
   <select id="model" title="モデル">
     <option value="">モデル: 既定</option>
     <option value="claude-opus-5-5">Opus 5.5 (高性能)</option>
@@ -25,20 +26,28 @@
   </select>
 </header>
 <div class="shell">
-  <aside class="side">
-    <div class="tabs"><button id="tab-sessions" class="on">会話</button><button id="tab-files">ファイル</button></div>
+  <aside class="side" id="side">
+    <div class="grip grip-r" id="grip-side" role="separator" aria-orientation="vertical" aria-label="サイドバーの幅" tabindex="0" title="ドラッグで幅を変更 / ダブルクリックで元に戻す"></div>
+    <div class="tabs"><button id="tab-sessions" class="on">会話</button><button id="tab-files">ファイル</button><button id="tab-git">変更 <span id="gitcount" class="badge" hidden></span></button></div>
     <div id="pane-sessions" class="pane"><button id="new" class="newbtn">＋ 新しい会話</button><div id="sessions"></div></div>
     <div id="pane-files" class="pane" hidden><div id="tree"></div></div>
+    <div id="pane-git" class="pane" hidden><div class="githead"><span id="gitbranch" class="gitbranch"></span><button id="gitrefresh" class="ghost" title="更新">↻</button></div><div id="gitlist"></div></div>
   </aside>
   <section class="main">
-    <main id="chat" class="chat"><div class="empty" id="empty"><img src="icon.png" width="44" height="44" alt=""><h1>何をしましょうか？</h1><p>左の「ファイル」をクリックすると、入力欄に @パス が入ります。</p></div></main>
+    <main id="chat" class="chat"><div class="empty" id="empty"><img src="icon.png" width="44" height="44" alt=""><h1>何をしましょうか？</h1><p>「ファイル」タブでクリックするとプレビュー、＠ で入力欄に @パス を入れられます。</p></div></main>
     <footer class="composer">
       <div class="box">
+        <div id="slash" class="slash" hidden></div>
         <textarea id="input" rows="1" placeholder="Claude に指示する (Enter で送信 / Shift+Enter で改行)"></textarea>
         <div class="actions"><span id="status" class="status"></span><button id="stop" class="stop" hidden>■ 停止</button><button id="send" class="send">送信</button></div>
       </div>
     </footer>
   </section>
+  <aside id="preview" class="preview" hidden>
+    <div class="grip grip-l" id="grip-prev" role="separator" aria-orientation="vertical" aria-label="プレビューの幅" tabindex="0" title="ドラッグで幅を変更 / ダブルクリックで元に戻す"></div>
+    <div class="phead"><span id="pname" class="pname"></span><button id="pinsert" class="ghost" title="入力欄に @パス を挿入">＠ 挿入</button><button id="pclose" class="ghost" title="閉じる">✕</button></div>
+    <div id="pbody" class="pbody"></div>
+  </aside>
 </div>
 <script src="app.js" type="module"></script>
 </body>

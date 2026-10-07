@@ -4,9 +4,11 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
-import { query, listSessions, getSessionMessages } from '@anthropic-ai/claude-agent-sdk';
+import { execFile } from 'node:child_process';
+import { query, listSessions, getSessionMessages, renameSession } from '@anthropic-ai/claude-agent-sdk';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pub = path.join(here, 'public');
@@ -37,9 +39,146 @@ const IGNORE = new Set(['.git', 'node_modules', '__pycache__', '.venv', '.DS_Sto
 const json = (res, obj, code = 200) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
 const resolveCwd = (c) => { const p = c && fs.existsSync(c) ? path.resolve(c) : DEFAULT_CWD; return p; };
 
-async function api(url, res) {
+
+// ---- ファイルプレビュー用 ----
+const RAW_MIME = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.bmp': 'image/bmp', '.ico': 'image/x-icon', '.pdf': 'application/pdf' };
+const MAX_TEXT = 1024 * 1024, MAX_RAW = 30 * 1024 * 1024, MAX_ZIP = 60 * 1024 * 1024;
+
+// 作業フォルダの外 (シンボリックリンク経由を含む) は読ませない
+function safeFile(cwd, rel) {
+  const root = fs.realpathSync(cwd);
+  const f = fs.realpathSync(path.resolve(cwd, rel));
+  if (f !== root && !f.startsWith(root + path.sep)) throw new Error('作業フォルダの外のファイルは開けません');
+  return f;
+}
+function decodeText(buf) {
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf).replace(/^﻿/, ''); }
+  catch { try { return new TextDecoder('shift_jis').decode(buf); } catch { return buf.toString('latin1'); } }
+}
+// 最小の ZIP リーダー (pptx / docx 用)。ZIP64 は非対応。展開サイズに上限を付ける
+function readZip(buf) {
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--) if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  if (eocd < 0) throw new Error('ZIP として読めません');
+  const count = buf.readUInt16LE(eocd + 10); let p = buf.readUInt32LE(eocd + 16);
+  const files = new Map();
+  for (let n = 0; n < count && buf.readUInt32LE(p) === 0x02014b50; n++) {
+    const method = buf.readUInt16LE(p + 10), csize = buf.readUInt32LE(p + 20);
+    const nl = buf.readUInt16LE(p + 28), el = buf.readUInt16LE(p + 30), cl = buf.readUInt16LE(p + 32), lho = buf.readUInt32LE(p + 42);
+    const name = buf.toString('utf8', p + 46, p + 46 + nl);
+    files.set(name, () => {
+      const start = lho + 30 + buf.readUInt16LE(lho + 26) + buf.readUInt16LE(lho + 28);
+      const data = buf.subarray(start, start + csize);
+      return method === 0 ? data : zlib.inflateRawSync(data, { maxOutputLength: 8 * 1024 * 1024 });
+    });
+    p += 46 + nl + el + cl;
+  }
+  return files;
+}
+const xmlText = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+function paragraphs(xml, pTag, tTag) {
+  const out = [];
+  for (const m of xml.matchAll(new RegExp(`<${pTag}[ >][^]*?</${pTag}>`, 'g'))) {
+    const t = [...m[0].matchAll(new RegExp(`<${tTag}[^>]*>([^]*?)</${tTag}>`, 'g'))].map((x) => xmlText(x[1])).join('');
+    if (t.trim()) out.push(t);
+  }
+  return out;
+}
+function previewOffice(buf, ext) {
+  if (buf.length > MAX_ZIP) return { kind: 'binary', note: 'ファイルが大きすぎて内容を表示できません' };
+  const zip = readZip(buf);
+  if (ext === '.pptx') {
+    const slides = [...zip.keys()].filter((k) => /^ppt\/slides\/slide\d+\.xml$/.test(k)).sort((a, b) => parseInt(a.match(/\d+/)[0]) - parseInt(b.match(/\d+/)[0]));
+    return { kind: 'pptx', slides: slides.map((k, i) => ({ n: i + 1, lines: paragraphs(zip.get(k)().toString('utf8'), 'a:p', 'a:t') })) };
+  }
+  const doc = zip.get('word/document.xml');
+  return { kind: 'docx', lines: doc ? paragraphs(doc().toString('utf8'), 'w:p', 'w:t') : [] };
+}
+function previewFile(file, name) {
+  const st = fs.statSync(file); const ext = path.extname(name).toLowerCase();
+  const base = { name, size: st.size };
+  if (RAW_MIME[ext]) return st.size > MAX_RAW ? { ...base, kind: 'binary', note: 'ファイルが大きすぎます' } : { ...base, kind: ext === '.pdf' ? 'pdf' : 'image' };
+  if (ext === '.pptx' || ext === '.docx') return { ...base, ...previewOffice(fs.readFileSync(file), ext) };
+  const fd = fs.openSync(file, 'r'); const head = Buffer.alloc(Math.min(4096, st.size)); fs.readSync(fd, head, 0, head.length, 0); fs.closeSync(fd);
+  if (head.includes(0)) return { ...base, kind: 'binary', note: 'バイナリファイルのため表示できません' };
+  const buf = fs.readFileSync(file, { encoding: null }).subarray(0, MAX_TEXT);
+  return { ...base, kind: /\.(md|markdown)$/i.test(name) ? 'markdown' : 'text', text: decodeText(buf), truncated: st.size > MAX_TEXT };
+}
+
+// ---- Git (読み取りのみ。シェルを通さず引数配列で実行) ----
+function git(cwd, args, max = 2 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    execFile('git', ['-c', 'core.quotepath=false', '-c', 'core.fsmonitor=false', '-c', 'core.pager=cat', ...args],
+      { cwd, maxBuffer: max, timeout: 15000, windowsHide: true, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' } },
+      (err, stdout) => (err ? reject(err) : resolve(stdout)));
+  });
+}
+async function gitStatus(cwd) {
+  let top;
+  try { top = (await git(cwd, ['rev-parse', '--show-toplevel'])).trim(); } catch { return { repo: false }; }
+  const branch = (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']).catch(() => '')).trim();
+  const raw = await git(cwd, ['status', '--porcelain=v1', '-z', '-uall']);
+  const parts = raw.split('\0'); const files = [];
+  for (let i = 0; i < parts.length; i++) {
+    const e = parts[i]; if (e.length < 4) continue;
+    const xy = e.slice(0, 2); const p = e.slice(3);
+    if (xy[0] === 'R' || xy[0] === 'C') i++; // 次のエントリは元のパス
+    files.push({ path: p, xy });
+  }
+  return { repo: true, top, branch, files };
+}
+// 差分: HEAD との比較 (ステージ済み + 未ステージ)。未追跡ファイルは全行を追加として返す
+async function gitDiff(cwd, rel) {
+  const st = await gitStatus(cwd); if (!st.repo) throw new Error('Git リポジトリではありません');
+  const abs = path.resolve(st.top, rel);
+  const real = fs.existsSync(abs) ? fs.realpathSync(abs) : abs; const root = fs.realpathSync(st.top);
+  if (real !== root && !real.startsWith(root + path.sep)) throw new Error('リポジトリの外のファイルです');
+  const f = st.files.find((x) => x.path === rel);
+  if (f && f.xy === '??') {
+    const buf = fs.readFileSync(abs).subarray(0, MAX_TEXT);
+    return { untracked: true, text: decodeText(buf) };
+  }
+  const text = await git(st.top, ['diff', 'HEAD', '--no-color', '--no-ext-diff', '--', rel], 4 * 1024 * 1024).catch(async () => git(st.top, ['diff', '--no-color', '--no-ext-diff', '--', rel], 4 * 1024 * 1024));
+  return { untracked: false, text };
+}
+
+// ---- スラッシュコマンド一覧 (SDK から取得して作業フォルダごとに保存) ----
+const cmdCache = new Map();
+const FALLBACK_COMMANDS = [{ name: 'compact', description: '会話を要約して、コンテキストを小さくする', argumentHint: '[指示]' }, { name: 'context', description: 'コンテキストの使用状況を表示', argumentHint: '' }, { name: 'cost', description: '使用量を表示', argumentHint: '' }];
+async function listCommands(cwd) {
+  if (cmdCache.has(cwd)) return cmdCache.get(cwd);
+  async function* idle() { await new Promise(() => {}); }
+  const q = query({ prompt: idle(), options: { cwd, settingSources: ['user', 'project', 'local'], systemPrompt: { type: 'preset', preset: 'claude_code' } } });
+  let list = FALLBACK_COMMANDS;
+  try {
+    const cmds = await Promise.race([q.supportedCommands(), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 20000))]);
+    if (Array.isArray(cmds) && cmds.length) list = cmds.map((c) => ({ name: c.name, description: c.description || '', argumentHint: c.argumentHint || '' }));
+    cmdCache.set(cwd, list);
+  } catch { /* フォールバックを返す (キャッシュしない) */ } finally { try { q.close(); } catch { /* 無視 */ } }
+  return list;
+}
+function readBody(req, limit = 8192) {
+  return new Promise((resolve, reject) => {
+    let n = 0; const chunks = [];
+    req.on('data', (c) => { n += c.length; if (n > limit) { reject(new Error('too large')); req.destroy(); } else chunks.push(c); });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
+}
+
+async function api(url, res, req) {
   const cwd = resolveCwd(url.searchParams.get('cwd'));
   try {
+    if (url.pathname === '/api/commands') return json(res, await listCommands(cwd));
+    if (url.pathname === '/api/git/status') return json(res, await gitStatus(cwd));
+    if (url.pathname === '/api/git/diff') return json(res, await gitDiff(cwd, url.searchParams.get('path') || ''));
+    if (url.pathname === '/api/rename' && req.method === 'POST') {
+      let b; try { b = JSON.parse(await readBody(req)); } catch { return json(res, { error: 'bad request' }, 400); }
+      const id = String(b.id || ''); const title = String(b.title || '').trim().slice(0, 200);
+      if (!/^[0-9a-f-]{36}$/i.test(id) || !title) return json(res, { error: 'bad request' }, 400);
+      await renameSession(id, title, { dir: cwd });
+      return json(res, { ok: true });
+    }
     if (url.pathname === '/api/sessions') {
       const list = await listSessions({ dir: cwd, limit: 60 });
       return json(res, list.map((x) => ({ sessionId: x.sessionId, title: x.customTitle || x.summary || x.firstPrompt || '(無題)', lastModified: x.lastModified })));
@@ -49,6 +188,17 @@ async function api(url, res) {
       if (!/^[0-9a-f-]{36}$/i.test(id)) return json(res, { error: 'bad id' }, 400);
       const msgs = await getSessionMessages(id, { dir: cwd });
       return json(res, msgs.map((m) => ({ type: m.type, uuid: m.uuid, parent_tool_use_id: m.parent_tool_use_id, message: m.message })));
+    }
+    if (url.pathname === '/api/file' || url.pathname === '/api/raw') {
+      const rel = url.searchParams.get('path') || '';
+      const file = safeFile(cwd, rel); const name = path.basename(file);
+      if (url.pathname === '/api/file') return json(res, previewFile(file, name));
+      const ext = path.extname(name).toLowerCase(); const mime = RAW_MIME[ext];
+      if (!mime) return json(res, { error: 'unsupported' }, 415);
+      const buf = fs.readFileSync(file);
+      const headers = { 'Content-Type': mime, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
+      if (ext === '.svg') headers['Content-Security-Policy'] = "sandbox; default-src 'none'; style-src 'unsafe-inline'";
+      res.writeHead(200, headers); return res.end(buf);
     }
     if (url.pathname === '/api/tree') {
       const target = path.resolve(cwd, url.searchParams.get('dir') || '.');
@@ -71,7 +221,7 @@ const server = http.createServer((req, res) => {
     return res.end();
   }
   if (!safeEqual(cookieToken(req), TOKEN)) { res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' }); return res.end('起動時に表示された URL (?t=...) から開いてください。'); }
-  if (url.pathname.startsWith('/api/')) return api(url, res);
+  if (url.pathname.startsWith('/api/')) return api(url, res, req);
   let rel = decodeURIComponent(url.pathname); if (rel === '/') rel = '/index.html';
   const file = path.normalize(path.join(pub, rel));
   if (!file.startsWith(pub + path.sep)) { res.writeHead(403); return res.end('forbidden'); }
@@ -160,6 +310,10 @@ wss.on('connection', (ws) => {
       sdk({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tu1', content: allowed ? '# cdock\n(模擬の出力)' : '拒否されました', is_error: !allowed }] } });
       const t2 = await say(allowed ? ['**確認できました。** これは `cdock` の README です:', '', '- 項目1', '- 項目2', ''].join('\n') : '拒否されたので中止します。');
       sdk({ type: 'assistant', parent_tool_use_id: null, message: { content: [{ type: 'text', text: t2 }] } });
+      sdk({ type: 'assistant', parent_tool_use_id: null, message: { content: [
+        { type: 'tool_use', id: 'tu2', name: 'Edit', input: { file_path: 'src/app.js', old_string: 'const x = 1\nfunction hello() {', new_string: 'const x = 2\nconst y = 3\nfunction hello(name) {' } },
+        { type: 'tool_use', id: 'tu3', name: 'Write', input: { file_path: 'notes.md', content: '# メモ\n\n- 追加した行' } }] } });
+      sdk({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tu2', content: 'ok' }, { type: 'tool_result', tool_use_id: 'tu3', content: 'ok' }] } });
       sdk({ type: 'result', subtype: 'success', is_error: false, duration_ms: 1500, total_cost_usd: 0.0123 });
     } finally { running = null; pending.clear(); send({ type: 'busy', value: false }); }
   }
