@@ -123,7 +123,7 @@ let ws, busy = false, live = null, sessionLabel = '', turnFailed = false, curren
 function setBusy(v) {
   const was = busy; busy = v; sendBtn.hidden = v; stopBtn.hidden = !v;
   statusEl.textContent = v ? '応答中…' : sessionLabel;
-  if (was && !v) { loadSessions(); loadGit(); }
+  if (was && !v) { loadSessions(); loadGit(); invalidateIndex(); }
 }
 function connect() {
   ws = new WebSocket(`ws://${location.host}/ws`);
@@ -132,7 +132,7 @@ function connect() {
   ws.onmessage = (e) => handle(JSON.parse(e.data));
 }
 function handle(m) {
-  if (m.type === 'hello') { if (!cwdEl.value) cwdEl.value = store.get('cwd', m.cwd); loadSessions(); loadRoot(); loadCommands(); loadGit(); }
+  if (m.type === 'hello') { if (!cwdEl.value) cwdEl.value = store.get('cwd', m.cwd); lastGoodCwd = cwdEl.value; loadSessions(); loadRoot(); loadCommands(); loadGit(); }
   else if (m.type === 'busy') setBusy(m.value);
   else if (m.type === 'error') { if (!turnFailed) add(el('div', 'err-box', m.message)); }
   else if (m.type === 'permission_request') askPermission(m);
@@ -207,6 +207,7 @@ function askPermission(p) {
 // ---------- 入力 ----------
 function send() {
   const text = input.value.trim(); if (!text || busy || ws.readyState !== 1) return;
+  if (cwdEl.classList.contains('invalid')) { add(el('div', 'err-box', 'フォルダが見つかりません。上部の「フォルダ」を確認してください。')); return; }
   if (text === '/clear') { input.value = ''; autosize(); hideSlash(); $('#new').onclick(); return; } // 新しい会話
   hideSlash();
   store.set('cwd', cwdEl.value); store.set('mode', modeEl.value); store.set('model', modelEl.value);
@@ -359,13 +360,18 @@ let previewRel = null;
 const pv = { box: $('#preview'), name: $('#pname'), body: $('#pbody') };
 const fmtSize = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : n >= 1024 ? Math.round(n / 1024) + ' KB' : n + ' B');
 const rawUrl = (rel) => `/api/raw?${new URLSearchParams({ cwd: cwdEl.value.trim(), path: rel })}`;
-async function openPreview(rel, row) {
+async function openPreview(rel, row, line) {
   document.querySelectorAll('.row.sel').forEach((r) => r.classList.remove('sel')); row?.classList.add('sel');
-  previewRel = rel; pv.box.hidden = false; pv.name.textContent = rel; pv.body.textContent = '読み込み中…';
+  previewRel = rel; pv.box.hidden = false; pv.name.textContent = line ? `${rel}:${line}` : rel; pv.body.textContent = '読み込み中…';
   let d; try { d = await api('/api/file', { path: rel }); } catch (e) { pv.body.textContent = ''; pv.body.append(el('div', 'note', e.message)); return; }
   if (previewRel !== rel) return;
   pv.body.textContent = ''; pv.body.scrollTop = 0;
-  if (d.kind === 'text') {
+  if ((d.kind === 'text' || d.kind === 'markdown') && line) {
+    // 検索結果から開いたときは、行番号つきで表示して該当行を強調する
+    const box = el('div', 'code lines');
+    d.text.split(NL).forEach((t, i) => { const r = el('div', `cl${i + 1 === line ? ' hit' : ''}`); r.append(el('span', 'no', String(i + 1)), el('span', 'tx', t)); box.append(r); });
+    pv.body.append(box); box.querySelector('.hit')?.scrollIntoView({ block: 'center' });
+  } else if (d.kind === 'text') {
     if (d.truncated) pv.body.append(el('div', 'note', `先頭 1MB のみ表示 (${fmtSize(d.size)})`));
     pv.body.append(el('pre', 'code', d.text));
   } else if (d.kind === 'markdown') {
@@ -405,24 +411,74 @@ for (const t of TABS) $(`#tab-${t}`).onclick = () => showTab(t);
 showTab(store.get('tab', 'sessions'));
 
 // ---------- サイドバー: Git の変更 ----------
-const GIT_LABEL = { M: '変更', A: '追加', D: '削除', R: '名前変更', '?': '未追跡', U: '競合' };
-function gitMark(xy) { const c = xy === '??' ? '?' : (xy[0] !== ' ' ? xy[0] : xy[1]); return c === '?' ? 'A' : c; }
-async function loadGit() {
-  const list = $('#gitlist'), br = $('#gitbranch'), badge = $('#gitcount');
-  let d; try { d = await api('/api/git/status', {}); } catch (e) { list.textContent = ''; list.append(el('div', 'hint', e.message)); return; }
-  list.textContent = ''; badge.hidden = true;
-  if (!d.repo) { br.textContent = ''; list.append(el('div', 'hint', 'このフォルダは Git リポジトリではありません')); return; }
-  br.textContent = `⎇ ${d.branch || '(detached)'}`;
-  if (!d.files.length) { list.append(el('div', 'hint', '変更はありません')); return; }
-  badge.textContent = d.files.length; badge.hidden = false;
-  for (const f of d.files) {
-    const row = el('div', 'gitrow'); const m = gitMark(f.xy);
-    row.title = `${GIT_LABEL[f.xy === '??' ? '?' : m] || m}: ${f.path}`;
-    row.append(el('span', `gs ${m}`, f.xy === '??' ? '?' : m), el('span', 'gp', f.path));
-    row.onclick = () => { document.querySelectorAll('.gitrow.sel').forEach((r) => r.classList.remove('sel')); row.classList.add('sel'); openDiff(f.path, f.xy === '??'); };
+const GIT_LABEL = { M: '変更', A: '追加', D: '削除', R: '名前変更', C: 'コピー', U: '競合', '?': '未追跡' };
+const gitState = { staged: 0 };
+let gitSel = null;
+const isConflict = (xy) => xy.includes('U') || xy === 'AA' || xy === 'DD';
+async function gitPost(action, body) {
+  const r = await fetch(`/api/git/${action}?${new URLSearchParams({ cwd: cwdEl.value.trim() })}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.error) throw new Error(j.error || r.status);
+  return j;
+}
+function gitMsg(text, bad) { const m = $('#commitnote'); m.textContent = text; m.classList.toggle('bad', !!bad); }
+async function gitAct(action, paths) { try { await gitPost(action, { paths }); gitMsg(''); } catch (e) { gitMsg(e.message, true); } await loadGit(); }
+function gitSection(list, title, files, kind) {
+  if (!files.length) return;
+  const head = el('div', 'gitsec');
+  head.append(el('span', 'gt', `${title} (${files.length})`));
+  if (kind !== 'conflict') {
+    const all = el('button', 'ghost mini', kind === 'staged' ? 'すべて解除' : 'すべてステージ');
+    all.onclick = () => gitAct(kind === 'staged' ? 'unstage' : 'stage', files.map((f) => f.path));
+    head.append(all);
+  }
+  list.append(head);
+  for (const f of files) {
+    const row = el('div', 'gitrow' + (f.path === gitSel ? ' sel' : ''));
+    const mark = kind === 'staged' ? f.xy[0] : f.xy === '??' ? '?' : (f.xy[1] !== ' ' ? f.xy[1] : f.xy[0]);
+    row.title = `${GIT_LABEL[mark] || mark}: ${f.path}`;
+    row.append(el('span', `gs ${mark === '?' ? 'A' : mark}`, mark), el('span', 'gp', f.path));
+    if (kind !== 'conflict') {
+      const btn = el('button', 'gbtn', kind === 'staged' ? '−' : '＋'); btn.title = kind === 'staged' ? 'ステージから外す' : 'ステージに追加';
+      btn.onclick = (ev) => { ev.stopPropagation(); gitAct(kind === 'staged' ? 'unstage' : 'stage', [f.path]); };
+      row.append(btn);
+    }
+    row.onclick = () => { document.querySelectorAll('.gitrow.sel').forEach((r) => r.classList.remove('sel')); row.classList.add('sel'); gitSel = f.path; openDiff(f.path, f.xy === '??'); };
     list.append(row);
   }
 }
+async function loadGit() {
+  const list = $('#gitlist'), br = $('#gitbranch'), badge = $('#gitcount'), box = $('#commitbox');
+  let d; try { d = await api('/api/git/status', {}); } catch (e) { list.textContent = ''; list.append(el('div', 'hint', e.message)); box.hidden = true; return; }
+  list.textContent = ''; badge.hidden = true;
+  if (!d.repo) { br.textContent = ''; box.hidden = true; list.append(el('div', 'hint', 'このフォルダは Git リポジトリではありません')); return; }
+  br.textContent = `⎇ ${d.branch || '(detached)'}`;
+  const tracked = d.files.filter((f) => f.xy !== '??');
+  const conflict = tracked.filter((f) => isConflict(f.xy));
+  const ok = tracked.filter((f) => !isConflict(f.xy));
+  const staged = ok.filter((f) => f.xy[0] !== ' ');
+  const changed = ok.filter((f) => f.xy[1] !== ' ');
+  const untracked = d.files.filter((f) => f.xy === '??');
+  box.hidden = false; gitState.staged = staged.length; updateCommitBtn();
+  if (!d.files.length) { list.append(el('div', 'hint', '変更はありません')); return; }
+  badge.textContent = d.files.length; badge.hidden = false;
+  gitSection(list, '競合', conflict, 'conflict');
+  gitSection(list, 'ステージ済み', staged, 'staged');
+  gitSection(list, '変更', changed, 'changed');
+  gitSection(list, '未追跡', untracked, 'untracked');
+}
+function updateCommitBtn() {
+  const b = $('#commitbtn'); b.textContent = gitState.staged ? `コミット (${gitState.staged})` : 'コミット';
+  b.disabled = !($('#commitmsg').value.trim() && gitState.staged > 0);
+}
+$('#commitmsg').addEventListener('input', updateCommitBtn);
+$('#commitmsg').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.isComposing) { e.preventDefault(); $('#commitbtn').click(); } });
+$('#commitbtn').onclick = async () => {
+  const btn = $('#commitbtn'); if (btn.disabled) return; btn.disabled = true;
+  try { const r = await gitPost('commit', { message: $('#commitmsg').value }); $('#commitmsg').value = ''; gitMsg(`✓ コミットしました ${r.hash}`); }
+  catch (e) { gitMsg(e.message, true); }
+  await loadGit();
+};
 $('#gitrefresh').onclick = loadGit;
 async function openDiff(rel, untracked) {
   previewRel = null; pv.box.hidden = false; pv.name.textContent = `${untracked ? '未追跡' : '差分'}: ${rel}`; pv.body.textContent = '読み込み中…';
@@ -438,12 +494,164 @@ async function openDiff(rel, untracked) {
   pv.body.append(wrap);
 }
 
-// フォルダを変えたら、会話とツリーを読み込み直す
-cwdEl.addEventListener('change', () => {
-  if (busy) return;
-  store.set('cwd', cwdEl.value);
-  ws.send(JSON.stringify({ type: 'newSession' })); currentSession = null; clearChat(); loadSessions(); loadRoot(); loadCommands(); loadGit();
+// ---------- ファイル検索 (名前 / 中身)。Ctrl+P で検索欄へ ----------
+let fileIndex = null, fileIndexCwd = '', searchMode = 'name', grepTimer = null, fsel = -1, searchSeq = 0;
+const fsInput = $('#fsearch'), fres = $('#fresults');
+function invalidateIndex() { fileIndex = null; }
+async function ensureIndex() {
+  const cwd = cwdEl.value.trim();
+  if (fileIndex && fileIndexCwd === cwd) return fileIndex;
+  try { fileIndex = (await api('/api/files', {})).files; fileIndexCwd = cwd; } catch { fileIndex = []; }
+  return fileIndex;
+}
+// あいまい一致: 全ての語が (ファイル名 > パス > 飛び飛びの文字) のいずれかで一致すること
+function fuzzyOne(q, p) {
+  const base = p.slice(p.lastIndexOf('/') + 1);
+  const bi = base.indexOf(q); if (bi >= 0) return 1000 - bi - base.length * 0.1;
+  const pi = p.indexOf(q); if (pi >= 0) return 600 - pi * 0.1 - p.length * 0.05;
+  let i = 0, last = -2, score = 0;
+  for (const ch of q) { const j = p.indexOf(ch, i); if (j < 0) return -1; score += j === last + 1 ? 3 : 1; last = j; i = j + 1; }
+  return score - p.length * 0.02;
+}
+function fuzzyScore(terms, path) {
+  const p = path.toLowerCase(); let total = 0;
+  for (const t of terms) { const s = fuzzyOne(t, p); if (s < 0) return -1; total += s; }
+  return total;
+}
+function searchItems() { return [...fres.querySelectorAll('.fres-it')]; }
+function setSel(i) {
+  const items = searchItems(); if (!items.length) { fsel = -1; return; }
+  fsel = (i + items.length) % items.length;
+  items.forEach((e, k) => e.classList.toggle('on', k === fsel)); items[fsel].scrollIntoView({ block: 'nearest' });
+}
+function clearSearch() { fsInput.value = ''; fres.hidden = true; fres.textContent = ''; $('#tree').hidden = false; fsel = -1; }
+function nameItem(path) {
+  const slash = path.lastIndexOf('/'); const base = path.slice(slash + 1), dir = slash >= 0 ? path.slice(0, slash) : '';
+  const it = el('div', 'fres-it'); it.title = path;
+  it.append(el('span', 'fb', base), el('span', 'fd', dir));
+  const at = el('span', 'at2', '＠'); at.title = '入力欄に @パス を挿入';
+  at.onclick = (ev) => { ev.stopPropagation(); insertAtCursor(atRef(path)); };
+  it.append(at); it.onclick = () => openPreview(path); it.dataset.path = path;
+  return it;
+}
+async function runSearch() {
+  const q = fsInput.value.trim(); const seq = ++searchSeq;
+  if (!q) { clearSearch(); return; }
+  $('#tree').hidden = true; fres.hidden = false;
+  if (searchMode === 'name') {
+    const files = await ensureIndex(); if (seq !== searchSeq) return;
+    const terms = q.toLowerCase().split(' ').filter(Boolean);
+    const scored = []; for (const f of files) { const s = fuzzyScore(terms, f); if (s >= 0) scored.push([s, f]); }
+    scored.sort((a, b) => b[0] - a[0] || a[1].length - b[1].length);
+    fres.textContent = '';
+    if (!scored.length) fres.append(el('div', 'hint', '一致するファイルがありません'));
+    for (const [, f] of scored.slice(0, 100)) fres.append(nameItem(f));
+    if (scored.length > 100) fres.append(el('div', 'hint', `他 ${scored.length - 100} 件 (語を増やして絞り込めます)`));
+    setSel(0);
+  } else {
+    if (q.length < 2) { fres.textContent = ''; fres.append(el('div', 'hint', '2 文字以上で検索します')); return; }
+    fres.textContent = ''; fres.append(el('div', 'hint', '検索中…'));
+    let d; try { d = await api('/api/grep', { q }); } catch (e) { fres.textContent = ''; fres.append(el('div', 'hint', e.message)); return; }
+    if (seq !== searchSeq) return;
+    fres.textContent = '';
+    if (!d.hits.length) { fres.append(el('div', 'hint', '一致する行がありません')); return; }
+    let cur = null;
+    for (const h of d.hits) {
+      if (h.path !== cur) { cur = h.path; const t = el('div', 'fres-file', h.path); t.title = h.path; fres.append(t); }
+      const it = el('div', 'fres-it hit'); it.dataset.path = h.path; it.dataset.line = h.line;
+      it.append(el('span', 'ln', String(h.line)), el('span', 'ltx', h.text.trim()));
+      it.onclick = () => openPreview(h.path, null, h.line); fres.append(it);
+    }
+    if (d.truncated) fres.append(el('div', 'hint', '先頭 200 件のみ表示しています。語を増やして絞り込んでください'));
+    setSel(0);
+  }
+}
+fsInput.addEventListener('input', () => { clearTimeout(grepTimer); grepTimer = setTimeout(runSearch, searchMode === 'content' ? 300 : 60); });
+fsInput.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown') { e.preventDefault(); setSel(fsel + 1); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); setSel(fsel - 1); }
+  else if (e.key === 'Enter' && !e.isComposing) {
+    const it = searchItems()[fsel]; if (!it) return; e.preventDefault();
+    if (e.shiftKey && it.dataset.path) insertAtCursor(atRef(it.dataset.path)); else it.click();
+  } else if (e.key === 'Escape') { e.preventDefault(); clearSearch(); }
 });
+$('#fsmode').onclick = () => {
+  searchMode = searchMode === 'name' ? 'content' : 'name';
+  $('#fsmode').textContent = searchMode === 'name' ? '名前' : '中身';
+  fsInput.placeholder = searchMode === 'name' ? 'ファイルを検索 (Ctrl+P)' : '中身を検索 (2文字以上)';
+  fsInput.focus(); runSearch();
+};
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'p') { e.preventDefault(); showTab('files'); fsInput.focus(); fsInput.select(); }
+});
+
+// ---------- フォルダの切り替え / 選択 ----------
+const recentDirs = () => { try { return JSON.parse(store.get('recentDirs', '[]')); } catch { return []; } };
+function fillRecentList() { const dl = $('#recent-dirs'); dl.textContent = ''; for (const p of recentDirs()) { const o = el('option'); o.value = p; dl.append(o); } }
+function pushRecent(p) { store.set('recentDirs', JSON.stringify([p, ...recentDirs().filter((x) => x.toLowerCase() !== p.toLowerCase())].slice(0, 10))); fillRecentList(); }
+let lastGoodCwd = '';
+// フォルダが存在するか確かめてから、会話・ツリー・Git・コマンドを読み込み直す。存在しなければ赤で知らせる
+async function switchCwd(raw) {
+  const value = raw.trim(); if (!value) return false;
+  if (busy) { cwdEl.value = lastGoodCwd; return false; }
+  try { const d = await api('/api/dirs', { path: value }); cwdEl.classList.remove('invalid'); cwdEl.title = ''; cwdEl.value = d.path; }
+  catch (e) { cwdEl.classList.add('invalid'); cwdEl.title = `フォルダが見つかりません: ${e.message}`; return false; }
+  if (cwdEl.value === lastGoodCwd) return true;
+  lastGoodCwd = cwdEl.value; store.set('cwd', cwdEl.value); pushRecent(cwdEl.value); invalidateIndex(); clearSearch();
+  ws.send(JSON.stringify({ type: 'newSession' })); currentSession = null; clearChat(); loadSessions(); loadRoot(); loadCommands(); loadGit();
+  return true;
+}
+cwdEl.addEventListener('change', () => switchCwd(cwdEl.value));
+fillRecentList();
+
+const dlg = { box: $('#dlg'), list: $('#dlg-list'), pathIn: $('#dlg-pathinput'), filter: $('#dlg-filter'), cur: '', parent: null, dirs: [], sep: '/', first: null };
+const dlgJoin = (base, name) => (base.endsWith('\\') || base.endsWith('/') ? base + name : base + dlg.sep + name);
+async function dlgLoad(p) {
+  try {
+    const d = await api('/api/dirs', { path: p, hidden: $('#dlg-hidden').checked ? '1' : '0' });
+    Object.assign(dlg, { cur: d.path, parent: d.parent, dirs: d.dirs, sep: d.sep });
+    dlg.pathIn.value = d.path; $('#dlg-cur').textContent = d.path; $('#dlg-up').disabled = !d.parent; dlg.filter.value = '';
+    dlgPlaces(d); dlgRender();
+  } catch (e) { dlg.list.textContent = ''; dlg.list.append(el('div', 'hint', e.message)); }
+}
+function dlgPlaces(d) {
+  const box = $('#dlg-places'); box.textContent = '';
+  const add = (label, p) => { const x = el('div', 'dlg-pl', label); x.title = p; x.onclick = () => dlgLoad(p); box.append(x); };
+  add('ホーム', d.home); for (const dr of d.drives) add(`ドライブ ${dr}`, dr);
+  const rec = $('#dlg-recent'); rec.textContent = '';
+  const list = recentDirs(); if (!list.length) rec.append(el('div', 'hint', '(まだありません)'));
+  for (const p of list) { const x = el('div', 'dlg-pl', p.split(/[\\/]/).filter(Boolean).pop() || p); x.title = p; x.onclick = () => dlgLoad(p); rec.append(x); }
+}
+function dlgRender() {
+  const q = dlg.filter.value.trim().toLowerCase();
+  const items = dlg.dirs.filter((n) => !q || n.toLowerCase().includes(q));
+  dlg.list.textContent = '';
+  if (!items.length) dlg.list.append(el('div', 'hint', q ? '一致するフォルダがありません' : 'サブフォルダはありません'));
+  for (const n of items) { const it = el('div', 'dlg-it'); it.append(el('span', '', '📁'), el('span', '', n)); it.onclick = () => dlgLoad(dlgJoin(dlg.cur, n)); dlg.list.append(it); }
+  dlg.first = items[0] ? dlgJoin(dlg.cur, items[0]) : null;
+}
+function dlgClose() { dlg.box.hidden = true; cwdEl.focus(); }
+$('#cwd-browse').onclick = () => { dlg.box.hidden = false; dlgLoad(cwdEl.value.trim()); dlg.filter.focus(); };
+$('#dlg-close').onclick = dlgClose; $('#dlg-cancel').onclick = dlgClose;
+$('#dlg-up').onclick = () => { if (dlg.parent) dlgLoad(dlg.parent); };
+$('#dlg-hidden').onchange = () => dlgLoad(dlg.cur);
+dlg.filter.oninput = dlgRender;
+dlg.filter.onkeydown = (e) => { if (e.key === 'Enter' && !e.isComposing && dlg.first) { e.preventDefault(); dlgLoad(dlg.first); } };
+dlg.pathIn.onkeydown = (e) => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); dlgLoad(dlg.pathIn.value); } };
+$('#dlg-ok').onclick = async () => { if (await switchCwd(dlg.cur)) dlgClose(); };
+dlg.box.addEventListener('keydown', (e) => { if (e.key === 'Escape') dlgClose(); });
+dlg.box.addEventListener('mousedown', (e) => { if (e.target === dlg.box) dlgClose(); });
+
+// ---------- テーマ (自動 / ライト / ダーク)。自動は OS の設定に従う ----------
+const THEMES = [['auto', '◐', '自動 (OS の設定に従う)'], ['light', '☀', 'ライト'], ['dark', '☾', 'ダーク']];
+let themeIdx = Math.max(0, THEMES.findIndex((t) => t[0] === store.get('theme', 'auto')));
+function applyTheme() {
+  const [name, icon, label] = THEMES[themeIdx];
+  if (name === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', name);
+  $('#theme').textContent = icon; $('#theme').title = `テーマ: ${label} (クリックで切り替え)`; store.set('theme', name);
+}
+$('#theme').onclick = () => { themeIdx = (themeIdx + 1) % THEMES.length; applyTheme(); };
+applyTheme();
 
 // ---------- チャットの文字サイズ (A− / A＋、記憶する) ----------
 const FS_MIN = 11, FS_MAX = 20, FS_DEFAULT = 14;

@@ -1,12 +1,28 @@
 :root {
+  color-scheme: light;
   --bg: #faf9f5; --panel: #ffffff; --text: #3d3929; --muted: #8c8878; --rule: #e8e4d8;
-  --accent: #c96442; --accent-ink: #ffffff; --user: #efece1; --code: #f1eee3; --ok: #4c8c4a; --warn: #b7791f; --bad: #c0392b;
+  --accent: #c96442; --accent-bg: #c96442; --accent-ink: #ffffff; --user: #efece1; --code: #f1eee3;
+  --ok: #4c8c4a; --warn: #b7791f; --bad: #c0392b; --blue: #3b6fa0;
+  --add-bg: rgba(76,140,74,.16); --del-bg: rgba(192,57,43,.14); --hunk-bg: rgba(59,111,160,.10); --hit-bg: rgba(201,100,66,.18);
   --sans: system-ui, "Segoe UI", sans-serif;
   --serif: var(--sans);
   --mono: "IBM Plex Mono", Consolas, "BIZ UDGothic", monospace;
 }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #262624; --panel: #30302e; --text: #ece9df; --muted: #a19c90; --rule: #42413d; --user: #3a3935; --code: #1e1d1c;
+  --accent: #e0805f; --accent-bg: #c96442; --accent-ink: #ffffff;
+  --ok: #86c784; --warn: #e3a947; --bad: #f08072; --blue: #7bb0e6;
+  --add-bg: rgba(110,190,108,.18); --del-bg: rgba(240,128,114,.18); --hunk-bg: rgba(123,176,230,.14); --hit-bg: rgba(224,128,95,.28);
+}
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #262624; --panel: #30302e; --text: #ece9df; --muted: #9c978a; --rule: #3c3b37; --user: #353431; --code: #1f1e1d; }
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #262624; --panel: #30302e; --text: #ece9df; --muted: #a19c90; --rule: #42413d; --user: #3a3935; --code: #1e1d1c;
+    --accent: #e0805f; --accent-bg: #c96442; --accent-ink: #ffffff;
+    --ok: #86c784; --warn: #e3a947; --bad: #f08072; --blue: #7bb0e6;
+    --add-bg: rgba(110,190,108,.18); --del-bg: rgba(240,128,114,.18); --hunk-bg: rgba(123,176,230,.14); --hit-bg: rgba(224,128,95,.28);
+  }
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
@@ -44,7 +60,7 @@ button.ghost:hover, select:hover { border-color: var(--muted); }
 .perm .body { padding: 10px 12px; } .perm .ask { font-weight: 600; margin-bottom: 6px; }
 .perm pre { border: 0; border-radius: 8px; margin: 6px 0; }
 .perm .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
-.perm .btns .primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.perm .btns .primary { background: var(--accent-bg); color: var(--accent-ink); border-color: var(--accent-bg); }
 .perm.done { border-color: var(--rule); opacity: .75; }
 .meta { color: var(--muted); font: calc(var(--chat-fs, 14px) - 2px) var(--sans); margin: -6px 0 18px; }
 .err-box { white-space: pre-wrap; color: var(--bad); background: var(--panel); border: 1px solid var(--bad); border-radius: 10px; padding: 8px 12px; margin: 8px 0 18px; }
@@ -54,7 +70,7 @@ button.ghost:hover, select:hover { border-color: var(--muted); }
 textarea { width: 100%; border: 0; outline: 0; resize: none; background: transparent; color: var(--text); font: var(--chat-fs, 14px)/1.5 var(--sans); max-height: 220px; }
 .actions { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
 .status { margin-right: auto; color: var(--muted); font-size: 12px; }
-.send { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+.send { background: var(--accent-bg); color: var(--accent-ink); border-color: var(--accent-bg); font-weight: 600; }
 .send:disabled { opacity: .45; cursor: default; }
 
 /* ---- 段階2: サイドバー ---- */
@@ -96,7 +112,7 @@ textarea { width: 100%; border: 0; outline: 0; resize: none; background: transpa
 .row.sel { background: var(--user); }
 .diff { margin: 0; border-top: 1px solid var(--rule); font: 12px/1.5 var(--mono); max-height: 360px; overflow: auto; background: var(--code); }
 .diff .dl { white-space: pre-wrap; word-break: break-word; padding: 0 12px; }
-.diff .add { background: rgba(76,140,74,.16); } .diff .del { background: rgba(192,57,43,.14); }
+.diff .add { background: var(--add-bg); } .diff .del { background: var(--del-bg); }
 .diff .dh { padding: 6px 12px; color: var(--muted); font: 600 11px var(--sans); border-bottom: 1px solid var(--rule); }
 @media (max-width: 1100px) { .preview { position: fixed; right: 0; top: 0; bottom: 0; width: min(92vw, 640px); z-index: 5; box-shadow: -8px 0 24px rgba(0,0,0,.12); } }
 
@@ -104,14 +120,14 @@ textarea { width: 100%; border: 0; outline: 0; resize: none; background: transpa
 .row { font: 13px/1.5 var(--sans); }              /* エクスプローラも UI と同じフォント */
 .row.dir { font-weight: 600; }
 .tabs button { font-size: 13px; }
-.badge { background: var(--accent); color: var(--accent-ink); border-radius: 999px; padding: 0 6px; font-size: 11px; margin-left: 2px; }
+.badge { background: var(--accent-bg); color: var(--accent-ink); border-radius: 999px; padding: 0 6px; font-size: 11px; margin-left: 2px; }
 .githead { display: flex; align-items: center; gap: 6px; padding: 2px 4px 8px; }
 .gitbranch { flex: 1; font: 600 12px var(--sans); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gitrow { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 6px; cursor: pointer; font: 13px/1.5 var(--sans); }
 .gitrow:hover, .gitrow.sel { background: var(--user); }
 .gitrow .gs { width: 14px; text-align: center; font: 700 12px var(--mono); flex: none; }
 .gitrow .gp { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
-.gs.M { color: var(--warn); } .gs.A, .gs.Q { color: var(--ok); } .gs.D { color: var(--bad); } .gs.R { color: #3b6fa0; }
+.gs.M { color: var(--warn); } .gs.A, .gs.Q { color: var(--ok); } .gs.D { color: var(--bad); } .gs.R { color: var(--blue); }
 .sess { position: relative; }
 .sess .ed { position: absolute; right: 6px; top: 6px; display: none; background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 0 6px; font-size: 12px; color: var(--muted); }
 .sess:hover .ed { display: block; } .sess .ed:hover { color: var(--accent); }
@@ -126,7 +142,7 @@ textarea { width: 100%; border: 0; outline: 0; resize: none; background: transpa
 .sysnote { color: var(--muted); font-size: 12px; text-align: center; margin: 4px 0 18px; border-top: 1px dashed var(--rule); padding-top: 6px; }
 .localout { white-space: pre-wrap; font: calc(var(--chat-fs, 14px) - 1.5px)/1.55 var(--mono); background: var(--code); border: 1px solid var(--rule); border-radius: 10px; padding: 10px 12px; margin: 0 0 18px; max-height: 360px; overflow: auto; }
 
-.diff .dh2 { color: var(--muted); font-weight: 600; } .diff .hunk { color: #3b6fa0; background: rgba(59,111,160,.10); }
+.diff .dh2 { color: var(--muted); font-weight: 600; } .diff .hunk { color: var(--blue); background: var(--hunk-bg); }
 .slash .ah { color: var(--muted); font: 11.5px var(--mono); white-space: nowrap; }
 .slash .ds { flex: 1; min-width: 0; }
 .md .tbl { overflow-x: auto; margin: .8em 0; }
@@ -146,3 +162,64 @@ body.resizing iframe { pointer-events: none; }
 @media (max-width: 1100px) { .grip-l { display: none; } }
 
 .fs { display: inline-flex; gap: 2px; } .fs button { padding: 4px 8px; font-size: 12px; }
+
+/* ---- フォルダ選択 ---- */
+.cwd input.invalid { border-color: var(--bad); background: rgba(192,57,43,.06); }
+.dlg { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: flex; align-items: center; justify-content: center; z-index: 20; }
+.dlg[hidden] { display: none; }
+.dlg-card { width: min(780px, 94vw); height: min(560px, 88vh); background: var(--bg); border: 1px solid var(--rule); border-radius: 14px; box-shadow: 0 16px 48px rgba(0,0,0,.25); display: flex; flex-direction: column; overflow: hidden; }
+.dlg-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--rule); font-weight: 600; }
+.dlg-body { flex: 1; display: flex; min-height: 0; }
+.dlg-side { width: 190px; flex: none; border-right: 1px solid var(--rule); padding: 8px; overflow-y: auto; }
+.dlg-h { color: var(--muted); font-size: 11px; font-weight: 600; padding: 8px 8px 4px; }
+.dlg-pl { padding: 5px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dlg-pl:hover { background: var(--user); }
+.dlg-main { flex: 1; display: flex; flex-direction: column; min-width: 0; padding: 10px 12px; gap: 8px; }
+.dlg-path { display: flex; gap: 6px; }
+.dlg-path input, .dlg-filter { flex: 1; min-width: 0; font: 13px var(--sans); color: var(--text); background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 6px 10px; }
+.dlg-list { flex: 1; overflow-y: auto; border: 1px solid var(--rule); border-radius: 10px; background: var(--panel); padding: 4px; min-height: 0; }
+.dlg-it { display: flex; gap: 8px; align-items: center; padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 13.5px; }
+.dlg-it:hover, .dlg-it.on { background: var(--user); }
+.dlg-hid { color: var(--muted); font-size: 12px; display: flex; gap: 6px; align-items: center; }
+.dlg-foot { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--rule); }
+.dlg-cur { flex: 1; color: var(--muted); font: 12px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.dlg-main .dlg-filter { flex: none; }
+.dlg-main .dlg-path { flex: none; }
+
+/* ---- ステージ / コミット ---- */
+#pane-git:not([hidden]) { display: flex; flex-direction: column; padding-bottom: 0; }
+#gitlist { flex: 1; overflow-y: auto; min-height: 0; padding-bottom: 8px; }
+.gitsec { display: flex; align-items: center; gap: 6px; padding: 10px 6px 4px; color: var(--muted); font: 600 11px var(--sans); }
+.gitsec .gt { flex: 1; } .mini { padding: 1px 8px; font-size: 11px; }
+.gitrow .gp { flex: 1; min-width: 0; }
+.gitrow .gbtn { flex: none; width: 22px; height: 22px; padding: 0; line-height: 1; font-size: 15px; border-radius: 6px; opacity: 0; color: var(--muted); }
+.gitrow:hover .gbtn, .gitrow.sel .gbtn, .gitrow .gbtn:focus-visible { opacity: 1; } .gitrow .gbtn:hover { color: var(--accent); border-color: var(--accent); }
+.commitbox { flex: none; border-top: 1px solid var(--rule); padding: 8px 4px 10px; background: var(--bg); }
+.commitbox textarea { width: 100%; resize: vertical; min-height: 54px; max-height: 200px; font: 13px/1.5 var(--sans); color: var(--text); background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 6px 8px; }
+.commitbox textarea:focus { outline: none; border-color: var(--muted); }
+.crow { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.cnote { flex: 1; font-size: 12px; color: var(--ok); overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.cnote.bad { color: var(--bad); }
+
+/* ---- ファイル検索 ---- */
+.fsearch { display: flex; gap: 6px; padding: 0 0 8px; position: sticky; top: 0; background: var(--bg); z-index: 2; }
+.fsearch input { flex: 1; min-width: 0; font: 13px var(--sans); color: var(--text); background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 6px 10px; }
+.fsearch input:focus { outline: none; border-color: var(--muted); }
+.fsearch button { font-size: 12px; padding: 4px 10px; flex: none; }
+#tree[hidden], #fresults[hidden] { display: none; }
+.fres-it { display: flex; align-items: baseline; gap: 8px; padding: 4px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; line-height: 1.45; }
+.fres-it:hover, .fres-it.on { background: var(--user); }
+.fres-it .fb { font-weight: 600; white-space: nowrap; }
+.fres-it .fd { color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; flex: 1; min-width: 0; }
+.fres-it .at2 { margin-left: auto; display: none; color: var(--accent); font: 600 11px var(--sans); padding: 0 6px; border-radius: 6px; flex: none; }
+.fres-it:hover .at2, .fres-it.on .at2 { display: inline; }
+.fres-file { font: 600 11.5px var(--sans); color: var(--muted); padding: 8px 8px 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.fres-it.hit { padding-left: 14px; }
+.fres-it .ln { color: var(--muted); font: 11.5px var(--mono); min-width: 28px; text-align: right; flex: none; }
+.fres-it .ltx { font: 12px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pbody .lines { font: 12.5px/1.55 var(--mono); }
+.pbody .cl { display: flex; white-space: pre; }
+.pbody .cl .no { color: var(--muted); width: 44px; text-align: right; padding-right: 12px; flex: none; user-select: none; }
+.pbody .cl.hit { background: var(--hit-bg); }
+
+.theme { min-width: 34px; }

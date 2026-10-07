@@ -3,6 +3,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
@@ -106,12 +107,40 @@ function previewFile(file, name) {
 }
 
 // ---- Git (読み取りのみ。シェルを通さず引数配列で実行) ----
-function git(cwd, args, max = 2 * 1024 * 1024) {
+function git(cwd, args, max = 2 * 1024 * 1024, timeout = 15000, writes = false) {
   return new Promise((resolve, reject) => {
+    const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_EDITOR: 'true' };
+    if (!writes) env.GIT_OPTIONAL_LOCKS = '0'; // 読み取りはインデックスをロックしない
     execFile('git', ['-c', 'core.quotepath=false', '-c', 'core.fsmonitor=false', '-c', 'core.pager=cat', ...args],
-      { cwd, maxBuffer: max, timeout: 15000, windowsHide: true, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' } },
-      (err, stdout) => (err ? reject(err) : resolve(stdout)));
+      { cwd, maxBuffer: max, timeout, windowsHide: true, env },
+      (err, stdout, stderr) => { if (err) { err.message = (stderr || err.message || '').toString().trim() || err.message; reject(err); } else resolve(stdout); });
   });
+}
+// 書き込み系 (ステージ / 解除 / コミット)。パスはリポジトリ内の相対パスに正規化し、外は拒否
+async function gitRepo(cwd) { const st = await gitStatus(cwd); if (!st.repo) throw new Error('Git リポジトリではありません'); return st; }
+function repoPaths(top, paths) {
+  if (!Array.isArray(paths) || !paths.length || paths.length > 5000) throw new Error('対象のファイルが不正です');
+  return paths.map((p) => {
+    if (typeof p !== 'string' || !p || p.includes('\0')) throw new Error('対象のファイルが不正です');
+    const rel = path.relative(top, path.resolve(top, p));
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) throw new Error('リポジトリの外のパスです');
+    return rel.split(path.sep).join('/');
+  });
+}
+async function gitStage(cwd, paths) { const st = await gitRepo(cwd); await git(st.top, ['add', '--', ...repoPaths(st.top, paths)], 2 * 1024 * 1024, 60000, true); }
+async function gitUnstage(cwd, paths) {
+  const st = await gitRepo(cwd); const ps = repoPaths(st.top, paths);
+  try { await git(st.top, ['restore', '--staged', '--', ...ps], 2 * 1024 * 1024, 60000, true); }
+  catch { await git(st.top, ['rm', '--cached', '-r', '-q', '--', ...ps], 2 * 1024 * 1024, 60000, true); } // 初回コミット前など
+}
+async function gitCommit(cwd, message) {
+  const st = await gitRepo(cwd);
+  const msg = String(message || '').trim(); if (!msg) throw new Error('コミットメッセージを入力してください'); if (msg.length > 10000) throw new Error('メッセージが長すぎます');
+  const staged = (await git(st.top, ['diff', '--cached', '--name-only'])).trim();
+  if (!staged) throw new Error('ステージ済みの変更がありません');
+  const out = await git(st.top, ['commit', '-m', msg], 2 * 1024 * 1024, 120000, true); // フック (pre-commit など) もそのまま実行する
+  const hash = (await git(st.top, ['rev-parse', '--short', 'HEAD']).catch(() => '')).trim();
+  return { hash, summary: out.split('\n')[0] };
 }
 async function gitStatus(cwd) {
   let top;
@@ -142,6 +171,62 @@ async function gitDiff(cwd, rel) {
   return { untracked: false, text };
 }
 
+// ---- ファイル検索 (名前の一覧 / 中身の検索)。Git リポジトリでは .gitignore を尊重 ----
+const SKIP_DIRS = new Set(['.git', 'node_modules', '__pycache__', '.venv', 'dist', 'build', '.next', '.cache']);
+function walkFiles(root, limit = 30000) {
+  const out = []; const stack = [''];
+  while (stack.length && out.length < limit) {
+    const rel = stack.pop(); let ents;
+    try { ents = fs.readdirSync(path.join(root, rel), { withFileTypes: true }); } catch { continue; }
+    for (const e of ents) {
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) { if (!SKIP_DIRS.has(e.name)) stack.push(r); } else if (e.isFile()) out.push(r);
+      if (out.length >= limit) break;
+    }
+  }
+  return out;
+}
+async function listFiles(cwd) {
+  const st = await gitStatus(cwd);
+  if (st.repo) {
+    try {
+      const raw = await git(cwd, ['ls-files', '-co', '--exclude-standard', '-z'], 16 * 1024 * 1024);
+      const files = raw.split('\0').filter(Boolean);
+      return { files: files.slice(0, 50000), truncated: files.length > 50000 };
+    } catch { /* 下の手動走査にフォールバック */ }
+  }
+  const files = walkFiles(cwd, 30000);
+  return { files, truncated: files.length >= 30000 };
+}
+async function grepFiles(cwd, q, caseSensitive) {
+  const MAX_HITS = 200; const hits = [];
+  const cut = (s) => (s.length > 300 ? s.slice(0, 300) + '…' : s);
+  const st = await gitStatus(cwd);
+  if (st.repo) {
+    try {
+      const args = ['grep', '-n', '-I', '-F', '--no-color', '--untracked', '-z', ...(caseSensitive ? [] : ['-i']), '-e', q, '--', '.'];
+      const raw = await git(cwd, args, 16 * 1024 * 1024, 30000).catch((e) => { if (e && e.code === 1) return ''; throw e; }); // 1 = 一致なし
+      for (const rec of raw.split('\n')) {
+        if (!rec) continue;
+        const m = /^([^\0]+)\0(\d+)\0(.*)$/.exec(rec); if (!m) continue;
+        hits.push({ path: m[1], line: Number(m[2]), text: cut(m[3]) }); if (hits.length >= MAX_HITS) break;
+      }
+      return { hits, truncated: hits.length >= MAX_HITS };
+    } catch { /* フォールバック */ }
+  }
+  const needle = caseSensitive ? q : q.toLowerCase(); let scanned = 0;
+  for (const rel of walkFiles(cwd, 5000)) {
+    if (hits.length >= MAX_HITS || scanned > 3000) break;
+    const f = path.join(cwd, rel); let stt; try { stt = fs.statSync(f); } catch { continue; }
+    if (stt.size > 512 * 1024) continue; scanned++;
+    let buf; try { buf = fs.readFileSync(f); } catch { continue; }
+    if (buf.subarray(0, 4096).includes(0)) continue;
+    const lines = decodeText(buf).split('\n');
+    for (let i = 0; i < lines.length && hits.length < MAX_HITS; i++) { if ((caseSensitive ? lines[i] : lines[i].toLowerCase()).includes(needle)) hits.push({ path: rel, line: i + 1, text: cut(lines[i].replace(/\r$/, '')) }); }
+  }
+  return { hits, truncated: hits.length >= MAX_HITS };
+}
+
 // ---- スラッシュコマンド一覧 (SDK から取得して作業フォルダごとに保存) ----
 const cmdCache = new Map();
 const FALLBACK_COMMANDS = [{ name: 'compact', description: '会話を要約して、コンテキストを小さくする', argumentHint: '[指示]' }, { name: 'context', description: 'コンテキストの使用状況を表示', argumentHint: '' }, { name: 'cost', description: '使用量を表示', argumentHint: '' }];
@@ -169,9 +254,40 @@ function readBody(req, limit = 8192) {
 async function api(url, res, req) {
   const cwd = resolveCwd(url.searchParams.get('cwd'));
   try {
+    if (url.pathname === '/api/dirs') {
+      // フォルダ選択用: サブフォルダ名だけを返す (ファイルの中身や名前は返さない)
+      const home = os.homedir();
+      const p = path.resolve(url.searchParams.get('path') || home);
+      if (!fs.statSync(p).isDirectory()) throw new Error('フォルダではありません');
+      const showHidden = url.searchParams.get('hidden') === '1';
+      const dirs = [];
+      for (const e of fs.readdirSync(p, { withFileTypes: true }).slice(0, 5000)) {
+        if (!showHidden && e.name.startsWith('.')) continue;
+        let isDir = e.isDirectory();
+        if (!isDir && e.isSymbolicLink()) { try { isDir = fs.statSync(path.join(p, e.name)).isDirectory(); } catch { /* リンク切れ */ } }
+        if (isDir) dirs.push(e.name);
+      }
+      dirs.sort((a, b) => a.localeCompare(b, 'ja'));
+      const up = path.dirname(p);
+      const drives = process.platform === 'win32' ? 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').map((l) => `${l}:\\`).filter((d) => fs.existsSync(d)) : ['/'];
+      return json(res, { path: p, parent: up !== p ? up : null, dirs, home, drives, sep: path.sep });
+    }
+    if (url.pathname === '/api/files') return json(res, await listFiles(cwd));
+    if (url.pathname === '/api/grep') {
+      const q = (url.searchParams.get('q') || '').slice(0, 200);
+      if (q.trim().length < 2) return json(res, { hits: [], truncated: false, short: true });
+      return json(res, await grepFiles(cwd, q, url.searchParams.get('case') === '1'));
+    }
     if (url.pathname === '/api/commands') return json(res, await listCommands(cwd));
     if (url.pathname === '/api/git/status') return json(res, await gitStatus(cwd));
     if (url.pathname === '/api/git/diff') return json(res, await gitDiff(cwd, url.searchParams.get('path') || ''));
+    if (url.pathname.startsWith('/api/git/') && req.method === 'POST') {
+      let b; try { b = JSON.parse(await readBody(req, 512 * 1024)); } catch { return json(res, { error: 'bad request' }, 400); }
+      if (url.pathname === '/api/git/stage') { await gitStage(cwd, b.paths); return json(res, { ok: true }); }
+      if (url.pathname === '/api/git/unstage') { await gitUnstage(cwd, b.paths); return json(res, { ok: true }); }
+      if (url.pathname === '/api/git/commit') return json(res, { ok: true, ...(await gitCommit(cwd, b.message)) });
+      return json(res, { error: 'not found' }, 404);
+    }
     if (url.pathname === '/api/rename' && req.method === 'POST') {
       let b; try { b = JSON.parse(await readBody(req)); } catch { return json(res, { error: 'bad request' }, 400); }
       const id = String(b.id || ''); const title = String(b.title || '').trim().slice(0, 200);
