@@ -656,8 +656,9 @@ function onFsChange(m) {
     if (!m.dirs || m.dirs.some((d) => d === '' || openDirs.has(d))) refreshTree(); // 見えているフォルダに変化があるときだけ
     loadGit();
     if (fsearch_active()) runSearch();
-    if (previewRel && (m.files || []).includes(previewRel)) { const top = pv.body.scrollTop; await openPreview(previewRel); pv.body.scrollTop = top; }
-    else if (diffState && m.git) { const top = pv.body.scrollTop; await openDiff(diffState.rel, diffState.untracked); pv.body.scrollTop = top; }
+    if (editState && (m.files || []).includes(editState.rel)) onEditedFileChange();
+    else if (previewRel && (m.files || []).includes(previewRel)) { const top = pv.body.scrollTop; await openPreview(previewRel); pv.body.scrollTop = top; }
+    else if (diffState && m.git && !editState) { const top = pv.body.scrollTop; await openDiff(diffState.rel, diffState.untracked); pv.body.scrollTop = top; }
   }, 150);
 }
 const fsearch_active = () => !$('#fresults').hidden && !!$('#fsearch').value.trim();
@@ -741,12 +742,14 @@ function renderPptx(rel, d) {
 }
 
 async function openPreview(rel, row, line) {
-  $('#pmode').hidden = true; mdState = null; diffState = null;
+  if (editState && !(await confirmLeaveEdit())) return;
+  $('#pmode').hidden = true; $('#pedit').hidden = true; mdState = null; diffState = null; curDoc = null; disposeDiffEditor();
   document.querySelectorAll('.row.sel').forEach((r) => r.classList.remove('sel')); row?.classList.add('sel');
   previewRel = rel; pv.box.hidden = false; pv.name.textContent = line ? `${rel}:${line}` : rel; pv.body.textContent = '読み込み中…';
   let d; try { d = await api('/api/file', { path: rel }); } catch (e) { pv.body.textContent = ''; pv.body.append(el('div', 'note', e.message)); return; }
   if (previewRel !== rel) return;
   pv.body.textContent = ''; pv.body.scrollTop = 0;
+  if (d.kind === 'text' || d.kind === 'markdown') { curDoc = { rel, d }; $('#pedit').hidden = !d.editable; }
   if ((d.kind === 'text' || d.kind === 'markdown') && line) {
     // 検索結果から開いたときは、行番号つきで表示して該当行を強調する
     const box = el('div', 'code lines');
@@ -770,9 +773,144 @@ async function openPreview(rel, row, line) {
     pv.body.append(el('div', 'note', `${d.name} (${fmtSize(d.size)}) — ${d.note || 'プレビューできない形式です'}`));
   }
 }
-$('#pclose').onclick = () => { pv.box.hidden = true; previewRel = null; document.querySelectorAll('.row.sel').forEach((r) => r.classList.remove('sel')); };
+$('#pclose').onclick = async () => { if (!(await confirmLeaveEdit())) return; disposeDiffEditor(); pv.box.hidden = true; curDoc = null; previewRel = null; document.querySelectorAll('.row.sel').forEach((r) => r.classList.remove('sel')); };
 $('#pinsert').onclick = () => { if (previewRel) insertAtCursor(atRef(previewRel)); };
 
+
+// ---------- 編集 (Monaco)。小さな修正・文書の手直し用。補完・デバッグなど IDE の機能は持たない ----------
+let curDoc = null;   // いま開いているテキスト / Markdown { rel, d }
+let editState = null; // 編集中 { rel, d, editor, model, mtimeMs, cleanVer, ignoreMtime, banner }
+let monacoP = null;
+function loadMonaco() {
+  if (monacoP) return monacoP;
+  monacoP = new Promise((resolve, reject) => {
+    const s = document.createElement('script'); s.src = '/vendor/monaco/vs/loader.js';
+    s.onerror = () => reject(new Error('エディタ (Monaco) を読み込めませんでした'));
+    s.onload = () => {
+      const V = '/vendor/monaco/vs/';
+      window.MonacoEnvironment = { getWorkerUrl: (_, label) => V + ({ json: 'language/json/json.worker.js', css: 'language/css/css.worker.js', scss: 'language/css/css.worker.js', less: 'language/css/css.worker.js', html: 'language/html/html.worker.js', handlebars: 'language/html/html.worker.js', razor: 'language/html/html.worker.js', typescript: 'language/typescript/ts.worker.js', javascript: 'language/typescript/ts.worker.js' }[label] || 'editor/editor.worker.js') };
+      window.require.config({ paths: { vs: '/vendor/monaco/vs' } });
+      window.require(['vs/editor/editor.main'], () => {
+        const m = window.monaco;
+        // 構文チェック・補完は使わない (非目標)。エラー波線が出ると、ただの文書にも赤線が付くため
+        try { m.languages.typescript.typescriptDefaults.setDiagnosticsOptions({ noSemanticValidation: true, noSyntaxValidation: true, noSuggestionDiagnostics: true }); } catch { /* 無視 */ }
+        try { m.languages.typescript.javascriptDefaults.setDiagnosticsOptions({ noSemanticValidation: true, noSyntaxValidation: true, noSuggestionDiagnostics: true }); } catch { /* 無視 */ }
+        try { m.languages.json.jsonDefaults.setDiagnosticsOptions({ validate: false }); } catch { /* 無視 */ }
+        try { m.languages.css.cssDefaults.setOptions({ validate: false }); } catch { /* 無視 */ }
+        resolve(m);
+      }, reject);
+    };
+    document.head.append(s);
+  });
+  monacoP.catch(() => { monacoP = null; });
+  return monacoP;
+}
+const cssVar = (n, f) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || f;
+const isDarkTheme = () => { const t = document.documentElement.getAttribute('data-theme'); return t ? t === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches; };
+function applyMonacoLook(editor) {
+  const m = window.monaco; const dark = isDarkTheme();
+  m.editor.defineTheme('cdock', { base: dark ? 'vs-dark' : 'vs', inherit: true, rules: [], colors: {
+    'editor.background': cssVar('--panel', dark ? '#30302e' : '#ffffff'), 'editor.foreground': cssVar('--text', dark ? '#ece9df' : '#3d3929'),
+    'editorLineNumber.foreground': cssVar('--muted', '#8c8878'), 'editorGutter.background': cssVar('--panel', '#ffffff'),
+  } });
+  m.editor.setTheme('cdock');
+  editor.updateOptions({ fontSize: Math.max(10, (parseFloat(cssVar('--fs', '14')) || 14) - 1.5), fontFamily: cssVar('--mono', 'Consolas, monospace') });
+}
+function syncEditorTheme() { if (!window.monaco) return; if (editState) applyMonacoLook(editState.editor); else if (diffEd) applyMonacoLook(diffEd.editor); }
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => syncEditorTheme());
+const editDirty = () => !!editState && editState.model.getAlternativeVersionId() !== editState.cleanVer;
+function editMarks() {
+  if (!editState) return; const dirty = editDirty();
+  pv.name.textContent = `${dirty ? '● ' : ''}${editState.rel}`; pv.name.title = dirty ? '未保存の変更があります' : '';
+  $('#psave').disabled = !dirty;
+}
+function editBanner(text, buttons) {
+  const b = editState?.banner; if (!b) return; b.textContent = ''; b.hidden = !text; if (!text) return;
+  b.append(el('span', '', text));
+  for (const [label, fn] of buttons || []) { const x = el('button', 'ghost mini', label); x.type = 'button'; x.onclick = fn; b.append(x); }
+}
+async function startEdit() {
+  if (!curDoc || editState || !curDoc.d.editable) return;
+  const { rel, d } = curDoc; let m;
+  try { pv.body.textContent = ''; pv.body.append(el('div', 'note', 'エディタを読み込み中…')); m = await loadMonaco(); } catch (e) { toast(e.message); await openPreview(rel); return; }
+  if (previewRel !== rel || editState) return;
+  pv.body.textContent = ''; pv.body.classList.add('editing');
+  const banner = el('div', 'edbanner'); banner.hidden = true; const host = el('div', 'edhost'); pv.body.append(banner, host);
+  const model = m.editor.createModel(d.text, undefined, m.Uri.parse(`inmemory://cdock/${encodeURI(rel)}`));
+  const wrap = /\.(md|markdown|txt|text|rst)$/i.test(rel);
+  const editor = m.editor.create(host, {
+    model, automaticLayout: true, minimap: { enabled: false }, scrollBeyondLastLine: false, wordWrap: wrap ? 'on' : 'off', renderWhitespace: 'none',
+    quickSuggestions: false, suggestOnTriggerCharacters: false, wordBasedSuggestions: 'off', parameterHints: { enabled: false }, hover: { enabled: false },
+    lightbulb: { enabled: 'off' }, codeLens: false, occurrencesHighlight: 'off', 'semanticHighlighting.enabled': false, inlineSuggest: { enabled: false },
+    unicodeHighlight: { ambiguousCharacters: false, invisibleCharacters: false, nonBasicASCII: false }, links: false, colorDecorators: false,
+    acceptSuggestionOnEnter: 'off', tabCompletion: 'off', folding: !wrap, glyphMargin: false, lineNumbersMinChars: 3, padding: { top: 8, bottom: 8 },
+  });
+  editState = { rel, d, editor, model, mtimeMs: d.mtimeMs, cleanVer: model.getAlternativeVersionId(), ignoreMtime: null, banner };
+  editor.addCommand(m.KeyMod.CtrlCmd | m.KeyCode.KeyS, () => { saveEdit(); });
+  model.onDidChangeContent(editMarks);
+  syncEditorTheme(); editMarks();
+  $('#pedit').hidden = true; $('#pmode').hidden = true; $('#psave').hidden = false; $('#pcancel').hidden = false;
+  editor.focus();
+}
+function exitEditUi() {
+  if (!editState) return; const s = editState; editState = null;
+  s.editor.dispose(); s.model.dispose(); pv.body.classList.remove('editing'); pv.body.textContent = '';
+  $('#psave').hidden = true; $('#pcancel').hidden = true; pv.name.title = '';
+}
+// 編集中のものがあれば、保存・破棄・キャンセルを尋ねる。続けてよければ true
+async function confirmLeaveEdit() {
+  if (!editState) return true;
+  if (editDirty()) {
+    const c = await askChoice({ title: '保存していない変更があります', body: `${editState.rel} の変更を、どうしますか？`, buttons: [
+      { label: 'キャンセル', value: 'cancel', def: true }, { label: '破棄して続ける', value: 'discard', danger: true }, { label: '保存して続ける', value: 'save', primary: true }] });
+    if (c === 'save') { if (!(await saveEdit())) return false; } else if (c !== 'discard') return false;
+  }
+  exitEditUi(); return true;
+}
+async function saveEdit(opt = {}) {
+  const s = editState; if (!s) return false;
+  const text = s.model.getValue(); const ver = s.model.getAlternativeVersionId();
+  try {
+    const r = await postJson('/api/file/save', { path: s.rel, text, mtimeMs: s.mtimeMs, eol: s.d.eol, ...opt });
+    s.mtimeMs = r.mtimeMs; s.cleanVer = ver; s.d.enc = r.enc || s.d.enc; s.d.text = text; editBanner(''); editMarks(); toast('保存しました'); return true;
+  } catch (e) {
+    if (e.code === 'changed') {
+      const c = await askChoice({ title: 'ファイルが変更されています', body: `${s.rel} は、開いたあとに別の場所 (Claude や他のツール) で変更されました。`, buttons: [
+        { label: 'キャンセル', value: 'cancel', def: true }, { label: '外部の内容を読み込む (編集を破棄)', value: 'reload', danger: true }, { label: '自分の内容で上書き', value: 'force', primary: true }] });
+      if (!editState || editState !== s) return false;
+      if (c === 'force') return saveEdit({ ...opt, force: true });
+      if (c === 'reload') await reloadExternal();
+      return false;
+    }
+    if (e.code === 'encoding') {
+      const c = await askChoice({ title: '文字コードを変換しますか？', body: `${e.message}\nUTF-8 で保存すると、他のツールで読めなくなる場合があります。`, buttons: [
+        { label: 'キャンセル', value: 'cancel', def: true }, { label: 'UTF-8 に変換して保存', value: 'utf8', primary: true }] });
+      if (c === 'utf8' && editState === s) return saveEdit({ ...opt, encoding: 'utf-8' });
+      return false;
+    }
+    toast(`保存できませんでした: ${e.message}`); return false;
+  }
+}
+// 外部で変わった内容を、エディタに読み込み直す (編集は破棄)
+async function reloadExternal() {
+  const s = editState; if (!s) return;
+  let d; try { d = await api('/api/file', { path: s.rel }); } catch (e) { editBanner(`読み込めませんでした: ${e.message}`); return; }
+  if (editState !== s) return;
+  s.model.setValue(d.text); s.cleanVer = s.model.getAlternativeVersionId(); s.mtimeMs = d.mtimeMs; s.d = { ...s.d, ...d }; editBanner(''); editMarks();
+}
+// 編集中のファイルに、フォルダの変化が通知されたとき (自分の保存でも通知される)
+async function onEditedFileChange() {
+  const s = editState; if (!s) return;
+  let d; try { d = await api('/api/file', { path: s.rel }); } catch { editBanner('このファイルは削除または移動されたようです。保存すると、同じ場所に作り直します', []); return; }
+  if (editState !== s || d.mtimeMs === s.mtimeMs || d.mtimeMs === s.ignoreMtime) return;
+  if (!editDirty()) { await reloadExternal(); toast('外部の変更を読み込みました'); return; }
+  editBanner('別の場所でこのファイルが変更されました。', [['外部の内容を読み込む (編集を破棄)', () => reloadExternal()], ['無視', () => { s.ignoreMtime = d.mtimeMs; editBanner(''); }]]);
+}
+$('#pedit').onclick = startEdit;
+$('#psave').onclick = () => { saveEdit(); };
+$('#pcancel').onclick = async () => { if (!editState) return; const rel = editState.rel; if (await confirmLeaveEdit()) await openPreview(rel); };
+window.addEventListener('beforeunload', (e) => { if (editDirty()) { e.preventDefault(); e.returnValue = ''; } });
+document.addEventListener('keydown', (e) => { if (editState && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 's') { e.preventDefault(); saveEdit(); } });
 
 const TABS = ['sessions', 'files', 'git'];
 function showTab(which) {
@@ -923,11 +1061,35 @@ brBtn.onclick = (e) => { e.stopPropagation(); openBranchMenu(); };
 document.addEventListener('mousedown', (e) => { if (!brMenu.hidden && !brMenu.contains(e.target) && e.target !== brBtn) closeBranchMenu(); });
 
 $('#gitrefresh').onclick = loadGit;
+
+// HEAD と作業ツリーを左右に並べる (Monaco の差分エディタ、読み取り専用)
+let diffEd = null;
+function disposeDiffEditor() { if (!diffEd) return; try { diffEd.editor.dispose(); diffEd.a.dispose(); diffEd.b.dispose(); } catch { /* 無視 */ } diffEd = null; pv.body.classList.remove('editing'); }
+async function renderSideDiff(rel) {
+  let sides, m;
+  try { [sides, m] = await Promise.all([api('/api/git/sides', { path: rel }), loadMonaco()]); } catch (e) { pv.body.append(el('div', 'note', e.message)); return; }
+  if (!diffState || diffState.rel !== rel) return;
+  pv.body.classList.add('editing'); const host = el('div', 'edhost'); pv.body.append(host);
+  const uri = (k) => m.Uri.parse(`inmemory://cdock-diff/${k}/${encodeURI(rel)}`);
+  const a = m.editor.createModel(sides.head ?? '', undefined, uri('head')); const b = m.editor.createModel(sides.work ?? '', undefined, uri('work'));
+  const editor = m.editor.createDiffEditor(host, { automaticLayout: true, readOnly: true, originalEditable: false, renderSideBySide: pv.body.clientWidth > 700, minimap: { enabled: false }, scrollBeyondLastLine: false, hover: { enabled: false }, unicodeHighlight: { ambiguousCharacters: false, invisibleCharacters: false, nonBasicASCII: false }, wordWrap: 'on', padding: { top: 8, bottom: 8 } });
+  editor.setModel({ original: a, modified: b });
+  diffEd = { editor, a, b }; applyMonacoLook(editor);
+  if (sides.head === null) pv.body.insertBefore(el('div', 'note', 'HEAD にはまだありません (新しいファイル)'), host);
+  else if (sides.work === null) pv.body.insertBefore(el('div', 'note', '作業ツリーから削除されています'), host);
+}
+let diffSide = store.get('diffSide', '0') === '1'; // 並べて表示 (Monaco) にするか
 async function openDiff(rel, untracked) {
-  $('#pmode').hidden = true; mdState = null; diffState = { rel, untracked };
+  if (editState && !(await confirmLeaveEdit())) return;
+  $('#pmode').hidden = true; $('#pedit').hidden = true; curDoc = null; mdState = null; diffState = { rel, untracked }; disposeDiffEditor();
   previewRel = null; pv.box.hidden = false; pv.name.textContent = `${untracked ? '未追跡' : '差分'}: ${rel}`; pv.body.textContent = '読み込み中…';
   let d; try { d = await api('/api/git/diff', { path: rel }); } catch (e) { pv.body.textContent = ''; pv.body.append(el('div', 'note', e.message)); return; }
   pv.body.textContent = ''; pv.body.scrollTop = 0;
+  const sw = el('button', 'ghost mini diffsw', diffSide ? '行ごとに表示' : '並べて表示'); sw.type = 'button';
+  sw.title = diffSide ? '従来の差分表示に戻す' : 'HEAD と作業ツリーを左右に並べて表示します (読み取り専用)';
+  sw.onclick = () => { diffSide = !diffSide; store.set('diffSide', diffSide ? '1' : '0'); openDiff(rel, untracked); };
+  pv.body.append(sw);
+  if (diffSide) { await renderSideDiff(rel); return; }
   const wrap = el('div', 'diff'); wrap.style.maxHeight = 'none'; wrap.style.border = '1px solid var(--rule)'; wrap.style.borderRadius = '10px';
   const lines = d.text.split(NL); if (lines[lines.length - 1] === '') lines.pop();
   if (!lines.length) wrap.append(el('div', 'dl', '(差分はありません)'));
@@ -1149,7 +1311,7 @@ function setParent(p) {
 async function refreshParent() { try { setParent((await api('/api/dirs', { path: cwdEl.value.trim() })).parent); } catch { setParent(null); } }
 $('#cwd-up').onclick = () => { if (cwdParent) switchCwd(cwdParent); };
 document.addEventListener('keydown', (e) => {
-  if (e.altKey && !e.ctrlKey && !e.shiftKey && !e.metaKey && e.key === 'ArrowUp') {
+  if (e.altKey && !e.ctrlKey && !e.shiftKey && !e.metaKey && e.key === 'ArrowUp' && !e.target.closest?.('.monaco-editor')) {
     e.preventDefault();
     if (!dlg.box.hidden) $('#dlg-up').click(); else if (cwdParent) switchCwd(cwdParent);
   }
@@ -1158,6 +1320,7 @@ document.addEventListener('keydown', (e) => {
 async function switchCwd(raw) {
   const value = raw.trim(); if (!value) return false;
   if (busy) { cwdEl.value = lastGoodCwd; return false; }
+  if (editState && !(await confirmLeaveEdit())) { cwdEl.value = lastGoodCwd; return false; }
   try { const d = await api('/api/dirs', { path: value }); cwdEl.classList.remove('invalid'); cwdEl.title = ''; cwdEl.value = d.path; setParent(d.parent); renderCrumbs(); }
   catch (e) { cwdEl.classList.add('invalid'); cwdEl.title = `フォルダが見つかりません: ${e.message}`; renderCrumbs(); return false; }
   if (cwdEl.value === lastGoodCwd) return true;
@@ -1277,7 +1440,7 @@ let themeIdx = Math.max(0, THEMES.findIndex((t) => t[0] === store.get('theme', '
 function applyTheme() {
   const [name, icon, label] = THEMES[themeIdx];
   if (name === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', name);
-  $('#theme').textContent = icon; $('#theme').title = `テーマ: ${label} (クリックで切り替え)`; store.set('theme', name);
+  $('#theme').textContent = icon; $('#theme').title = `テーマ: ${label} (クリックで切り替え)`; store.set('theme', name); syncEditorTheme();
 }
 $('#theme').onclick = () => { themeIdx = (themeIdx + 1) % THEMES.length; applyTheme(); };
 applyTheme();
@@ -1286,7 +1449,7 @@ applyTheme();
 const FS_MIN = 12, FS_MAX = 20, FS_DEFAULT = 14;
 function setChatFs(n) {
   const v = Math.max(FS_MIN, Math.min(FS_MAX, n));
-  document.documentElement.style.setProperty('--fs', `${v}px`); store.set('chatFs', String(v));
+  document.documentElement.style.setProperty('--fs', `${v}px`); store.set('chatFs', String(v)); syncEditorTheme();
   $('#fs-down').disabled = v <= FS_MIN; $('#fs-up').disabled = v >= FS_MAX; $('.fs').title = `文字サイズ (画面全体): ${v}px (ダブルクリックで初期値)`;
   return v;
 }

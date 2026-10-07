@@ -6,6 +6,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import iconv from 'iconv-lite';
 import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
@@ -20,7 +21,7 @@ const HOST = '127.0.0.1';
 const DEFAULT_CWD = path.resolve(arg('cwd', process.cwd()));
 const TOKEN = process.env.CDOCK_WEB_TOKEN || crypto.randomBytes(24).toString('hex');
 
-const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' };
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ttf': 'font/ttf', '.woff2': 'font/woff2', '.json': 'application/json; charset=utf-8', '.map': 'application/json', '.ico': 'image/x-icon' };
 
 // ---- 認証: 起動ごとのトークン (初回は ?t=、以降は Cookie)。他サイトからの接続は Origin で拒否
 function cookieToken(req) {
@@ -52,10 +53,6 @@ function safeFile(cwd, rel) {
   const f = fs.realpathSync(path.resolve(cwd, rel));
   if (f !== root && !f.startsWith(root + path.sep)) throw new Error('作業フォルダの外のファイルは開けません');
   return f;
-}
-function decodeText(buf) {
-  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf).replace(/^﻿/, ''); }
-  catch { try { return new TextDecoder('shift_jis').decode(buf); } catch { return buf.toString('latin1'); } }
 }
 // 最小の ZIP リーダー (pptx / docx 用)。ZIP64 は非対応。展開サイズに上限を付ける
 function readZip(buf) {
@@ -96,6 +93,57 @@ function previewOffice(buf, ext) {
   const doc = zip.get('word/document.xml');
   return { kind: 'docx', lines: doc ? paragraphs(doc().toString('utf8'), 'w:p', 'w:t') : [] };
 }
+// ---- テキストの編集 (Monaco)。保存は、元の文字コード・BOM・改行を保ち、一時ファイル経由で置き換える ----
+const MAX_EDIT = 2 * 1024 * 1024; // 編集・保存できる上限 (小さな修正と文書の手直し向け)
+// BOM を除いて、UTF-8 として読めなければ Shift_JIS。どちらで読んだか・BOM の有無も返す
+function decodeTextInfo(buf) {
+  let b = buf; let bom = false;
+  if (b.length >= 3 && b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF) { bom = true; b = b.subarray(3); }
+  try { return { text: new TextDecoder('utf-8', { fatal: true }).decode(b), enc: 'utf-8', bom }; }
+  catch {
+    try { return { text: new TextDecoder('shift_jis').decode(buf), enc: 'shift_jis', bom: false }; }
+    catch { return { text: buf.toString('latin1'), enc: 'latin1', bom: false }; }
+  }
+}
+const decodeText = (buf) => decodeTextInfo(buf).text;
+function detectEol(text) {
+  const crlf = (text.match(/\r\n/g) || []).length; const lf = (text.match(/\n/g) || []).length - crlf;
+  return crlf > lf ? 'crlf' : 'lf';
+}
+function encodeText(text, enc, bom) {
+  if (enc === 'shift_jis') {
+    const out = iconv.encode(text, 'shift_jis');
+    if (iconv.decode(out, 'shift_jis') !== text) throw fail('Shift_JIS で表せない文字が含まれています。UTF-8 に変換して保存できます', { status: 422, code: 'encoding' });
+    return out;
+  }
+  const body = Buffer.from(text, 'utf8');
+  return bom ? Buffer.concat([Buffer.from([0xEF, 0xBB, 0xBF]), body]) : body;
+}
+async function saveFile(cwd, rel, text, expectMtime, opt = {}) {
+  const file = safeFile(cwd, rel); const root = fs.realpathSync(cwd);
+  if (path.relative(root, file).split(path.sep).includes('.git')) throw fail('.git の中身は編集できません');
+  const st = fs.statSync(file); if (!st.isFile()) throw fail('ファイルではありません');
+  if (typeof text !== 'string') throw fail('内容が正しくありません');
+  if (Buffer.byteLength(text, 'utf8') > MAX_EDIT) throw fail('大きすぎて保存できません (上限 2MB)');
+  // 開いたあとに、ほかの人・ツール (Claude を含む) がファイルを変えていたら、勝手に上書きしない
+  if (!opt.force && Math.abs(st.mtimeMs - Number(expectMtime)) > 1) throw fail('このファイルは、開いたあとに別の場所で変更されています', { status: 409, code: 'changed', info: { mtimeMs: st.mtimeMs } });
+  const cur = fs.readFileSync(file); const info = decodeTextInfo(cur);
+  if (cur.subarray(0, 4096).includes(0)) throw fail('バイナリファイルは保存できません');
+  const eol = opt.eol === 'crlf' || opt.eol === 'lf' ? opt.eol : detectEol(info.text);
+  const enc = opt.encoding === 'utf-8' ? 'utf-8' : info.enc === 'latin1' ? 'utf-8' : info.enc; // 'utf-8' の指定は、Shift_JIS で表せないときの変換用
+  const normalized = text.replace(/\r\n|\r|\n/g, eol === 'crlf' ? '\r\n' : '\n');
+  const buf = encodeText(normalized, enc, enc === 'utf-8' ? (opt.encoding === 'utf-8' ? false : info.bom) : false);
+  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.cdock-${crypto.randomBytes(4).toString('hex')}.tmp`);
+  try {
+    fs.writeFileSync(tmp, buf, { flag: 'wx' });
+    try { fs.chmodSync(tmp, st.mode & 0o777); } catch { /* Windows では無視 */ }
+    try { fs.renameSync(tmp, file); }
+    catch (e) { if (e.code !== 'EPERM' && e.code !== 'EBUSY' && e.code !== 'EEXIST') throw e; fs.copyFileSync(tmp, file); fs.rmSync(tmp, { force: true }); } // 置き換えられない環境では、上書きコピー
+  } catch (e) { try { fs.rmSync(tmp, { force: true }); } catch { /* 無視 */ } throw fail(friendly(e)); }
+  const ns = fs.statSync(file);
+  return { mtimeMs: ns.mtimeMs, size: ns.size, enc, eol };
+}
+
 function previewFile(file, name) {
   const st = fs.statSync(file); const ext = path.extname(name).toLowerCase();
   const base = { name, size: st.size };
@@ -104,7 +152,8 @@ function previewFile(file, name) {
   const fd = fs.openSync(file, 'r'); const head = Buffer.alloc(Math.min(4096, st.size)); fs.readSync(fd, head, 0, head.length, 0); fs.closeSync(fd);
   if (head.includes(0)) return { ...base, kind: 'binary', note: 'バイナリファイルのため表示できません' };
   const buf = fs.readFileSync(file, { encoding: null }).subarray(0, MAX_TEXT);
-  return { ...base, kind: /\.(md|markdown)$/i.test(name) ? 'markdown' : 'text', text: decodeText(buf), truncated: st.size > MAX_TEXT };
+  const info = decodeTextInfo(buf); const truncated = st.size > MAX_TEXT;
+  return { ...base, kind: /\.(md|markdown)$/i.test(name) ? 'markdown' : 'text', text: info.text, truncated, enc: info.enc, bom: info.bom, eol: detectEol(info.text), mtimeMs: st.mtimeMs, editable: !truncated && st.size <= MAX_EDIT && info.enc !== 'latin1' };
 }
 
 // ---- 添付ファイル (ドラッグ＆ドロップ / 貼り付け / 選択) ----
@@ -352,6 +401,24 @@ async function gitDiff(cwd, rel) {
   }
   const text = await git(st.top, ['diff', 'HEAD', '--no-color', '--no-ext-diff', '--', rel], 4 * 1024 * 1024).catch(async () => git(st.top, ['diff', '--no-color', '--no-ext-diff', '--', rel], 4 * 1024 * 1024));
   return { untracked: false, text };
+}
+
+// 並べて比べる用: HEAD の内容と、作業ツリーの内容 (どちらも読み取りのみ)
+async function gitSides(cwd, rel) {
+  const st = await gitStatus(cwd); if (!st.repo) throw new Error('Git リポジトリではありません');
+  const abs = path.resolve(st.top, rel);
+  const real = fs.existsSync(abs) ? fs.realpathSync(abs) : abs; const root = fs.realpathSync(st.top);
+  if (real !== root && !real.startsWith(root + path.sep)) throw new Error('リポジトリの外のファイルです');
+  const head = await new Promise((resolve) => execFile('git', ['-c', 'core.quotepath=false', 'show', `HEAD:${rel}`],
+    { cwd: st.top, encoding: 'buffer', maxBuffer: 4 * 1024 * 1024, timeout: 15000, windowsHide: true, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' } },
+    (err, out) => resolve(err ? null : out)));
+  const work = fs.existsSync(abs) && fs.statSync(abs).isFile() ? fs.readFileSync(abs) : null;
+  const LIM = 1024 * 1024;
+  for (const b of [head, work]) {
+    if (b && b.length > LIM) throw new Error('大きいため、並べて表示できません (上限 1MB)');
+    if (b && b.subarray(0, 4096).includes(0)) throw new Error('バイナリファイルは並べて表示できません');
+  }
+  return { head: head ? decodeText(head) : null, work: work ? decodeText(work) : null };
 }
 
 // ---- ファイル検索 (名前の一覧 / 中身の検索)。Git リポジトリでは .gitignore を尊重 ----
@@ -609,7 +676,12 @@ async function api(url, res, req) {
     if (url.pathname === '/api/models') return json(res, (await getInit(cwd)).models);
     if (url.pathname === '/api/git/status') return json(res, await gitStatus(cwd));
     if (url.pathname === '/api/git/branches') return json(res, await gitBranches(cwd));
+    if (url.pathname === '/api/git/sides') return json(res, await gitSides(cwd, url.searchParams.get('path') || ''));
     if (url.pathname === '/api/git/diff') return json(res, await gitDiff(cwd, url.searchParams.get('path') || ''));
+    if (url.pathname === '/api/file/save' && req.method === 'POST') {
+      let b; try { b = JSON.parse(await readBody(req, 5 * 1024 * 1024)); } catch { return json(res, { error: 'bad request' }, 400); }
+      return json(res, { ok: true, ...(await saveFile(cwd, String(b.path || ''), b.text, b.mtimeMs, { force: !!b.force, eol: b.eol, encoding: b.encoding })) });
+    }
     if (url.pathname === '/api/fs/move' && req.method === 'POST') {
       let b; try { b = JSON.parse(await readBody(req)); } catch { return json(res, { error: 'bad request' }, 400); }
       const oc = b.onConflict === 'rename' || b.onConflict === 'overwrite' ? b.onConflict : undefined;
@@ -671,7 +743,7 @@ async function api(url, res, req) {
         .sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name, 'ja') : a.dir ? -1 : 1));
       return json(res, { root: cwd, entries: ents });
     }
-  } catch (e) { return json(res, { error: String(e && e.message || e), ...(e && e.code === 'exists' ? { code: 'exists', info: e.info } : {}) }, (e && e.status) || 500); }
+  } catch (e) { return json(res, { error: String(e && e.message || e), ...(e && e.status && typeof e.code === 'string' ? { code: e.code, info: e.info } : {}) }, (e && e.status) || 500); }
   return json(res, { error: 'not found' }, 404);
 }
 
@@ -685,6 +757,17 @@ const server = http.createServer((req, res) => {
   }
   if (!safeEqual(cookieToken(req), TOKEN)) { res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' }); return res.end('起動時に表示された URL (?t=...) から開いてください。'); }
   if (url.pathname === '/api/upload' && req.method === 'POST') return receiveUpload(req, res);
+  const mm = /^\/vendor\/monaco\/(.+)$/.exec(url.pathname);
+  if (mm) {
+    const base = path.join(here, 'node_modules', 'monaco-editor', 'min');
+    const f = path.normalize(path.join(base, decodeURIComponent(mm[1])));
+    if (!f.startsWith(base + path.sep)) { res.writeHead(403); return res.end('forbidden'); }
+    return fs.readFile(f, (err, buf) => {
+      if (err) { res.writeHead(404); return res.end('not found'); }
+      res.writeHead(200, { 'Content-Type': MIME[path.extname(f)] || 'application/octet-stream', 'Cache-Control': 'public, max-age=86400' });
+      res.end(buf);
+    });
+  }
   if (url.pathname.startsWith('/api/')) return api(url, res, req);
   let rel = decodeURIComponent(url.pathname); if (rel === '/') rel = '/index.html';
   const file = path.normalize(path.join(pub, rel));
