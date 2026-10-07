@@ -827,11 +827,40 @@ function resolveRel(base, url) {
   }
   return parts.join('/');
 }
+// Mermaid (```mermaid のコードブロックを図にする)。Markdown のプレビューで、初めて必要になったときだけ読み込む
+let mermaidP = null, mermaidSeq = 0;
+function loadMermaid() {
+  if (window.mermaid) return Promise.resolve(window.mermaid);
+  if (mermaidP) return mermaidP;
+  mermaidP = new Promise((resolve, reject) => {
+    const s = document.createElement('script'); s.src = '/vendor/mermaid/mermaid.min.js';
+    s.onload = () => (window.mermaid ? resolve(window.mermaid) : reject(new Error('Mermaid を初期化できませんでした')));
+    s.onerror = () => reject(new Error('Mermaid を読み込めませんでした'));
+    document.head.append(s);
+  });
+  mermaidP.catch(() => { mermaidP = null; });
+  return mermaidP;
+}
+async function renderMermaid(root) {
+  const blocks = [...root.querySelectorAll('pre[data-lang="mermaid"]')]; if (!blocks.length) return;
+  let m; try { m = await loadMermaid(); } catch (e) { for (const b of blocks) b.before(el('div', 'note', e.message)); return; }
+  m.initialize({ startOnLoad: false, securityLevel: 'strict', theme: isDarkTheme() ? 'dark' : 'default', fontFamily: 'system-ui, "Segoe UI", sans-serif' });
+  for (const pre of blocks) {
+    const id = `mmd${++mermaidSeq}`;
+    try {
+      const { svg } = await m.render(id, pre.textContent);
+      const box = el('div', 'mermaid'); box.innerHTML = svg; pre.replaceWith(box); // securityLevel strict: Mermaid が出力を無害化する
+    } catch (e) {
+      document.getElementById(`d${id}`)?.remove(); // 失敗時に Mermaid が body に残す要素
+      pre.before(el('div', 'note mmerr', `Mermaid の図を描画できませんでした: ${String((e && e.message) || e).split('\n')[0]}`));
+    }
+  }
+}
 function renderMdPreview() {
   const { rel, d } = mdState; pv.body.textContent = '';
   if (d.truncated) pv.body.append(el('div', 'note', `先頭 1MB のみ表示 (${fmtSize(d.size)})`));
   if (mdRaw) pv.body.append(el('pre', 'code', d.text));
-  else { const div = el('div', 'md doc'); div.innerHTML = md(d.text, { soft: true, resolve: (u) => resolveRel(rel, u), rawUrl }); pv.body.append(div); }
+  else { const div = el('div', 'md doc'); div.innerHTML = md(d.text, { soft: true, resolve: (u) => resolveRel(rel, u), rawUrl }); pv.body.append(div); renderMermaid(div); }
   $('#pmode').textContent = mdRaw ? '表示' : 'ソース';
 }
 $('#pmode').onclick = () => { if (!mdState) return; mdRaw = !mdRaw; renderMdPreview(); };
@@ -1654,7 +1683,7 @@ let themeIdx = Math.max(0, THEMES.findIndex((t) => t[0] === store.get('theme', '
 function applyTheme() {
   const [name, icon, label] = THEMES[themeIdx];
   if (name === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', name);
-  $('#theme').textContent = icon; $('#theme').title = `テーマ: ${label} (クリックで切り替え)`; store.set('theme', name); syncEditorTheme();
+  $('#theme').textContent = icon; $('#theme').title = `テーマ: ${label} (クリックで切り替え)`; store.set('theme', name); syncEditorTheme(); if (mdState && !mdRaw && !editState) renderMdPreview(); // 図の配色も、テーマに合わせて描き直す
 }
 $('#theme').onclick = () => { themeIdx = (themeIdx + 1) % THEMES.length; applyTheme(); };
 applyTheme();

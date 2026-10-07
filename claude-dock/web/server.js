@@ -773,10 +773,10 @@ const server = http.createServer((req, res) => {
   }
   if (!safeEqual(cookieToken(req), TOKEN)) { res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' }); return res.end('起動時に表示された URL (?t=...) から開いてください。'); }
   if (url.pathname === '/api/upload' && req.method === 'POST') return receiveUpload(req, res);
-  const mm = /^\/vendor\/monaco\/(.+)$/.exec(url.pathname);
+  const mm = /^\/vendor\/(monaco|mermaid)\/(.+)$/.exec(url.pathname); // 同梱ライブラリの配信 (Monaco / Mermaid)
   if (mm) {
-    const base = path.join(here, 'node_modules', 'monaco-editor', 'min');
-    const f = path.normalize(path.join(base, decodeURIComponent(mm[1])));
+    const base = mm[1] === 'monaco' ? path.join(here, 'node_modules', 'monaco-editor', 'min') : path.join(here, 'node_modules', 'mermaid', 'dist');
+    const f = path.normalize(path.join(base, decodeURIComponent(mm[2])));
     if (!f.startsWith(base + path.sep)) { res.writeHead(403); return res.end('forbidden'); }
     return fs.readFile(f, (err, buf) => {
       if (err) { res.writeHead(404); return res.end('not found'); }

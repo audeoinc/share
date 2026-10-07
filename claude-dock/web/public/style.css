@@ -449,3 +449,8 @@ button.danger:disabled { opacity: .45; cursor: default; }
 .sess .ed.del { right: 34px; }
 .sess .ed.del:hover { color: var(--bad); }
 .dlg-msg .note { color: var(--muted); font-size: calc(var(--fs, 14px) - 2px); margin: 2px 0 8px; word-break: break-all; }
+
+/* Mermaid の図 */
+.pbody .md .mermaid { margin: 12px 0; padding: 10px; overflow: auto; text-align: center; background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; }
+.pbody .md .mermaid svg { max-width: 100%; height: auto; }
+.pbody .md .mmerr { color: var(--bad); }
