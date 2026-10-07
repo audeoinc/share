@@ -1,0 +1,26 @@
+{
+  "profiles": [
+    {
+      "name": "cdock",
+      "guid": "{c3d0c4b1-7a52-4f0e-9c1d-2b6f8e4a5d10}",
+      "commandline": "powershell.exe -NoLogo",
+      "hidden": true,
+      "colorScheme": "Claude Light",
+      "padding": "12, 8, 12, 8",
+      "scrollbarState": "hidden",
+      "cursorShape": "bar",
+      "font": { "face": "Cascadia Mono", "size": 11 }
+    }
+  ],
+  "schemes": [
+    {
+      "name": "Claude Light",
+      "background": "#FAF9F5", "foreground": "#3D3929",
+      "cursorColor": "#C96442", "selectionBackground": "#E8E2D0",
+      "black": "#3D3929", "red": "#C0392B", "green": "#4C8C4A", "yellow": "#B7791F",
+      "blue": "#3B6FA0", "purple": "#8E5C9E", "cyan": "#2F8F8F", "white": "#E8E2D0",
+      "brightBlack": "#8C8878", "brightRed": "#D9534F", "brightGreen": "#5FA35D", "brightYellow": "#D4952B",
+      "brightBlue": "#5A8FC0", "brightPurple": "#A67BB5", "brightCyan": "#4FB0B0", "brightWhite": "#FAF9F5"
+    }
+  ]
+}

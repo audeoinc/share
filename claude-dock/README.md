@@ -19,7 +19,13 @@ windows\cdock.cmd C:\path\to\project      (省略するとカレント)
 ```
 Files | Claude / Shell の3ペインが開きます。Files で `Enter` すると `@path` を**クリップボードにコピー**するので、
 Claude ペインで `Ctrl+V` で貼り付けます (Windows Terminal にはペイン間のキー送信がないため)。
-`Space`で複数選択 → `A` で一括コピー。ペイン移動は `Alt+矢印`。**この版は Windows 実機で未検証です。**
+`Space`で複数選択 → `A` で一括コピー。ペイン移動は `Alt+矢印`。
+起動時だけ専用プロファイル `cdock` (Claude 風ライト配色・余白・フォント) をペインに適用します。初回は配色の fragment を
+`%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\cdock` に設置するので、Windows Terminal を一度閉じてから起動してください
+(settings.json は変更しません。通常のタブには影響なし。削除はそのフォルダを消すだけ)。`CDOCK_PROFILE` で別プロファイル名、空文字で無効化。
+フォントや余白は `windows/cdock.fragment.json` で変更できます。
+Claude ペインのテーマも起動分だけ `windows/claude-settings.json` (`{"theme": "light"}`) で上書きします (`claude --settings`。普段の設定は不変)。
+値は `dark` / `auto` など。無効化は `CDOCK_CLAUDE_SETTINGS` を空文字に。Windows 11 / Windows Terminal で動作確認済み。
 
 ## 依存 (tmux 版: macOS / Linux / WSL)
 `tmux`, `python3` (3.8+・標準ライブラリのみ), `claude` — macOS / Linux / WSL。
