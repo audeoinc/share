@@ -1,5 +1,5 @@
 ﻿# cdock web を配布用の ZIP にまとめる (node_modules は含めない。移行先で start.cmd が npm install します)
-# 使い方: pwsh -File pack.ps1   →  dist\cdock-web.zip
+# 使い方: pwsh -File pack.ps1   →  release\cdock-web.zip (git に入れて受け渡しに使う)
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 $files = git ls-files . 2>$null
@@ -8,13 +8,13 @@ $stage = Join-Path ([IO.Path]::GetTempPath()) ('cdock-web-' + [guid]::NewGuid().
 $root = Join-Path $stage 'cdock-web'
 try {
   foreach ($f in $files) {
-    if ($f -eq 'pack.ps1' -or $f -like '.gitignore') { continue }
+    if ($f -eq 'pack.ps1' -or $f -eq '.gitignore' -or $f -like 'release/*') { continue }
     $dest = Join-Path $root $f
     New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
     Copy-Item -LiteralPath $f -Destination $dest
   }
-  New-Item -ItemType Directory -Force -Path dist | Out-Null
-  $zip = Join-Path $PSScriptRoot 'dist\cdock-web.zip'
+  New-Item -ItemType Directory -Force -Path release | Out-Null
+  $zip = Join-Path $PSScriptRoot 'release\cdock-web.zip'
   if (Test-Path $zip) { Remove-Item $zip -Force }
   Compress-Archive -Path $root -DestinationPath $zip
   $kb = [math]::Round((Get-Item $zip).Length / 1KB)
