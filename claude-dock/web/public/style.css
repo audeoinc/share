@@ -415,3 +415,7 @@ button.danger:disabled { opacity: .45; cursor: default; }
 .runmeta { flex-wrap: wrap; } .runmeta .runstat { flex: 1 1 100%; } .runmeta .sp { display: none; } .runmeta button { white-space: nowrap; }
 .phead .pname { font-family: var(--sans); }
 .runbar select { flex: none; max-width: 110px; padding: 6px 4px; }
+.runfield { position: relative; flex: 1; min-width: 0; display: flex; }
+.runfield input { width: 100%; padding-right: 26px; }
+.runfield .clr { position: absolute; right: 3px; top: 50%; transform: translateY(-50%); width: 20px; height: 20px; padding: 0; line-height: 1; border: 0; border-radius: 50%; background: transparent; color: var(--muted); cursor: pointer; font-size: 15px; }
+.runfield .clr:hover { background: var(--rule); color: var(--text); }

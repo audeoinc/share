@@ -948,7 +948,7 @@ function runStatus(text, cls) { const s = $('#runstat'); s.textContent = text; s
 function runUi() {
   const going = !!run.id; const b = $('#runbtn');
   b.textContent = going ? '停止' : '実行'; b.classList.toggle('send', !going); b.classList.toggle('danger', going);
-  $('#runcmd').disabled = going; $('#runshell').disabled = going; $('#runsend').disabled = going || !run.text; $('#runclear').disabled = going || !run.text;
+  $('#runcmd').disabled = going; $('#runshell').disabled = going; runClrSync(); $('#runsend').disabled = going || !run.text; $('#runclear').disabled = going || !run.text;
 }
 function runStart() {
   const cmd = $('#runcmd').value.trim(); if (!cmd || run.id) return;
@@ -969,11 +969,14 @@ function runEnd(m) {
   if (m.error && !run.text) run.text = '';
   runUi();
 }
+const runClrSync = () => { $('#runclr').hidden = !$('#runcmd').value || $('#runcmd').disabled; };
+$('#runcmd').addEventListener('input', runClrSync);
+$('#runclr').onclick = () => { const i = $('#runcmd'); i.value = ''; run.hi = -1; runClrSync(); i.focus(); };
 $('#runbtn').onclick = () => { if (run.id) run.stopping = true; if (run.id) ws.send(JSON.stringify({ type: 'run_stop', id: run.id })); else runStart(); };
 $('#runcmd').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); runStart(); }
-  else if (e.key === 'ArrowUp' && run.hist.length) { e.preventDefault(); run.hi = Math.min(run.hi + 1, run.hist.length - 1); $('#runcmd').value = run.hist[run.hi]; }
-  else if (e.key === 'ArrowDown' && run.hi >= 0) { e.preventDefault(); run.hi -= 1; $('#runcmd').value = run.hi >= 0 ? run.hist[run.hi] : ''; }
+  else if (e.key === 'ArrowUp' && run.hist.length) { e.preventDefault(); run.hi = Math.min(run.hi + 1, run.hist.length - 1); $('#runcmd').value = run.hist[run.hi]; runClrSync(); }
+  else if (e.key === 'ArrowDown' && run.hi >= 0) { e.preventDefault(); run.hi -= 1; $('#runcmd').value = run.hi >= 0 ? run.hist[run.hi] : ''; runClrSync(); }
 });
 $('#runclear').onclick = () => { run.text = ''; $('#runout').textContent = ''; runStatus('作業フォルダで実行します (入力待ちのコマンドは非対応)'); runUi(); };
 $('#runsend').onclick = () => {

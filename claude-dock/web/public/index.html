@@ -49,7 +49,7 @@
       <div id="tree"></div>
     </div>
     <div id="pane-run" class="pane" hidden>
-      <div class="runbar"><select id="runshell" hidden title="実行するシェル (記憶されます)"></select><input id="runcmd" placeholder="コマンド (例: npm test)  Enter で実行" autocomplete="off" spellcheck="false"><button id="runbtn" class="send" type="button">実行</button></div>
+      <div class="runbar"><select id="runshell" hidden title="実行するシェル (記憶されます)"></select><span class="runfield"><input id="runcmd" placeholder="コマンド (例: npm test)  Enter で実行" autocomplete="off" spellcheck="false"><button id="runclr" class="clr" type="button" hidden title="入力を消す" aria-label="入力を消す">×</button></span><button id="runbtn" class="send" type="button">実行</button></div>
       <div class="runmeta"><span id="runstat" class="runstat">作業フォルダで実行します (入力待ちのコマンドは非対応)</span><span class="sp"></span><button id="runsend" class="ghost mini" type="button" disabled title="コマンドと出力の末尾を、会話の入力欄に入れます">Claude に渡す</button><button id="runclear" class="ghost mini" type="button" disabled>クリア</button></div>
       <pre id="runout" class="runout"></pre>
     </div>

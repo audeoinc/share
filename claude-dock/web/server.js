@@ -791,38 +791,37 @@ function runShell() {
 }
 // 起動に 1〜3 秒かかるので、PowerShell を 1 つ先に起動して待たせておく (1 回の実行ごとに使い捨て、使ったら次を用意する)
 let spare = null;
+const PS_ARGS = ['-NoLogo', '-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-Command', '-'];
+function spawnShell(prime) {
+  const c = spawn(runShell().exe, PS_ARGS, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  c.stdin.on('error', () => {});
+  // 出力の整形機能は、最初に使うときに 0.5 秒ほどかかる。待機中に済ませておく (結果は捨てる)
+  if (prime) c.stdin.write('[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $null = (Get-Item . | Format-List | Out-String); $null = (Get-Item . | Format-Table | Out-String); $null = (Get-Date | Out-String)\n');
+  return c;
+}
 function warmShell() {
-  const sh = runShell(); if (sh.kind !== 'ps' || (spare && spare.exitCode === null)) return;
+  if (runShell().kind !== 'ps' || (spare && spare.exitCode === null)) return;
   try {
-    const c = spawn(sh.exe, ['-NoLogo', '-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-Command', '-'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-    const drop = () => { if (spare === c) spare = null; };
-    c.on('error', drop); c.on('exit', drop); c.stdin.on('error', () => {}); c.stdout.resume(); c.stderr.resume(); spare = c;
-    // 出力の整形機能は、最初に使うときに 0.5 秒ほどかかる。待機中に済ませておく (結果は捨てる)
-    c.stdin.write("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $null = (Get-Item . | Format-List | Out-String); $null = (Get-Item . | Format-Table | Out-String); $null = (Get-Date | Out-String)\n");
+    const c = spawnShell(true); const drop = () => { if (spare === c) spare = null; };
+    c.on('error', drop); c.on('exit', drop); c.stdout.resume(); c.stderr.resume(); spare = c;
   } catch { spare = null; }
 }
 process.on('exit', () => { try { if (spare) spare.kill(); } catch { /* 無視 */ } });
 function runSpawn(cmd, opts, pref) {
   const sh = runShell();
   if (sh.kind === 'default' || pref === 'cmd') return spawn(cmd, { ...opts, shell: true });
-  // 出力は UTF-8 に揃え、進捗バーと色は出さない。コマンドは文字化けしないよう Base64 で渡す
+  // PowerShell は標準入力から 1 行ずつ渡す (入力は最後に閉じるので、入力待ちにならない)。
+  //  1 行目: 場所と環境 / 2 行目: コマンド本体 (Base64 で渡して文字化けを防ぐ) / 3 行目: 終了コード
+  // 表形式の出力は「その行の終わり」にまとめて出るので、exit は別の行にする
   const q = (x) => `'${String(x).replace(/'/g, "''")}'`;
-  const body = `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $OutputEncoding=[System.Text.Encoding]::UTF8; $ProgressPreference='SilentlyContinue'; try { $PSStyle.OutputRendering='PlainText' } catch {}
-${cmd}
-exit $(if ($?) { 0 } elseif ($LASTEXITCODE) { $LASTEXITCODE } else { 1 })`;
-  const ready = spare && spare.exitCode === null ? spare : null;
-  if (ready) { // 先に起動してあった PowerShell に、フォルダと環境を設定してから渡す。標準入力はすぐ閉じる (入力待ちにならない)
-    spare = null;
-    const env = Object.entries(opts.env || {}).filter(([k]) => /^(NO_COLOR|FORCE_COLOR|GIT_TERMINAL_PROMPT|PYTHONUNBUFFERED|PYTHONIOENCODING)$/.test(k)).map(([k, v]) => `$env:${k}=${q(v)}`).join('; ');
-    const script = `Set-Location -LiteralPath ${q(opts.cwd)}; ${env}
-${body}`;
-    ready.stdin.end(`iex ([System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(script, 'utf8').toString('base64')}')))
-`);
-    setTimeout(warmShell, 300);
-    return ready;
-  }
-  warmShell(); // 今回は間に合わないので普通に起動し、次回のために 1 つ用意する
-  return spawn(sh.exe, ['-NoLogo', '-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-EncodedCommand', Buffer.from(body, 'utf16le').toString('base64')], opts);
+  let c = spare && spare.exitCode === null ? spare : null; spare = null;
+  if (!c) c = spawnShell(false);
+  const env = Object.entries(opts.env || {}).filter(([k]) => /^(NO_COLOR|FORCE_COLOR|GIT_TERMINAL_PROMPT|PYTHONUNBUFFERED|PYTHONIOENCODING)$/.test(k)).map(([k, v]) => `$env:${k}=${q(v)}`).join('; ');
+  c.stdin.write(`Set-Location -LiteralPath ${q(opts.cwd)}; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $OutputEncoding=[System.Text.Encoding]::UTF8; $ProgressPreference='SilentlyContinue'; try { $PSStyle.OutputRendering='PlainText' } catch {}; ${env}\n`);
+  c.stdin.write(`iex ([System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(`${cmd}\n$global:__s = $?; $global:__e = $LASTEXITCODE`, 'utf8').toString('base64')}')))\n`);
+  c.stdin.end('exit $(if ($global:__s) { 0 } elseif ($global:__e) { $global:__e } else { 1 })\n');
+  setTimeout(warmShell, 300);
+  return c;
 }
 
 const wss = new WebSocketServer({ noServer: true });
