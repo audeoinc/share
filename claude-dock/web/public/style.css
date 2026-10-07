@@ -419,3 +419,33 @@ button.danger:disabled { opacity: .45; cursor: default; }
 .runfield input { width: 100%; padding-right: 26px; }
 .runfield .clr { position: absolute; right: 3px; top: 50%; transform: translateY(-50%); width: 20px; height: 20px; padding: 0; line-height: 1; border: 0; border-radius: 50%; background: transparent; color: var(--muted); cursor: pointer; font-size: 15px; }
 .runfield .clr:hover { background: var(--rule); color: var(--text); }
+.queued { max-width: 780px; margin: 0 auto 6px; display: flex; gap: 8px; align-items: center; padding: 6px 10px; background: var(--user); border: 1px solid var(--rule); border-radius: 12px; font-size: calc(var(--fs, 14px) - 1px); }
+.queued[hidden] { display: none; }
+.queued .qlab { color: var(--muted); white-space: nowrap; flex: none; }
+.queued .qtx { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queued button { flex: none; white-space: nowrap; }
+/* 進行中の行・ツール実行カードの状態表示は、縮めず折り返さない。長いコマンドだけを省略する */
+.prow > .plab, .prow > .pname, .prow > .pmore, .prow > .psec, .prow > .pchev, .prow > .spin { flex: none; white-space: nowrap; }
+.prow > .pdet { flex: 0 1 auto; min-width: 0; }
+.card .st, .card .tn { flex: none; white-space: nowrap; }
+
+/* 会話の一覧: フォルダ名・ブランチ */
+.sessq { width: 100%; margin: 6px 0 4px; font-size: calc(var(--fs, 14px) - 1px); }
+.sess .d { display: flex; flex-wrap: wrap; gap: 0 2px; align-items: baseline; }
+.sess .sf { font-weight: 500; } .sess .sf.here { color: var(--accent); }
+.sess .sb { margin-left: 6px; font-family: var(--mono); font-size: calc(var(--fs, 14px) - 3.5px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.sess.gone { opacity: .5; cursor: not-allowed; }
+
+/* effort のスライダー (ポップアップ) */
+.effortbtn { white-space: nowrap; }
+.effortpop { position: fixed; z-index: 60; width: 300px; padding: 14px 16px 12px; background: var(--panel); border: 1px solid var(--rule); border-radius: 14px; box-shadow: 0 8px 28px rgba(0,0,0,.14); font-size: calc(var(--fs, 14px) - 1px); }
+.effortpop .ep-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 10px; } .effortpop .ep-t { color: var(--muted); } .effortpop .ep-v { font-weight: 600; }
+.effortpop .ep-ends { display: flex; justify-content: space-between; color: var(--muted); font-size: calc(var(--fs, 14px) - 3px); margin-bottom: 4px; }
+.effortpop .ep-track input[type=range] { width: 100%; margin: 0; accent-color: var(--accent); }
+.effortpop .ep-ticks { display: flex; justify-content: space-between; margin-top: 2px; font-family: var(--mono); font-size: calc(var(--fs, 14px) - 4px); color: var(--muted); }
+.effortpop .ep-tick.on { color: var(--accent); font-weight: 600; } .effortpop .ep-tick.off { opacity: .35; text-decoration: line-through; }
+.effortpop .ep-recwrap { position: relative; height: 18px; margin: 4px 7px 0; } .effortpop .ep-rec { position: absolute; transform: translateX(-50%); font-size: calc(var(--fs, 14px) - 3px); color: var(--muted); white-space: nowrap; }
+.effortpop .ep-foot { display: flex; justify-content: flex-end; margin-top: 6px; }
+.sess .ed.del { right: 34px; }
+.sess .ed.del:hover { color: var(--bad); }
+.dlg-msg .note { color: var(--muted); font-size: calc(var(--fs, 14px) - 2px); margin: 2px 0 8px; word-break: break-all; }

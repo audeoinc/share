@@ -11,7 +11,7 @@ import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { execFile, execFileSync, spawn } from 'node:child_process';
-import { query, listSessions, getSessionMessages, renameSession } from '@anthropic-ai/claude-agent-sdk';
+import { query, listSessions, getSessionMessages, renameSession, deleteSession } from '@anthropic-ai/claude-agent-sdk';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pub = path.join(here, 'public');
@@ -491,7 +491,7 @@ async function getInit(cwd) {
     const [cmds, models] = await Promise.race([Promise.all([q.supportedCommands(), q.supportedModels()]), timeout]);
     result = {
       commands: Array.isArray(cmds) && cmds.length ? cmds.map((c) => ({ name: c.name, description: c.description || '', argumentHint: c.argumentHint || '' })) : FALLBACK_COMMANDS,
-      models: (Array.isArray(models) ? models : []).map((m) => ({ value: m.value, resolved: m.resolvedModel || m.value, name: m.displayName || m.value, description: m.description || '' })),
+      models: (Array.isArray(models) ? models : []).map((m) => ({ value: m.value, resolved: m.resolvedModel || m.value, name: m.displayName || m.value, description: m.description || '', efforts: m.supportsEffort === false ? [] : (Array.isArray(m.supportedEffortLevels) ? m.supportedEffortLevels : []) })),
     };
     cmdCache.set(cwd, result);
   } catch { /* フォールバックを返す (キャッシュしない) */ } finally { try { q.close(); } catch { /* 無視 */ } }
@@ -707,21 +707,29 @@ async function api(url, res, req) {
       if (url.pathname === '/api/git/commit') return json(res, { ok: true, ...(await gitCommit(cwd, b.message)) });
       return json(res, { error: 'not found' }, 404);
     }
+    if (url.pathname === '/api/session/delete' && req.method === 'POST') { // 会話の履歴の削除 (元に戻せない。画面側で確認する)
+      let b; try { b = JSON.parse(await readBody(req)); } catch { return json(res, { error: 'bad request' }, 400); }
+      const id = String(b.id || ''); if (!/^[0-9a-f-]{36}$/i.test(id)) return json(res, { error: 'bad id' }, 400);
+      await deleteSession(id, { dir: typeof b.dir === 'string' && b.dir ? b.dir : cwd });
+      return json(res, { ok: true });
+    }
     if (url.pathname === '/api/rename' && req.method === 'POST') {
       let b; try { b = JSON.parse(await readBody(req)); } catch { return json(res, { error: 'bad request' }, 400); }
       const id = String(b.id || ''); const title = String(b.title || '').trim().slice(0, 200);
       if (!/^[0-9a-f-]{36}$/i.test(id) || !title) return json(res, { error: 'bad request' }, 400);
-      await renameSession(id, title, { dir: cwd });
+      await renameSession(id, title, { dir: typeof b.dir === 'string' && b.dir ? b.dir : cwd });
       return json(res, { ok: true });
     }
     if (url.pathname === '/api/sessions') {
-      const list = await listSessions({ dir: cwd, limit: 60 });
-      return json(res, list.map((x) => ({ sessionId: x.sessionId, title: x.customTitle || x.summary || x.firstPrompt || '(無題)', lastModified: x.lastModified })));
+      // すべてのフォルダの会話を新しい順に返す。選んだときに、その会話のフォルダ (cwd) とブランチへ戻る
+      const list = await listSessions({ limit: 200 });
+      return json(res, list.map((x) => ({ sessionId: x.sessionId, title: x.customTitle || x.summary || x.firstPrompt || '(無題)', lastModified: x.lastModified, cwd: x.cwd || '', gitBranch: x.gitBranch || '', exists: !!x.cwd && fs.existsSync(x.cwd) })));
     }
     if (url.pathname === '/api/session') {
       const id = url.searchParams.get('id') || '';
       if (!/^[0-9a-f-]{36}$/i.test(id)) return json(res, { error: 'bad id' }, 400);
-      const msgs = await getSessionMessages(id, { dir: cwd });
+      const dirQ = url.searchParams.get('dir'); // その会話のフォルダ (一覧の cwd)
+      const msgs = await getSessionMessages(id, { dir: dirQ || cwd });
       return json(res, msgs.map((m) => ({ type: m.type, uuid: m.uuid, parent_tool_use_id: m.parent_tool_use_id, message: m.message })));
     }
     if (url.pathname === '/api/file' || url.pathname === '/api/raw') {
@@ -901,7 +909,7 @@ wss.on('connection', (ws) => {
 
   send({ type: 'hello', cwd: DEFAULT_CWD, features: ['attach', 'watch', 'move', 'trash', 'run'], shells: runShell().kind === 'ps' ? [{ id: 'ps', label: runShell().exe === 'pwsh' ? 'PowerShell 7' : 'PowerShell' }, { id: 'cmd', label: 'cmd' }] : [] });
 
-  async function runTurn({ text, cwd, permissionMode, model, attachments }) {
+  async function runTurn({ text, cwd, permissionMode, model, effort, attachments }) {
     if (running) return send({ type: 'error', message: '前の応答がまだ実行中です' });
     const abort = new AbortController();
     const workDir = cwd && fs.existsSync(cwd) ? path.resolve(cwd) : DEFAULT_CWD;
@@ -919,6 +927,7 @@ wss.on('connection', (ws) => {
       systemPrompt: { type: 'preset', preset: 'claude_code' },
       permissionMode: permissionMode || 'default',
       ...(model ? { model } : {}),
+      ...(['low', 'medium', 'high', 'xhigh', 'max'].includes(effort) ? { effort } : {}),
       ...(sessionId ? { resume: sessionId } : {}),
       canUseTool: (toolName, input, opts) => new Promise((resolve, reject) => {
         const id = crypto.randomUUID();

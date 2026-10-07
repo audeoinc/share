@@ -20,6 +20,8 @@
     <option value="claude-sonnet-5-5">Sonnet 5.5 (軽快)</option>
     <option value="claude-haiku-4-5">Haiku 4.5 (最軽量)</option>
   </select>
+  <select id="effort" hidden><option value="">既定</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select>
+  <button id="effortbtn" class="ghost effortbtn" type="button">effort</button>
   <select id="mode" title="権限モード">
     <option value="default">確認しながら進める</option>
     <option value="acceptEdits">編集は自動で許可</option>
@@ -42,7 +44,7 @@
       <div id="branchmenu" class="branchmenu" hidden></div>
     </div>
     <div class="tabs"><button id="tab-sessions" class="on">会話</button><button id="tab-files">ファイル</button><button id="tab-git">変更 <span id="gitcount" class="badge" hidden></span></button><button id="tab-run">実行</button></div>
-    <div id="pane-sessions" class="pane"><button id="new" class="newbtn">＋ 新しい会話</button><div id="sessions"></div></div>
+    <div id="pane-sessions" class="pane"><button id="new" class="newbtn">＋ 新しい会話</button><input id="sessq" class="sessq" placeholder="会話を検索 (題名・フォルダ・ブランチ)" autocomplete="off" spellcheck="false"><div id="sessions"></div></div>
     <div id="pane-files" class="pane" hidden>
       <div class="fsearch"><input id="fsearch" placeholder="ファイルを検索 (Ctrl+P)" autocomplete="off" spellcheck="false"><button id="fsmode" class="ghost" title="ファイル名 / 中身 を切り替え">名前</button><button id="treerefresh" class="ghost" type="button" title="更新">↻</button><button id="trashbtn" class="ghost" type="button" title="ごみ箱 (削除したファイルの復元)">🗑</button></div>
       <div id="fresults" hidden></div>
@@ -63,6 +65,7 @@
   <section class="main">
     <main id="chat" class="chat"><div class="empty" id="empty"><img src="icon.png" width="44" height="44" alt=""><h1>何をしましょうか？</h1><p>「ファイル」タブでクリックするとプレビュー、＠ で入力欄に @パス を入れられます。</p></div></main>
     <footer class="composer">
+      <div id="queued" class="queued" hidden></div>
       <div class="box">
         <div id="slash" class="slash" hidden></div>
         <div id="attach" class="attach" hidden></div>

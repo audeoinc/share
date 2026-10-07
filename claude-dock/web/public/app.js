@@ -153,7 +153,7 @@ function setBusy(v) {
   const was = busy; busy = v; sendBtn.hidden = v; stopBtn.hidden = !v;
   statusEl.textContent = v ? '応答中…' : sessionLabel;
   if (v && !was) progStart(); else if (!v) progStop();
-  if (was && !v) { loadSessions(); loadGit(); invalidateIndex(); refreshTree(); }
+  if (was && !v) { loadSessions(); loadGit(); invalidateIndex(); refreshTree(); if (queued) setTimeout(sendQueued, 80); }
 }
 function connect() {
   ws = new WebSocket(`ws://${location.host}/ws`);
@@ -175,7 +175,7 @@ function handle(m) {
 }
 
 function onSdk(msg) {
-  if (msg.type === 'system' && msg.subtype === 'init') { currentSession = msg.session_id; lastModelId = msg.model || ''; sessionLabel = modelName(lastModelId); statusEl.title = lastModelId; if (modelEl.value === '') setDefaultLabel(lastModelId); statusEl.textContent = busy ? '応答中…' : sessionLabel; return; }
+  if (msg.type === 'system' && msg.subtype === 'init') { currentSession = msg.session_id; lastModelId = msg.model || ''; lastEffort = msg.effort || (effortEl.disabled ? '' : effortShown()) || ''; /* 「既定」のときの実際の値は init には含まれないので、選んだ値だけを出す */ sessionLabel = modelName(lastModelId) + (lastEffort ? ` · ${lastEffort}` : ''); statusEl.title = `${lastModelId}${lastEffort ? ` / effort: ${lastEffort}` : ''}`; if (modelEl.value === '') setDefaultLabel(lastModelId); syncEffort(); statusEl.textContent = busy ? '応答中…' : sessionLabel; return; }
   if (msg.type === 'system' && msg.subtype === 'local_command_output') { add(el('pre', 'localout', msg.content)); return; }
   if (msg.type === 'system' && msg.subtype === 'compact_boundary') {
     const md = msg.compact_metadata || {};
@@ -248,13 +248,49 @@ function askPermission(p) {
 }
 
 // ---------- 入力 ----------
-function send() {
-  const ready = attachments.filter((a) => a.status === 'ready');
-  if (attachments.some((a) => a.status === 'uploading')) return; // アップロード中は送らない
-  const text = input.value.trim() || (ready.length ? '添付したファイルを確認してください。' : '');
+// 応答中に打った発言は、いったん「待機中」に置く。応答が終わったら自動で送る。「今すぐ送信」なら、応答を止めて、すぐ送る
+let queued = null; // { text, ready }
+function renderQueued() {
+  const box = $('#queued'); box.textContent = ''; box.hidden = !queued; if (!queued) return;
+  const now = el('button', 'send mini', '今すぐ送信'); now.type = 'button'; now.title = 'いまの応答を止めて、この発言をすぐ送ります';
+  now.onclick = () => { if (busy && ws.readyState === 1) ws.send(JSON.stringify({ type: 'interrupt' })); };
+  const del = el('button', 'ghost mini', '取り消し'); del.type = 'button'; del.title = '待機中の発言を、入力欄に戻します';
+  del.onclick = () => unqueue();
+  box.append(el('span', 'qlab', '待機中'), el('span', 'qtx', queued.text.replace(/\s+/g, ' ')), now, del);
+}
+function unqueue() { // 待機中の発言を入力欄に戻す (添付も戻す)
+  if (!queued) return; const q = queued; queued = null; renderQueued();
+  input.value = q.text + (input.value ? '\n' + input.value : ''); autosize(); attachments = [...q.ready, ...attachments]; renderAttach(); input.focus();
+}
+function sendQueued() {
+  if (!queued) return; const q = queued; queued = null; renderQueued();
+  if (!ws || ws.readyState !== 1) { queued = q; unqueue(); return; }
+  send(q);
+}
+function send(over) {
+  const ready = over ? over.ready : attachments.filter((a) => a.status === 'ready');
+  if (!over && attachments.some((a) => a.status === 'uploading')) return; // アップロード中は送らない
+  const text = over ? over.text : (input.value.trim() || (ready.length ? '添付したファイルを確認してください。' : ''));
   if (text.startsWith('!') && !ready.length && text.slice(1).trim()) { // 「!コマンド」は Claude に送らず、「実行」タブで実行する (Claude の応答中でも可)
     if (run.id) { showTab('run'); runStatus('実行中のコマンドがあります。終わるのを待つか、停止してください', 'bad'); return; }
     input.value = ''; autosize(); hideSlash(); showTab('run'); $('#runcmd').value = text.slice(1).trim(); runStart(); return;
+  }
+  const em = /^\/effort(?:\s+(\S+))?\s*$/i.exec(text); // 「/effort」は画面上部の選択と同じものを操作する (Claude には送らない)
+  if (em && !ready.length && !over) {
+    input.value = ''; autosize(); hideSlash();
+    const arg = (em[1] || '').toLowerCase();
+    if (!arg) { if (effortEl.disabled) toast('このモデルは effort に対応していません'); else { if (effortPop) closeEffortPop(); openEffortPop(); } }
+    else if (effortEl.disabled) toast('このモデルは effort に対応していません');
+    else {
+      const v = arg === 'auto' || arg === 'default' ? '' : arg; const opt = [...effortEl.options].find((o) => o.value === v);
+      if (!opt || opt.disabled) toast(`「${arg}」は、このモデルでは使えません`);
+      else { setEffort(v); toast(`effort を ${v || '既定'} にしました (次の発言から)`); }
+    }
+    return;
+  }
+  if (busy && text && !over && ws.readyState === 1 && text !== '/clear') { // 応答中: 待機に置く (続けて打てば、同じ待機に足す)
+    queued = { text: queued ? `${queued.text}\n${text}` : text, ready: [...(queued ? queued.ready : []), ...ready] };
+    input.value = ''; autosize(); attachments = []; renderAttach(); renderQueued(); return;
   }
   if (!text || busy || ws.readyState !== 1) return;
   if (ready.length && !serverFeatures.has('attach')) { add(el('div', 'err-box', 'サーバーが古いため、添付を送れません。start.cmd で起動し直してください。')); return; }
@@ -264,8 +300,8 @@ function send() {
   store.set('cwd', cwdEl.value); store.set('mode', modeEl.value); store.set('model', modelEl.value);
   turnFailed = false;
   add(userBubble(text, ready));
-  ws.send(JSON.stringify({ type: 'send', text, cwd: cwdEl.value.trim(), permissionMode: modeEl.value, model: modelEl.value || undefined, attachments: ready.map((a) => (a.rel ? { rel: a.rel } : { path: a.path })) }));
-  input.value = ''; autosize(); attachments = []; renderAttach();
+  ws.send(JSON.stringify({ type: 'send', text, cwd: cwdEl.value.trim(), permissionMode: modeEl.value, model: modelEl.value || undefined, effort: effortEl.disabled ? undefined : (effortEl.value || undefined), attachments: ready.map((a) => (a.rel ? { rel: a.rel } : { path: a.path })) }));
+  if (!over) { input.value = ''; autosize(); attachments = []; renderAttach(); }
 }
 function autosize() { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 220) + 'px'; }
 // ---------- スラッシュコマンド ----------
@@ -305,12 +341,63 @@ input.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
 });
 sendBtn.onclick = send;
-stopBtn.onclick = () => ws.send(JSON.stringify({ type: 'interrupt' }));
+stopBtn.onclick = () => { ws.send(JSON.stringify({ type: 'interrupt' })); unqueue(); }; // 止めたときは、待機中の発言を送らず、入力欄に戻す
 modeEl.onchange = () => { store.set('mode', modeEl.value); if (busy) ws.send(JSON.stringify({ type: 'setMode', mode: modeEl.value })); };
-modelEl.onchange = () => { store.set('model', modelEl.value); if (modelEl.value === '' && lastModelId) setDefaultLabel(lastModelId); };
+modelEl.onchange = () => { syncEffort(); store.set('model', modelEl.value); if (modelEl.value === '' && lastModelId) setDefaultLabel(lastModelId); };
 
 // ---------- モデルの選択 (SDK が返す実際の一覧。「既定」が何になるかも表示する) ----------
-let models = [], lastModelId = '';
+let models = [], lastModelId = '', lastEffort = '';
+// ---------- effort (思考の深さ): スライダーで選ぶ。選んだモデルが対応するレベルだけ選べる ----------
+// 状態は、非表示の <select id="effort"> が持つ。value が空 = 「既定」(モデルの標準。おすすめの値が分かるモデルでは、その値を添える)
+const effortEl = $('#effort');
+const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+const recommendedEffort = () => { // モデルごとの「おすすめ」。SDK からは取れないので、確認できたものだけ持つ
+  const m = models.find((x) => x.value === (modelEl.value || 'default')); const id = m ? `${m.resolved} ${m.name}` : lastModelId;
+  return /sonnet-5-5|Sonnet 5\.5/.test(id) ? 'medium' : '';
+};
+const effortLevelsNow = () => { const m = models.find((x) => x.value === (modelEl.value || 'default')); return m && Array.isArray(m.efforts) ? m.efforts : null; }; // null = 不明 (すべて許可)
+function effortShown() { const rec = recommendedEffort(); return effortEl.value || rec; }
+function syncEffort() {
+  const levels = effortLevelsNow();
+  for (const o of effortEl.options) { if (o.value) o.disabled = !!levels && !levels.includes(o.value); }
+  effortEl.disabled = !!levels && levels.length === 0; // 対応しないモデル
+  if (effortEl.value && effortEl.selectedOptions[0]?.disabled && levels && levels.length) { effortEl.value = ''; store.set('effort', ''); } // 選んでいたレベルに対応しないモデルへ変えたときは、「既定」に戻す
+  const b = $('#effortbtn'); const v = effortEl.value, rec = recommendedEffort();
+  b.disabled = effortEl.disabled;
+  b.textContent = effortEl.disabled ? 'effort: 非対応' : v ? `effort: ${v}` : rec ? `effort: ${rec} (既定)` : 'effort: 既定';
+  b.title = effortEl.disabled ? 'このモデルは effort に対応していません' : '思考の深さ (effort)。高いほど深く考えますが、時間と費用が増えます。クリックで変更 (/effort でも開きます)';
+  if (effortPop) renderEffortPop();
+}
+effortEl.value = store.get('effort', ''); if (effortEl.value !== store.get('effort', '')) effortEl.value = '';
+function setEffort(v) { effortEl.value = v; store.set('effort', v); syncEffort(); }
+let effortPop = null;
+function closeEffortPop() { if (!effortPop) return; effortPop.remove(); effortPop = null; document.removeEventListener('mousedown', effortOutside, true); document.removeEventListener('keydown', effortKey, true); }
+function effortOutside(e) { if (effortPop && !effortPop.contains(e.target) && e.target !== $('#effortbtn')) closeEffortPop(); }
+function effortKey(e) { if (e.key === 'Escape') { e.preventDefault(); closeEffortPop(); } }
+function renderEffortPop() {
+  const pop = effortPop; if (!pop) return; pop.textContent = '';
+  const levels = effortLevelsNow() || EFFORT_LEVELS; const cur = effortShown(); const rec = recommendedEffort();
+  const head = el('div', 'ep-head'); head.append(el('span', 'ep-t', 'エフォート'), el('span', 'ep-v', cur || '既定')); pop.append(head);
+  const ends = el('div', 'ep-ends'); ends.append(el('span', '', '高速'), el('span', '', '高精度')); pop.append(ends);
+  const track = el('div', 'ep-track'); const slider = el('input'); slider.type = 'range'; slider.min = '0'; slider.max = String(EFFORT_LEVELS.length - 1); slider.step = '1';
+  slider.value = String(Math.max(0, EFFORT_LEVELS.indexOf(cur || rec || 'high'))); slider.setAttribute('aria-label', 'effort');
+  slider.oninput = () => { // 対応しないレベルは、近い対応レベルへ寄せる
+    let i = Number(slider.value); if (!levels.includes(EFFORT_LEVELS[i])) { const ok = EFFORT_LEVELS.map((l, k) => [k, l]).filter(([, l]) => levels.includes(l)); i = ok.reduce((b, [k]) => (Math.abs(k - i) < Math.abs(b - i) ? k : b), ok[0][0]); slider.value = String(i); }
+    setEffort(EFFORT_LEVELS[i]);
+  };
+  const ticks = el('div', 'ep-ticks'); EFFORT_LEVELS.forEach((l) => { const t = el('span', 'ep-tick' + (levels.includes(l) ? '' : ' off') + (l === cur ? ' on' : ''), l); ticks.append(t); });
+  track.append(slider); pop.append(track, ticks);
+  if (rec) { const r = el('div', 'ep-rec'); r.style.left = `calc(${(EFFORT_LEVELS.indexOf(rec) / (EFFORT_LEVELS.length - 1)) * 100}% )`; r.textContent = 'おすすめ'; const w = el('div', 'ep-recwrap'); w.append(r); pop.append(w); }
+  const foot = el('div', 'ep-foot'); const reset = el('button', 'ghost mini', rec ? `既定 (${rec}) に戻す` : '既定に戻す'); reset.type = 'button'; reset.disabled = !effortEl.value; reset.onclick = () => setEffort('');
+  foot.append(reset); pop.append(foot);
+}
+function openEffortPop() {
+  if (effortEl.disabled) return; if (effortPop) return closeEffortPop();
+  effortPop = el('div', 'effortpop'); document.body.append(effortPop); renderEffortPop();
+  const r = $('#effortbtn').getBoundingClientRect(); effortPop.style.top = `${Math.round(r.bottom + 6)}px`; effortPop.style.right = `${Math.max(8, Math.round(window.innerWidth - r.right))}px`;
+  document.addEventListener('mousedown', effortOutside, true); document.addEventListener('keydown', effortKey, true);
+}
+$('#effortbtn').onclick = openEffortPop;
 const modelName = (id) => { const m = models.find((x) => x.value !== 'default' && (x.resolved === id || x.value === id)) || models.find((x) => x.resolved === id); return m ? m.name : id; };
 function defaultName() {
   const d = models.find((x) => x.value === 'default'); if (!d) return '';
@@ -332,6 +419,7 @@ function fillModels() {
   const target = [...modelEl.options].some((o) => o.value === keep) ? keep : byResolved ? byResolved.value : '';
   modelEl.value = target; store.set('model', target);
   if (lastModelId && !target) setDefaultLabel(lastModelId);
+  syncEffort();
 }
 async function loadModels() { try { models = await api('/api/models', {}); } catch { models = []; } fillModels(); }
 
@@ -347,22 +435,53 @@ function ago(ms) {
   const h = Math.floor(m / 60); if (h < 24) return `${h} 時間前`;
   return `${Math.floor(h / 24)} 日前`;
 }
+// 会話の一覧: すべてのフォルダの会話を新しい順に出す。選ぶと、その会話のフォルダ (とブランチ) へ戻って続きを開く
+let sessAll = [];
+const normDir = (x) => String(x || '').split(String.fromCharCode(92)).join('/').replace(/\/+$/, '').toLowerCase();
+const dirLeaf = (x) => String(x || "").split(/[\\/]+/).filter(Boolean).pop() || String(x || "");
 async function loadSessions() {
   const box = $('#sessions');
+  try { sessAll = await api('/api/sessions', {}); renderSessions(); }
+  catch (e) { box.textContent = ''; box.append(el('div', 'hint', '一覧を取得できませんでした: ' + e.message)); }
+}
+function renderSessions() {
+  const box = $('#sessions'); box.textContent = '';
+  const q = $('#sessq').value.trim().toLowerCase();
+  const terms = q ? q.split(/\s+/) : [];
+  const list = sessAll.filter((s) => { const hay = `${splitAttachments(s.title).text} ${s.cwd} ${s.gitBranch}`.toLowerCase(); return terms.every((t) => hay.includes(t)); });
+  if (!list.length) box.append(el('div', 'hint', q ? '一致する会話がありません' : '会話はまだありません'));
+  for (const s of list) {
+    const d = el('div', 'sess' + (s.sessionId === currentSession ? ' on' : '') + (s.exists ? '' : ' gone'));
+    const t = el('div', 't', splitAttachments(s.title).text.trim() || s.title);
+    const ed = el('span', 'ed', '✎'); ed.title = '名前を変更';
+    ed.onclick = (ev) => { ev.stopPropagation(); renameStart(d, t, s); };
+    const here = normDir(s.cwd) === normDir(cwdEl.value);
+    const meta = el('div', 'd');
+    meta.append(el('span', here ? 'sf here' : 'sf', s.cwd ? dirLeaf(s.cwd) : '?'), el('span', '', ` · ${ago(s.lastModified)}`));
+    if (s.gitBranch && s.gitBranch !== 'HEAD') meta.append(el('span', 'sb', `⎇ ${s.gitBranch}`));
+    d.title = `${s.cwd || ''}${s.gitBranch ? `  ⎇ ${s.gitBranch}` : ''}${s.exists ? '' : '\n(フォルダが見つかりません)'}`;
+    const del = el('span', 'ed del', '🗑'); del.title = '会話を削除';
+    del.onclick = (ev) => { ev.stopPropagation(); deleteSessionUi(s); };
+    d.append(t, meta, ed, del);
+    d.onclick = () => openSession(s);
+    box.append(d);
+  }
+}
+$('#sessq').addEventListener('input', renderSessions);
+// 会話の履歴の削除。Claude Code 本体の履歴からも消え、元に戻せない。確認ダイアログの既定はキャンセル
+async function deleteSessionUi(s) {
+  if (busy && s.sessionId === currentSession) { toast('応答中の会話は削除できません。止めてからにしてください'); return; }
+  const title = splitAttachments(s.title).text.trim() || s.title;
+  const body = el('div'); body.append(el('div', '', `「${title.length > 60 ? `${title.slice(0, 60)}…` : title}」`), el('div', 'note', `${s.cwd || ''}${s.gitBranch ? `  ⎇ ${s.gitBranch}` : ''}`),
+    el('div', '', 'この会話の履歴を削除します。Claude Code 本体 (ターミナル) の履歴からも消え、元に戻せません。'));
+  const c = await askChoice({ title: '会話を削除しますか？', body, buttons: [{ label: 'キャンセル', value: 'cancel', def: true }, { label: '削除する', value: 'delete', danger: true }] });
+  if (c !== 'delete') return;
   try {
-    const list = await api('/api/sessions', {});
-    box.textContent = '';
-    if (!list.length) box.append(el('div', 'hint', 'このフォルダの会話はまだありません'));
-    for (const s of list) {
-      const d = el('div', 'sess' + (s.sessionId === currentSession ? ' on' : ''));
-      const t = el('div', 't', splitAttachments(s.title).text.trim() || s.title);
-      const ed = el('span', 'ed', '✎'); ed.title = '名前を変更';
-      ed.onclick = (ev) => { ev.stopPropagation(); renameStart(d, t, s); };
-      d.append(t, el('div', 'd', ago(s.lastModified)), ed);
-      d.onclick = () => openSession(s.sessionId);
-      box.append(d);
-    }
-  } catch (e) { box.textContent = ''; box.append(el('div', 'hint', '一覧を取得できませんでした: ' + e.message)); }
+    await postJson('/api/session/delete', { id: s.sessionId, dir: s.cwd || '' });
+    sessAll = sessAll.filter((x) => x.sessionId !== s.sessionId);
+    if (s.sessionId === currentSession) { ws.send(JSON.stringify({ type: 'newSession' })); currentSession = null; sessionLabel = ''; statusEl.textContent = ''; clearChat(); }
+    renderSessions(); toast('会話を削除しました');
+  } catch (e) { toast(`削除できませんでした: ${e.message}`); }
 }
 function renameStart(row, titleEl, s) {
   const inp = el('input', 'rn'); inp.value = splitAttachments(s.title).text.trim() || s.title; titleEl.replaceWith(inp); inp.focus(); inp.select();
@@ -372,7 +491,7 @@ function renameStart(row, titleEl, s) {
     const v = inp.value.trim();
     if (save && v && v !== (splitAttachments(s.title).text.trim() || s.title)) {
       try {
-        const r = await fetch(`/api/rename?${new URLSearchParams({ cwd: cwdEl.value.trim() })}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: s.sessionId, title: v }) });
+        const r = await fetch(`/api/rename?${new URLSearchParams({ cwd: cwdEl.value.trim() })}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dir: s.cwd, id: s.sessionId, title: v }) });
         if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.status);
       } catch (e) { add(el('div', 'err-box', '名前を変更できませんでした: ' + e.message)); }
     }
@@ -382,10 +501,22 @@ function renameStart(row, titleEl, s) {
   inp.onkeydown = (ev) => { if (ev.key === 'Enter' && !ev.isComposing) finish(true); else if (ev.key === 'Escape') finish(false); };
   inp.onblur = () => finish(true);
 }
-async function openSession(id) {
+async function openSession(s) {
   if (busy) return;
+  const id = s.sessionId;
+  if (!s.exists) { toast(`この会話のフォルダが見つかりません: ${s.cwd || '(不明)'}`); return; }
+  if (s.cwd && normDir(s.cwd) !== normDir(cwdEl.value)) { if (!(await switchCwd(s.cwd))) { toast('作業フォルダを切り替えられませんでした'); return; } } // 会話のフォルダへ戻る
+  if (s.gitBranch && s.gitBranch !== 'HEAD') { // 会話のブランチへ戻るか尋ねる (違うときだけ)
+    let g = null; try { g = await api('/api/git/status', {}); } catch { /* Git でなければ無視 */ }
+    if (g && g.repo && g.branch && g.branch !== s.gitBranch) {
+      const c = await askChoice({ title: 'ブランチが違います', body: `この会話は、ブランチ「${s.gitBranch}」で行われました。いまは「${g.branch}」です。`, buttons: [
+        { label: 'キャンセル', value: 'cancel' }, { label: 'このまま開く', value: 'keep', def: true }, { label: `「${s.gitBranch}」に切り替える`, value: 'switch', primary: true }] });
+      if (c === null || c === 'cancel') return;
+      if (c === 'switch') { try { await postJson('/api/git/switch', { branch: s.gitBranch }); loadGit(); } catch (e) { toast(`ブランチを切り替えられませんでした: ${e.message}`); } }
+    }
+  }
   try {
-    const msgs = await api('/api/session', { id });
+    const msgs = await api('/api/session', { id, dir: s.cwd || '' });
     clearChat(); $('#empty')?.remove();
     for (const m of msgs) {
       if (m.type === 'assistant') { const box = el('div', 'msg assistant'); renderAssistantBlocks(box, m.message && m.message.content); if (box.childNodes.length) add(box); }
