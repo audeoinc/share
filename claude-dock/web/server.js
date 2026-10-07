@@ -10,7 +10,7 @@ import iconv from 'iconv-lite';
 import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { query, listSessions, getSessionMessages, renameSession } from '@anthropic-ai/claude-agent-sdk';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -792,6 +792,43 @@ wss.on('connection', (ws) => {
   let running = null;        // { q, abort }
   let sessionId = null;
 
+  // ---- コマンド実行ペイン (「実行」タブ)。1回ごとに実行して出力を流す。入力待ちのコマンドは非対応 (標準入力は閉じている) ----
+  const runs = new Map(); // id -> child
+  const RUN_CAP = 8 * 1024 * 1024;
+  function killTree(child) {
+    if (!child || child.exitCode !== null) return;
+    if (process.platform === 'win32') execFile('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }, () => {});
+    else { try { process.kill(-child.pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch { /* 無視 */ } } }
+  }
+  function decodeChunk(buf) { // UTF-8 を優先。末尾が文字の途中で切れていたら、次に回す。だめなら Windows は Shift_JIS
+    for (let k = 0; k <= 3 && k < buf.length; k++) {
+      try { return { text: new TextDecoder('utf-8', { fatal: true }).decode(buf.subarray(0, buf.length - k)), rest: buf.subarray(buf.length - k) }; } catch { /* 次へ */ }
+    }
+    return { text: process.platform === 'win32' ? new TextDecoder('shift_jis').decode(buf) : buf.toString('latin1'), rest: Buffer.alloc(0) };
+  }
+  function startRun(id, cmd, cwdRaw) {
+    const end = (o) => send({ type: 'run_end', id, ...o });
+    if (typeof id !== 'string' || id.length > 60 || typeof cmd !== 'string' || !cmd.trim() || cmd.length > 8000) return;
+    if (runs.size) return end({ error: '実行中のコマンドがあります。終わるのを待つか、停止してください' });
+    const cwd = typeof cwdRaw === 'string' && cwdRaw && fs.existsSync(cwdRaw) && fs.statSync(cwdRaw).isDirectory() ? path.resolve(cwdRaw) : null;
+    if (!cwd) return end({ error: '作業フォルダが見つかりません' });
+    const t0 = Date.now(); let child;
+    try {
+      child = spawn(cmd, { cwd, shell: true, windowsHide: true, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0', GIT_TERMINAL_PROMPT: '0', PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8' } });
+    } catch (e) { return end({ error: String(e.message || e) }); }
+    runs.set(id, child); let sent = 0, capped = false; const tails = { out: Buffer.alloc(0), err: Buffer.alloc(0) };
+    const feed = (key) => (chunk) => {
+      if (capped) return;
+      const { text, rest } = decodeChunk(Buffer.concat([tails[key], chunk])); tails[key] = rest;
+      sent += chunk.length; if (text) send({ type: 'run_out', id, data: text });
+      if (sent > RUN_CAP) { capped = true; send({ type: 'run_out', id, data: '\n[出力が多すぎるため、ここで停止しました]\n' }); killTree(child); }
+    };
+    child.stdout.on('data', feed('out')); child.stderr.on('data', feed('err'));
+    child.on('error', (e) => { runs.delete(id); end({ error: String(e.message || e), ms: Date.now() - t0 }); });
+    child.on('close', (code, signal) => { runs.delete(id); end({ code, signal, ms: Date.now() - t0 }); });
+  }
+
   // 作業フォルダの変化 (ファイルの作成・移動・削除など) を監視して、画面に知らせる
   let watcher = null, wTimer = null, wDirs = new Set(), wFiles = new Set(), wGit = false;
   const stopWatch = () => { if (watcher) { try { watcher.close(); } catch { /* 無視 */ } watcher = null; } clearTimeout(wTimer); wDirs = new Set(); wFiles = new Set(); wGit = false; };
@@ -818,7 +855,7 @@ wss.on('connection', (ws) => {
     } catch { send({ type: 'watch_state', active: false, reason: 'この環境ではフォルダの監視ができません (「↻」かウィンドウに戻ったときに更新します)' }); }
   }
 
-  send({ type: 'hello', cwd: DEFAULT_CWD, features: ['attach', 'watch', 'move', 'trash'] });
+  send({ type: 'hello', cwd: DEFAULT_CWD, features: ['attach', 'watch', 'move', 'trash', 'run'] });
 
   async function runTurn({ text, cwd, permissionMode, model, attachments }) {
     if (running) return send({ type: 'error', message: '前の応答がまだ実行中です' });
@@ -910,10 +947,12 @@ wss.on('connection', (ws) => {
     else if (m.type === 'interrupt' && running) { try { await running.q.interrupt(); } catch { running.abort.abort(); } }
     else if (m.type === 'setMode' && running) { try { await running.q.setPermissionMode(m.mode); } catch {} }
     else if (m.type === 'newSession') { if (!running) sessionId = null; }
+    else if (m.type === 'run') startRun(m.id, m.cmd, m.cwd);
+    else if (m.type === 'run_stop') killTree(runs.get(m.id));
     else if (m.type === 'watch') startWatch(typeof m.cwd === 'string' ? m.cwd : '');
     else if (m.type === 'resume' && typeof m.sessionId === 'string' && /^[0-9a-f-]{36}$/i.test(m.sessionId) && !running) { sessionId = m.sessionId; }
   });
-  ws.on('close', () => { stopWatch(); if (running) running.abort.abort(); });
+  ws.on('close', () => { for (const c of runs.values()) killTree(c); stopWatch(); if (running) running.abort.abort(); });
 });
 
 server.listen(PORT, HOST, () => {

@@ -158,6 +158,8 @@ function handle(m) {
   else if (m.type === 'busy') setBusy(m.value);
   else if (m.type === 'notice') add(el('div', 'err-box', m.message));
   else if (m.type === 'fs') onFsChange(m);
+  else if (m.type === 'run_out') { if (m.id === run.id) runAppend(m.data); }
+  else if (m.type === 'run_end') runEnd(m);
   else if (m.type === 'watch_state') { $('#treerefresh').title = m.active ? '更新 (自動でも更新されます)' : (m.reason || '更新'); }
   else if (m.type === 'error') { if (!turnFailed) add(el('div', 'err-box', m.message)); }
   else if (m.type === 'permission_request') askPermission(m);
@@ -874,7 +876,7 @@ async function saveEdit(opt = {}) {
   s.saving = true; editMarks();
   try {
     const r = await postJson('/api/file/save', { path: s.rel, text, mtimeMs: s.mtimeMs, eol: s.d.eol, ...opt });
-    s.mtimeMs = r.mtimeMs; s.cleanVer = ver; s.d.enc = r.enc || s.d.enc; s.d.text = text; s.saving = false; editBanner(''); editMarks(); toast('保存しました'); return true;
+    s.mtimeMs = r.mtimeMs; s.cleanVer = ver; s.d.enc = r.enc || s.d.enc; s.d.text = text; s.saving = false; editBanner(''); editMarks(); toast('保存しました'); loadGit(); return true; // 変更タブにすぐ反映 (自動更新を待たない)
   } catch (e) {
     s.saving = false; editMarks();
     if (e.code === 'changed') {
@@ -915,11 +917,67 @@ $('#pcancel').onclick = async () => { if (!editState) return; const rel = editSt
 window.addEventListener('beforeunload', (e) => { if (editDirty()) { e.preventDefault(); e.returnValue = ''; } });
 document.addEventListener('keydown', (e) => { if (editState && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 's') { e.preventDefault(); saveEdit(); } });
 
-const TABS = ['sessions', 'files', 'git'];
+// ---------- 実行ペイン: コマンドを1回ずつ実行して、出力を見せる。「Claude に渡す」で会話の入力欄へ ----------
+const run = { id: null, text: '', cmd: '', t0: 0, timer: null, raf: 0, hist: [], hi: -1 };
+try { run.hist = JSON.parse(store.get('runHist', '[]')); } catch { run.hist = []; }
+const RUN_MAX = 400000;
+const ANSI = new RegExp(String.fromCharCode(27) + '(?:\\[[0-9;?]*[ -/]*[@-~]|\\][^\\u0007]*\\u0007)', 'g');
+function runAppend(data) {
+  // 色などの制御文字を除き、行頭に戻る (\r) は、その行を書き直す (進捗表示のため)
+  let t = run.text; const cleaned = data.replace(ANSI, '').replace(/\r\n/g, '\n');
+  for (const ch of cleaned) {
+    if (ch === '\r') t = t.slice(0, t.lastIndexOf('\n') + 1); else t += ch;
+  }
+  run.text = t.length > RUN_MAX ? '…(先頭を省略)\n' + t.slice(t.length - RUN_MAX) : t;
+  if (!run.raf) run.raf = setTimeout(() => {
+    run.raf = 0; const o = $('#runout'); const near = o.scrollHeight - o.scrollTop - o.clientHeight < 40;
+    o.textContent = run.text; if (near) o.scrollTop = o.scrollHeight;
+  }, 50);
+}
+function runStatus(text, cls) { const s = $('#runstat'); s.textContent = text; s.className = `runstat ${cls || ''}`; }
+function runUi() {
+  const going = !!run.id; const b = $('#runbtn');
+  b.textContent = going ? '停止' : '実行'; b.classList.toggle('send', !going); b.classList.toggle('danger', going);
+  $('#runcmd').disabled = going; $('#runsend').disabled = going || !run.text; $('#runclear').disabled = going || !run.text;
+}
+function runStart() {
+  const cmd = $('#runcmd').value.trim(); if (!cmd || run.id) return;
+  if (!serverFeatures.has('run')) { runStatus('サーバーが古いため実行できません。サーバーを再起動してください', 'bad'); return; }
+  if (!ws || ws.readyState !== 1) { runStatus('接続されていません', 'bad'); return; }
+  run.hist = [cmd, ...run.hist.filter((h) => h !== cmd)].slice(0, 30); store.set('runHist', JSON.stringify(run.hist)); run.hi = -1;
+  run.id = `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; run.cmd = cmd; run.text = ''; run.t0 = Date.now(); $('#runout').textContent = '';
+  ws.send(JSON.stringify({ type: 'run', id: run.id, cmd, cwd: cwdEl.value.trim() }));
+  clearInterval(run.timer); const tick = () => runStatus(`実行中… ${Math.round((Date.now() - run.t0) / 1000)} 秒`, 'busy'); tick(); run.timer = setInterval(tick, 500);
+  runUi();
+}
+function runEnd(m) {
+  if (m.id !== run.id) return; clearInterval(run.timer); run.id = null; const stopped = run.stopping; run.stopping = false; run.exit = stopped ? { ...m, code: null } : m;
+  const sec = ((m.ms ?? (Date.now() - run.t0)) / 1000).toFixed(1);
+  if (m.error) { runStatus(`✗ ${m.error}`, 'bad'); run.exit = { error: m.error }; }
+  else if (m.code === 0) runStatus(`✓ 成功 (終了コード 0, ${sec} 秒)`, 'ok');
+  else runStatus(stopped || m.signal ? `■ 停止しました (${sec} 秒)` : `✗ 失敗 (終了コード ${m.code}, ${sec} 秒)`, 'bad');
+  if (m.error && !run.text) run.text = '';
+  runUi();
+}
+$('#runbtn').onclick = () => { if (run.id) run.stopping = true; if (run.id) ws.send(JSON.stringify({ type: 'run_stop', id: run.id })); else runStart(); };
+$('#runcmd').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); runStart(); }
+  else if (e.key === 'ArrowUp' && run.hist.length) { e.preventDefault(); run.hi = Math.min(run.hi + 1, run.hist.length - 1); $('#runcmd').value = run.hist[run.hi]; }
+  else if (e.key === 'ArrowDown' && run.hi >= 0) { e.preventDefault(); run.hi -= 1; $('#runcmd').value = run.hi >= 0 ? run.hist[run.hi] : ''; }
+});
+$('#runclear').onclick = () => { run.text = ''; $('#runout').textContent = ''; runStatus('作業フォルダで実行します (入力待ちのコマンドは非対応)'); runUi(); };
+$('#runsend').onclick = () => {
+  const lines = run.text.replace(/\n+$/, '').split('\n'); const tail = lines.slice(-200);
+  const x = run.exit; const result = !x ? '' : x.error ? `\n(エラー: ${x.error})` : `\n(終了コード ${x.code ?? '停止'})`;
+  insertAtCursor(`\n\`\`\`\n$ ${run.cmd}\n${lines.length > tail.length ? `(先頭 ${lines.length - tail.length} 行を省略)\n` : ''}${tail.join('\n')}${result}\n\`\`\`\n`);
+};
+
+const TABS = ['sessions', 'files', 'run', 'git'];
 function showTab(which) {
   for (const t of TABS) { $(`#pane-${t}`).hidden = t !== which; $(`#tab-${t}`).classList.toggle('on', t === which); }
   store.set('tab', which);
   if (which === 'git') loadGit();
+  if (which === 'run') $('#runcmd').focus();
 }
 for (const t of TABS) $(`#tab-${t}`).onclick = () => showTab(t);
 showTab(store.get('tab', 'sessions'));

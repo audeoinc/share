@@ -401,3 +401,15 @@ button.danger:disabled { opacity: .45; cursor: default; }
 .pbody.editing > .note { padding: 6px 12px; margin: 0; }
 .pbody.editing > .diffsw { float: none; align-self: flex-end; margin: 6px 12px; }
 #psave.saved { color: var(--ok, #2e7d32); border-color: transparent; background: transparent; opacity: 1; }
+
+/* 実行ペイン */
+#pane-run { display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+#pane-run[hidden] { display: none; }
+.runbar { display: flex; gap: 6px; }
+.runbar input { flex: 1; min-width: 0; font: calc(var(--fs, 14px) - 1.5px) var(--mono); }
+.runmeta { display: flex; gap: 6px; align-items: center; }
+.runmeta .sp { flex: 1; }
+.runstat { font-size: calc(var(--fs, 14px) - 2px); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.runstat.ok { color: var(--ok); } .runstat.bad { color: var(--bad); } .runstat.busy { color: var(--blue); }
+.runout { flex: 1; min-height: 120px; margin: 0; padding: 8px 10px; overflow: auto; background: var(--code); border: 1px solid var(--rule); border-radius: 8px; font: calc(var(--fs, 14px) - 2px)/var(--lh-code) var(--mono); white-space: pre-wrap; word-break: break-all; }
+.runmeta { flex-wrap: wrap; } .runmeta .runstat { flex: 1 1 100%; } .runmeta .sp { display: none; } .runmeta button { white-space: nowrap; }

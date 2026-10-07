@@ -41,12 +41,17 @@
       <div class="repoline" hidden><button id="gitbranch" class="gitbranch" type="button" title="ブランチを切り替え / 新規作成" disabled></button></div>
       <div id="branchmenu" class="branchmenu" hidden></div>
     </div>
-    <div class="tabs"><button id="tab-sessions" class="on">会話</button><button id="tab-files">ファイル</button><button id="tab-git">変更 <span id="gitcount" class="badge" hidden></span></button></div>
+    <div class="tabs"><button id="tab-sessions" class="on">会話</button><button id="tab-files">ファイル</button><button id="tab-git">変更 <span id="gitcount" class="badge" hidden></span></button><button id="tab-run">実行</button></div>
     <div id="pane-sessions" class="pane"><button id="new" class="newbtn">＋ 新しい会話</button><div id="sessions"></div></div>
     <div id="pane-files" class="pane" hidden>
       <div class="fsearch"><input id="fsearch" placeholder="ファイルを検索 (Ctrl+P)" autocomplete="off" spellcheck="false"><button id="fsmode" class="ghost" title="ファイル名 / 中身 を切り替え">名前</button><button id="treerefresh" class="ghost" type="button" title="更新">↻</button><button id="trashbtn" class="ghost" type="button" title="ごみ箱 (削除したファイルの復元)">🗑</button></div>
       <div id="fresults" hidden></div>
       <div id="tree"></div>
+    </div>
+    <div id="pane-run" class="pane" hidden>
+      <div class="runbar"><input id="runcmd" placeholder="コマンド (例: npm test)  Enter で実行" autocomplete="off" spellcheck="false"><button id="runbtn" class="send" type="button">実行</button></div>
+      <div class="runmeta"><span id="runstat" class="runstat">作業フォルダで実行します (入力待ちのコマンドは非対応)</span><span class="sp"></span><button id="runsend" class="ghost mini" type="button" disabled title="コマンドと出力の末尾を、会話の入力欄に入れます">Claude に渡す</button><button id="runclear" class="ghost mini" type="button" disabled>クリア</button></div>
+      <pre id="runout" class="runout"></pre>
     </div>
     <div id="pane-git" class="pane" hidden><div class="githead"><span class="gitnote">Git の変更 (ブランチは上のバーで切り替え)</span><button id="gitrefresh" class="ghost" title="更新">↻</button></div>
       <div id="gitlist"></div>
