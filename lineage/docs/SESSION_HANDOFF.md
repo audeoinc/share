@@ -16,9 +16,9 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 ### 0.1 いまの状態（事実）
 
 > **更新（2026-08-22・新リポジトリでの再開セッション）**
-> - リポジトリ移行は**完了**。現行は `audeoinc/share` の `lineage/`、作業ブランチ
->   `claude/lineage-project-resume-tqwrp9`。以下 0.1 の「旧リポジトリ／旧ブランチ」は
->   移行前の記録として読むこと。
+> - リポジトリ移行は**完了**。現行はこのツリー直下の `lineage/`。以下 0.1 の
+>   「旧リポジトリ／旧ブランチ」は移行前の記録として読むこと（リポジトリ名・
+>   ブランチ名は環境固有の情報なので記載しない）。
 > - 移行後の健全性確認は実施済み（`npm test` と `node test/test_v1_5_0_003.js` が
 >   記載どおり再現）。
 > - **本セッションで 1 件修正**：`WITH cte AS (...) (SELECT ...)`（CTE の後ろの
@@ -36,8 +36,8 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 >   **エンジン変更のため GCS 再アップロードが必要**。
 > - **本ドキュメントは §4.20 までしか追随していない**。§0.7 を参照。
 
-- バージョン: **1.5.0-032**。作業ブランチ: `claude/direct-file-visibility-check-6qztqm`
-  （旧リポジトリ `audeoinc/audeo-share`、ディレクトリ `lineage/`）。
+- バージョン: **1.5.0-032**（移行前のリポジトリ／ブランチでの作業時点の記録。
+  リポジトリ名・ブランチ名は環境固有の情報なので記載しない。ディレクトリは `lineage/`）。
 - バンドル: `javascript/dist/lineage_udf_bundle.js`
   `sha256 = ad18b4bc5a015e9d831900d5ca6edfde4043b3c5ccb9fc71a6940e0e24ad00cf`、`461888` bytes。
 - テスト: `test:release` 52 本 PASS / ゴールデン（`test_v1_5_0_003`）48 ケース PASS。
@@ -1310,7 +1310,7 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 
 ## 5. 現在地（2026-08-22 更新）
 
-- リポジトリ: `audeoinc/share` の `lineage/`。ブランチ `claude/lineage-project-resume-tqwrp9`。
+- 配置: ツリー直下の `lineage/`（リポジトリ名・ブランチ名は環境固有なので記載しない）。
 - バージョン表記: `1.5.0-032`（`release_manifest.json` / `package.json`）。
   テスト番号は版数と独立で、現在 `test_v1_5_0_079` まで。
 - バンドル: `sha256 = eecd0bc82f1d2ca01db8b4f727ee0c35510057afefe086a6f9ef33b92d655ba4`、`478961` bytes
