@@ -12,7 +12,16 @@ Claude Code 本体は改造せず、tmux でペインを並べ、小さなエク
 └─────────┴──────────────────────────────┘
 ```
 
-## 依存
+## Windows (追加インストール不要)
+Windows Terminal + PowerShell だけで動く版が `windows/` にあります (tmux / Python / WSL 不要)。
+```
+windows\cdock.cmd C:\path\to\project      (省略するとカレント)
+```
+Files | Claude / Shell の3ペインが開きます。Files で `Enter` すると `@path` を**クリップボードにコピー**するので、
+Claude ペインで `Ctrl+V` で貼り付けます (Windows Terminal にはペイン間のキー送信がないため)。
+`Space`で複数選択 → `A` で一括コピー。ペイン移動は `Alt+矢印`。**この版は Windows 実機で未検証です。**
+
+## 依存 (tmux 版: macOS / Linux / WSL)
 `tmux`, `python3` (3.8+・標準ライブラリのみ), `claude` — macOS / Linux / WSL。
 
 ## 導入 (別環境へはこのディレクトリごとコピー)
