@@ -53,9 +53,9 @@ button.ghost:hover, select:hover { border-color: var(--muted); }
 .card { font-family: var(--sans); font-size: calc(var(--fs, 14px) - 1px); background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; margin: 8px 0; overflow: hidden; }
 .card > summary { cursor: pointer; padding: calc(var(--pad-m) + 3px) 12px; display: flex; gap: 8px; align-items: baseline; list-style: none; }
 .card > summary::-webkit-details-marker { display: none; }
-.card .tn { font-weight: 600; color: var(--accent); white-space: nowrap; }
-.card .ts { color: var(--muted); font-family: var(--mono); font-size: calc(var(--fs, 14px) - 2px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.card .st { margin-left: auto; color: var(--muted); } .card.ok .st { color: var(--ok); } .card.err .st { color: var(--bad); }
+.card .tn { font-weight: 600; color: var(--accent); white-space: nowrap; flex: none; }
+.card .ts { color: var(--muted); font-family: var(--mono); font-size: calc(var(--fs, 14px) - 2px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; min-width: 0; } /* 長いコマンドは省略し、右の「完了」は縮めない */
+.card .st { margin-left: auto; color: var(--muted); flex: none; white-space: nowrap; } .card.ok .st { color: var(--ok); } .card.err .st { color: var(--bad); }
 .card pre { margin: 0; padding: 10px 12px; border-top: 1px solid var(--rule); font: calc(var(--fs, 14px) - 2px)/var(--lh-code) var(--mono); white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; background: var(--code); }
 .perm { border-color: var(--accent); }
 .perm .body { padding: 10px 12px; } .perm .ask { font-weight: 600; margin-bottom: 6px; }
