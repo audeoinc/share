@@ -257,7 +257,17 @@ async function api(url, res, req) {
     if (url.pathname === '/api/dirs') {
       // フォルダ選択用: サブフォルダ名だけを返す (ファイルの中身や名前は返さない)
       const home = os.homedir();
-      const p = path.resolve(url.searchParams.get('path') || home);
+      let p = path.resolve(url.searchParams.get('path') || home);
+      let fellBack = false;
+      if (url.searchParams.get('fallback') === '1') {
+        // 存在しないパスやファイルを指しているときは、いちばん近い存在するフォルダまで上がる
+        for (;;) {
+          try { if (fs.statSync(p).isDirectory()) break; } catch { /* 存在しない */ }
+          const up = path.dirname(p); fellBack = true;
+          if (up === p) { p = home; break; }
+          p = up;
+        }
+      }
       if (!fs.statSync(p).isDirectory()) throw new Error('フォルダではありません');
       const showHidden = url.searchParams.get('hidden') === '1';
       const dirs = [];
@@ -270,7 +280,7 @@ async function api(url, res, req) {
       dirs.sort((a, b) => a.localeCompare(b, 'ja'));
       const up = path.dirname(p);
       const drives = process.platform === 'win32' ? 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').map((l) => `${l}:\\`).filter((d) => fs.existsSync(d)) : ['/'];
-      return json(res, { path: p, parent: up !== p ? up : null, dirs, home, drives, sep: path.sep });
+      return json(res, { path: p, parent: up !== p ? up : null, dirs, home, drives, sep: path.sep, fellBack });
     }
     if (url.pathname === '/api/files') return json(res, await listFiles(cwd));
     if (url.pathname === '/api/grep') {

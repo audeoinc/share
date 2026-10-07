@@ -606,10 +606,12 @@ fillRecentList();
 
 const dlg = { box: $('#dlg'), list: $('#dlg-list'), pathIn: $('#dlg-pathinput'), filter: $('#dlg-filter'), cur: '', parent: null, dirs: [], sep: '/', first: null };
 const dlgJoin = (base, name) => (base.endsWith('\\') || base.endsWith('/') ? base + name : base + dlg.sep + name);
-async function dlgLoad(p) {
+async function dlgLoad(p, fallback) {
   try {
-    const d = await api('/api/dirs', { path: p, hidden: $('#dlg-hidden').checked ? '1' : '0' });
+    const d = await api('/api/dirs', { path: p, hidden: $('#dlg-hidden').checked ? '1' : '0', fallback: fallback ? '1' : '0' });
     Object.assign(dlg, { cur: d.path, parent: d.parent, dirs: d.dirs, sep: d.sep });
+    const note = $('#dlg-note'); note.hidden = !d.fellBack;
+    if (d.fellBack) note.textContent = `「${p}」はフォルダとして開けないため、いちばん近いフォルダを表示しています`;
     dlg.pathIn.value = d.path; $('#dlg-cur').textContent = d.path; $('#dlg-up').disabled = !d.parent; dlg.filter.value = '';
     dlgPlaces(d); dlgRender();
   } catch (e) { dlg.list.textContent = ''; dlg.list.append(el('div', 'hint', e.message)); }
@@ -631,7 +633,7 @@ function dlgRender() {
   dlg.first = items[0] ? dlgJoin(dlg.cur, items[0]) : null;
 }
 function dlgClose() { dlg.box.hidden = true; cwdEl.focus(); }
-$('#cwd-browse').onclick = () => { dlg.box.hidden = false; dlgLoad(cwdEl.value.trim()); dlg.filter.focus(); };
+$('#cwd-browse').onclick = () => { dlg.box.hidden = false; dlgLoad(cwdEl.value.trim(), true); dlg.filter.focus(); };
 $('#dlg-close').onclick = dlgClose; $('#dlg-cancel').onclick = dlgClose;
 $('#dlg-up').onclick = () => { if (dlg.parent) dlgLoad(dlg.parent); };
 $('#dlg-hidden').onchange = () => dlgLoad(dlg.cur);
