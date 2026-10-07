@@ -1,3 +1,4 @@
+import { renderMarkdown } from './md.js';
 // cdock web — フロントエンド (依存なし)
 const $ = (s) => document.querySelector(s);
 const NL = String.fromCharCode(10);
@@ -11,50 +12,9 @@ const store = {
 modeEl.value = store.get('mode', 'default');
 modelEl.value = store.get('model', '');
 
-// ---------- 最小 Markdown (すべて先にエスケープ) ----------
-const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-function inline(s) {
-  s = esc(s);
-  s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
-  s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
-  s = s.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,;:!?]|$)/g, '$1<em>$2</em>');
-  s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
-  return s;
-}
-function md(src) {
-  const out = []; const lines = src.replace(/\r\n/g, '\n').split('\n'); let i = 0;
-  while (i < lines.length) {
-    const ln = lines[i];
-    if (/^```(\w*)\s*$/.test(ln)) {
-      const buf = []; i++;
-      while (i < lines.length && !/^```\s*$/.test(lines[i])) buf.push(lines[i++]);
-      i++; out.push(`<pre><code>${esc(buf.join('\n'))}</code></pre>`); continue;
-    }
-    if (/^\s*\|.*\|\s*$/.test(ln) && i + 1 < lines.length && /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(lines[i + 1])) {
-      const cells = (l) => l.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
-      const head = cells(ln); i += 2; const rows = [];
-      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) rows.push(cells(lines[i++]));
-      const td = (tag, c) => `<${tag}>${inline(c)}</${tag}>`;
-      out.push(`<div class="tbl"><table><thead><tr>${head.map((c) => td('th', c)).join('')}</tr></thead><tbody>${rows.map((r) => `<tr>${r.map((c) => td('td', c)).join('')}</tr>`).join('')}</tbody></table></div>`);
-      continue;
-    }
-    const h = /^(#{1,3})\s+(.*)$/.exec(ln);
-    if (h) { out.push(`<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`); i++; continue; }
-    if (/^\s*[-*]\s+/.test(ln)) {
-      const items = []; while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) items.push(`<li>${inline(lines[i++].replace(/^\s*[-*]\s+/, ''))}</li>`);
-      out.push(`<ul>${items.join('')}</ul>`); continue;
-    }
-    if (/^\s*\d+[.)]\s+/.test(ln)) {
-      const items = []; while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i])) items.push(`<li>${inline(lines[i++].replace(/^\s*\d+[.)]\s+/, ''))}</li>`);
-      out.push(`<ol>${items.join('')}</ol>`); continue;
-    }
-    if (!ln.trim()) { i++; continue; }
-    const para = []; while (i < lines.length && lines[i].trim() && !/^(```|#{1,3}\s|\s*[-*]\s|\s*\d+[.)]\s)/.test(lines[i])) para.push(lines[i++]);
-    out.push(`<p>${inline(para.join('\n')).replace(/\n/g, '<br>')}</p>`);
-  }
-  return out.join('\n');
-}
-const mdLive = (t) => md((t.match(/^```/gm) || []).length % 2 ? t + '\n```' : t);
+// ---------- Markdown (md.js) ----------
+const md = (src, opts) => renderMarkdown(src, opts || {});
+const mdLive = (t) => md((t.match(/^```/gm) || []).length % 2 ? `${t}\n${'`'.repeat(3)}` : t);
 
 // ---------- 描画ヘルパー ----------
 function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
@@ -132,7 +92,7 @@ function connect() {
   ws.onmessage = (e) => handle(JSON.parse(e.data));
 }
 function handle(m) {
-  if (m.type === 'hello') { if (!cwdEl.value) cwdEl.value = store.get('cwd', m.cwd); lastGoodCwd = cwdEl.value; loadSessions(); loadRoot(); loadCommands(); loadGit(); }
+  if (m.type === 'hello') { if (!cwdEl.value) cwdEl.value = store.get('cwd', m.cwd); lastGoodCwd = cwdEl.value; refreshParent(); loadSessions(); loadRoot(); loadCommands(); loadGit(); }
   else if (m.type === 'busy') setBusy(m.value);
   else if (m.type === 'error') { if (!turnFailed) add(el('div', 'err-box', m.message)); }
   else if (m.type === 'permission_request') askPermission(m);
@@ -360,7 +320,29 @@ let previewRel = null;
 const pv = { box: $('#preview'), name: $('#pname'), body: $('#pbody') };
 const fmtSize = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : n >= 1024 ? Math.round(n / 1024) + ' KB' : n + ' B');
 const rawUrl = (rel) => `/api/raw?${new URLSearchParams({ cwd: cwdEl.value.trim(), path: rel })}`;
+// Markdown: 表示 / ソースの切り替え、相対リンク (他のファイル) と相対パスの画像
+let mdState = null, mdRaw = false;
+function resolveRel(base, url) {
+  const clean = url.split('#')[0].split('?')[0]; if (!clean) return null;
+  let target; try { target = decodeURIComponent(clean); } catch { return null; }
+  const parts = target.startsWith('/') ? [] : base.split('/').slice(0, -1);
+  for (const seg of target.split('/')) {
+    if (seg === '..') { if (!parts.length) return null; parts.pop(); } else if (seg && seg !== '.') parts.push(seg);
+  }
+  return parts.join('/');
+}
+function renderMdPreview() {
+  const { rel, d } = mdState; pv.body.textContent = '';
+  if (d.truncated) pv.body.append(el('div', 'note', `先頭 1MB のみ表示 (${fmtSize(d.size)})`));
+  if (mdRaw) pv.body.append(el('pre', 'code', d.text));
+  else { const div = el('div', 'md doc'); div.innerHTML = md(d.text, { soft: true, resolve: (u) => resolveRel(rel, u), rawUrl }); pv.body.append(div); }
+  $('#pmode').textContent = mdRaw ? '表示' : 'ソース';
+}
+$('#pmode').onclick = () => { if (!mdState) return; mdRaw = !mdRaw; renderMdPreview(); };
+pv.body.addEventListener('click', (e) => { const a = e.target.closest('a[data-rel]'); if (a) { e.preventDefault(); openPreview(a.dataset.rel); } });
+
 async function openPreview(rel, row, line) {
+  $('#pmode').hidden = true; mdState = null;
   document.querySelectorAll('.row.sel').forEach((r) => r.classList.remove('sel')); row?.classList.add('sel');
   previewRel = rel; pv.box.hidden = false; pv.name.textContent = line ? `${rel}:${line}` : rel; pv.body.textContent = '読み込み中…';
   let d; try { d = await api('/api/file', { path: rel }); } catch (e) { pv.body.textContent = ''; pv.body.append(el('div', 'note', e.message)); return; }
@@ -375,8 +357,7 @@ async function openPreview(rel, row, line) {
     if (d.truncated) pv.body.append(el('div', 'note', `先頭 1MB のみ表示 (${fmtSize(d.size)})`));
     pv.body.append(el('pre', 'code', d.text));
   } else if (d.kind === 'markdown') {
-    if (d.truncated) pv.body.append(el('div', 'note', `先頭 1MB のみ表示 (${fmtSize(d.size)})`));
-    pv.body.append(Object.assign(el('div', 'md'), { innerHTML: md(d.text) }));
+    mdState = { rel, d }; mdRaw = false; $('#pmode').hidden = false; renderMdPreview();
   } else if (d.kind === 'image') {
     const img = el('img'); img.alt = d.name; img.src = rawUrl(rel); pv.body.append(img);
   } else if (d.kind === 'pdf') {
@@ -481,6 +462,7 @@ $('#commitbtn').onclick = async () => {
 };
 $('#gitrefresh').onclick = loadGit;
 async function openDiff(rel, untracked) {
+  $('#pmode').hidden = true; mdState = null;
   previewRel = null; pv.box.hidden = false; pv.name.textContent = `${untracked ? '未追跡' : '差分'}: ${rel}`; pv.body.textContent = '読み込み中…';
   let d; try { d = await api('/api/git/diff', { path: rel }); } catch (e) { pv.body.textContent = ''; pv.body.append(el('div', 'note', e.message)); return; }
   pv.body.textContent = ''; pv.body.scrollTop = 0;
@@ -589,12 +571,25 @@ document.addEventListener('keydown', (e) => {
 const recentDirs = () => { try { return JSON.parse(store.get('recentDirs', '[]')); } catch { return []; } };
 function fillRecentList() { const dl = $('#recent-dirs'); dl.textContent = ''; for (const p of recentDirs()) { const o = el('option'); o.value = p; dl.append(o); } }
 function pushRecent(p) { store.set('recentDirs', JSON.stringify([p, ...recentDirs().filter((x) => x.toLowerCase() !== p.toLowerCase())].slice(0, 10))); fillRecentList(); }
-let lastGoodCwd = '';
+let lastGoodCwd = '', cwdParent = null;
+// 「一つ上へ」ボタン (昔の Windows エクスプローラーの ↑ と同じ。Alt+↑ でも可)
+function setParent(p) {
+  cwdParent = p || null; const b = $('#cwd-up'); b.disabled = !cwdParent;
+  b.title = cwdParent ? `一つ上のフォルダへ: ${cwdParent} (Alt+↑)` : '一番上のフォルダです';
+}
+async function refreshParent() { try { setParent((await api('/api/dirs', { path: cwdEl.value.trim() })).parent); } catch { setParent(null); } }
+$('#cwd-up').onclick = () => { if (cwdParent) switchCwd(cwdParent); };
+document.addEventListener('keydown', (e) => {
+  if (e.altKey && !e.ctrlKey && !e.shiftKey && !e.metaKey && e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (!dlg.box.hidden) $('#dlg-up').click(); else if (cwdParent) switchCwd(cwdParent);
+  }
+});
 // フォルダが存在するか確かめてから、会話・ツリー・Git・コマンドを読み込み直す。存在しなければ赤で知らせる
 async function switchCwd(raw) {
   const value = raw.trim(); if (!value) return false;
   if (busy) { cwdEl.value = lastGoodCwd; return false; }
-  try { const d = await api('/api/dirs', { path: value }); cwdEl.classList.remove('invalid'); cwdEl.title = ''; cwdEl.value = d.path; }
+  try { const d = await api('/api/dirs', { path: value }); cwdEl.classList.remove('invalid'); cwdEl.title = ''; cwdEl.value = d.path; setParent(d.parent); }
   catch (e) { cwdEl.classList.add('invalid'); cwdEl.title = `フォルダが見つかりません: ${e.message}`; return false; }
   if (cwdEl.value === lastGoodCwd) return true;
   lastGoodCwd = cwdEl.value; store.set('cwd', cwdEl.value); pushRecent(cwdEl.value); invalidateIndex(); clearSearch();
@@ -644,6 +639,17 @@ $('#dlg-ok').onclick = async () => { if (await switchCwd(dlg.cur)) dlgClose(); }
 dlg.box.addEventListener('keydown', (e) => { if (e.key === 'Escape') dlgClose(); });
 dlg.box.addEventListener('mousedown', (e) => { if (e.target === dlg.box) dlgClose(); });
 
+// ---------- 行間・余白 (詰める / 標準 / ゆったり) ----------
+const DENSITIES = [['compact', '詰める'], ['normal', '標準'], ['roomy', 'ゆったり']];
+let densityIdx = Math.max(0, DENSITIES.findIndex((d) => d[0] === store.get('density', 'normal')));
+function applyDensity() {
+  const [name, label] = DENSITIES[densityIdx];
+  if (name === 'normal') document.documentElement.removeAttribute('data-density'); else document.documentElement.setAttribute('data-density', name);
+  $('#density').title = `行間: ${label} (クリックで切り替え)`; $('#density').textContent = name === 'compact' ? '≡' : name === 'normal' ? '☰' : '☷'; store.set('density', name);
+}
+$('#density').onclick = () => { densityIdx = (densityIdx + 1) % DENSITIES.length; applyDensity(); };
+applyDensity();
+
 // ---------- テーマ (自動 / ライト / ダーク)。自動は OS の設定に従う ----------
 const THEMES = [['auto', '◐', '自動 (OS の設定に従う)'], ['light', '☀', 'ライト'], ['dark', '☾', 'ダーク']];
 let themeIdx = Math.max(0, THEMES.findIndex((t) => t[0] === store.get('theme', 'auto')));
@@ -655,12 +661,12 @@ function applyTheme() {
 $('#theme').onclick = () => { themeIdx = (themeIdx + 1) % THEMES.length; applyTheme(); };
 applyTheme();
 
-// ---------- チャットの文字サイズ (A− / A＋、記憶する) ----------
-const FS_MIN = 11, FS_MAX = 20, FS_DEFAULT = 14;
+// ---------- 文字サイズ (画面全体) (A− / A＋、記憶する) ----------
+const FS_MIN = 12, FS_MAX = 20, FS_DEFAULT = 14;
 function setChatFs(n) {
   const v = Math.max(FS_MIN, Math.min(FS_MAX, n));
-  document.documentElement.style.setProperty('--chat-fs', `${v}px`); store.set('chatFs', String(v));
-  $('#fs-down').disabled = v <= FS_MIN; $('#fs-up').disabled = v >= FS_MAX; $('.fs').title = `チャットの文字サイズ: ${v}px (ダブルクリックで初期値)`;
+  document.documentElement.style.setProperty('--fs', `${v}px`); store.set('chatFs', String(v));
+  $('#fs-down').disabled = v <= FS_MIN; $('#fs-up').disabled = v >= FS_MAX; $('.fs').title = `文字サイズ (画面全体): ${v}px (ダブルクリックで初期値)`;
   return v;
 }
 let chatFs = setChatFs(Number(store.get('chatFs', FS_DEFAULT)) || FS_DEFAULT);
