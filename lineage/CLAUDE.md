@@ -40,7 +40,7 @@ JavaScript エンジンと、それを日次で回す BigQuery パイプライ�
 cd javascript
 node scripts/build_udf.js       # src → dist/lineage_udf_bundle.js を再生成
 node scripts/verify_bundle.js   # バンドルの API とスモーク解析を検証
-npm run test:release            # リリース回帰（60 本、test_v1_5_0_079 … 014）
+npm run test:release            # リリース回帰（61 本、test_v1_5_0_080 … 014）
 node test/test_v1_5_0_003.js    # ゴールデン回帰（48 ケース）
 npm test                        # build + verify:bundle + test:release を一括
 ```
@@ -55,7 +55,7 @@ npm test                        # build + verify:bundle + test:release を一括
 1 変更 = 「実装 + 番号付き回帰テスト + CHANGELOG 追記」をワンセットにする。
 
 - 回帰テストは `javascript/test/test_v1_5_0_0XX.js` を新規作成し、`package.json` の
-  `test:release` チェーンの先頭に追加する（番号は連番、現行最新は 079）。
+  `test:release` チェーンの先頭に追加する（番号は連番、現行最新は 080）。
 - `CHANGELOG.md` の現行バージョン見出し直下に、症状・原因・修正・対象テストを追記。
 - 詳細な変更手順・単位は `docs/DEVELOPMENT_GUIDE.md` に従う。
 
@@ -301,26 +301,12 @@ PR 先は移行先リポジトリの規約に合わせる。
 
 ## 7. 現在地
 
-- バンドル: `sha256 = ad18b4bc5a015e9d831900d5ca6edfde4043b3c5ccb9fc71a6940e0e24ad00cf`、`461888` bytes
-- `test:release` 52 本 PASS / ゴールデン 48 ケース PASS
-- 直近の修正: 03 STEP 3 を**データセット単位のループ**へ変更し、UDF チャンク分割を撤去。
-  リージョン全体を1パスで解析すると V8 ヒープ蓄積で "UDF out of memory" になり、行数チャンクでも
-  大オブジェクトが偏ると OOM が続いた。実運用で「1データセットずつなら通る」ことを確認済みのため、
-  STEP 3 の 変更検知→探索→解析→direct-dependency publish を
-  `FOR ds_row IN (SELECT ds FROM UNNEST(target_datasets) ...) DO ... END FOR` で囲い、
-  各反復で `LOWER(object_dataset)=LOWER(@current_dataset)` に絞る。探索・解析とも単一クエリに復帰
-  （`*_udf_chunk_*`・`udf_chunk`・2つの `WHILE` を削除）。ループ外に残すもの＝target_datasets 解決／
-  グローバルメタデータ（STEP 1 で全 target dataset 分ロード、跨ぎ参照を保持）／orphan cleanup／
-  STEP 4 Impact 再構築（データセット跨ぎのため最後に1回）。カウンタは反復加算、run summary はループ後1回。
-  さらに**変更なし時の高速化**：列メタデータ（COLUMNS/COLUMN_FIELD_PATHS 全収集＝最重）を STEP 1 から
-  STEP 3 の has-changes gate 内へ移動。`changed_datasets`（変更ある有効 object を持つ Dataset）を軽い
-  レジストリ probe で先に求め、空なら列メタ収集も解析ループも丸ごとスキップ、非空ならその Dataset だけ
-  ループ。STEP 4 は `has_analysis_work OR orphan_direct_dep_deleted>0`（direct-dep orphan 削除の
-  `@@row_count`）でのみ再構築。STEP 1/2 と orphan cleanup は毎回実行（変更検知・無効化処理）。
-  加えて**列メタの参照データセット絞り込み（案D）**：has-changes gate 内に discovery 先行パスを新設。
-  `changed_datasets` を回して UDF を `source_discovery_only` で1データセットずつ実行し、全 discovery 行を
-  `all_changed_with_discovery` に蓄積、参照ソースの dataset 名を `referenced_source_datasets` に収集。
-  列メタ union は「参照された & アクセス可能な」ソース dataset のみに限定（未参照時は型付き空表で fallback）。
-  安全な過剰包含＝参照分を減らさないので解決結果は不変、未参照 dataset のみスキップ。解析ループは UDF 探索を
-  再実行せず `all_changed_with_discovery` から当該 dataset 分を読むだけ（isolation 不変・object 単位検証は従来通り）。
-  SQLのみ・バンドル不変・**BigQuery 未検証**。詳細は `CHANGELOG.md` 冒頭。
+- バンドル: `sha256 = eecd0bc82f1d2ca01db8b4f727ee0c35510057afefe086a6f9ef33b92d655ba4`、`478961` bytes
+  （`release_manifest.json` と一致。この2値は `build:everything` が manifest を書き直すので、
+  手で直すのは本ファイルと `docs/` 側だけ）
+- `test:release` 61 本 PASS / ゴールデン 48 ケース PASS
+- 実測性能: 初期ロード 11 分 22 秒 / 日次 4 分。日次の新規 ephemeral 指紋 3〜22 件/日
+- **直近の変更の内容はここに書かない**（古くなるので）。`CHANGELOG.md` の冒頭と
+  `docs/HANDOFF_BRIEF.md` を見ること。本節は上の3項目（バンドル・テスト本数・実測性能）
+  だけを現行値として保つ
+- **BigQuery 実機検証は未完了の変更がある**。`docs/HANDOFF_BRIEF.md` の未了事項を参照

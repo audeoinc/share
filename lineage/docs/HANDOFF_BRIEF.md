@@ -36,7 +36,7 @@ BigQuery の SQL を解析して「**出力列 ← 物理テーブル.物理列*
 |---|---|
 | 版 | `1.5.0-032`（`release_manifest.json` / `javascript/package.json`） |
 | バンドル | `sha256 = eecd0bc82f1d2ca01db8b4f727ee0c35510057afefe086a6f9ef33b92d655ba4` / 478,961 bytes |
-| テスト | `test:release` 60 本 ＋ ゴールデン 48 ケース PASS |
+| テスト | `test:release` 61 本 ＋ ゴールデン 48 ケース PASS |
 | 実測性能 | **初期ロード 11 分 22 秒 / 日次 4 分** |
 | 日次の新規指紋 | **3〜22 件/日**（変更前は 1,200〜1,350 件/日） |
 
@@ -46,7 +46,7 @@ ZIP を展開するだけです。**依存パッケージはありません**（
 
 ```
 cd javascript
-npm test                 # build → bundle 検証 → 回帰 60 本
+npm test                 # build → bundle 検証 → 回帰 61 本
 npm run build:everything # 上記 ＋ リリース ZIP の作り直し
 ```
 
@@ -228,7 +228,7 @@ static テーブルが際限なく重くなる**ためです。
      ディレクトリ名も同様（版数由来の `lineage_v<version>` は環境固有ではないので可）
 2. **1 変更 = 実装 ＋ 番号付き回帰テスト ＋ CHANGELOG 追記**。
    テストは `javascript/test/test_v1_5_0_0XX.js` を新規作成し、`package.json` の
-   `test:release` チェーンの**先頭**に追加（現在の最新は 079）
+   `test:release` チェーンの**先頭**に追加（現在の最新は 080）
 3. **エンジンを変えたらバンドル再ビルド → `release_manifest.json` 更新 → GCS 差し替え**
 4. SQL の `__T_*__` プレースホルダは `lnge_render_dynamic_sql` で解決する。
    修飾名はバッククォートで囲む（チームの規約）

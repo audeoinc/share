@@ -1,5 +1,44 @@
 # 1.5.0-032
 
+- The release pipeline's generated UDF deployment no longer disagrees with the engine.
+  `scripts/build_everything.js` built the `CREATE OR REPLACE FUNCTION` DDL inline with
+  three parameters (`sql_text`, `physical_columns_json`, `options_json`) and a body
+  calling `LineageEngine.analyzeToJson(...)` -- an entry point that exists nowhere in
+  `javascript/src`. The three other paths agree on the real one: 01 setup,
+  `sql/bigquery/create_persistent_lineage_udf.sql` and 03's two `__UDF__` call sites all
+  use the four-parameter `analyzeLineageForBigQuery`. So `--deploy` would have replaced a
+  working `lnge_analyze_json` with one that fails every analysis ("No matching signature"
+  from 03, which passes four arguments), and the build would still have reported success.
+  Nothing caught it because the drift is between SQL text and JavaScript, which no test
+  compared.
+  The signature now has one home, `scripts/lib/deployment_udf_sql.js`
+  (`UDF_PARAMETER_NAMES`, `UDF_ENTRY_POINT`, `buildPersistentUdfSql`), and
+  `writeDeploymentSql` renders from it. Test `test_v1_5_0_080` holds every reader to it:
+  the bundle's exported function and its arity, the generated DDL, the parameter lists
+  parsed out of the two hand-written SQL deployments, and the argument count at each
+  `__UDF__` call site in 03.
+- `release_config.example.json`: `bigquery_function` was `analyze_lineage`, which both
+  breaks the mandatory `lnge_` naming rule and names a function 03 never calls (03 builds
+  `<prefix>lnge_analyze_json<suffix>`). Now `lnge_analyze_json`. Also dropped
+  `repository_validation_sql`, a key the loader never read.
+- `release_manifest.json` is now written to the source tree as well as the staged
+  release, with the same bytes, so the two copies cannot drift. Previously only the
+  staged copy was written and the repository's copy was maintained by hand -- the
+  recorded `sha256` could go stale after an engine rebuild with nothing to catch it.
+- `deployment.status` in the manifest is now the outcome rather than an intention. The
+  status was set to `DEPLOYED` after the file had already been written, so a successful
+  `--deploy` still shipped `"PENDING"`. The bundle upload and the BigQuery deploy now run
+  before the manifest is written, and the ZIP is created afterwards (then uploaded), so
+  the manifest in the ZIP matches the source tree and records what happened.
+- `CLAUDE.md` section 7 recorded the bundle as `sha256 = ad18b4bc...` / `461888` bytes and
+  `test:release` at 52, while `dist/` and `release_manifest.json` were at
+  `eecd0bc8...` / `478961` / 60. Since CLAUDE.md is loaded at session start, that stale
+  pair was the first thing any reader saw about the deployed UDF. The section now carries
+  only the three values worth keeping current (bundle, test count, measured performance)
+  and points at `CHANGELOG.md` / `docs/HANDOFF_BRIEF.md` for everything narrative, which
+  is what went stale. The pre-migration figures in `docs/SESSION_HANDOFF.md` 0.1 are
+  marked as historical.
+
 - The job registry MERGE no longer re-writes matched rows that are identical. A
   `WHEN MATCHED AND (...)` guard compares the stored columns and updates only when one
   of them differs.
