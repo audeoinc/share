@@ -230,6 +230,9 @@ static テーブルが際限なく重くなる**ためです。
    テストは `javascript/test/test_v1_5_0_0XX.js` を新規作成し、`package.json` の
    `test:release` チェーンの**先頭**に追加（現在の最新は 080）
 3. **エンジンを変えたらバンドル再ビルド → `release_manifest.json` 更新 → GCS 差し替え**
+   - **UDF の署名を変えるときは `javascript/scripts/lib/deployment_udf_sql.js` を直す**。
+     01 setup・再配備ヘルパ・03 の呼び出しが同じ署名を使っているので、どれかを忘れると
+     `test_v1_5_0_080` が落ちる。経緯は `docs/UDF_DEPLOYMENT_CONSISTENCY.md`
 4. SQL の `__T_*__` プレースホルダは `lnge_render_dynamic_sql` で解決する。
    修飾名はバッククォートで囲む（チームの規約）
 
