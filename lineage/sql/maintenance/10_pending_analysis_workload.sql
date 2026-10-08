@@ -45,6 +45,18 @@
 -- steady-state arrival rate, measured from the jobs rather than from when the
 -- pipeline happened to run.
 --
+-- Reports 9 and 10 are the ROW-LEVEL forms of the two questions above: report 9
+-- names the objects that are new (with dag_id / task_id and the head of the SQL, so
+-- an unexpected arrival can be traced to the DAG that emitted it), and report 10
+-- lists what the next run will actually analyze. They answer "what IS this?" once a
+-- count in report 5 or 7 is higher than expected. Both are capped by
+-- detail_row_limit, because the day a backlog arrives they would otherwise return the
+-- whole repository.
+--
+-- NOTE on finding a CHANGE rather than an arrival: use is_changed (report 10), never
+-- updated_at. The definition-registry MERGE in 03 has no WHEN MATCHED guard, so every
+-- matched row is rewritten on every run and updated_at moves for all of them.
+--
 -- Read-only report; not part of the daily pipeline. Run it on demand -- and in
 -- particular BEFORE and AFTER a run, since a successful analysis clears
 -- is_changed and the pending workload shrinks.
@@ -99,6 +111,17 @@ BEGIN
   -- Days of job history in reports 6 and 7. Bounded by what 03's own JOBS lookback
   -- has actually collected -- a longer window here does not invent jobs.
   DECLARE job_history_days INT64 DEFAULT 14;
+  -- Days of arrival history in report 9, the ROW-LEVEL view. Deliberately shorter
+  -- than arrival_history_days: report 5 returns one row per day, report 9 one row
+  -- per object, so a wide window that covers the initial load returns the whole
+  -- repository.
+  DECLARE new_object_detail_days INT64 DEFAULT 2;
+  -- Characters of SQL shown per row in report 9 -- enough to recognize the statement
+  -- without making the result unreadable. Whitespace is collapsed first.
+  DECLARE new_object_sql_preview_chars INT64 DEFAULT 400;
+  -- Row cap for reports 9 and 10, so a backlog day cannot return the repository.
+  -- A result that hits the cap is a signal in itself: read report 5 or 7 for counts.
+  DECLARE detail_row_limit INT64 DEFAULT 200;
 
   -- --------------------------------------------------------------------------
   -- [C] DERIVED / INTERNAL -- from [A]; DO NOT edit
@@ -139,6 +162,10 @@ BEGIN
 
   ASSERT arrival_history_days >= 1 AS 'arrival_history_days must be >= 1.';
   ASSERT job_history_days >= 1 AS 'job_history_days must be >= 1.';
+  ASSERT new_object_detail_days >= 1 AS 'new_object_detail_days must be >= 1.';
+  ASSERT new_object_sql_preview_chars >= 1 AS
+    'new_object_sql_preview_chars must be >= 1.';
+  ASSERT detail_row_limit >= 1 AS 'detail_row_limit must be >= 1.';
 
   SET registry_fqn = FORMAT(
     '%s.%s.%s',
@@ -490,4 +517,118 @@ BEGIN
 
   EXECUTE IMMEDIATE rendered_sql
   USING job_history_days AS days;
+
+  -- --------------------------------------------------------------------------
+  -- Report 9: WHICH objects are new -- one row per object, with its SQL.
+  --
+  -- Reports 5 and 7 count arrivals; this one names them. It is the report to read
+  -- when the count is higher than expected and the question becomes "what IS this?".
+  -- dag_id / task_id and source_user_email come straight from the source job's
+  -- labels, so a new statement can be traced back to the DAG or the schedule that
+  -- emitted it without joining to the job registry.
+  --
+  -- An ephemeral arrival appears as object_dataset = the synthetic label and
+  -- object_name = 'fp_<hash>'; sql_head is then the only way to tell what ran.
+  --
+  -- CAVEATS, both inherited from first_seen_at:
+  --   * first_seen_at is when THIS PIPELINE first saw the object, not when it was
+  --     created. The initial load, and the first run after widening the dataset
+  --     filters or the lookback, show the whole history arriving at once -- so a
+  --     window that reaches back to one of those days returns everything.
+  --   * A day on which no run completed contributes nothing, which reads as "no new
+  --     SQL" when it means "not collected yet". Check report 7's jobs_collected.
+  --
+  -- A CHANGED existing View does not appear here at all: its first_seen_at does not
+  -- move. Report 10 is the one that covers those.
+  -- --------------------------------------------------------------------------
+  SET rendered_sql = FORMAT(
+    """
+    SELECT
+      first_seen_at,
+      object_dataset,
+      object_name,
+      object_type,
+      generation_type,
+      is_ephemeral,
+      analysis_status,
+      LENGTH(definition_text) AS sql_length,
+      source_user_email,
+      (SELECT value FROM UNNEST(labels) WHERE key = 'dag_id') AS dag_id,
+      (SELECT value FROM UNNEST(labels) WHERE key = 'task_id') AS task_id,
+      -- Whitespace collapsed with a POSIX class, not an escape: the template is a
+      -- quoted string and a backslash in it would be read as an escape sequence.
+      SUBSTR(
+        REGEXP_REPLACE(definition_text, '[[:space:]]+', ' '),
+        1,
+        @preview_chars
+      ) AS sql_head
+    FROM `%s`
+    WHERE is_active = TRUE
+      AND definition_text IS NOT NULL
+      AND object_type IN ('VIEW', 'TABLE')
+      AND (@include_tables OR object_type = 'VIEW')
+      AND first_seen_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+    ORDER BY first_seen_at DESC, sql_length DESC
+    LIMIT @row_limit
+    """,
+    registry_fqn
+  );
+
+  EXECUTE IMMEDIATE rendered_sql
+  USING
+    process_generated_tables AS include_tables,
+    new_object_detail_days AS days,
+    new_object_sql_preview_chars AS preview_chars,
+    detail_row_limit AS row_limit;
+
+  -- --------------------------------------------------------------------------
+  -- Report 10: WHAT THE NEXT RUN WILL ANALYZE -- one row per object.
+  --
+  -- The row-level form of reports 1 to 3, and the place to look for a definition
+  -- CHANGE rather than an arrival. is_changed is the gate STEP 3 itself uses and it
+  -- is sticky: it is cleared only by a successful analysis of the object's own batch,
+  -- so this list is exactly what the next run has to get through.
+  --
+  -- changed_at_least_once reads previous_definition_hash, which keeps the last
+  -- DIFFERENT hash forever. It says "this object's definition has changed at some
+  -- point", NOT "it changed recently".
+  --
+  -- WHY THERE IS NO "changed recently" COLUMN: updated_at cannot answer it. The
+  -- definition-registry MERGE in 03 has no WHEN MATCHED guard, so every matched row
+  -- is rewritten on every run and updated_at moves for all of them. Filtering on it
+  -- returns the whole registry. The honest signals are first_seen_at (arrival, report
+  -- 9), is_changed (due for analysis, here) and last_analyzed_at / last_analyzed_hash
+  -- (what analysis has actually caught up with).
+  -- --------------------------------------------------------------------------
+  SET rendered_sql = FORMAT(
+    """
+    SELECT
+      object_dataset,
+      object_name,
+      object_type,
+      generation_type,
+      analysis_status,
+      (previous_definition_hash IS NOT NULL) AS changed_at_least_once,
+      (last_analyzed_hash IS DISTINCT FROM definition_hash)
+        AS current_definition_unanalyzed,
+      LENGTH(definition_text) AS sql_length,
+      first_seen_at,
+      last_seen_at,
+      last_analyzed_at
+    FROM `%s`
+    WHERE is_active = TRUE
+      AND is_changed = TRUE
+      AND definition_text IS NOT NULL
+      AND object_type IN ('VIEW', 'TABLE')
+      AND (@include_tables OR object_type = 'VIEW')
+    ORDER BY first_seen_at DESC, sql_length DESC
+    LIMIT @row_limit
+    """,
+    registry_fqn
+  );
+
+  EXECUTE IMMEDIATE rendered_sql
+  USING
+    process_generated_tables AS include_tables,
+    detail_row_limit AS row_limit;
 END;
