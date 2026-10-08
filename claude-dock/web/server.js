@@ -1007,6 +1007,50 @@ wss.on('connection', (ws) => {
     return text;
   }
 
+  // ---- 許可の確認で選べる「この会話の間は許可」。名前どおり、この会話の間だけ効かせる (設定ファイルには書かない)。
+  //      画面は発言ごとに Claude Code の処理を起こし直すので、許可はサーバーで覚えて、次の発言以降にも引き継ぐ。
+  const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+  const SAFE_BASH_FIRST = new Set(['ls', 'dir', 'cat', 'type', 'echo', 'pwd', 'head', 'tail', 'wc', 'grep', 'rg', 'sort', 'diff', 'tree', 'which', 'where', 'date', 'whoami', 'mkdir', 'touch', 'cp', 'mv', 'cd', 'sleep']);
+  const SAFE_TWO = new Set(['git status', 'git diff', 'git log', 'git show', 'git add', 'git commit', 'git branch', 'git switch', 'npm test', 'npm run', 'npm ci']);
+  const SAFE_PS = /^(Get-[A-Za-z]+|Test-Path|Select-String|Write-Output|Write-Host|Set-Location|New-Item|Measure-Object|Sort-Object|Compare-Object)$/i;
+  const grantStore = new Map(); // 会話の id -> { items: [{ key, label, rules, dirs, edits }] }
+  function grantOptionsFor(toolName, input, suggestions) {
+    const opts = [];
+    if (EDIT_TOOLS.has(toolName)) opts.push({ key: 'edits', label: 'この会話の間は、編集を自動で許可', edits: true });
+    else if ((toolName === 'Bash' || toolName === 'PowerShell') && input && typeof input.command === 'string') {
+      const cmd = input.command.trim(); const toks = cmd.split(/\s+/); const first = toks[0] || ''; const two = `${first} ${toks[1] || ''}`.toLowerCase().trim();
+      const prefix = SAFE_TWO.has(two) ? two : (toolName === 'Bash' ? SAFE_BASH_FIRST.has(first.toLowerCase()) : SAFE_PS.test(first)) ? first : '';
+      if (prefix) opts.push({ key: 'prefix', label: `この会話の間は「${prefix} …」を許可`, rules: [{ toolName, ruleContent: `${prefix} *` }] });
+      if (cmd && cmd.length <= 300 && !/[\r\n]/.test(cmd)) opts.push({ key: 'exact', label: 'このコマンドだけ、この会話の間は許可', rules: [{ toolName, ruleContent: cmd }] });
+    } else if (Array.isArray(suggestions)) {
+      const rules = suggestions.filter((u) => u.type === 'addRules' && u.behavior === 'allow').flatMap((u) => u.rules || []);
+      const dirs = suggestions.filter((u) => u.type === 'addDirectories').flatMap((u) => u.directories || []);
+      if (rules.length || dirs.length) opts.push({ key: 'rule', label: `この会話の間は「${rules[0] ? (rules[0].ruleContent || rules[0].toolName) : dirs[0]}」を許可`, rules, dirs });
+    }
+    return opts;
+  }
+  const ruleString = (r) => (r.ruleContent ? `${r.toolName}(${r.ruleContent})` : r.toolName);
+  function grantsFor(id) { const g = id && grantStore.get(id); return g ? g.items : []; }
+  function sendGrants() { send({ type: 'grants', items: grantsFor(sessionId).map((g) => g.label) }); }
+  function recordGrant(g) { // 選ばれた許可を、この会話に記録して、いまの処理にも効かせるための更新を返す
+    const id = sessionId; if (!id) return [];
+    const store = grantStore.get(id) || { items: [] }; if (!store.items.some((x) => x.key === g.key && x.label === g.label)) store.items.push(g); grantStore.set(id, store);
+    const updates = [];
+    if (g.rules && g.rules.length) updates.push({ type: 'addRules', rules: g.rules, behavior: 'allow', destination: 'session' });
+    if (g.dirs && g.dirs.length) updates.push({ type: 'addDirectories', directories: g.dirs, destination: 'session' });
+    if (g.edits) updates.push({ type: 'setMode', mode: 'acceptEdits', destination: 'session' });
+    sendGrants(); return updates;
+  }
+  // 次の発言 (新しい処理) にも、覚えている許可を引き継ぐ
+  function applyGrants(options) {
+    const items = grantsFor(sessionId); if (!items.length) return options;
+    const rules = items.flatMap((g) => (g.rules || []).map(ruleString)); const dirs = items.flatMap((g) => g.dirs || []);
+    if (rules.length) options.allowedTools = [...new Set([...(options.allowedTools || []), ...rules])];
+    if (dirs.length) options.additionalDirectories = [...new Set([...(options.additionalDirectories || []), ...dirs])];
+    if (items.some((g) => g.edits) && options.permissionMode === 'default') options.permissionMode = 'acceptEdits'; // 確認モードのときだけ、編集の自動許可に引き上げる
+    return options;
+  }
+
   async function runTurn({ text, cwd, permissionMode, model, effort, attachments }) {
     if (running) return send({ type: 'error', message: '前の応答がまだ実行中です' });
     const abort = new AbortController();
@@ -1026,12 +1070,14 @@ wss.on('connection', (ws) => {
       ...(sessionId ? { resume: sessionId } : {}),
       canUseTool: (toolName, input, opts) => new Promise((resolve, reject) => {
         const id = crypto.randomUUID();
-        pending.set(id, { resolve, suggestions: opts.suggestions, input });
+        const grants = grantOptionsFor(toolName, input, opts.suggestions);
+        pending.set(id, { resolve, suggestions: opts.suggestions, input, grants });
         opts.signal.addEventListener('abort', () => { pending.delete(id); reject(new Error('aborted')); }, { once: true });
-        send({ type: 'permission_request', id, toolName, input, title: opts.title, displayName: opts.displayName, reason: opts.decisionReason, blockedPath: opts.blockedPath, hasSuggestions: !!(opts.suggestions && opts.suggestions.length) });
+        send({ type: 'permission_request', id, toolName, input, title: opts.title, displayName: opts.displayName, reason: opts.decisionReason, blockedPath: opts.blockedPath, hasSuggestions: !!(opts.suggestions && opts.suggestions.length), grants: grants.map(({ key, label }) => ({ key, label })) });
       }),
     };
-    if (process.env.CDOCK_WEB_MOCK) return mockTurn(text, abort);
+    if (process.env.CDOCK_WEB_MOCK) return mockTurn(text, abort, permissionMode);
+    applyGrants(options); // この会話で許可済みのものを、新しい処理にも引き継ぐ
     // 入力はストリーム (AsyncIterable) で渡す: 応答の途中で足されたメッセージを、止めずに取り込める (inject)
     const inbox = { items: [], closed: false, wake: null };
     const mk = (t, priority) => ({ type: 'user', message: { role: 'user', content: t }, parent_tool_use_id: null, ...(priority ? { priority } : {}) });
@@ -1072,13 +1118,15 @@ wss.on('connection', (ws) => {
   }
 
   // 開発用の模擬応答 (CDOCK_WEB_MOCK=1): 認証なしで画面の動作確認ができる
-  async function mockTurn(text, abort) {
+  async function mockTurn(text, abort, permissionMode) {
     running = { q: { interrupt: async () => abort.abort(), setPermissionMode: async () => {} }, abort };
     send({ type: 'busy', value: true });
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const sdk = (msg) => send({ type: 'sdk', msg });
     try {
-      sdk({ type: 'system', subtype: 'init', session_id: 'mock', model: 'mock-model' });
+      sessionId = 'mock'; // 許可の記録 (grants) の確認用
+      const eff = process.env.CDOCK_MOCK_DOWNGRADE ? 'default' : (applyGrants({ permissionMode: permissionMode || 'default' }).permissionMode); // 模擬: CDOCK_MOCK_DOWNGRADE=1 で、選んだモードが使えない環境を再現
+      sdk({ type: 'system', subtype: 'init', session_id: 'mock', model: 'mock-model', permissionMode: eff });
       const say = async (t) => {
         sdk({ type: 'stream_event', parent_tool_use_id: null, event: { type: 'message_start' } });
         sdk({ type: 'stream_event', parent_tool_use_id: null, event: { type: 'content_block_start', content_block: { type: 'thinking' } } }); await sleep(1600);
@@ -1091,8 +1139,9 @@ wss.on('connection', (ws) => {
       sdk({ type: 'assistant', parent_tool_use_id: null, message: { content: [{ type: 'text', text: t1 }, { type: 'tool_use', id: 'tu1', name: 'Bash', input: { command: 'cat README.md' } }] } });
       const allowed = await new Promise((resolve) => {
         const id = crypto.randomUUID();
-        pending.set(id, { resolve: (r) => resolve(r.behavior === 'allow'), suggestions: [], input: {} });
-        send({ type: 'permission_request', id, toolName: 'Bash', input: { command: 'cat README.md' }, title: 'Claude は次のコマンドを実行します', hasSuggestions: true });
+        const grants = grantOptionsFor('Bash', { command: 'cat README.md' }, []);
+        pending.set(id, { resolve: (r) => resolve(r.behavior === 'allow'), suggestions: [], input: {}, grants });
+        send({ type: 'permission_request', id, toolName: 'Bash', input: { command: 'cat README.md' }, title: 'Claude は次のコマンドを実行します', hasSuggestions: true, grants: grants.map(({ key, label }) => ({ key, label })) });
       });
       if (allowed) for (const sec of [1, 2, 3]) { sdk({ type: 'tool_progress', tool_use_id: 'tu1', tool_name: 'Bash', elapsed_time_seconds: sec }); await sleep(1000); } // 時間のかかるツールの模擬
       sdk({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tu1', content: allowed ? '# cdock\n(模擬の出力)' : '拒否されました', is_error: !allowed }] } });
@@ -1111,18 +1160,23 @@ wss.on('connection', (ws) => {
     if (m.type === 'send' && typeof m.text === 'string' && m.text.trim()) runTurn(m);    else if (m.type === 'permission') {
       const p = pending.get(m.id); if (!p) return;
       pending.delete(m.id);
-      if (m.allow) p.resolve({ behavior: 'allow', updatedInput: p.input, ...(m.remember && p.suggestions ? { updatedPermissions: p.suggestions } : {}) });
+      if (m.allow) {
+        const g = m.grant && Array.isArray(p.grants) ? p.grants.find((x) => x.key === m.grant) : null; // 「この会話の間は許可」: 設定ファイルには書かず、この会話の間だけ覚える
+        const updates = g ? recordGrant(g) : [];
+        p.resolve({ behavior: 'allow', updatedInput: p.input, ...(updates.length ? { updatedPermissions: updates } : {}) });
+      }
       else p.resolve({ behavior: 'deny', message: 'ユーザーが拒否しました' });
     }
     else if (m.type === 'interrupt' && running) { try { await running.q.interrupt(); } catch { running.abort.abort(); } }
     else if (m.type === 'setMode' && running) { try { await running.q.setPermissionMode(m.mode); } catch {} }
-    else if (m.type === 'newSession') { if (!running) sessionId = null; }
+    else if (m.type === 'newSession') { if (!running) { sessionId = null; sendGrants(); } }
+    else if (m.type === 'grants_clear') { if (sessionId) grantStore.delete(sessionId); sendGrants(); }
     else if (m.type === 'inject' && typeof m.text === 'string' && m.text.trim()) injectMessage(m);
     else if (m.type === 'run') startRun(m.id, m.cmd, m.cwd, m.shell);
     else if (m.type === 'run_stop') killTree(runs.get(m.id));
     else if (m.type === 'run_warm') warmShell();
     else if (m.type === 'watch') startWatch(typeof m.cwd === 'string' ? m.cwd : '');
-    else if (m.type === 'resume' && typeof m.sessionId === 'string' && /^[0-9a-f-]{36}$/i.test(m.sessionId) && !running) { sessionId = m.sessionId; }
+    else if (m.type === 'resume' && typeof m.sessionId === 'string' && /^[0-9a-f-]{36}$/i.test(m.sessionId) && !running) { sessionId = m.sessionId; sendGrants(); }
   });
   ws.on('close', () => { for (const c of runs.values()) killTree(c); stopWatch(); if (running) running.abort.abort(); });
 });

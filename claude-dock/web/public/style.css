@@ -493,3 +493,14 @@ button.danger:disabled { opacity: .45; cursor: default; }
 .docspop { width: min(480px, 94vw); }
 .docspop .dp-title { white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }
 .docspop .dp-item { align-items: center; }
+
+/* いま効いている権限モード / この会話の間に許可したもの */
+.modechip { color: var(--muted); font-size: calc(var(--fs, 14px) - 2px); white-space: nowrap; margin-right: 4px; }
+.modechip.bad { color: var(--bad); font-weight: 600; }
+.grantchip { white-space: nowrap; }
+.grantpop { position: fixed; z-index: 60; width: min(420px, 92vw); padding: 10px 12px; background: var(--panel); border: 1px solid var(--rule); border-radius: 12px; box-shadow: 0 8px 28px rgba(0,0,0,.14); font-size: calc(var(--fs, 14px) - 1px); }
+.grantpop .gp-h { font-weight: 600; margin-bottom: 6px; }
+.grantpop .gp-i { padding: 3px 0; word-break: break-all; }
+.grantpop .gp-n { color: var(--muted); font-size: calc(var(--fs, 14px) - 3px); margin-top: 6px; }
+.grantpop .gp-f { display: flex; justify-content: flex-end; margin-top: 8px; }
+.card.perm .btns { flex-wrap: wrap; }

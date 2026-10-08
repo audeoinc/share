@@ -168,6 +168,7 @@ function connect() {
 function handle(m) {
   if (m.type === 'hello') { serverFeatures = new Set(m.features || []); setupShells(m.shells || []); if (m.claude && m.claude.warn) add(el('div', 'err-box', m.claude.warn)); if (m.claude) statusEl.dataset.cc = `${m.claude.source === 'installed' ? 'PC の' : '同梱の'} Claude Code ${m.claude.version}`; if (!cwdEl.value) cwdEl.value = store.get('cwd', m.cwd); lastGoodCwd = cwdEl.value; renderCrumbs(); refreshParent(); loadSessions(); loadRoot(); loadCommands(); loadGit(); watchCwd(); }
   else if (m.type === 'busy') setBusy(m.value);
+  else if (m.type === 'grants') renderGrantChip(m.items);
   else if (m.type === 'injected') { if (pendingInject) add(userBubble(pendingInject.text, pendingInject.ready)); pendingInject = null; } // 取り込まれたら、いまの応答の途中に、発言として表示する
   else if (m.type === 'inject_rejected') { const q = pendingInject; pendingInject = null; if (q) { queued = q; renderQueued(); if (!busy) sendQueued(); else toast('いまの応答が終わったら、この発言を送ります'); } } // 応答がちょうど終わっていた場合など
   else if (m.type === 'notice') add(el('div', 'err-box', m.message));
@@ -181,7 +182,7 @@ function handle(m) {
 }
 
 function onSdk(msg) {
-  if (msg.type === 'system' && msg.subtype === 'init') { currentSession = msg.session_id; if (!sessBranch.has(currentSession)) sessBranch.set(currentSession, gitBranchNow); updateBranchBanner(); lastModelId = msg.model || ''; lastEffort = msg.effort || (effortEl.disabled ? '' : effortShown()) || ''; /* 「既定」のときの実際の値は init には含まれないので、選んだ値だけを出す */ sessionLabel = modelName(lastModelId) + (lastEffort ? ` · ${lastEffort}` : ''); statusEl.title = `${lastModelId}${lastEffort ? ` / effort: ${lastEffort}` : ''}`; if (modelEl.value === '') setDefaultLabel(lastModelId); syncEffort(); statusEl.textContent = busy ? '応答中…' : sessionLabel; return; }
+  if (msg.type === 'system' && msg.subtype === 'init') { currentSession = msg.session_id; if (!sessBranch.has(currentSession)) sessBranch.set(currentSession, gitBranchNow); updateBranchBanner(); lastModelId = msg.model || ''; lastEffort = msg.effort || (effortEl.disabled ? '' : effortShown()) || ''; /* 「既定」のときの実際の値は init には含まれないので、選んだ値だけを出す */ sessionLabel = modelName(lastModelId) + (lastEffort ? ` · ${lastEffort}` : ''); statusEl.title = `${lastModelId}${lastEffort ? ` / effort: ${lastEffort}` : ''}`; if (modelEl.value === '') setDefaultLabel(lastModelId); syncEffort(); statusEl.textContent = busy ? '応答中…' : sessionLabel; updateModeChip(msg.permissionMode); return; }
   if (msg.type === 'system' && msg.subtype === 'local_command_output') { add(el('pre', 'localout', msg.content)); return; }
   if (msg.type === 'system' && msg.subtype === 'compact_boundary') {
     const md = msg.compact_metadata || {};
@@ -234,6 +235,41 @@ function onSdk(msg) {
   }
 }
 
+// ---------- いま実際に効いている権限モードの表示 / この会話の間に許可したものの一覧 ----------
+const MODE_JA = { default: '確認しながら進める', acceptEdits: '編集は自動で許可', plan: 'プラン', auto: '自動', bypassPermissions: 'すべて許可', dontAsk: '確認なし (許可済み以外は拒否)', acceptEditsAuto: '' };
+const modeChip = $('#modechip'), grantChip = $('#grantchip');
+let lastEffectiveMode = '', modeWarnedFor = '';
+function updateModeChip(effective) { // init で知らされた、実際のモード。選んだモードと違えば、警告する (例: 「自動」を選んだのに、使えず確認モードで動いている)
+  lastEffectiveMode = effective || ''; const wanted = modeEl.value;
+  if (!effective) { modeChip.hidden = true; return; }
+  const grantedEdits = wanted === 'default' && effective === 'acceptEdits'; // この会話の許可で、編集が自動になっているだけ (警告しない)
+  const bad = wanted !== effective && !grantedEdits;
+  modeChip.hidden = false; modeChip.className = `modechip${bad ? ' bad' : ''}`;
+  modeChip.textContent = bad ? `権限: ${MODE_JA[effective] || effective} ⚠` : `権限: ${MODE_JA[effective] || effective}`;
+  modeChip.title = bad ? `「${MODE_JA[wanted] || wanted}」を選びましたが、実際は「${MODE_JA[effective] || effective}」で動いています。環境の設定や、モデルが対応していないなどで、選んだモードが使えない場合があります` : (grantedEdits ? 'この会話で「編集を自動で許可」を選んだため、編集は確認なしで行われます' : '実際に効いている権限モード');
+  if (bad && modeWarnedFor !== `${currentSession}:${effective}`) {
+    modeWarnedFor = `${currentSession}:${effective}`;
+    add(el('div', 'err-box', `「${MODE_JA[wanted] || wanted}」を選びましたが、いまは「${MODE_JA[effective] || effective}」で動いています (使えない環境や、モデルの場合に、確認モードに戻ります)。`));
+  }
+}
+modeEl.addEventListener('change', () => { if (lastEffectiveMode && !busy) { modeChip.title = `次の発言から「${MODE_JA[modeEl.value] || modeEl.value}」を使います (いまは「${MODE_JA[lastEffectiveMode] || lastEffectiveMode}」)`; } });
+let grantItems = [], grantPop = null;
+function closeGrantPop() { if (!grantPop) return; grantPop.remove(); grantPop = null; document.removeEventListener('mousedown', grantOutside, true); }
+function grantOutside(e) { if (grantPop && !grantPop.contains(e.target) && e.target !== grantChip) closeGrantPop(); }
+function renderGrantChip(items) {
+  grantItems = items || []; grantChip.hidden = !grantItems.length; grantChip.textContent = `許可済み ${grantItems.length}`;
+  grantChip.title = 'この会話の間に、「許可」を選んだもの (クリックで一覧)'; if (!grantItems.length) closeGrantPop();
+}
+grantChip.onclick = () => {
+  if (grantPop) return closeGrantPop();
+  grantPop = el('div', 'grantpop'); grantPop.append(el('div', 'gp-h', 'この会話の間は、確認なしで許可しているもの'));
+  for (const t of grantItems) grantPop.append(el('div', 'gp-i', t));
+  grantPop.append(el('div', 'gp-n', 'アプリを閉じると、忘れます。取り消すと、次の発言から効きます。'));
+  const foot = el('div', 'gp-f'); const clr = el('button', 'ghost mini', 'すべて取り消す'); clr.type = 'button'; clr.onclick = () => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'grants_clear' })); closeGrantPop(); toast('この会話の許可を、取り消しました (次の発言から)'); };
+  foot.append(clr); grantPop.append(foot); document.body.append(grantPop);
+  const r = grantChip.getBoundingClientRect(); grantPop.style.bottom = `${Math.round(window.innerHeight - r.top + 6)}px`; grantPop.style.right = `${Math.max(8, Math.round(window.innerWidth - r.right))}px`;
+  document.addEventListener('mousedown', grantOutside, true);
+};
 function askPermission(p) {
   prog.perm++; renderProgress();
   const card = el('div', 'card perm');
@@ -242,14 +278,14 @@ function askPermission(p) {
   if (p.reason) body.append(el('div', 'meta', p.reason));
   body.append(el('pre', '', p.input.command ?? p.input.file_path ?? JSON.stringify(p.input, null, 2)));
   const btns = el('div', 'btns');
-  const decide = (allow, remember, label) => {
-    ws.send(JSON.stringify({ type: 'permission', id: p.id, allow, remember })); prog.perm = Math.max(0, prog.perm - 1); prog.phaseT0 = Date.now(); prog.running.forEach((t) => { t.t0 = Date.now(); }); renderProgress(); // 許可を待っていた時間は含めない
+  const decide = (allow, grant, label) => {
+    ws.send(JSON.stringify({ type: 'permission', id: p.id, allow, grant })); prog.perm = Math.max(0, prog.perm - 1); prog.phaseT0 = Date.now(); prog.running.forEach((t) => { t.t0 = Date.now(); });
     btns.remove(); card.classList.add('done'); body.append(el('div', 'meta', label));
   };
-  const ok = el('button', 'primary', '許可'); ok.onclick = () => decide(true, false, '許可しました');
+  const ok = el('button', 'primary', '許可'); ok.onclick = () => decide(true, undefined, '許可しました'); ok.title = '今回だけ許可します';
   btns.append(ok);
-  if (p.hasSuggestions) { const always = el('button', '', 'このセッションでは常に許可'); always.onclick = () => decide(true, true, '常に許可に設定しました'); btns.append(always); }
-  const no = el('button', '', '拒否'); no.onclick = () => decide(false, false, '拒否しました');
+  for (const g of p.grants || []) { const b = el('button', '', g.label); b.onclick = () => decide(true, g.key, `${g.label}: 設定しました`); b.title = 'この会話の間だけ有効です (設定ファイルには書きません。アプリを閉じると忘れます)'; btns.append(b); }
+  const no = el('button', '', '拒否'); no.onclick = () => decide(false, undefined, '拒否しました');
   btns.append(no); body.append(btns); card.append(body); add(card);
 }
 
