@@ -1220,7 +1220,7 @@ async function openDocsPop() {
     docsPop.append(el('div', 'dp-group', g));
     for (const l of items) {
       const a = el('a', 'dp-item'); a.href = l.url; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.title = l.url;
-      a.append(el('span', 'dp-title', l.title), el('span', 'dp-host', hostOf(l.url)), el('span', 'dp-ext', '↗'));
+      a.append(el('span', 'dp-title', l.title)); // URL と矢印は出さない (名前を長く出すため)。URL は、カーソルを置くと出る
       a.onclick = () => setTimeout(closeDocsPop, 0);
       docsPop.append(a);
     }

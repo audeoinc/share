@@ -488,3 +488,8 @@ button.danger:disabled { opacity: .45; cursor: default; }
 .branchwarn[hidden] { display: none; }
 .branchwarn .bw-t { flex: 1 1 320px; min-width: 0; }
 .branchwarn button { flex: none; white-space: nowrap; }
+
+/* ドキュメントのメニュー: 名前を 30 字ほど表示できる幅にし、それより長い名前は折り返す */
+.docspop { width: min(480px, 94vw); }
+.docspop .dp-title { white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }
+.docspop .dp-item { align-items: center; }
