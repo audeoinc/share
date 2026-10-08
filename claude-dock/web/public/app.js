@@ -181,7 +181,7 @@ function handle(m) {
 }
 
 function onSdk(msg) {
-  if (msg.type === 'system' && msg.subtype === 'init') { currentSession = msg.session_id; lastModelId = msg.model || ''; lastEffort = msg.effort || (effortEl.disabled ? '' : effortShown()) || ''; /* 「既定」のときの実際の値は init には含まれないので、選んだ値だけを出す */ sessionLabel = modelName(lastModelId) + (lastEffort ? ` · ${lastEffort}` : ''); statusEl.title = `${lastModelId}${lastEffort ? ` / effort: ${lastEffort}` : ''}`; if (modelEl.value === '') setDefaultLabel(lastModelId); syncEffort(); statusEl.textContent = busy ? '応答中…' : sessionLabel; return; }
+  if (msg.type === 'system' && msg.subtype === 'init') { currentSession = msg.session_id; if (!sessBranch.has(currentSession)) sessBranch.set(currentSession, gitBranchNow); updateBranchBanner(); lastModelId = msg.model || ''; lastEffort = msg.effort || (effortEl.disabled ? '' : effortShown()) || ''; /* 「既定」のときの実際の値は init には含まれないので、選んだ値だけを出す */ sessionLabel = modelName(lastModelId) + (lastEffort ? ` · ${lastEffort}` : ''); statusEl.title = `${lastModelId}${lastEffort ? ` / effort: ${lastEffort}` : ''}`; if (modelEl.value === '') setDefaultLabel(lastModelId); syncEffort(); statusEl.textContent = busy ? '応答中…' : sessionLabel; return; }
   if (msg.type === 'system' && msg.subtype === 'local_command_output') { add(el('pre', 'localout', msg.content)); return; }
   if (msg.type === 'system' && msg.subtype === 'compact_boundary') {
     const md = msg.compact_metadata || {};
@@ -282,7 +282,7 @@ function sendQueued() {
   if (!ws || ws.readyState !== 1) { queued = q; unqueue(); return; }
   send(q);
 }
-function send(over) {
+function send(over, opt) {
   const ready = over ? over.ready : attachments.filter((a) => a.status === 'ready');
   if (!over && attachments.some((a) => a.status === 'uploading')) return; // アップロード中は送らない
   const text = over ? over.text : (input.value.trim() || (ready.length ? '添付したファイルを確認してください。' : ''));
@@ -311,6 +311,7 @@ function send(over) {
   if (ready.length && !serverFeatures.has('attach')) { add(el('div', 'err-box', 'サーバーが古いため、添付を送れません。start.cmd で起動し直してください。')); return; }
   if (cwdEl.classList.contains('invalid')) { add(el('div', 'err-box', 'フォルダが見つかりません。上部の「フォルダ」を確認してください。')); return; }
   if (text === '/clear') { input.value = ''; autosize(); hideSlash(); $('#new').onclick(); return; } // 新しい会話
+  { const sbm = branchMismatch(); if (sbm && !(opt && opt.branchOk)) { confirmBranchSend(over, sbm); return; } } // 会話のブランチと、いまのブランチが違うとき
   hideSlash();
   store.set('cwd', cwdEl.value); store.set('mode', modeEl.value); store.set('model', modelEl.value);
   turnFailed = false;
@@ -455,7 +456,7 @@ let sessAll = [];
 const normDir = (x) => String(x || '').split(String.fromCharCode(92)).join('/').replace(/\/+$/, '').toLowerCase();
 const dirLeaf = (x) => String(x || "").split(/[\\/]+/).filter(Boolean).pop() || String(x || "");
 async function loadSessions() {
-  const box = $('#sessions');
+  const box = $('#sessions'); updateBranchBanner();
   try { sessAll = await api('/api/sessions', {}); renderSessions(); }
   catch (e) { box.textContent = ''; box.append(el('div', 'hint', '一覧を取得できませんでした: ' + e.message)); }
 }
@@ -516,18 +517,49 @@ function renameStart(row, titleEl, s) {
   inp.onkeydown = (ev) => { if (ev.key === 'Enter' && !ev.isComposing) finish(true); else if (ev.key === 'Escape') finish(false); };
   inp.onblur = () => finish(true);
 }
+// ---------- ブランチの食い違いを防ぐ: 会話は「フォルダ + ブランチ」に紐づく。違うブランチのまま、うっかり編集しないための確認と警告 ----------
+let gitBranchNow = ''; const sessBranch = new Map(); // 会話の id -> その会話が行われたブランチ
+async function branchInfo() { // いまのブランチと、切り替えを妨げる変更 (未追跡を除く) の件数。Git でなければ null
+  try { const g = await api('/api/git/status', {}); return g.repo ? { branch: g.branch && g.branch !== 'HEAD' ? g.branch : '', dirty: (g.files || []).filter((f) => f.xy !== '??').length } : null; } catch { return null; }
+}
+const branchMismatch = () => { const sb = currentSession ? sessBranch.get(currentSession) : ''; return sb && gitBranchNow && sb !== gitBranchNow ? sb : ''; };
+async function switchToBranch(name) {
+  try { await postJson('/api/git/switch', { branch: name }); await loadGit(); refreshTree(); invalidateIndex(); return true; } catch (e) { toast(`ブランチを切り替えられませんでした: ${e.message}`); return false; }
+}
+function updateBranchBanner() { // 開いている会話のブランチが、いまと違うあいだ、会話の上に警告を出し続ける
+  const box = $('#branchwarn'); box.textContent = ''; const sb = branchMismatch(); box.hidden = !sb; if (!sb) return;
+  box.append(el('span', 'bw-t', `この会話は、ブランチ「${sb}」で行われました。いまのブランチは「${gitBranchNow}」です。ここで続けると、「${gitBranchNow}」のファイルが変更されます。`));
+  const sw = el('button', 'ghost mini', `「${sb}」に切り替える`); sw.type = 'button';
+  sw.onclick = async () => { const bi = await branchInfo(); if (bi && bi.dirty) { toast(`変更が ${bi.dirty} 件残っているため、切り替えられません。コミットなどで片付けてください`); return; } if (await switchToBranch(sb)) toast(`「${sb}」に切り替えました`); };
+  const keep = el('button', 'ghost mini', 'このブランチで続ける'); keep.type = 'button'; keep.title = '警告を消します (この会話は、いまのブランチのものとして扱います)';
+  keep.onclick = () => { sessBranch.set(currentSession, gitBranchNow); updateBranchBanner(); };
+  box.append(sw, keep);
+}
+// 送信の前の確認: 会話のブランチと、いまのブランチが違うとき
+async function confirmBranchSend(over, sb) {
+  const bi = await branchInfo(); const dirty = bi ? bi.dirty : 0; const restore = () => { if (over) { queued = over; renderQueued(); } };
+  const body = `この会話は、ブランチ「${sb}」で行われました。いまは「${gitBranchNow}」です。このまま送ると、Claude は「${gitBranchNow}」の上でファイルを変更します。${dirty ? `\n(変更が ${dirty} 件残っているため、ブランチは切り替えられません)` : ''}`;
+  const c = await askChoice({ title: 'ブランチが違います', body, buttons: [{ label: 'キャンセル', value: 'cancel', def: true }, { label: 'このブランチのまま送る (注意)', value: 'keep', danger: true }, ...(dirty ? [] : [{ label: `「${sb}」に切り替えて送る`, value: 'switch', primary: true }])] });
+  if (c === 'switch') { if (!(await switchToBranch(sb))) return restore(); }
+  else if (c === 'keep') { sessBranch.set(currentSession, gitBranchNow); updateBranchBanner(); } // 承知のうえで続ける: 以後は、この確認を出さない
+  else return restore();
+  send(over, { branchOk: true });
+}
 async function openSession(s) {
   if (busy) return;
   const id = s.sessionId;
   if (!s.exists) { toast(`この会話のフォルダが見つかりません: ${s.cwd || '(不明)'}`); return; }
   if (s.cwd && normDir(s.cwd) !== normDir(cwdEl.value)) { if (!(await switchCwd(s.cwd))) { toast('作業フォルダを切り替えられませんでした'); return; } } // 会話のフォルダへ戻る
-  if (s.gitBranch && s.gitBranch !== 'HEAD') { // 会話のブランチへ戻るか尋ねる (違うときだけ)
-    let g = null; try { g = await api('/api/git/status', {}); } catch { /* Git でなければ無視 */ }
-    if (g && g.repo && g.branch && g.branch !== s.gitBranch) {
-      const c = await askChoice({ title: 'ブランチが違います', body: `この会話は、ブランチ「${s.gitBranch}」で行われました。いまは「${g.branch}」です。`, buttons: [
-        { label: 'キャンセル', value: 'cancel' }, { label: 'このまま開く', value: 'keep', def: true }, { label: `「${s.gitBranch}」に切り替える`, value: 'switch', primary: true }] });
+  const sb = s.gitBranch && s.gitBranch !== 'HEAD' ? s.gitBranch : ''; // その会話が行われたブランチ
+  if (sb) { // 会話のブランチと、いまのブランチが違うとき: 切り替えて開くのを、お勧めの選択にする
+    const bi = await branchInfo();
+    if (bi && bi.branch && bi.branch !== sb) {
+      const dirty = bi.dirty;
+      const body = `この会話は、ブランチ「${sb}」で行われました。いまは「${bi.branch}」です。\n${dirty ? `変更が ${dirty} 件残っているため、ブランチは切り替えられません。コミットなどで片付けると、切り替えられます。` : 'ブランチを切り替えて開くのがお勧めです。'}\n「${bi.branch}」のまま続けると、そのブランチのファイルが変更されます。`;
+      const c = await askChoice({ title: 'ブランチが違います', body, buttons: [
+        { label: 'キャンセル', value: 'cancel', def: !!dirty }, { label: '別のブランチのまま開く (注意)', value: 'keep', danger: true }, ...(dirty ? [] : [{ label: `「${sb}」に切り替えて開く`, value: 'switch', primary: true, def: true }])] });
       if (c === null || c === 'cancel') return;
-      if (c === 'switch') { try { await postJson('/api/git/switch', { branch: s.gitBranch }); loadGit(); } catch (e) { toast(`ブランチを切り替えられませんでした: ${e.message}`); } }
+      if (c === 'switch' && !(await switchToBranch(sb))) return; // 切り替えられなかったときは、開かない (違うブランチで編集してしまわないため)
     }
   }
   try {
@@ -538,6 +570,7 @@ async function openSession(s) {
       else if (m.type === 'user') renderUserContent(m.message && m.message.content);
     }
     currentSession = id; sessionLabel = ''; statusEl.textContent = '';
+    sessBranch.set(id, sb || gitBranchNow); updateBranchBanner();
     ws.send(JSON.stringify({ type: 'resume', sessionId: id }));
     scrollDown(true); loadSessions();
   } catch (e) { add(el('div', 'err-box', '会話を開けませんでした: ' + e.message)); }
@@ -1320,6 +1353,7 @@ function gitSection(list, title, files, kind) {
 async function loadGit() {
   const list = $('#gitlist'), br = $('#gitbranch'), badge = $('#gitcount'), box = $('#commitbox');
   let d; try { d = await api('/api/git/status', {}); } catch (e) { list.textContent = ''; list.append(el('div', 'hint', e.message)); box.hidden = true; return; }
+  gitBranchNow = d.repo && d.branch && d.branch !== 'HEAD' ? d.branch : ''; updateBranchBanner();
   list.textContent = ''; badge.hidden = true;
   if (!d.repo) { br.textContent = ''; br.disabled = true; $('.repoline').hidden = true; closeBranchMenu(); box.hidden = true; list.append(el('div', 'hint', 'このフォルダは Git リポジトリではありません')); return; }
   const bname = d.branch && d.branch !== 'HEAD' ? d.branch : '(detached HEAD)';

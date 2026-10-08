@@ -482,3 +482,9 @@ button.danger:disabled { opacity: .45; cursor: default; }
 .linkcard .lk-msg { flex: 1; font-size: calc(var(--fs, 14px) - 2px); color: var(--muted); } .linkcard .lk-msg.bad { color: var(--bad); }
 .linkcard .lk-raw { flex: 1; min-height: 260px; margin: 0 14px 8px; padding: 10px 12px; resize: none; font: calc(var(--fs, 14px) - 1.5px)/1.5 var(--mono); color: var(--text); background: var(--code); border: 1px solid var(--rule); border-radius: 10px; white-space: pre; overflow: auto; tab-size: 2; }
 .linkcard .lk-note { word-break: break-all; }
+
+/* ブランチの食い違いの警告 (会話の上) */
+.branchwarn { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 8px 16px; background: color-mix(in srgb, var(--warn) 14%, var(--panel)); border-bottom: 1px solid color-mix(in srgb, var(--warn) 45%, var(--rule)); font-size: calc(var(--fs, 14px) - 1px); }
+.branchwarn[hidden] { display: none; }
+.branchwarn .bw-t { flex: 1 1 320px; min-width: 0; }
+.branchwarn button { flex: none; white-space: nowrap; }
