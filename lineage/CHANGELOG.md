@@ -1,5 +1,41 @@
 # 1.5.0-032
 
+- `sql/maintenance/10_pending_analysis_workload.sql` gained reports 9 and 10, the
+  row-level forms of the questions reports 5/7 and 1-3 answer as counts. Reports 5 and
+  7 say how many objects are new per day, which is the right shape for "is the arrival
+  rate what I expect"; neither can answer the next question, "what IS this?", and that
+  was being answered by pasting ad-hoc SQL each time.
+  Report 9 lists the objects whose `first_seen_at` falls in the window, with
+  `generation_type`, `is_ephemeral`, `analysis_status`, the SQL length, the source
+  user, `dag_id` / `task_id` pulled out of the source job's labels, and the head of the
+  statement with whitespace collapsed -- so an unexpected arrival is traced to its DAG
+  without joining the job registry, and an ephemeral arrival (object_name `fp_<hash>`)
+  is identifiable at all.
+  Report 10 lists what the next run will analyze: `is_changed = TRUE`, which is the
+  gate STEP 3 itself uses and is sticky until that object's batch succeeds. It carries
+  `changed_at_least_once` (from `previous_definition_hash`) and
+  `current_definition_unanalyzed` (`last_analyzed_hash IS DISTINCT FROM
+  definition_hash`). This is also the only report that covers a CHANGED existing View,
+  since a change does not move `first_seen_at`.
+  New `[B]` options: `new_object_detail_days` (default 2 -- deliberately shorter than
+  `arrival_history_days`, because one row per object over a window that reaches the
+  initial load returns the whole repository), `new_object_sql_preview_chars` (400) and
+  `detail_row_limit` (200, applied to both reports).
+  Both honor `process_generated_tables` the way reports 1-3 do.
+  Two traps avoided in the implementation, recorded in the comments: the preview
+  collapses whitespace with the POSIX class `[[:space:]]+` rather than `\s+`, because
+  the template is a quoted string and a backslash in it is read as an escape sequence;
+  and neither report offers a "changed recently" column, because `updated_at` cannot
+  provide one -- the definition-registry MERGE in 03 has no `WHEN MATCHED` guard, so
+  every matched row is rewritten on every run and `updated_at` moves for all of them.
+  Filtering on it returns the whole registry.
+  SQL only; the bundle is unchanged and there is no offline regression test for a
+  report script (the JS suite cannot execute BigQuery SQL). Parameter consistency was
+  checked mechanically instead: every named parameter passed in each report's `USING`
+  appears in that report's template and vice versa, across all ten reports -- BigQuery
+  rejects an `EXECUTE IMMEDIATE` that is passed a named parameter its SQL does not use.
+  **Not yet run against BigQuery.**
+
 - The release pipeline's generated UDF deployment no longer disagrees with the engine.
   `scripts/build_everything.js` built the `CREATE OR REPLACE FUNCTION` DDL inline with
   three parameters (`sql_text`, `physical_columns_json`, `options_json`) and a body
