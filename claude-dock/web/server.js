@@ -722,6 +722,21 @@ async function api(url, res, req) {
       await deleteSession(id, { dir: typeof b.dir === 'string' && b.dir ? b.dir : cwd });
       return json(res, { ok: true });
     }
+    if (url.pathname === '/api/links' && req.method === 'GET') return json(res, { items: loadLinks(), file: LINKS_USER_FILE });
+    if (url.pathname === '/api/links/raw' && req.method === 'GET') { // 設定ファイルの中身 (JSON の直接編集用)。まだなければ、ひな形
+      let text; try { text = fs.readFileSync(LINKS_USER_FILE, 'utf8').replace(/^\uFEFF/, ''); } catch { text = JSON.stringify({ links: [], hidden: [], overrides: {} }, null, 2) + '\n'; }
+      return json(res, { text, file: LINKS_USER_FILE });
+    }
+    if (url.pathname === '/api/links/raw' && req.method === 'POST') {
+      let b; try { b = JSON.parse(await readBody(req, 512 * 1024)); } catch { return json(res, { error: 'bad request' }, 400); }
+      let obj; try { obj = JSON.parse(String(b.text || '')); } catch (e) { return json(res, { error: `JSON の書き方が正しくありません: ${e.message}` }, 400); }
+      if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return json(res, { error: 'JSON は { "links": [...], "hidden": [...], "overrides": {...} } の形にしてください' }, 400);
+      saveLinks(obj); return json(res, { ok: true });
+    }
+    if (url.pathname === '/api/links/save' && req.method === 'POST') {
+      let b; try { b = JSON.parse(await readBody(req, 512 * 1024)); } catch { return json(res, { error: 'bad request' }, 400); }
+      saveLinks(b); return json(res, { ok: true, items: loadLinks() });
+    }
     if (url.pathname === '/api/rename' && req.method === 'POST') {
       let b; try { b = JSON.parse(await readBody(req)); } catch { return json(res, { error: 'bad request' }, 400); }
       const id = String(b.id || ''); const title = String(b.title || '').trim().slice(0, 200);
@@ -795,6 +810,35 @@ const server = http.createServer((req, res) => {
     res.end(buf);
   });
 });
+
+// ---- ドキュメントのリンク (上部の「ドキュメント」メニュー)。既定 (同梱の links.default.json) + ユーザー (その PC の設定フォルダ)。
+//      ユーザーの設定: { links: [追加したもの], hidden: [非表示にした既定の id], overrides: { id: { group, title, url } } }
+const CONFIG_DIR = process.env.CDOCK_CONFIG_DIR || (process.platform === 'win32' ? path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'crogue') : path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'crogue'));
+const LINKS_USER_FILE = path.join(CONFIG_DIR, 'links.json');
+const LINKS_DEFAULT_FILE = path.join(here, 'links.default.json');
+const readJsonFile = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8').replace(/^\uFEFF/, '')); } catch { return null; } };
+const cleanUrl = (u) => { try { const x = new URL(String(u || '').trim()); return /^https?:$/.test(x.protocol) && x.hostname ? x.href : ''; } catch { return ''; } }; // http / https だけ
+const cleanText = (t, max) => String(t == null ? '' : t).replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, max);
+function loadLinks() {
+  const defs = ((readJsonFile(LINKS_DEFAULT_FILE) || {}).links || []).map((l) => ({ id: cleanText(l.id, 60), group: cleanText(l.group, 60), title: cleanText(l.title, 100), url: cleanUrl(l.url) })).filter((l) => l.id && l.title && l.url);
+  const user = readJsonFile(LINKS_USER_FILE) || {}; const hidden = new Set(Array.isArray(user.hidden) ? user.hidden.map(String) : []); const ov = user.overrides && typeof user.overrides === 'object' ? user.overrides : {};
+  const items = defs.map((d) => { const o = ov[d.id] || {}; return { id: d.id, source: 'default', hidden: hidden.has(d.id), group: cleanText(o.group != null ? o.group : d.group, 60), title: cleanText(o.title || d.title, 100), url: cleanUrl(o.url) || d.url, orig: { group: d.group, title: d.title, url: d.url } }; });
+  for (const l of Array.isArray(user.links) ? user.links : []) { const url = cleanUrl(l.url), title = cleanText(l.title, 100); if (url && title) items.push({ id: cleanText(l.id, 60) || `u-${crypto.randomBytes(4).toString('hex')}`, source: 'user', hidden: false, group: cleanText(l.group, 60), title, url }); }
+  return items;
+}
+function saveLinks(b) {
+  const defIds = new Set(((readJsonFile(LINKS_DEFAULT_FILE) || {}).links || []).map((l) => String(l.id)));
+  const links = (Array.isArray(b.links) ? b.links : []).slice(0, 200).map((l) => ({ id: cleanText(l.id, 60) || `u-${crypto.randomBytes(4).toString('hex')}`, group: cleanText(l.group, 60), title: cleanText(l.title, 100), url: cleanUrl(l.url) }));
+  const bad = links.find((l) => !l.title || !l.url); if (bad) throw fail('名前と URL (http / https) を入力してください', { status: 400 });
+  const hidden = (Array.isArray(b.hidden) ? b.hidden : []).map(String).filter((id) => defIds.has(id));
+  const overrides = {}; for (const [id, o] of Object.entries(b.overrides && typeof b.overrides === 'object' ? b.overrides : {})) {
+    if (!defIds.has(id) || !o) continue; const url = cleanUrl(o.url), title = cleanText(o.title, 100); if (!url || !title) throw fail('名前と URL (http / https) を入力してください', { status: 400 });
+    overrides[id] = { group: cleanText(o.group, 60), title, url };
+  }
+  fs.mkdirSync(CONFIG_DIR, { recursive: true });
+  const tmp = `${LINKS_USER_FILE}.${crypto.randomBytes(3).toString('hex')}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ links, hidden, overrides }, null, 2), 'utf8'); fs.renameSync(tmp, LINKS_USER_FILE);
+}
 
 // ---- Claude Code 本体。既定は SDK に同梱のもの。環境変数 CDOCK_CLAUDE_PATH で、PC にインストール済みのものを使える
 //      (パスを指定、または auto で探す)。start-light.cmd は同梱のコピーを入れず (約 250MB 減)、この指定で起動する

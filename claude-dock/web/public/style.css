@@ -454,3 +454,31 @@ button.danger:disabled { opacity: .45; cursor: default; }
 .pbody .md .mermaid { margin: 12px 0; padding: 10px; overflow: auto; text-align: center; background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; }
 .pbody .md .mermaid svg { max-width: 100%; height: auto; }
 .pbody .md .mmerr { color: var(--bad); }
+
+/* ドキュメントのリンク (メニューと編集画面) */
+.docsbtn { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.docsbtn svg { flex: none; }
+@media (max-width: 1180px) { .docsbtn span { display: none; } }
+.docspop { position: fixed; z-index: 60; width: 340px; max-height: min(70vh, 520px); overflow-y: auto; padding: 8px; background: var(--panel); border: 1px solid var(--rule); border-radius: 14px; box-shadow: 0 8px 28px rgba(0,0,0,.14); font-size: calc(var(--fs, 14px) - 1px); }
+.docspop .dp-group { color: var(--muted); font-size: calc(var(--fs, 14px) - 3px); font-weight: 600; letter-spacing: .04em; padding: 8px 8px 4px; }
+.docspop .dp-item { display: flex; align-items: baseline; gap: 8px; padding: 6px 8px; border-radius: 8px; color: var(--text); text-decoration: none; }
+.docspop .dp-item:hover { background: var(--user); }
+.docspop .dp-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.docspop .dp-host { color: var(--muted); font-size: calc(var(--fs, 14px) - 3px); flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.docspop .dp-ext { color: var(--muted); flex: none; } .docspop .dp-item:hover .dp-ext { color: var(--accent); }
+.docspop .dp-empty { padding: 10px; color: var(--muted); }
+.docspop .dp-foot { display: flex; justify-content: flex-end; border-top: 1px solid var(--rule); margin-top: 6px; padding-top: 6px; }
+.linkcard { height: auto; max-height: 86vh; width: min(900px, 96vw); }
+.linkcard .lk-note { padding: 8px 14px; color: var(--muted); font-size: calc(var(--fs, 14px) - 2px); }
+.linkcard .lk-list { flex: 1; min-height: 0; overflow-y: auto; padding: 0 14px 8px; }
+.linkcard .lk-row { display: grid; grid-template-columns: 120px 1fr 1.6fr auto; gap: 6px; align-items: center; padding: 3px 0; position: relative; }
+.linkcard .lk-row.off input { opacity: .45; }
+.linkcard .lk-h { color: var(--muted); font-size: calc(var(--fs, 14px) - 3px); font-weight: 600; }
+.linkcard .lk-row input { min-width: 0; font: calc(var(--fs, 14px) - 1px) var(--sans); color: var(--text); background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 5px 8px; }
+.linkcard .lk-row input.bad { border-color: var(--bad); }
+.linkcard .lk-acts { display: flex; gap: 4px; justify-content: flex-end; white-space: nowrap; }
+.linkcard .lk-tag { position: absolute; right: -2px; top: -2px; display: none; }
+.linkcard .lk-foot { display: flex; gap: 8px; align-items: center; padding: 10px 14px; border-top: 1px solid var(--rule); }
+.linkcard .lk-msg { flex: 1; font-size: calc(var(--fs, 14px) - 2px); color: var(--muted); } .linkcard .lk-msg.bad { color: var(--bad); }
+.linkcard .lk-raw { flex: 1; min-height: 260px; margin: 0 14px 8px; padding: 10px 12px; resize: none; font: calc(var(--fs, 14px) - 1.5px)/1.5 var(--mono); color: var(--text); background: var(--code); border: 1px solid var(--rule); border-radius: 10px; white-space: pre; overflow: auto; tab-size: 2; }
+.linkcard .lk-note { word-break: break-all; }

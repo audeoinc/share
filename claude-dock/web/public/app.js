@@ -1169,6 +1169,107 @@ $('#runsend').onclick = () => {
   insertAtCursor(`\n\`\`\`\n$ ${run.cmd}\n${lines.length > tail.length ? `(先頭 ${lines.length - tail.length} 行を省略)\n` : ''}${tail.join('\n')}${result}\n\`\`\`\n`);
 };
 
+// ---------- ドキュメントのリンク (上部の「ドキュメント」メニュー)。既定 (同梱) + ユーザーが足したもの。編集画面で変更できる ----------
+let docLinks = [], docsPop = null;
+async function loadDocLinks() { try { docLinks = (await api('/api/links', {})).items.filter(Boolean); } catch { docLinks = []; } }
+const hostOf = (u) => { try { return new URL(u).host; } catch { return ''; } };
+function closeDocsPop() { if (!docsPop) return; docsPop.remove(); docsPop = null; document.removeEventListener('mousedown', docsOutside, true); document.removeEventListener('keydown', docsKey, true); }
+function docsOutside(e) { if (docsPop && !docsPop.contains(e.target) && !e.target.closest('#docsbtn')) closeDocsPop(); }
+function docsKey(e) { if (e.key === 'Escape') { e.preventDefault(); closeDocsPop(); } }
+async function openDocsPop() {
+  if (docsPop) return closeDocsPop();
+  await loadDocLinks();
+  docsPop = el('div', 'docspop'); document.body.append(docsPop);
+  const shown = docLinks.filter((l) => !l.hidden); const groups = new Map();
+  for (const l of shown) { const g = l.group || 'その他'; if (!groups.has(g)) groups.set(g, []); groups.get(g).push(l); }
+  if (!shown.length) docsPop.append(el('div', 'dp-empty', 'リンクがありません。下の「リンクを編集…」で追加できます'));
+  for (const [g, items] of groups) {
+    docsPop.append(el('div', 'dp-group', g));
+    for (const l of items) {
+      const a = el('a', 'dp-item'); a.href = l.url; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.title = l.url;
+      a.append(el('span', 'dp-title', l.title), el('span', 'dp-host', hostOf(l.url)), el('span', 'dp-ext', '↗'));
+      a.onclick = () => setTimeout(closeDocsPop, 0);
+      docsPop.append(a);
+    }
+  }
+  const foot = el('div', 'dp-foot'); const edit = el('button', 'ghost mini', 'リンクを編集…'); edit.type = 'button'; edit.onclick = openLinksEditor; foot.append(edit); docsPop.append(foot);
+  const r = $('#docsbtn').getBoundingClientRect(); docsPop.style.top = `${Math.round(r.bottom + 6)}px`; docsPop.style.left = `${Math.max(8, Math.min(Math.round(r.left), window.innerWidth - 348))}px`;
+  document.addEventListener('mousedown', docsOutside, true); document.addEventListener('keydown', docsKey, true);
+}
+$('#docsbtn').onclick = openDocsPop;
+
+// リンクの編集画面: 既定のリンクは、書き換え・非表示にできる (「既定に戻す」で元に戻る)。足したものは、削除もできる
+async function openLinksEditor() {
+  closeDocsPop(); await loadDocLinks();
+  const rows = docLinks.map((l) => ({ ...l, orig: l.orig ? { ...l.orig } : null, removed: false }));
+  const box = el('div', 'dlg'); const card = el('div', 'dlg-card linkcard'); card.setAttribute('role', 'dialog');
+  const head = el('div', 'dlg-head'); head.append(el('span', '', 'ドキュメントのリンク')); const x = el('button', 'ghost', '✕'); x.type = 'button'; head.append(x); card.append(head);
+  const noteText = '既定のリンクは、名前や URL を書き換えたり、非表示にしたりできます。足したリンクは、各自の PC にだけ保存されます。URL は http / https のみです。'; const note = el('div', 'lk-note', noteText); card.append(note);
+  const list = el('div', 'lk-list'); card.append(list);
+  const same = (r) => r.orig && r.group === r.orig.group && r.title === r.orig.title && r.url === r.orig.url;
+  function render() {
+    list.textContent = '';
+    const head2 = el('div', 'lk-row lk-h'); head2.append(el('span', '', 'グループ'), el('span', '', '名前'), el('span', '', 'URL'), el('span', '', '')); list.append(head2);
+    for (const r of rows) {
+      if (r.removed) continue;
+      const row = el('div', 'lk-row' + (r.hidden ? ' off' : ''));
+      const inp = (key, ph) => { const i = el('input'); i.value = r[key] || ''; i.placeholder = ph; i.spellcheck = false; i.autocomplete = 'off'; i.oninput = () => { r[key] = i.value; if (key === 'url') i.classList.toggle('bad', !!i.value.trim() && !/^https?:\/\/\S+$/i.test(i.value.trim())); sync(); }; return i; };
+      const acts = el('span', 'lk-acts');
+      if (r.source === 'default') {
+        const eye = el('button', 'ghost mini', r.hidden ? '表示する' : '非表示'); eye.type = 'button'; eye.title = r.hidden ? 'メニューに表示します' : 'メニューから隠します (削除ではありません)'; eye.onclick = () => { r.hidden = !r.hidden; render(); };
+        acts.append(eye);
+        const rs = el('button', 'ghost mini', '既定に戻す'); rs.type = 'button'; rs.disabled = same(r); rs.onclick = () => { Object.assign(r, r.orig); render(); }; r._rs = rs; acts.append(rs); // 書き換えたときだけ押せる
+        row.append(inp('group', 'グループ'), inp('title', '名前'), inp('url', 'https://…'), acts, el('span', 'lk-tag', '既定'));
+      } else {
+        const del = el('button', 'ghost mini', '削除'); del.type = 'button'; del.onclick = () => { r.removed = true; render(); }; acts.append(del);
+        row.append(inp('group', 'グループ'), inp('title', '名前'), inp('url', 'https://…'), acts);
+      }
+      list.append(row);
+    }
+  }
+  const add = el('button', 'ghost', '＋ リンクを追加'); add.type = 'button';
+  add.onclick = () => { rows.push({ id: '', source: 'user', hidden: false, group: '社内', title: '', url: '', removed: false }); render(); const ins = list.querySelectorAll('.lk-row:last-child input'); ins[1]?.focus(); list.scrollTop = list.scrollHeight; };
+  const foot = el('div', 'dlg-foot lk-foot'); const msg = el('span', 'lk-msg'); const cancel = el('button', 'ghost', 'キャンセル'); cancel.type = 'button';
+  const modeBtn = el('button', 'ghost', 'JSON を直接編集'); modeBtn.type = 'button'; modeBtn.title = '設定ファイル (links.json) を、そのまま書き換えます';
+  const save = el('button', 'send', '保存'); save.type = 'button'; foot.append(add, modeBtn, msg, cancel, save); card.append(foot); box.append(card);
+  const snap = () => JSON.stringify(rows.map((r) => [r.id, r.group, r.title, r.url, r.hidden, r.removed])); let snap0 = snap(); let raw = null; // raw: JSON 直接編集中の textarea
+  const sync = () => { msg.textContent = ''; for (const r of rows) if (r._rs) r._rs.disabled = same(r); };
+  const close = () => { box.remove(); document.removeEventListener('keydown', onKey, true); };
+  const onKey = (e) => { if (e.key === 'Escape' && !askOpen) { e.preventDefault(); e.stopPropagation(); close(); } };
+  let askOpen = false; const ask = async (o) => { askOpen = true; try { return await askChoice(o); } finally { askOpen = false; } };
+  document.addEventListener('keydown', onKey, true); x.onclick = close; cancel.onclick = close; box.addEventListener('mousedown', (e) => { if (e.target === box) close(); });
+  const fail2 = (t) => { msg.textContent = t; msg.className = 'lk-msg bad'; };
+  async function saveList() {
+    const live = rows.filter((r) => !r.removed); const user = live.filter((r) => r.source === 'user'); const defs = live.filter((r) => r.source === 'default');
+    const bad = [...user, ...defs].find((r) => !r.title.trim() || !/^https?:\/\/\S+$/i.test(r.url.trim()));
+    if (bad) return fail2('名前と URL (http / https) を入力してください');
+    const body = { links: user.map((r) => ({ id: r.id, group: r.group.trim(), title: r.title.trim(), url: r.url.trim() })), hidden: defs.filter((r) => r.hidden).map((r) => r.id),
+      overrides: Object.fromEntries(defs.filter((r) => !same(r)).map((r) => [r.id, { group: r.group.trim(), title: r.title.trim(), url: r.url.trim() }])) };
+    try { await postJson('/api/links/save', body); close(); toast('リンクを保存しました'); } catch (e) { fail2(`保存できませんでした: ${e.message}`); }
+  }
+  async function saveRaw() {
+    try { await postJson('/api/links/raw', { text: raw.value }); close(); toast('設定ファイルを保存しました'); } catch (e) { fail2(e.message); }
+  }
+  async function enterRaw() {
+    if (snap() !== snap0 && (await ask({ title: '一覧での変更があります', body: '一覧で変更した内容は、保存されません。JSON の編集に切り替えますか？', buttons: [{ label: 'キャンセル', value: 'no', def: true }, { label: '切り替える', value: 'yes', primary: true }] })) !== 'yes') return;
+    let d; try { d = await api('/api/links/raw', {}); } catch (e) { return fail2(e.message); }
+    const ids = rows.filter((r) => r.source === 'default').map((r) => r.id);
+    list.hidden = true; add.hidden = true; note.textContent = `設定ファイル: ${d.file}  /  links: 追加したリンク、hidden: 非表示にする既定の id、overrides: 既定の書き換え (id をキーに)。既定の id: ${ids.join(', ')}`;
+    raw = el('textarea', 'lk-raw'); raw.value = d.text; raw.spellcheck = false; raw.oninput = () => { msg.textContent = ''; }; card.insertBefore(raw, foot); modeBtn.textContent = '一覧で編集'; msg.textContent = '';
+    raw.addEventListener('keydown', (e) => { if (e.key === 'Tab') { e.preventDefault(); const s = raw.selectionStart; raw.setRangeText('  ', s, raw.selectionEnd, 'end'); } });
+    raw.focus();
+  }
+  async function leaveRaw() {
+    const keep = raw.value; let changed = true; try { changed = keep !== (await api('/api/links/raw', {})).text; } catch { /* 変更ありとして扱う */ }
+    if (changed && (await ask({ title: 'JSON の変更があります', body: '保存していない JSON の変更は、破棄されます。一覧に戻りますか？', buttons: [{ label: 'キャンセル', value: 'no', def: true }, { label: '破棄して戻る', value: 'yes', danger: true }] })) !== 'yes') return;
+    raw.remove(); raw = null; list.hidden = false; add.hidden = false; note.textContent = noteText; modeBtn.textContent = 'JSON を直接編集'; msg.textContent = '';
+    await loadDocLinks(); rows.length = 0; rows.push(...docLinks.map((l) => ({ ...l, orig: l.orig ? { ...l.orig } : null, removed: false }))); snap0 = snap(); render();
+  }
+  modeBtn.onclick = () => (raw ? leaveRaw() : enterRaw());
+  save.onclick = () => (raw ? saveRaw() : saveList());
+  render(); document.body.append(box);
+}
+
 const TABS = ['sessions', 'files', 'run', 'git'];
 function showTab(which) {
   for (const t of TABS) { $(`#pane-${t}`).hidden = t !== which; $(`#tab-${t}`).classList.toggle('on', t === which); }
