@@ -23,7 +23,7 @@ function New-Package([string]$zipName, [bool]$light) {
     if ($light) {
       $note = @'
 > **ライト版**: PC にインストール済みの Claude Code を使います (Claude Code 本体は同梱しません)。
-> - 必要なもの: Node.js、Claude Code (2.1.292 を推奨。claude.exe が見つかること)
+> - 必要なもの: Node.js、Claude Code (2.1.293 を推奨。claude.exe が見つかること)
 > - 起動: `start.cmd [作業フォルダ]` (初回だけ `npm install` が走ります。約 340MB、1〜2 分)
 > - Claude Code が見つからないときは、メッセージを出して終了します。環境変数 `CDOCK_CLAUDE_PATH` に claude.exe のパスを指定すれば、使うものを選べます
 
