@@ -149,9 +149,13 @@ function historyUser(text) {
 // ---------- 通信 ----------
 let serverFeatures = new Set();
 let ws, busy = false, live = null, sessionLabel = '', turnFailed = false, currentSession = null;
+const IDLE_PLACEHOLDER = input.placeholder;
 function setBusy(v) {
-  const was = busy; busy = v; sendBtn.hidden = v; stopBtn.hidden = !v;
+  const was = busy; busy = v; stopBtn.hidden = !v;
+  sendBtn.hidden = false; sendBtn.textContent = v ? '待機に追加' : '送信'; // 応答中も、送信ボタンを残す (押すと「待機中」に置かれる)
+  sendBtn.title = v ? '応答中なので、発言を「待機中」に置きます。続けて「今すぐ送信」を押すと、作業を止めずに取り込ませます' : '';
   statusEl.textContent = v ? '応答中…' : sessionLabel;
+  input.placeholder = v ? '応答中: Enter で「待機中」に置き、「今すぐ送信」で取り込ませます' : IDLE_PLACEHOLDER;
   if (v && !was) progStart(); else if (!v) progStop();
   if (was && !v) { loadSessions(); loadGit(); invalidateIndex(); refreshTree(); if (queued) setTimeout(sendQueued, 80); }
 }
