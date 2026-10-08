@@ -109,26 +109,18 @@ URL には起動ごとのトークン (`?t=...`) が付きます。`127.0.0.1` �
 新しい会話ごとに Claude Code の標準指示・ツール定義などで約 36k トークンがキャッシュに書き込まれます。キャッシュはモデルごとなので、
 **会話の途中でモデルを切り替えると履歴全体が書き直され**、費用が増えます。切り替えるなら新しい会話で。
 
-## 他の PC へ渡す
-`release/crogue.zip` を渡します (git に置いてあります。`node_modules` は含みません)。**展開して、`crogue\start.cmd` をダブルクリックするだけ**です。
-- 必要なもの: Node.js。初回だけ、必要な部品を `npm install` で入れます (数分)。
-- 起動すると、ブラウザが自動で開きます。作業フォルダは、画面上部のバーで選べます (最後に使ったフォルダは、次回も覚えています)。コマンドラインからは `start.cmd 作業フォルダ` でも起動できます。
-- ZIP の中の構成: `start.cmd` (起動)、`README.md` (初心者向けの使い方ガイド。元は `pkg\README.md`)、それ以外のすべてを入れた `app\` フォルダ (`server.js`、`public\`、`README.md` など。初回の起動で、`node_modules\` もここにできます)。
-- Node.js が見つからないときは、メッセージを出して止まります (ウィンドウがすぐに閉じないようにしてあります)。
-ソースを変えたら `pwsh -File pack.ps1` で作り直し、ZIP もあわせてコミットします。ZIP は作るたびに中身の日付が変わるので、ソースを変えたときだけ作り直してください (履歴が増えます)。起動ファイルの元は `pkg\start.cmd` と `pkg\start-light.cmd` です (リポジトリ直下の `start.cmd` は、開発用です)。
-
-## 容量が厳しい環境 (ライト版)
-既定 (通常版) では、Claude Agent SDK が **Claude Code 本体を同梱**します (Windows 用で約 244MB。`node_modules` 全体で約 580MB)。
-その PC にすでに Claude Code が入っている場合は、同梱のコピーを入れない **ライト版** が使えます (`node_modules` は約 340MB)。
-
-- **配布**: `release/crogue-light.zip` を渡します。展開して `crogue\start.cmd` をダブルクリックするだけです (ZIP の中の `start.cmd` がライト版の起動です。通常版の案内は入っていません。構成は通常版と同じで、`start.cmd` と `app\` フォルダです)。通常版は `release/crogue.zip` です。
-- **必要なもの**: Node.js、Claude Code (`claude.exe`。2.1.293 を推奨)。初回は `npm install --omit=optional` が走ります。
-- Claude Code は、`claude.exe` を自動で探します (`where claude`)。使うものを決めたいときは、環境変数 `CDOCK_CLAUDE_PATH` に `claude.exe` のパスを入れてください (`.cmd` は不可)。
-- **見つからないとき**: メッセージを出して終了します (同梱のコピーがないため)。
-- **バージョンをそろえてください。** この画面は、Claude Code 2.1.293 に対応する SDK で作ってあります。違うバージョンのときは、起動時と画面に警告が出ます (使うことは使います)。PC のほうが古いときは、一部の機能が動かないことがあるので、Claude Code を更新してください。PC のほうが新しいときは、通常は動きますが、新しい機能が画面に出ないことがあります。
+## 配布と、使う環境
+配布するのは `release/crogue.zip` です (git に置いてあります)。**展開して `crogue\start.cmd` をダブルクリックするだけ**で使えます (使い方は、ZIP の直下の `README.md`。元は `pkg\README.md`)。
+- **前提**: Node.js と Claude Code (`claude.exe`。**2.1.293** を推奨) が使えて、API キーを含む `settings.json` の設定が済んでいること。配布版は、PC にインストール済みの Claude Code を使います (Claude Code 本体は同梱しません)。
+- ZIP の構成: `start.cmd` (起動)、`README.md` (使い方)、それ以外のすべてを入れた `app\` (`server.js`、`public\`、この `README.md` など)。`node_modules` は含みません。初回の起動で、`npm install --omit=optional` が走ります (約 340MB、1〜2 分)。
+- 起動するとブラウザが自動で開きます (`--open`)。開きたくないときは、**Shift を押しながらダブルクリック** (起動の最初に PowerShell で Shift の状態を調べます。約 0.65 秒かかります)、または `start.cmd --no-open` です。環境変数 `CDOCK_NO_OPEN=1` でも無効にできます。作業フォルダは、画面上部のバーで選べます (最後に使ったフォルダは覚えています)。`start.cmd [--no-open] [作業フォルダ]` でも指定できます。
+- Node.js や Claude Code が見つからないときは、メッセージを出して止まります。
+- **Claude Code の探し方**: `claude.exe` を自動で探します (`where claude`)。使うものを決めたいときは、環境変数 `CDOCK_CLAUDE_PATH` に `claude.exe` のパスを入れます (`.cmd` は不可)。
+- **バージョンをそろえてください。** この画面は、Claude Code 2.1.293 に対応する SDK (0.3.293) で作ってあります。違うバージョンのときは、起動時と画面に警告が出ます (使うことは使います)。PC のほうが古いときは、一部の機能が動かないことがあります。新しいときは、通常は動きますが、新しい機能が画面に出ないことがあります。
 - 起動時のコンソールに、どの Claude Code を使っているかが出ます。
-- 通常版でも、`CDOCK_CLAUDE_PATH` を設定すれば PC の Claude Code を使えます (ただし同梱のコピーは入ったままです)。リポジトリには `start-light.cmd` (ライト版の起動) もあります。
 - ポート 8787 が使用中のときは、次の空きポートで起動します (`--port` を指定した場合は、別のポートへは移らず終了します)。止めたいサーバーは、起動したウィンドウを閉じるか、`Get-NetTCPConnection -LocalPort 8787 -State Listen | % { Stop-Process -Id $_.OwningProcess -Force }`。
+
+**ZIP の作り方 (開発者向け)**: ソースを変えたら `pwsh -File pack.ps1` で作り直し、ZIP もあわせてコミットします。ZIP は作るたびに中身の日付が変わるので、ソースを変えたときだけ作り直してください (履歴が増えます)。配布用の起動ファイルの元は `pkg\start.cmd` です。リポジトリ直下の `start.cmd` は、開発用で、SDK に同梱の Claude Code 本体を使って動かします (`npm install` で約 580MB)。
 
 ## 予定
 .ppt / .docx のページ画像、ブランチの削除・マージ、リモートへの push など

@@ -841,7 +841,7 @@ function saveLinks(b) {
 }
 
 // ---- Claude Code 本体。既定は SDK に同梱のもの。環境変数 CDOCK_CLAUDE_PATH で、PC にインストール済みのものを使える
-//      (パスを指定、または auto で探す)。start-light.cmd は同梱のコピーを入れず (約 250MB 減)、この指定で起動する
+//      (パスを指定、または auto で探す)。配布版の start.cmd は、同梱のコピーを入れず (約 250MB 減)、この指定で起動する
 const SDK_CC_VERSION = (() => { try { return JSON.parse(fs.readFileSync(path.join(here, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'package.json'), 'utf8')).claudeCodeVersion || ''; } catch { return ''; } })();
 function resolveClaude() {
   const want = (process.env.CDOCK_CLAUDE_PATH || '').trim();
@@ -864,13 +864,13 @@ function resolveClaude() {
       : `PC の Claude Code (${ver}) は、この画面が想定するバージョン (${SDK_CC_VERSION}) より新しいです。通常は動きますが、新しい機能が画面に出ないことがあります。動作がおかしい場合は、Claude Code を ${SDK_CC_VERSION} にそろえるか、この画面の新しい版を入手してください`;
   return { source: 'installed', path: exe, version: ver, warn };
 }
-const LIGHT = process.env.CDOCK_LIGHT === '1'; // ライト版 (同梱の Claude Code なし): PC の Claude Code が必須
+const LIGHT = process.env.CDOCK_LIGHT === '1'; // 配布版 (同梱の Claude Code なし): PC の Claude Code が必須 (配布版の start.cmd が設定する)
 const CLAUDE = resolveClaude();
 if (LIGHT && CLAUDE.source !== 'installed') {
   console.error(`
 Claude Code (claude.exe) が見つかりません。${CLAUDE.warn ? `
   ${CLAUDE.warn.replace(/。?同梱のものを使います$/, '')}` : ''}
-  このライト版は、PC にインストール済みの Claude Code を使います (バージョン ${SDK_CC_VERSION} を推奨)。
+  この画面は、PC にインストール済みの Claude Code を使います (バージョン ${SDK_CC_VERSION} を推奨)。
   Claude Code をインストールしてから、もう一度起動してください。インストール先が特殊な場合は、環境変数 CDOCK_CLAUDE_PATH に claude.exe のパスを指定してください。`);
   process.exit(1);
 }
@@ -1138,7 +1138,7 @@ function openBrowser(url) {
 const onListening = () => {
   const url = `http://${HOST}:${PORT}/?t=${TOKEN}`;
   console.log(`Claude Rogue  ${url}`);
-  if (process.argv.includes('--open') && !process.env.CDOCK_NO_OPEN) openBrowser(url);
+  if (process.argv.includes('--open')) { console.log('ブラウザを自動で開きます (開かないとき: start.cmd --no-open、または Shift を押しながらダブルクリック)'); if (!process.env.CDOCK_NO_OPEN) openBrowser(url); }
   console.log(`Claude Code: ${CLAUDE.source === 'installed' ? `PC のもの (${CLAUDE.path}, ${CLAUDE.version})` : `SDK 同梱 (${CLAUDE.version})`}${CLAUDE.warn ? `
   注意: ${CLAUDE.warn}` : ''}`);
   console.log(`作業フォルダ: ${DEFAULT_CWD}`);
