@@ -110,14 +110,18 @@ URL には起動ごとのトークン (`?t=...`) が付きます。`127.0.0.1` �
 **会話の途中でモデルを切り替えると履歴全体が書き直され**、費用が増えます。切り替えるなら新しい会話で。
 
 ## 他の PC へ渡す
-`release/crogue.zip` を渡します (git に置いてあります。`node_modules` は含みません)。移行先で展開し、`crogue\start.cmd [作業フォルダ]` を実行します (初回は `npm install` が走ります。Node.js が必要)。
-ソースを変えたら `pwsh -File pack.ps1` で作り直し、ZIP もあわせてコミットします。ZIP は作るたびに中身の日付が変わるので、ソースを変えたときだけ作り直してください (履歴が増えます)。
+`release/crogue.zip` を渡します (git に置いてあります。`node_modules` は含みません)。**展開して、`crogue\start.cmd` をダブルクリックするだけ**です。
+- 必要なもの: Node.js。初回だけ、必要な部品を `npm install` で入れます (数分)。
+- 起動すると、ブラウザが自動で開きます。作業フォルダは、画面上部のバーで選べます (最後に使ったフォルダは、次回も覚えています)。コマンドラインからは `start.cmd 作業フォルダ` でも起動できます。
+- ZIP の中の構成: `start.cmd` (起動) と、それ以外のすべてを入れた `app\` フォルダ (`server.js`、`public\`、`README.md` など。初回の起動で、`node_modules\` もここにできます)。
+- Node.js が見つからないときは、メッセージを出して止まります (ウィンドウがすぐに閉じないようにしてあります)。
+ソースを変えたら `pwsh -File pack.ps1` で作り直し、ZIP もあわせてコミットします。ZIP は作るたびに中身の日付が変わるので、ソースを変えたときだけ作り直してください (履歴が増えます)。起動ファイルの元は `pkg\start.cmd` と `pkg\start-light.cmd` です (リポジトリ直下の `start.cmd` は、開発用です)。
 
 ## 容量が厳しい環境 (ライト版)
 既定 (通常版) では、Claude Agent SDK が **Claude Code 本体を同梱**します (Windows 用で約 244MB。`node_modules` 全体で約 580MB)。
 その PC にすでに Claude Code が入っている場合は、同梱のコピーを入れない **ライト版** が使えます (`node_modules` は約 340MB)。
 
-- **配布**: `release/crogue-light.zip` を渡します。展開して `crogue\start.cmd [作業フォルダ]` を実行するだけです (ZIP の中の `start.cmd` がライト版の起動です。通常版の案内は入っていません)。通常版は `release/crogue.zip` です。
+- **配布**: `release/crogue-light.zip` を渡します。展開して `crogue\start.cmd` をダブルクリックするだけです (ZIP の中の `start.cmd` がライト版の起動です。通常版の案内は入っていません。構成は通常版と同じで、`start.cmd` と `app\` フォルダです)。通常版は `release/crogue.zip` です。
 - **必要なもの**: Node.js、Claude Code (`claude.exe`。2.1.293 を推奨)。初回は `npm install --omit=optional` が走ります。
 - Claude Code は、`claude.exe` を自動で探します (`where claude`)。使うものを決めたいときは、環境変数 `CDOCK_CLAUDE_PATH` に `claude.exe` のパスを入れてください (`.cmd` は不可)。
 - **見つからないとき**: メッセージを出して終了します (同梱のコピーがないため)。

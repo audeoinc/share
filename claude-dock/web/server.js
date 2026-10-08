@@ -1127,9 +1127,18 @@ wss.on('connection', (ws) => {
   ws.on('close', () => { for (const c of runs.values()) killTree(c); stopWatch(); if (running) running.abort.abort(); });
 });
 
+// --open: 起動したら、既定のブラウザで画面を開く (start.cmd をダブルクリックで使うため)。CDOCK_NO_OPEN=1 で無効
+function openBrowser(url) {
+  try {
+    const opt = { detached: true, stdio: 'ignore', windowsHide: true };
+    if (process.platform === 'win32') spawn('cmd', ['/c', 'start', '', url], opt).unref();
+    else spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [url], opt).unref();
+  } catch { /* 開けなければ、表示された URL を使ってもらう */ }
+}
 const onListening = () => {
   const url = `http://${HOST}:${PORT}/?t=${TOKEN}`;
   console.log(`Claude Rogue  ${url}`);
+  if (process.argv.includes('--open') && !process.env.CDOCK_NO_OPEN) openBrowser(url);
   console.log(`Claude Code: ${CLAUDE.source === 'installed' ? `PC のもの (${CLAUDE.path}, ${CLAUDE.version})` : `SDK 同梱 (${CLAUDE.version})`}${CLAUDE.warn ? `
   注意: ${CLAUDE.warn}` : ''}`);
   console.log(`作業フォルダ: ${DEFAULT_CWD}`);
