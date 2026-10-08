@@ -351,7 +351,7 @@ input.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
 });
-sendBtn.onclick = send;
+sendBtn.onclick = () => send(); // クリックのイベントを引数として渡さない (send(over) の over と取り違えるため)
 stopBtn.onclick = () => { ws.send(JSON.stringify({ type: 'interrupt' })); unqueue(); }; // 止めたときは、待機中の発言を送らず、入力欄に戻す
 modeEl.onchange = () => { store.set('mode', modeEl.value); if (busy) ws.send(JSON.stringify({ type: 'setMode', mode: modeEl.value })); };
 modelEl.onchange = () => { syncEffort(); store.set('model', modelEl.value); if (modelEl.value === '' && lastModelId) setDefaultLabel(lastModelId); };
