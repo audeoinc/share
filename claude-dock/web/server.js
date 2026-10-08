@@ -952,17 +952,22 @@ wss.on('connection', (ws) => {
     } catch { send({ type: 'watch_state', active: false, reason: 'この環境ではフォルダの監視ができません (「↻」かウィンドウに戻ったときに更新します)' }); }
   }
 
-  send({ type: 'hello', cwd: DEFAULT_CWD, features: ['attach', 'watch', 'move', 'trash', 'run'], claude: { source: CLAUDE.source, version: CLAUDE.version, warn: CLAUDE.warn }, shells: runShell().kind === 'ps' ? [{ id: 'ps', label: runShell().exe === 'pwsh' ? 'PowerShell 7' : 'PowerShell' }, { id: 'cmd', label: 'cmd' }] : [] });
+  send({ type: 'hello', cwd: DEFAULT_CWD, features: ['attach', 'watch', 'move', 'trash', 'run', 'inject'], claude: { source: CLAUDE.source, version: CLAUDE.version, warn: CLAUDE.warn }, shells: runShell().kind === 'ps' ? [{ id: 'ps', label: runShell().exe === 'pwsh' ? 'PowerShell 7' : 'PowerShell' }, { id: 'cmd', label: 'cmd' }] : [] });
+
+  // 添付 (ファイル / フォルダ) の一覧をプロンプトの末尾に付ける。作業フォルダの中と、アップロード用フォルダの中だけを受け付ける
+  function composePrompt(text, attachments, workDir) {
+    const files = (Array.isArray(attachments) ? attachments : []).map((a) => (a && a.rel ? (projectDir(workDir, a.rel) ? projectDir(workDir, a.rel) + path.sep : projectFile(workDir, a.rel)) : uploadedPath(a && a.path))).filter(Boolean).slice(0, 30);
+    const requested = Array.isArray(attachments) ? attachments.length : 0;
+    if (files.length < requested) send({ type: 'notice', message: `${requested - files.length} 件の添付を読み込めませんでした (見つからない、または許可された場所の外のファイルです)` });
+    if (files.length) text = `${text}\n\n<attachments>\n添付 (ユーザーが添付したもの。ファイルは Read ツールで開けます。末尾が \\ か / のものはディレクトリで、Glob / Grep / Read で中身を確認できます):\n${files.map((f) => `- ${f}`).join('\n')}\n</attachments>`;
+    return text;
+  }
 
   async function runTurn({ text, cwd, permissionMode, model, effort, attachments }) {
     if (running) return send({ type: 'error', message: '前の応答がまだ実行中です' });
     const abort = new AbortController();
     const workDir = cwd && fs.existsSync(cwd) ? path.resolve(cwd) : DEFAULT_CWD;
-    // 添付: アップロード用フォルダの中のファイルだけを受け付け、プロンプトの末尾に一覧として付ける
-    const files = (Array.isArray(attachments) ? attachments : []).map((a) => (a && a.rel ? (projectDir(workDir, a.rel) ? projectDir(workDir, a.rel) + path.sep : projectFile(workDir, a.rel)) : uploadedPath(a && a.path))).filter(Boolean).slice(0, 30);
-    const requested = Array.isArray(attachments) ? attachments.length : 0;
-    if (files.length < requested) send({ type: 'notice', message: `${requested - files.length} 件の添付を読み込めませんでした (見つからない、または許可された場所の外のファイルです)` });
-    if (files.length) text = `${text}\n\n<attachments>\n添付 (ユーザーが添付したもの。ファイルは Read ツールで開けます。末尾が \\ か / のものはディレクトリで、Glob / Grep / Read で中身を確認できます):\n${files.map((f) => `- ${f}`).join('\n')}\n</attachments>`;
+    text = composePrompt(text, attachments, workDir);
     const options = {
       ...claudeOpt,
       cwd: workDir,
@@ -983,21 +988,43 @@ wss.on('connection', (ws) => {
       }),
     };
     if (process.env.CDOCK_WEB_MOCK) return mockTurn(text, abort);
-    const q = query({ prompt: text, options });
-    running = { q, abort };
+    // 入力はストリーム (AsyncIterable) で渡す: 応答の途中で足されたメッセージを、止めずに取り込める (inject)
+    const inbox = { items: [], closed: false, wake: null };
+    const mk = (t, priority) => ({ type: 'user', message: { role: 'user', content: t }, parent_tool_use_id: null, ...(priority ? { priority } : {}) });
+    async function* gen() {
+      while (true) {
+        if (inbox.items.length) { yield inbox.items.shift(); continue; }
+        if (inbox.closed) return;
+        await new Promise((r) => { inbox.wake = r; });
+      }
+    }
+    inbox.items.push(mk(text));
+    const q = query({ prompt: gen(), options });
+    running = { q, abort, inbox, mk, workDir };
     send({ type: 'busy', value: true });
     try {
       for await (const msg of q) {
         if (msg.type === 'system' && msg.subtype === 'init') sessionId = msg.session_id;
         send({ type: 'sdk', msg });
+        if (msg.type === 'result') { inbox.closed = true; if (inbox.wake) inbox.wake(); } // 1 回の応答が終わったら、入力を閉じる (残りの送信があれば、先に処理される)
       }
     } catch (e) {
       if (!abort.signal.aborted) send({ type: 'error', message: String(e && e.message || e) });
     } finally {
+      inbox.closed = true; if (inbox.wake) inbox.wake();
       running = null;
       pending.clear();
       send({ type: 'busy', value: false });
     }
+  }
+
+  // 応答の途中に、新しいメッセージを足す: 元の作業は止めず、次の区切りで Claude が取り込む (Claude Desktop と同じ動き)
+  function injectMessage({ text, attachments }) {
+    const r = running;
+    if (!r || !r.inbox || r.inbox.closed) return send({ type: 'inject_rejected' }); // 応答が終わっていた / 模擬: 画面側で、通常の送信に切り替える
+    r.inbox.items.push(r.mk(composePrompt(text, attachments, r.workDir), 'next'));
+    if (r.inbox.wake) r.inbox.wake();
+    send({ type: 'injected' });
   }
 
   // 開発用の模擬応答 (CDOCK_WEB_MOCK=1): 認証なしで画面の動作確認ができる
@@ -1046,6 +1073,7 @@ wss.on('connection', (ws) => {
     else if (m.type === 'interrupt' && running) { try { await running.q.interrupt(); } catch { running.abort.abort(); } }
     else if (m.type === 'setMode' && running) { try { await running.q.setPermissionMode(m.mode); } catch {} }
     else if (m.type === 'newSession') { if (!running) sessionId = null; }
+    else if (m.type === 'inject' && typeof m.text === 'string' && m.text.trim()) injectMessage(m);
     else if (m.type === 'run') startRun(m.id, m.cmd, m.cwd, m.shell);
     else if (m.type === 'run_stop') killTree(runs.get(m.id));
     else if (m.type === 'run_warm') warmShell();

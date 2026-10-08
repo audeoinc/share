@@ -164,6 +164,8 @@ function connect() {
 function handle(m) {
   if (m.type === 'hello') { serverFeatures = new Set(m.features || []); setupShells(m.shells || []); if (m.claude && m.claude.warn) add(el('div', 'err-box', m.claude.warn)); if (m.claude) statusEl.dataset.cc = `${m.claude.source === 'installed' ? 'PC の' : '同梱の'} Claude Code ${m.claude.version}`; if (!cwdEl.value) cwdEl.value = store.get('cwd', m.cwd); lastGoodCwd = cwdEl.value; renderCrumbs(); refreshParent(); loadSessions(); loadRoot(); loadCommands(); loadGit(); watchCwd(); }
   else if (m.type === 'busy') setBusy(m.value);
+  else if (m.type === 'injected') { if (pendingInject) add(userBubble(pendingInject.text, pendingInject.ready)); pendingInject = null; } // 取り込まれたら、いまの応答の途中に、発言として表示する
+  else if (m.type === 'inject_rejected') { const q = pendingInject; pendingInject = null; if (q) { queued = q; renderQueued(); if (!busy) sendQueued(); else toast('いまの応答が終わったら、この発言を送ります'); } } // 応答がちょうど終わっていた場合など
   else if (m.type === 'notice') add(el('div', 'err-box', m.message));
   else if (m.type === 'fs') onFsChange(m);
   else if (m.type === 'run_out') { if (m.id === run.id) runAppend(m.data); }
@@ -252,15 +254,24 @@ function askPermission(p) {
 let queued = null; // { text, ready }
 function renderQueued() {
   const box = $('#queued'); box.textContent = ''; box.hidden = !queued; if (!queued) return;
-  const now = el('button', 'send mini', '今すぐ送信'); now.type = 'button'; now.title = 'いまの応答を止めて、この発言をすぐ送ります';
-  now.onclick = () => { if (busy && ws.readyState === 1) ws.send(JSON.stringify({ type: 'interrupt' })); };
+  const now = el('button', 'send mini', '今すぐ送信'); now.type = 'button'; now.title = 'いまの作業は止めずに、この発言を取り込ませます (Claude が次の区切りで読んで、続けます)';
+  now.onclick = () => injectQueued();
+  const stopSend = el('button', 'ghost mini', '止めて送信'); stopSend.type = 'button'; stopSend.title = 'いまの応答を止めて、この発言を新しい応答として送ります';
+  stopSend.onclick = () => { if (busy && ws.readyState === 1) ws.send(JSON.stringify({ type: 'interrupt' })); };
   const del = el('button', 'ghost mini', '取り消し'); del.type = 'button'; del.title = '待機中の発言を、入力欄に戻します';
   del.onclick = () => unqueue();
-  box.append(el('span', 'qlab', '待機中'), el('span', 'qtx', queued.text.replace(/\s+/g, ' ')), now, del);
+  box.append(el('span', 'qlab', '待機中'), el('span', 'qtx', queued.text.replace(/\s+/g, ' ')), now, stopSend, del);
 }
 function unqueue() { // 待機中の発言を入力欄に戻す (添付も戻す)
   if (!queued) return; const q = queued; queued = null; renderQueued();
   input.value = q.text + (input.value ? '\n' + input.value : ''); autosize(); attachments = [...q.ready, ...attachments]; renderAttach(); input.focus();
+}
+let pendingInject = null; // 取り込みを頼んだ発言 (サーバーが断ったら、通常の送信に戻す)
+function injectQueued() { // 応答を止めずに、待機中の発言を取り込ませる
+  if (!queued || !busy || !ws || ws.readyState !== 1) return;
+  if (!serverFeatures.has('inject')) { toast('サーバーが古いため、取り込み送信はできません。「止めて送信」を使うか、再起動してください'); return; }
+  const q = queued; queued = null; renderQueued(); pendingInject = q;
+  ws.send(JSON.stringify({ type: 'inject', text: q.text, attachments: q.ready.map((a) => (a.rel ? { rel: a.rel } : { path: a.path })), cwd: cwdEl.value.trim() }));
 }
 function sendQueued() {
   if (!queued) return; const q = queued; queued = null; renderQueued();
