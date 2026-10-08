@@ -311,7 +311,7 @@ function injectQueued() { // 応答を止めずに、待機中の発言を取り
   if (!queued || !busy || !ws || ws.readyState !== 1) return;
   if (!serverFeatures.has('inject')) { toast('サーバーが古いため、取り込み送信はできません。「止めて送信」を使うか、再起動してください'); return; }
   const q = queued; queued = null; renderQueued(); pendingInject = q;
-  ws.send(JSON.stringify({ type: 'inject', text: q.text, attachments: q.ready.map((a) => (a.rel ? { rel: a.rel } : { path: a.path })), cwd: cwdEl.value.trim() }));
+  ws.send(JSON.stringify({ type: 'inject', text: q.text, attachments: q.ready.map((a) => (a.rel ? { rel: a.rel } : a.abs ? { abs: a.abs } : { path: a.path })), cwd: cwdEl.value.trim() }));
 }
 function sendQueued() {
   if (!queued) return; const q = queued; queued = null; renderQueued();
@@ -352,7 +352,7 @@ function send(over, opt) {
   store.set('cwd', cwdEl.value); store.set('mode', modeEl.value); store.set('model', modelEl.value);
   turnFailed = false;
   add(userBubble(text, ready));
-  ws.send(JSON.stringify({ type: 'send', text, cwd: cwdEl.value.trim(), permissionMode: modeEl.value, model: modelEl.value || undefined, effort: effortEl.disabled ? undefined : (effortEl.value || undefined), attachments: ready.map((a) => (a.rel ? { rel: a.rel } : { path: a.path })) }));
+  ws.send(JSON.stringify({ type: 'send', text, cwd: cwdEl.value.trim(), permissionMode: modeEl.value, model: modelEl.value || undefined, effort: effortEl.disabled ? undefined : (effortEl.value || undefined), attachments: ready.map((a) => (a.rel ? { rel: a.rel } : a.abs ? { abs: a.abs } : { path: a.path })) }));
   if (!over) { input.value = ''; autosize(); attachments = []; renderAttach(); }
 }
 function autosize() { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 220) + 'px'; }
@@ -1684,7 +1684,72 @@ input.addEventListener('paste', (e) => {
   const files = [...((e.clipboardData && e.clipboardData.files) || [])];
   if (!files.length) return; e.preventDefault(); addFiles(files.map(namePasted));
 });
-$('#attbtn').onclick = () => $('#filepick').click();
+// ---------- PC 内のファイルやフォルダを探して、元の場所のまま添付する (コピーしない)。作業フォルダの外も、たどれる (読み取りと添付だけ) ----------
+const fdlg = { box: $('#fdlg'), list: $('#fdlg-list'), pathIn: $('#fdlg-pathinput'), filter: $('#fdlg-filter'), cur: '', parent: null, dirs: [], files: [], sep: '/', picked: new Map() };
+const fjoin = (base, name) => (base.endsWith('\\') || base.endsWith('/') ? base + name : base + fdlg.sep + name);
+const parentOfPath = (p) => { const s = String(p).replace(/[\\/]+$/, ''); const i = Math.max(s.lastIndexOf('\\'), s.lastIndexOf('/')); return i > 0 ? s.slice(0, i) || s.slice(0, i + 1) : ''; };
+function openFilePicker() {
+  fdlg.picked.clear(); fdlg.box.hidden = false;
+  const start = store.get('fdlgDir', '') || parentOfPath(cwdEl.value.trim()) || cwdEl.value.trim(); // 最初は、作業フォルダの「ひとつ上」(外のファイルを渡したい、という使い方が多いため)
+  fdlgLoad(start, true); fdlg.filter.focus();
+}
+async function fdlgLoad(p, fallback) {
+  try {
+    const d = await api('/api/dirs', { path: p, files: '1', hidden: $('#fdlg-hidden').checked ? '1' : '0', fallback: fallback ? '1' : '0' });
+    Object.assign(fdlg, { cur: d.path, parent: d.parent, dirs: d.dirs, files: d.files || [], sep: d.sep }); store.set('fdlgDir', d.path);
+    fdlg.pathIn.value = d.path; $('#fdlg-up').disabled = !d.parent; fdlg.filter.value = '';
+    const box = $('#fdlg-places'); box.textContent = '';
+    const add = (label, path) => { if (!path) return; const x = el('div', 'dlg-pl', label); x.title = path; x.onclick = () => fdlgLoad(path); box.append(x); };
+    add('作業フォルダ', cwdEl.value.trim()); add('作業フォルダの上', parentOfPath(cwdEl.value.trim())); add('ホーム', d.home); for (const dr of d.drives) add(`ドライブ ${dr}`, dr);
+    fdlgRender();
+  } catch (e) { fdlg.list.textContent = ''; fdlg.list.append(el('div', 'hint', e.message)); }
+}
+function fdlgRender() {
+  const q = fdlg.filter.value.trim().toLowerCase();
+  const dirs = fdlg.dirs.filter((n) => !q || n.toLowerCase().includes(q)); const files = fdlg.files.filter((f) => !q || f.name.toLowerCase().includes(q));
+  fdlg.list.textContent = '';
+  if (!dirs.length && !files.length) fdlg.list.append(el('div', 'hint', q ? '一致するものがありません' : 'このフォルダには、何もありません'));
+  const row = (icon, name, full, isDir, meta) => {
+    const it = el('div', 'dlg-it fdlg-it'); const cb = el('input'); cb.type = 'checkbox'; cb.checked = fdlg.picked.has(full); cb.title = '添付する';
+    cb.onclick = (e) => { e.stopPropagation(); if (cb.checked) fdlg.picked.set(full, { name, isDir }); else fdlg.picked.delete(full); fdlgCount(); };
+    it.append(cb, el('span', '', icon), el('span', 'dn', name)); if (meta) it.append(el('span', 'fm', meta));
+    it.onclick = () => { if (isDir) fdlgLoad(full); else { cb.checked = !cb.checked; cb.onclick({ stopPropagation() {} }); } };
+    fdlg.list.append(it);
+  };
+  for (const n of dirs) row('📁', n, fjoin(fdlg.cur, n), true, 'フォルダ');
+  for (const f of files) row('📄', f.name, fjoin(fdlg.cur, f.name), false, fmtSize(f.size));
+  fdlgCount();
+}
+function fdlgCount() { const n = fdlg.picked.size; const ok = $('#fdlg-ok'); ok.textContent = n ? `添付する (${n})` : '添付する'; ok.disabled = !n; $('#fdlg-cur').textContent = fdlg.cur; }
+function addAbs(full, name, isDir) {
+  if (attachments.some((a) => a.abs === full)) return;
+  if (attachments.length >= MAX_ATTACH) { add(el('div', 'err-box', `添付は ${MAX_ATTACH} 件までです`)); return; }
+  attachments.push({ name: name + (isDir ? '/' : ''), sub: parentOfPath(full) || full, abs: full, dir: isDir, status: 'ready' });
+}
+function fdlgClose() { fdlg.box.hidden = true; input.focus(); }
+$('#fdlg-ok').onclick = () => { for (const [full, v] of fdlg.picked) addAbs(full, v.name, v.isDir); renderAttach(); fdlgClose(); toast('添付しました (コピーせず、元の場所のまま渡します)'); };
+$('#fdlg-folder').onclick = () => { if (!fdlg.cur) return; addAbs(fdlg.cur, fdlg.cur.split(/[\\/]/).filter(Boolean).pop() || fdlg.cur, true); renderAttach(); fdlgClose(); toast('このフォルダを添付しました'); };
+$('#fdlg-up').onclick = () => { if (fdlg.parent) fdlgLoad(fdlg.parent); };
+$('#fdlg-close').onclick = $('#fdlg-cancel').onclick = fdlgClose;
+$('#fdlg-hidden').onchange = () => fdlgLoad(fdlg.cur);
+fdlg.filter.oninput = fdlgRender;
+fdlg.pathIn.onkeydown = (e) => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); fdlgLoad(fdlg.pathIn.value, true); } };
+fdlg.box.addEventListener('keydown', (e) => { if (e.key === 'Escape') fdlgClose(); });
+fdlg.box.addEventListener('mousedown', (e) => { if (e.target === fdlg.box) fdlgClose(); });
+// 📎: アップロード (コピーして渡す) と、PC 内を探して添付 (元の場所のまま) の、どちらかを選ぶ
+let attMenu = null;
+function closeAttMenu() { if (!attMenu) return; attMenu.remove(); attMenu = null; document.removeEventListener('mousedown', attMenuOutside, true); }
+function attMenuOutside(e) { if (attMenu && !attMenu.contains(e.target) && e.target !== $('#attbtn')) closeAttMenu(); }
+$('#attbtn').onclick = () => {
+  if (attMenu) return closeAttMenu();
+  attMenu = el('div', 'ctxmenu attmenu');
+  const item = (label, sub, fn) => { const b = el('div', 'ci'); b.append(el('div', '', label), el('div', 'cs', sub)); b.onclick = () => { closeAttMenu(); fn(); }; attMenu.append(b); };
+  item('PC 内を探して添付', '元の場所のまま渡します (コピーしません)。作業フォルダの外も選べます', openFilePicker);
+  item('ファイルを選んでアップロード', 'ふつうのファイル選択です。コピーを一時フォルダに作って渡します', () => $('#filepick').click());
+  document.body.append(attMenu); const r = $('#attbtn').getBoundingClientRect();
+  attMenu.style.left = `${Math.round(r.left)}px`; attMenu.style.top = `${Math.round(r.top - attMenu.offsetHeight - 6)}px`;
+  document.addEventListener('mousedown', attMenuOutside, true);
+};
 $('#filepick').onchange = () => { addFiles($('#filepick').files); $('#filepick').value = ''; };
 
 // ドラッグ中は画面全体に「ここにドロップ」を表示する

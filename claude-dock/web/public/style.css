@@ -504,3 +504,8 @@ button.danger:disabled { opacity: .45; cursor: default; }
 .grantpop .gp-n { color: var(--muted); font-size: calc(var(--fs, 14px) - 3px); margin-top: 6px; }
 .grantpop .gp-f { display: flex; justify-content: flex-end; margin-top: 8px; }
 .card.perm .btns { flex-wrap: wrap; }
+
+/* PC 内を探して添付 */
+.fdlg-it { gap: 8px; } .fdlg-it input[type=checkbox] { flex: none; margin: 0; }
+.fdlg-it .fm { margin-left: auto; color: var(--muted); font-size: calc(var(--fs, 14px) - 3px); flex: none; }
+.attmenu { min-width: 300px; } .attmenu .ci { padding: 8px 12px; } .attmenu .cs { color: var(--muted); font-size: calc(var(--fs, 14px) - 3px); margin-top: 2px; white-space: normal; max-width: 340px; }

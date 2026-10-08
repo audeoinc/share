@@ -98,6 +98,21 @@
     <div class="dlg-foot"><span id="dlg-cur" class="dlg-cur"></span><button id="dlg-cancel" class="ghost">キャンセル</button><button id="dlg-ok" class="send">このフォルダを開く</button></div>
   </div>
 </div>
+<div id="fdlg" class="dlg" hidden>
+  <div class="dlg-card" role="dialog" aria-label="PC 内を探して添付">
+    <div class="dlg-head"><span>PC 内を探して添付 (元の場所のまま渡します)</span><button id="fdlg-close" class="ghost" title="閉じる">✕</button></div>
+    <div class="dlg-body">
+      <nav class="dlg-side"><div class="dlg-h">場所</div><div id="fdlg-places"></div></nav>
+      <section class="dlg-main">
+        <div class="dlg-path"><button id="fdlg-up" class="ghost" title="ひとつ上へ">↑</button><input id="fdlg-pathinput" spellcheck="false" autocomplete="off"></div>
+        <input id="fdlg-filter" class="dlg-filter" placeholder="名前で絞り込み" autocomplete="off">
+        <div id="fdlg-list" class="dlg-list"></div>
+        <div class="dlg-opts"><label class="dlg-hid"><input type="checkbox" id="fdlg-hidden"> 隠しファイル・フォルダを表示</label></div>
+      </section>
+    </div>
+    <div class="dlg-foot"><span id="fdlg-cur" class="dlg-cur"></span><button id="fdlg-cancel" class="ghost">キャンセル</button><button id="fdlg-folder" class="ghost" title="いま開いているフォルダを、丸ごと添付します">このフォルダを添付</button><button id="fdlg-ok" class="send" disabled>添付する</button></div>
+  </div>
+</div>
 <div id="dropzone" class="dropzone" hidden><div>📎 ここにドロップして添付</div></div>
 <script src="app.js" type="module"></script>
 </body>

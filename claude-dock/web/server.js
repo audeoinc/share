@@ -654,6 +654,16 @@ async function api(url, res, req) {
         if (isDir) dirs.push(e.name);
       }
       dirs.sort((a, b) => a.localeCompare(b, 'ja'));
+      let files; // files=1: 添付用に、ファイルの名前・大きさ・更新日も返す (名前と大きさだけ。中身は返さない)
+      if (url.searchParams.get('files') === '1') {
+        files = [];
+        for (const e of fs.readdirSync(p, { withFileTypes: true }).slice(0, 5000)) {
+          if (!showHidden && e.name.startsWith('.')) continue;
+          if (e.isDirectory()) continue;
+          try { const st = fs.statSync(path.join(p, e.name)); if (st.isFile()) files.push({ name: e.name, size: st.size, mtime: st.mtimeMs }); } catch { /* リンク切れ・権限なし */ }
+        }
+        files.sort((a, b) => a.name.localeCompare(b.name, 'ja'));
+      }
       // Git のリポジトリのフォルダには、印とブランチ名を付ける (.git の HEAD を読むだけ。コマンドは実行しない)
       const headOf = (dir) => {
         try {
@@ -667,7 +677,7 @@ async function api(url, res, req) {
       const upDir = path.dirname(p);
       const up = upDir;
       const drives = process.platform === 'win32' ? 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').map((l) => `${l}:\\`).filter((d) => fs.existsSync(d)) : ['/'];
-      return json(res, { path: p, parent: up !== p ? up : null, dirs, home, drives, sep: path.sep, fellBack, repos, isRepo: headOf(p) !== null });
+      return json(res, { path: p, parent: up !== p ? up : null, dirs, ...(files ? { files } : {}), home, drives, sep: path.sep, fellBack, repos, isRepo: headOf(p) !== null });
     }
     if (url.pathname === '/api/slides') return json(res, await slidesStatus(cwd, url.searchParams.get('path') || ''));
     if (url.pathname === '/api/slide') {
@@ -999,9 +1009,28 @@ wss.on('connection', (ws) => {
   send({ type: 'hello', cwd: DEFAULT_CWD, features: ['attach', 'watch', 'move', 'trash', 'run', 'inject'], claude: { source: CLAUDE.source, version: CLAUDE.version, warn: CLAUDE.warn }, shells: runShell().kind === 'ps' ? [{ id: 'ps', label: runShell().exe === 'pwsh' ? 'PowerShell 7' : 'PowerShell' }, { id: 'cmd', label: 'cmd' }] : [] });
 
   // 添付 (ファイル / フォルダ) の一覧をプロンプトの末尾に付ける。作業フォルダの中と、アップロード用フォルダの中だけを受け付ける
-  function composePrompt(text, attachments, workDir) {
-    const files = (Array.isArray(attachments) ? attachments : []).map((a) => (a && a.rel ? (projectDir(workDir, a.rel) ? projectDir(workDir, a.rel) + path.sep : projectFile(workDir, a.rel)) : uploadedPath(a && a.path))).filter(Boolean).slice(0, 30);
-    const requested = Array.isArray(attachments) ? attachments.length : 0;
+  // PC 内のファイル / フォルダを、元の場所のまま添付する (コピーしない)。作業フォルダの外のものは、読めるように、その会話の間だけ許可する
+  const insideOf = (child, parent) => { const rel = path.relative(parent, child); return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel)); };
+  function externalEntry(abs, workDir) {
+    if (typeof abs !== 'string' || !path.isAbsolute(abs)) return null;
+    try {
+      const real = fs.realpathSync(abs); const st = fs.statSync(real); const base = path.basename(real) || real;
+      const free = insideOf(real, fs.realpathSync(workDir)) || insideOf(real, UPLOAD_ROOT); // すでに許可されている場所は、許可を足さない
+      if (st.isDirectory()) return { path: real + (real.endsWith(path.sep) ? '' : path.sep), grant: free ? null : { key: 'attach', label: `添付した外のフォルダ「${base}」`, dirs: [real] } };
+      if (st.isFile()) return { path: real, grant: free ? null : { key: 'attach', label: `添付した外のファイル「${base}」の読み取り`, rules: [{ toolName: 'Read', ruleContent: real.split(path.sep).join('/') }] } };
+    } catch { /* 見つからない */ }
+    return null;
+  }
+  // 添付 (ファイル / フォルダ) の一覧をプロンプトの末尾に付ける。collect には、外の場所の許可を集める
+  function composePrompt(text, attachments, workDir, collect) {
+    const list = Array.isArray(attachments) ? attachments : [];
+    const files = list.map((a) => {
+      if (!a) return null;
+      if (a.rel) return projectDir(workDir, a.rel) ? projectDir(workDir, a.rel) + path.sep : projectFile(workDir, a.rel);
+      if (a.abs) { const e = externalEntry(a.abs, workDir); if (e && e.grant && collect) collect.push(e.grant); return e ? e.path : null; }
+      return uploadedPath(a.path);
+    }).filter(Boolean).slice(0, 30);
+    const requested = list.length;
     if (files.length < requested) send({ type: 'notice', message: `${requested - files.length} 件の添付を読み込めませんでした (見つからない、または許可された場所の外のファイルです)` });
     if (files.length) text = `${text}\n\n<attachments>\n添付 (ユーザーが添付したもの。ファイルは Read ツールで開けます。末尾が \\ か / のものはディレクトリで、Glob / Grep / Read で中身を確認できます):\n${files.map((f) => `- ${f}`).join('\n')}\n</attachments>`;
     return text;
@@ -1055,7 +1084,7 @@ wss.on('connection', (ws) => {
     if (running) return send({ type: 'error', message: '前の応答がまだ実行中です' });
     const abort = new AbortController();
     const workDir = cwd && fs.existsSync(cwd) ? path.resolve(cwd) : DEFAULT_CWD;
-    text = composePrompt(text, attachments, workDir);
+    const attachGrants = []; text = composePrompt(text, attachments, workDir, attachGrants);
     const options = {
       ...claudeOpt,
       cwd: workDir,
@@ -1077,7 +1106,10 @@ wss.on('connection', (ws) => {
       }),
     };
     if (process.env.CDOCK_WEB_MOCK) return mockTurn(text, abort, permissionMode);
+    if (sessionId) attachGrants.forEach((g) => recordGrant(g)); // 続きの会話: 添付した外の場所の許可を、会話に記録する (新しい会話は、最初の応答の開始時に記録)
     applyGrants(options); // この会話で許可済みのものを、新しい処理にも引き継ぐ
+    { const rules = attachGrants.flatMap((g) => (g.rules || []).map(ruleString)); const dirs = attachGrants.flatMap((g) => g.dirs || []); // この発言そのものにも (新しい会話では、まだ記録がないため)
+      if (rules.length) options.allowedTools = [...new Set([...(options.allowedTools || []), ...rules])]; if (dirs.length) options.additionalDirectories = [...new Set([...(options.additionalDirectories || []), ...dirs])]; }
     // 入力はストリーム (AsyncIterable) で渡す: 応答の途中で足されたメッセージを、止めずに取り込める (inject)
     const inbox = { items: [], closed: false, wake: null };
     const mk = (t, priority) => ({ type: 'user', message: { role: 'user', content: t }, parent_tool_use_id: null, ...(priority ? { priority } : {}) });
@@ -1094,7 +1126,7 @@ wss.on('connection', (ws) => {
     send({ type: 'busy', value: true });
     try {
       for await (const msg of q) {
-        if (msg.type === 'system' && msg.subtype === 'init') sessionId = msg.session_id;
+        if (msg.type === 'system' && msg.subtype === 'init') { const first = !sessionId; sessionId = msg.session_id; if (first) attachGrants.forEach((g) => recordGrant(g)); }
         send({ type: 'sdk', msg });
         if (msg.type === 'result') { inbox.closed = true; if (inbox.wake) inbox.wake(); } // 1 回の応答が終わったら、入力を閉じる (残りの送信があれば、先に処理される)
       }
@@ -1112,7 +1144,8 @@ wss.on('connection', (ws) => {
   function injectMessage({ text, attachments }) {
     const r = running;
     if (!r || !r.inbox || r.inbox.closed) return send({ type: 'inject_rejected' }); // 応答が終わっていた / 模擬: 画面側で、通常の送信に切り替える
-    r.inbox.items.push(r.mk(composePrompt(text, attachments, r.workDir), 'next'));
+    const col = []; const composed = composePrompt(text, attachments, r.workDir, col); col.forEach((g) => recordGrant(g));
+    r.inbox.items.push(r.mk(composed, 'next'));
     if (r.inbox.wake) r.inbox.wake();
     send({ type: 'injected' });
   }
