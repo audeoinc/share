@@ -4,6 +4,7 @@
 #   release\crogue-light.zip  ライト版 (PC の Claude Code を使う。同梱しないので約 250MB 小さい)
 # ZIP の中の構成:
 #   crogue\start.cmd   ダブルクリックで起動 (pkg\start.cmd / pkg\start-light.cmd が元)
+#   crogue\README.md   使い方ガイド (pkg\README.md が元。通常版 / ライト版の部分を切り替える)
 #   crogue\app\        それ以外のすべて (server.js、public\、package.json、README.md など。初回の起動で node_modules もここにできる)
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
@@ -25,6 +26,14 @@ function New-Package([string]$zipName, [bool]$light) {
     }
     $launcher = if ($light) { 'pkg\start-light.cmd' } else { 'pkg\start.cmd' }
     Copy-Item -LiteralPath $launcher -Destination (Join-Path $root 'start.cmd')
+    # 使い方ガイド (初心者向け)。pkg\README.md の <!--full--> / <!--light--> の部分を、版に合わせて取捨する
+    $md = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'pkg\README.md'))
+    $drop = if ($light) { 'full' } else { 'light' }; $keep = if ($light) { 'light' } else { 'full' }
+    $md = [regex]::Replace($md, "(?s)<!--$drop-->.*?<!--/$drop-->?
+?", '')
+    $md = [regex]::Replace($md, "<!--/?$keep-->?
+?", '')
+    [IO.File]::WriteAllText((Join-Path $root 'README.md'), $md, (New-Object Text.UTF8Encoding($false)))
     if ($light) {
       $note = @'
 > **ライト版**: PC にインストール済みの Claude Code を使います (Claude Code 本体は同梱しません)。
