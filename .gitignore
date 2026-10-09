@@ -3,6 +3,9 @@
 # the tree and must not be.
 /release/lineage_v*/
 
+# Installed dependencies are reproducible from the lockfile.
+node_modules/
+
 # Machine-local Claude Code settings: per-developer allow-rules that accumulate
 # local paths, ports, PIDs and one-off commands. Nothing here belongs in a tree
 # that gets moved to another project. Shared settings go in .claude/settings.json.
