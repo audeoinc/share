@@ -1,129 +1,134 @@
-# 画面構成(ワイヤーフレーム)— 配信コンテンツプランナー
+# Screen Layouts (Wireframes) — Contents Planner
 
-## この資料について
+## About this document
 
-配信コンテンツプランナーの画面の構成を、ワイヤーフレームで示す。
+This document shows the screen layout of the Contents Planner as wireframes. It covers deliveries for the US.
 
-- 図: `ccp-wireframes.drawio`(draw.io。1 画面 = 1 ページ)。Confluence では、draw.io のマクロから取り込む。
-- 図の中の黒い丸の番号は、各画面の「画面の要素」の表の番号と対応する。
-- 「関連するユーザーストーリー」の列は、ユーザーストーリーの資料の番号(例: `1-作3` = 1 章の作業の 3 番目)。
-- 図の文言・日付・配信名は、説明のための例。
-- 色は使わず、灰色の濃さで区別する。配信の状態(未起案 / 検討中 / 承認済み / 確定)は、薄い灰色から濃い灰色の 4 段階で表す。
+- Figures: `ccp-wireframes.drawio` (draw.io, one page per screen). In Confluence, import it with the draw.io macro.
+- The black numbered circles in each figure match the numbers in that screen's "Elements" table.
+- The "Related user stories" column lists numbers from the user stories document (for example, `1-作3` = chapter 1, task 3; `作` = task, `確` = check).
+- Text, dates, names and figures in the drawings are examples.
+- The figures use lines and text only. A delivery's status (Not started / In review / Approved / Confirmed) is written as text.
 
-### 画面の一覧
+### Screens
 
-| No. | 画面 | 役割 |
+| No. | Screen | Role |
 | --- | --- | --- |
-| 01 | 配信カレンダー | 月の配信予定を一覧し、配信を作る・開く入口 |
-| 02 | 配信カード(全体) | 1 本の配信の企画を、工程ごとに作り、メール・プッシュの見え方を確かめる |
+| 01 | Delivery calendar | Lists the month's deliveries; the entry point for creating and opening deliveries |
+| 02 | Delivery card (overall) | Builds one delivery step by step, and checks how the email and push look |
 
-(以降の画面は、順次追加する)
-
----
-
-## 01 配信カレンダー
-
-### 目的
-
-月の配信予定をカレンダーで一覧する。各配信の企画の進み具合を色の濃さで見分け、配信を作る・開く入口にする。
-
-### 図
-
-![配信カレンダー](img/01-calendar.png)
-
-### 画面の要素
-
-| No. | 要素 | 内容・操作 | 関連するユーザーストーリー |
-| --- | --- | --- | --- |
-| 1 | 画面名 | 「配信カレンダー」。最初に開く画面 | `1-作1` |
-| 2 | テンプレート | テンプレートの管理画面を開く | `7-作1` 〜 `7-作6` |
-| 3 | 表示言語 | 画面の言語を、日本語 / English で切り替える | `1-作7` `17-作1` |
-| 4 | 自動で下書き | 内容が空の配信を開いたとき、AI による下書きを自動で始めるかどうか(オン / オフ) | `4-作2` |
-| 5 | 新規作成 | 配信を新しく作る(配信カードが開く) | `3-作1` |
-| 6 | 絞り込み | 国(JP / US)、チャネル(メール / プッシュ)、部署(販促 / CRM / EC)、ステータスで絞り込む。「すべて」で解除 | `1-作3` `1-作4` |
-| 7 | 件数 | 絞り込み後の件数 / 全体の件数 | `1-確2` |
-| 8 | 月の移動 | 前の月・次の月に移動する。中央に表示中の年月 | `1-作2` |
-| 9 | 表示の切り替え | 月 / 週 / 一覧。週は当週・翌週だけを並べる。一覧は表の形で並べる | `1-作8` `1-作13` |
-| 10 | 書き出し | 表示中の配信の一覧を、ファイルに書き出す(関係者への共有用) | `1-作13` |
-| 11 | ステータスの凡例 | 未起案 / 検討中 / 承認済み / 確定 と、配信の表示の濃さの対応 | `1-確1` |
-| 12 | 日付の「＋」 | 日付の枠にマウスを重ねると出る。その日の配信を新しく作る。絞り込み中の国・チャネル・部署が、最初から入る | `1-作5` |
-| 13 | 配信 | 時刻と配信名。濃さでステータスを表す。選ぶと、配信カードが開く | `1-作6` `1-確1` `1-確3` |
-| 14 | 今日 | 今日の日付を、塗りつぶしで示す | — |
-
-### 状態
-
-- 配信がない日は、日付だけを表示する。
-- 1 日に複数の配信があるときは、時刻の順に縦に並べる。
-- 前後の月の日付は、薄い文字で表示する。
-
-### 画面の移り変わり
-
-| 操作 | 移り先 |
-| --- | --- |
-| 配信(13)を選ぶ | 02 配信カード(その配信の内容) |
-| 新規作成(5)・日付の「＋」(12) | 02 配信カード(空の配信) |
-| テンプレート(2) | テンプレートの管理(追加予定) |
-| 表示の切り替え(9)で「週」 | 週の表示(追加予定) |
+(More screens will be added.)
 
 ---
 
-## 02 配信カード(全体)
+## 01 Delivery calendar
 
-### 目的
+### Purpose
 
-1 本の配信の企画を、工程(テーマ → テンプレート → ヒーロー → セクション → 制作指示)の順に作る。AI の案と理由を見ながら採用・書き換えを行い、右側でメール・プッシュの見え方を確かめる。
+Lists the month's deliveries on a calendar. Shows each delivery's planning status, and is the entry point for creating and opening deliveries.
 
-カレンダーの上に重ねて開く(背景のカレンダーは、灰色で隠す)。
+### Figure
 
-### 図
+![Delivery calendar](img/01-calendar.png)
 
-![配信カード(全体)](img/02-card.png)
+### Elements
 
-### 画面の構成
-
-| 領域 | 内容 |
-| --- | --- |
-| 上 | 配信名、工程の進み、メニュー、閉じる |
-| 左 | 配信情報と、各工程で決めた内容の要約(上下にスクロール) |
-| 中央 | 工程ごとの内容づくり(タブで切り替える)と、AI チャット |
-| 右 | プレビュー(メール / プッシュ)。右端に、商品情報の折りたたみ |
-| 下 | キャンセル・保存 |
-
-### 画面の要素
-
-| No. | 要素 | 内容・操作 | 関連するユーザーストーリー |
+| No. | Element | Content and actions | Related user stories |
 | --- | --- | --- | --- |
-| 1 | 配信名 | 配信の名前 | `3-作1` |
-| 2 | 工程の進み | 5 つの工程のうち、終わった数(例: 工程 5 / 5) | `3-確1` `3-確2` |
-| 3 | メニュー | 複製(別の日・別の国向け)、削除・取りやめ、変更の履歴 | `3-作4` `3-作5` `3-確4` |
-| 4 | 閉じる | 配信カードを閉じる(保存していない変更があるときは、確認する) | `3-作2` |
-| 5 | すべてAIで下書き | テーマ → テンプレート・メイン画像 → ヘッドライン・コピー → 各セクション → 制作指示を、まとめて AI が下書きする。進行中は、いまどの工程かを示す | `4-作1` `4-確1` `4-確3` |
-| 6 | 配信情報 | 配信名、配信日時(必須)、国、チャネル、部署、ステータス、担当者、制作の締め切り | `3-作1` `3-作6` `3-作7` |
-| 7 | 工程の要約 | テーマとその理由、掲載商品の数、ヘッドライン、コピーと切り口、制作指示。採用した内容を一か所で見渡す | `3-確1` `3-確3` |
-| 8 | 工程のタブ | ① テーマ ② テンプレート ③ ヒーロー ④ セクション ⑤ 制作指示。終わった工程に印(✓)を付ける | `3-確2` |
-| 9 | AIで案を出す | 開いている工程の案を、AI が出す(テーマは 3 案) | `5-作1` |
-| 10 | 採用中の内容 | 採用中の案(書き換えられる)と、AI の理由 | `5-作3` `5-確2` `3-確3` |
-| 11 | 案の一覧 | AI が出した案と、それぞれの理由。「採用」で 10 に入る | `5-作2` `5-確1` |
-| 12 | AI チャット | 開いている工程の案づくりに、指示を加える。よく使う頼み方はボタンで送る。折りたためる | `5-作4` `13-作1` `13-作2` `13-確1` |
-| 13 | メール / プッシュ | プレビューを、メールとプッシュ通知で切り替える | `15-作1` `16-確1` |
-| 14 | PC / スマホ | メールの見え方を、パソコンとスマートフォンで切り替える | `15-作5` |
-| 15 | 倍率 | 拡大・縮小。「全体」で、メール全体が収まる大きさにする | `15-作2` |
-| 16 | 件名・プリヘッダー | メールの件名と、受信一覧に出る短い説明文 | `9-作5` |
-| 17 | プレビュー | テンプレートの構成どおりに、メイン画像、ヘッドライン・コピー、セクション、商品(画像・名前・価格・ボタン)を並べる。プレビューの上で、商品の並べ替え・削除、文言の書き換えができる | `15-作3` `15-確1` 〜 `15-確3` |
-| 18 | 商品情報 | 開くと、掲載商品の一覧と、販売・在庫などの判断材料を表示する(別の図) | `12-作1` `12-作2` |
-| 19 | キャンセル / 保存 | キャンセルは、変更を捨てて閉じる。保存は、内容を保存する | `3-作2` `4-作4` |
+| 1 | Screen name | "Delivery Calendar". The first screen users see | `1-作1` |
+| 2 | Templates | Opens template management | `7-作1` – `7-作6` |
+| 3 | Display language | Switches the UI language between 日本語 and English | `1-作7` `17-作1` |
+| 4 | Auto-draft on open | Whether opening an empty delivery starts an AI draft automatically (On / Off) | `4-作2` |
+| 5 | New | Creates a new delivery (opens a delivery card) | `3-作1` |
+| 6 | Filters | Filters by channel (Email / Push), department (Promotion / CRM / EC) and status. "All" clears a filter | `1-作3` `1-作4` |
+| 7 | Count | Number of deliveries shown / total | `1-確2` |
+| 8 | Month navigation | Moves to the previous or next month. The month shown is in the middle | `1-作2` |
+| 9 | View | Month / Week / List. Week shows only this week and next week. List shows deliveries as a table | `1-作8` `1-作13` |
+| 10 | Export | Exports the deliveries shown to a file, for sharing with stakeholders | `1-作13` |
+| 11 | Status legend | The four statuses, in order of progress | `1-確1` |
+| 12 | "+" on a day | Appears when hovering over a day. Creates a delivery on that day, with the current channel and department filters filled in | `1-作5` |
+| 13 | Delivery | Time, status and name. Selecting it opens the delivery card | `1-作6` `1-確1` `1-確3` |
+| 14 | Today | Today's date is outlined | — |
 
-### 状態
+### States
 
-- 内容が空の配信を開いたとき、「自動で下書き」(01 の 4)がオンなら、5 の下書きが自動で始まる。
-- 左の領域は、内容が長いときに上下にスクロールする。
-- 各領域の幅は、境目をドラッグして調整できる(`3-作3`)。
+- Days without deliveries show only the date.
+- Several deliveries on one day are stacked in time order.
+- Days of the previous and next month are shown in light text.
 
-### 画面の移り変わり
+### Transitions
 
-| 操作 | 移り先 |
+| Action | Goes to |
 | --- | --- |
-| 工程のタブ(8) | 各工程の内容づくり(テーマ / テンプレート / ヒーロー / セクション / 制作指示。追加予定) |
-| プッシュ(13) | プッシュ通知のプレビュー(追加予定) |
-| 商品情報(18) | 商品情報のパネル(追加予定) |
-| 閉じる(4)・キャンセル・保存(19) | 01 配信カレンダー |
+| Select a delivery (13) | 02 Delivery card (that delivery) |
+| New (5) or "+" on a day (12) | 02 Delivery card (an empty delivery) |
+| Templates (2) | Template management (to be added) |
+| View (9): Week | Week view (to be added) |
+
+---
+
+## 02 Delivery card (overall)
+
+### Purpose
+
+Builds one delivery through its steps (Theme → Template → Hero → Sections → Production notes). Users review AI suggestions and their reasons, adopt or edit them, and check how the email and push look. Product info on the right gives the facts for choosing products.
+
+The card opens over the calendar. This figure shows it with Product info open.
+
+### Figure
+
+![Delivery card (overall)](img/02-card.png)
+
+### Layout
+
+| Area | Content |
+| --- | --- |
+| Top | Delivery name, step progress, menu, close |
+| Left | Delivery info and a summary of each step (scrolls vertically) |
+| Middle | Content for each step (switched by tabs), and AI chat |
+| Right | Preview (Email / Push) |
+| Right edge | Product info (collapsible) |
+| Bottom | Cancel and Save |
+
+### Elements
+
+| No. | Element | Content and actions | Related user stories |
+| --- | --- | --- | --- |
+| 1 | Delivery name | The name of the delivery | `3-作1` |
+| 2 | Step progress | How many of the five steps are done (for example, Step 5 / 5) | `3-確1` `3-確2` |
+| 3 | Menu | Duplicate (for another day), delete or cancel, change history | `3-作4` `3-作5` `3-確4` |
+| 4 | Close | Closes the card (asks for confirmation if there are unsaved changes) | `3-作2` |
+| 5 | Draft all with AI | AI drafts everything in order: theme → template and main image → headline and copy → each section → production notes. While running, it shows which step is in progress | `4-作1` `4-確1` `4-確3` |
+| 6 | Delivery info | Name and date & time (required), channel, department, status, owner, production due date | `3-作1` `3-作6` `3-作7` |
+| 7 | Step summary | Theme and its reason, number of products, headline, copy and angle, production notes. Shows everything adopted in one place | `3-確1` `3-確3` |
+| 8 | Step tabs | 1 Theme, 2 Template, 3 Hero, 4 Sections, 5 Production. Finished steps are checked (✓) | `3-確2` |
+| 9 | Suggest with AI | AI suggests options for the open step (three for the theme) | `5-作1` |
+| 10 | Current content | The adopted option (editable) and the AI's reason | `5-作3` `5-確2` `3-確3` |
+| 11 | Options | The AI's options, each with a reason. "Adopt" moves it into 10 | `5-作2` `5-確1` |
+| 12 | AI chat | Adds instructions for the open step. Common requests are buttons. Collapsible | `5-作4` `13-作1` `13-作2` `13-確1` |
+| 13 | Email / Push | Switches the preview between the email and the push notification | `15-作1` `16-確1` |
+| 14 | Desktop / Mobile | Switches how the email is shown: desktop or smartphone | `15-作5` |
+| 15 | Zoom | Zooms in and out. "Fit" shows the whole email | `15-作2` |
+| 16 | Subject and preheader | The email subject and the short text shown in the inbox | `9-作5` |
+| 17 | Preview | Lays out the main image, headline and copy, sections and products (image, name, price, button) as the template defines. Products can be reordered or removed, and text edited, on the preview | `15-作3` `15-確1` – `15-確3` |
+| 18 | Product info | Panel with the facts for choosing products. "›" collapses it | `12-作1` |
+| 19 | Products in this delivery | The delivery's products in email order, with the section each is in. Selecting one shows its details below and outlines it in the preview | `12-作1` `12-作2` `12-確7` |
+| 20 | Key figures | Sales in the last 4 weeks and the change, weeks of stock cover, 12-week sales | `12-確1` `12-確2` `12-確3` |
+| 21 | Sales and stock chart | Weekly sales (bars) and stock (line) over 12 weeks | `12-確4` |
+| 22 | MD plan and attributes | Merchandising policy, promotion period, this week's plan; rating, season, weather fit, new arrival | `12-確5` `12-確6` |
+| 23 | Cancel / Save | Cancel discards changes and closes. Save saves the content | `3-作2` `4-作4` |
+
+### States
+
+- When an empty delivery is opened and "Auto-draft on open" (01, element 4) is On, Draft all with AI (5) starts automatically.
+- The left area scrolls vertically when the content is long.
+- The width of each area can be adjusted by dragging the borders (`3-作3`).
+- When Product info is collapsed, it becomes a narrow bar on the right edge, and the preview gets wider.
+
+### Transitions
+
+| Action | Goes to |
+| --- | --- |
+| Step tabs (8) | Content for each step: Theme / Template / Hero / Sections / Production notes (to be added) |
+| Push (13) | Push notification preview (to be added) |
+| Close (4), Cancel or Save (23) | 01 Delivery calendar |
