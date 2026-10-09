@@ -4,6 +4,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
+const { buildPersistentUdfSql } = require("./lib/deployment_udf_sql");
 
 const javascriptDir = path.resolve(__dirname, "..");
 const packageDir = path.resolve(javascriptDir, "..");
@@ -69,19 +70,14 @@ function replaceVersion(value) {
 function writeDeploymentSql(config) {
   if (!config) return null;
   const bundleUri = replaceVersion(config.gcs_bundle_uri);
-  const sql = [
-    `CREATE OR REPLACE FUNCTION \`${config.bigquery_project}.${config.bigquery_dataset}.${config.bigquery_function}\`(`,
-    "  sql_text STRING,",
-    "  physical_columns_json STRING,",
-    "  options_json STRING",
-    ")",
-    "RETURNS STRING",
-    "LANGUAGE js",
-    `OPTIONS (library=[\"${bundleUri}\"])`,
-    'AS r\"\"\"',
-    "return LineageEngine.analyzeToJson(sql_text, physical_columns_json, options_json);",
-    '\"\"\";'
-  ].join("\n");
+  // The signature lives in scripts/lib/deployment_udf_sql.js so this path cannot
+  // drift from 01_setup_lineage_environment.sql and the redeploy helper.
+  const sql = buildPersistentUdfSql({
+    project: config.bigquery_project,
+    dataset: config.bigquery_dataset,
+    functionName: config.bigquery_function,
+    bundleUri
+  });
   const outputPath = path.join(releaseDir, "sql", "generated", "deploy_persistent_udf.sql");
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   fs.writeFileSync(outputPath, `${sql}\n`, "utf8");
@@ -136,23 +132,35 @@ function main() {
     },
     duration_ms: Date.now() - startedAt.getTime()
   };
-  fs.writeFileSync(path.join(releaseDir, "release_manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  // Written after the deploy step below, so deployment.status is the real
+  // outcome; writeManifest() puts the same bytes in the source tree and the
+  // staged release, so the two copies cannot disagree.
+  function writeManifest() {
+    const body = `${JSON.stringify(manifest, null, 2)}\n`;
+    fs.writeFileSync(path.join(releaseDir, "release_manifest.json"), body, "utf8");
+    fs.writeFileSync(path.join(packageDir, "release_manifest.json"), body, "utf8");
+  }
 
-  console.log("[4/7] Create release ZIP");
-  fs.rmSync(zipPath, { force: true });
-  run("zip", ["-qr", zipPath, releaseName], { cwd: path.dirname(releaseDir) });
-
+  // The bundle and the function go out before the manifest is written, so the
+  // recorded deployment.status is the outcome rather than an intention, and the
+  // ZIP is built last and therefore carries that same manifest.
   if (deploy) {
-    console.log("[5/7] Upload bundle and ZIP to GCS");
+    console.log("[4/7] Upload bundle to GCS and deploy persistent BigQuery UDF");
     run("gsutil", ["cp", stagedBundle, replaceVersion(config.gcs_bundle_uri)]);
-    run("gsutil", ["cp", zipPath, replaceVersion(config.gcs_zip_uri)]);
-
-    console.log("[6/7] Deploy persistent BigQuery UDF");
     run("bq", ["query", "--use_legacy_sql=false", fs.readFileSync(deploymentSql, "utf8")]);
     manifest.deployment.status = "DEPLOYED";
   } else {
-    console.log("[5/7] GCS upload skipped (use --deploy)");
-    console.log("[6/7] BigQuery deploy skipped (use --deploy)");
+    console.log("[4/7] GCS upload and BigQuery deploy skipped (use --deploy)");
+  }
+
+  console.log("[5/7] Write release manifest");
+  writeManifest();
+
+  console.log("[6/7] Create release ZIP");
+  fs.rmSync(zipPath, { force: true });
+  run("zip", ["-qr", zipPath, releaseName], { cwd: path.dirname(releaseDir) });
+  if (deploy) {
+    run("gsutil", ["cp", zipPath, replaceVersion(config.gcs_zip_uri)]);
   }
 
   console.log("[7/7] Build Everything completed");

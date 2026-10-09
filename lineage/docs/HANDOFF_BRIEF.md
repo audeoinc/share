@@ -36,7 +36,7 @@ BigQuery の SQL を解析して「**出力列 ← 物理テーブル.物理列*
 |---|---|
 | 版 | `1.5.0-032`（`release_manifest.json` / `javascript/package.json`） |
 | バンドル | `sha256 = eecd0bc82f1d2ca01db8b4f727ee0c35510057afefe086a6f9ef33b92d655ba4` / 478,961 bytes |
-| テスト | `test:release` 60 本 ＋ ゴールデン 48 ケース PASS |
+| テスト | `test:release` 61 本 ＋ ゴールデン 48 ケース PASS |
 | 実測性能 | **初期ロード 11 分 22 秒 / 日次 4 分** |
 | 日次の新規指紋 | **3〜22 件/日**（変更前は 1,200〜1,350 件/日） |
 
@@ -46,7 +46,7 @@ ZIP を展開するだけです。**依存パッケージはありません**（
 
 ```
 cd javascript
-npm test                 # build → bundle 検証 → 回帰 60 本
+npm test                 # build → bundle 検証 → 回帰 61 本
 npm run build:everything # 上記 ＋ リリース ZIP の作り直し
 ```
 
@@ -168,7 +168,7 @@ static テーブルが際限なく重くなる**ためです。
 
 | スクリプト | 答える問い |
 |---|---|
-| `10_pending_analysis_workload.sql` | 次の実行は何件処理するか（1〜3）／滞留はどれだけか（4）／日次の新規発生数は（5・7）／指紋は再利用されているか（6）／数字は使い捨てか名前か（8） |
+| `10_pending_analysis_workload.sql` | 次の実行は何件処理するか（1〜3）／滞留はどれだけか（4）／日次の新規発生数は（5・7）／指紋は再利用されているか（6）／数字は使い捨てか名前か（8）／**新規オブジェクトの実物はどれか**（9）／**次の実行が解析する一覧**（10） |
 | `11_analysis_batch_diagnostics.sql` | バッチごとの所要時間（1）／失敗したステートメント（2）／**時間はどこに消えたか**（3・4）／**同じ形が何回流れたか**（5） |
 | `12_ephemeral_sql_similarity.sql` | 指紋をもっと緩めたら何件畳めるか、それは安全か（1〜3）／数字の正体は（4・5）／ルール別の比較（6） |
 | `13_sql_pattern_drift.sql` | **どのモデルの SQL が毎日変わっているか**（0〜3）／**今日の新規に畳む余地はあるか**（4）／**違っている数字は何か**（5・6） |
@@ -228,8 +228,11 @@ static テーブルが際限なく重くなる**ためです。
      ディレクトリ名も同様（版数由来の `lineage_v<version>` は環境固有ではないので可）
 2. **1 変更 = 実装 ＋ 番号付き回帰テスト ＋ CHANGELOG 追記**。
    テストは `javascript/test/test_v1_5_0_0XX.js` を新規作成し、`package.json` の
-   `test:release` チェーンの**先頭**に追加（現在の最新は 079）
+   `test:release` チェーンの**先頭**に追加（現在の最新は 080）
 3. **エンジンを変えたらバンドル再ビルド → `release_manifest.json` 更新 → GCS 差し替え**
+   - **UDF の署名を変えるときは `javascript/scripts/lib/deployment_udf_sql.js` を直す**。
+     01 setup・再配備ヘルパ・03 の呼び出しが同じ署名を使っているので、どれかを忘れると
+     `test_v1_5_0_080` が落ちる。経緯は `docs/UDF_DEPLOYMENT_CONSISTENCY.md`
 4. SQL の `__T_*__` プレースホルダは `lnge_render_dynamic_sql` で解決する。
    修飾名はバッククォートで囲む（チームの規約）
 

@@ -24,6 +24,7 @@ Generated: 2026-07-28
 - `docs/SUPPORTED_SQL.md`
 - `docs/SYSTEM_DESIGN.md`
 - `docs/TROUBLESHOOTING.md`
+- `docs/UDF_DEPLOYMENT_CONSISTENCY.md`
 - `docs/UDF_DESIGN.md`
 - `docs/UDF_BUNDLE_BUILD_PROCESS.md`
 - `docs/adr/ADR-0001-use-javascript-udf.md`
