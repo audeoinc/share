@@ -91,7 +91,7 @@ draw.io: `drawio/01-calendar.drawio`
 
 Builds one delivery through its steps (Theme → Template → Hero → Sections → Production notes). Users review AI suggestions and their reasons, adopt or edit them, and check how the email looks. Product info on the right gives the facts for choosing products.
 
-The card opens over the calendar. This figure shows the Theme step, with Product info open. Screens 03–06 show the other steps; the parts outside the middle area are the same as here.
+The card opens over the calendar. This figure shows the Theme step. Screens 03–06 show the other steps; the parts outside the middle area (including Product info) are the same as here.
 
 ### Figure
 
@@ -143,7 +143,7 @@ draw.io: `drawio/02-card-theme.drawio`
 - When an empty delivery is opened and "Auto-draft on open" is On, Draft all with AI (5) starts automatically. It can be stopped to open the card without waiting.
 - The left area scrolls vertically when the content is long.
 - The width of each area can be adjusted by dragging the borders.
-- When Product info is collapsed, it becomes a narrow bar on the right edge, and the preview gets wider (as in 03–06).
+- Product info stays open on every step (02–07). When collapsed with "›", it becomes a narrow bar on the right edge, and the preview gets wider.
 
 ---
 
