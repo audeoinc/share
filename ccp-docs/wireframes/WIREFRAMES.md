@@ -4,7 +4,7 @@
 
 This document shows the screen layout of the Contents Planner as wireframes. It covers deliveries for the US.
 
-- Figures: `ccp-wireframes.drawio` (draw.io, one page per screen). In Confluence, import it with the draw.io macro.
+- Figures: one draw.io file per screen, in `drawio/` (for example, `drawio/01-calendar.drawio`). In Confluence, import each file with the draw.io macro.
 - The black numbered circles in each figure match the numbers in that screen's "Elements" table.
 - Text, dates, names and figures in the drawings are examples.
 - The figures use lines and text only. A delivery's status (Not started / In review / Approved / Confirmed) is written as text.
@@ -54,6 +54,8 @@ Lists the month's deliveries on a calendar, with each delivery's planning status
 
 ![Delivery calendar](img/01-calendar.png)
 
+draw.io: `drawio/01-calendar.drawio`
+
 ### Elements
 
 | No. | Element | Content and actions |
@@ -94,6 +96,8 @@ The card opens over the calendar. This figure shows the Theme step, with Product
 ### Figure
 
 ![Delivery card — Theme](img/02-card-theme.png)
+
+draw.io: `drawio/02-card-theme.drawio`
 
 ### Layout
 
@@ -153,6 +157,8 @@ Chooses the email layout (template) for the delivery. When the template changes,
 
 ![Delivery card — Template](img/03-card-template.png)
 
+draw.io: `drawio/03-card-template.drawio`
+
 ### Elements
 
 Parts outside the middle area are the same as in 02.
@@ -179,6 +185,8 @@ Chooses the main image (hero) at the top of the email.
 
 ![Delivery card — Hero](img/04-card-hero.png)
 
+draw.io: `drawio/04-card-hero.drawio`
+
 ### Elements
 
 | No. | Element | Content and actions |
@@ -204,6 +212,8 @@ Writes each section's heading and copy, and chooses its products. Shows how ofte
 ### Figure
 
 ![Delivery card — Sections](img/05-card-sections.png)
+
+draw.io: `drawio/05-card-sections.drawio`
 
 ### Elements
 
@@ -236,6 +246,8 @@ Writes notes for the production team, and hands the delivery over to production.
 
 ![Delivery card — Production notes](img/06-card-production.png)
 
+draw.io: `drawio/06-card-production.drawio`
+
 ### Elements
 
 | No. | Element | Content and actions |
@@ -259,6 +271,8 @@ Builds a push notification. A push is its own delivery card (its own owner, stat
 ### Figure
 
 ![Delivery card — Push](img/07-card-push.png)
+
+draw.io: `drawio/07-card-push.drawio`
 
 ### Elements
 
@@ -293,6 +307,8 @@ Shows one week of deliveries side by side, so the team can review the week as a 
 
 ![Week view & review](img/08-week-review.png)
 
+draw.io: `drawio/08-week-review.drawio`
+
 ### Elements
 
 | No. | Element | Content and actions |
@@ -325,6 +341,8 @@ Shows this week and the previous week as small previews, to see how often each p
 
 ![Compare weeks](img/09-compare-weeks.png)
 
+draw.io: `drawio/09-compare-weeks.drawio`
+
 ### Elements
 
 | No. | Element | Content and actions |
@@ -350,6 +368,8 @@ Creates and edits email layouts (templates). Push templates are managed on the P
 ### Figure
 
 ![Template management](img/10-templates.png)
+
+draw.io: `drawio/10-templates.drawio`
 
 ### Elements
 
@@ -380,6 +400,8 @@ Looks back at results after delivery, to use in planning the next weeks: which t
 ### Figure
 
 ![Results](img/11-results.png)
+
+draw.io: `drawio/11-results.drawio`
 
 ### Elements
 
@@ -412,6 +434,8 @@ Lists changes that affect upcoming deliveries (out of stock, MD policy changes, 
 
 ![Alerts](img/12-alerts.png)
 
+draw.io: `drawio/12-alerts.drawio`
+
 ### Elements
 
 | No. | Element | Content and actions |
@@ -435,6 +459,8 @@ Shows deliveries as a table, for checking many deliveries at once and sharing wi
 ### Figure
 
 ![List view](img/13-list.png)
+
+draw.io: `drawio/13-list.drawio`
 
 ### Elements
 
