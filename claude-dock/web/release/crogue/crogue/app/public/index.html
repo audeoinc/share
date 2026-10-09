@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Rogue</title>
+<link rel="icon" href="icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><img src="icon.png" alt="" width="20" height="20"><span>Claude Rogue</span></div>
+  <div class="spacer"></div>
+  <button id="docsbtn" class="ghost docsbtn" type="button" title="ドキュメント (公式ドキュメントや社内資料へのリンク)"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 5A1.5 1.5 0 0 1 4 3.5h5A3 3 0 0 1 12 6.5V20a2.2 2.2 0 0 0-2.2-2.2H4A1.5 1.5 0 0 1 2.5 16.3V5z"/><path d="M21.5 5A1.5 1.5 0 0 0 20 3.5h-5A3 3 0 0 0 12 6.5V20a2.2 2.2 0 0 1 2.2-2.2H20a1.5 1.5 0 0 0 1.5-1.5V5z"/></svg><span>ドキュメント</span></button>
+  <span class="fs" title="文字サイズ (画面全体)"><button id="fs-down" class="ghost">A−</button><button id="fs-up" class="ghost">A＋</button></span>
+  <button id="density" class="ghost" title="行間">≡</button>
+  <button id="theme" class="ghost theme" title="テーマ: 自動 / ライト / ダーク">◐</button>
+  <select id="model" title="モデル">
+    <option value="">モデル: 既定</option>
+    <option value="claude-opus-5-5">Opus 5.5 (高性能)</option>
+    <option value="claude-sonnet-5-5">Sonnet 5.5 (軽快)</option>
+    <option value="claude-haiku-4-5">Haiku 4.5 (最軽量)</option>
+  </select>
+  <select id="effort" hidden><option value="">既定</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select>
+  <button id="effortbtn" class="ghost effortbtn" type="button">effort</button>
+  <select id="mode" title="権限モード">
+    <option value="default">確認しながら進める</option>
+    <option value="acceptEdits">編集は自動で許可</option>
+    <option value="plan">プランモード</option>
+    <option value="auto">自動 (分類器が判断)</option>
+  </select>
+</header>
+<div class="shell">
+  <aside class="side" id="side">
+    <div class="grip grip-r" id="grip-side" role="separator" aria-orientation="vertical" aria-label="サイドバーの幅" tabindex="0" title="ドラッグで幅を変更 / ダブルクリックで元に戻す"></div>
+    <div class="locbar">
+      <div class="cwdbar">
+        <button type="button" id="cwd-up" class="ghost cwdup" title="一つ上のフォルダへ (Alt+↑)">↑</button>
+        <div id="crumbs" class="crumbs" title="作業フォルダ (空いている所をクリックすると、パスを入力できます)"></div>
+        <input id="cwd" list="recent-dirs" spellcheck="false" autocomplete="off" placeholder="作業フォルダのパス" hidden>
+        <datalist id="recent-dirs"></datalist>
+        <button type="button" id="cwd-browse" class="ghost cwdbrowse" title="作業フォルダを選択">📁</button>
+      </div>
+      <div class="repoline" hidden><button id="gitbranch" class="gitbranch" type="button" title="ブランチを切り替え / 新規作成" disabled></button></div>
+      <div id="branchmenu" class="branchmenu" hidden></div>
+    </div>
+    <div class="tabs"><button id="tab-sessions" class="on">会話</button><button id="tab-files">ファイル</button><button id="tab-git">変更 <span id="gitcount" class="badge" hidden></span></button><button id="tab-run">実行</button></div>
+    <div id="pane-sessions" class="pane"><button id="new" class="newbtn">＋ 新しい会話</button><input id="sessq" class="sessq" placeholder="会話を検索 (題名・フォルダ・ブランチ)" autocomplete="off" spellcheck="false"><div id="sessions"></div></div>
+    <div id="pane-files" class="pane" hidden>
+      <div class="fsearch"><input id="fsearch" placeholder="ファイルを検索 (Ctrl+P)" autocomplete="off" spellcheck="false"><button id="fsmode" class="ghost" title="ファイル名 / 中身 を切り替え">名前</button><button id="treerefresh" class="ghost" type="button" title="更新">↻</button><button id="trashbtn" class="ghost" type="button" title="ごみ箱 (削除したファイルの復元)">🗑</button></div>
+      <div id="fresults" hidden></div>
+      <div id="tree"></div>
+    </div>
+    <div id="pane-run" class="pane" hidden>
+      <div class="runbar"><select id="runshell" hidden title="実行するシェル (記憶されます)"></select><span class="runfield"><input id="runcmd" placeholder="コマンド (例: npm test)  Enter で実行" autocomplete="off" spellcheck="false"><button id="runclr" class="clr" type="button" hidden title="入力を消す" aria-label="入力を消す">×</button></span><button id="runbtn" class="send" type="button">実行</button></div>
+      <div class="runmeta"><span id="runstat" class="runstat">作業フォルダで実行します (入力待ちのコマンドは非対応)</span><span class="sp"></span><button id="runsend" class="ghost mini" type="button" disabled title="コマンドと出力の末尾を、会話の入力欄に入れます">Claude に渡す</button><button id="runclear" class="ghost mini" type="button" disabled>クリア</button></div>
+      <pre id="runout" class="runout"></pre>
+    </div>
+    <div id="pane-git" class="pane" hidden><div class="githead"><span class="gitnote">Git の変更 (ブランチは上のバーで切り替え)</span><button id="gitrefresh" class="ghost" title="更新">↻</button></div>
+      <div id="gitlist"></div>
+      <div id="commitbox" class="commitbox" hidden>
+        <textarea id="commitmsg" rows="2" placeholder="コミットメッセージ (Ctrl+Enter で確定)"></textarea>
+        <div class="crow"><span id="commitnote" class="cnote"></span><button id="suggestbtn" class="ghost" type="button" disabled title="ステージ済みの差分を Claude (Haiku) に送って、メッセージの案を作ります">✨ 提案</button><button id="commitbtn" class="send" disabled>コミット</button></div>
+      </div></div>
+  </aside>
+  <section class="main">
+    <div id="branchwarn" class="branchwarn" hidden></div>
+    <main id="chat" class="chat"><div class="empty" id="empty"><img src="icon.png" width="44" height="44" alt=""><h1>何をしましょうか？</h1><p>「ファイル」タブでクリックするとプレビュー、＠ で入力欄に @パス を入れられます。</p></div></main>
+    <footer class="composer">
+      <div id="queued" class="queued" hidden></div>
+      <div class="box">
+        <div id="slash" class="slash" hidden></div>
+        <div id="attach" class="attach" hidden></div>
+        <textarea id="input" rows="1" placeholder="Claude に指示する (Enter で送信 / Shift+Enter で改行 / !コマンド で実行)"></textarea>
+        <div class="actions"><button id="attbtn" class="ghost attbtn" title="ファイルを添付 (ドラッグ＆ドロップ / Ctrl+V の貼り付けも可)">📎</button><input id="filepick" type="file" multiple hidden><span id="status" class="status"></span><span id="modechip" class="modechip" hidden></span><button id="grantchip" class="ghost mini grantchip" type="button" hidden></button><button id="stop" class="stop" hidden>■ 停止</button><button id="send" class="send">送信</button></div>
+      </div>
+    </footer>
+  </section>
+  <aside id="preview" class="preview" hidden>
+    <div class="grip grip-l" id="grip-prev" role="separator" aria-orientation="vertical" aria-label="プレビューの幅" tabindex="0" title="ドラッグで幅を変更 / ダブルクリックで元に戻す"></div>
+    <div class="phead"><span id="pname" class="pname"></span><button id="pedit" class="ghost" hidden title="Monaco エディタで編集します (Ctrl+S で保存)">✎ 編集</button><button id="psave" class="send" hidden title="保存 (Ctrl+S)">保存</button><button id="pcancel" class="ghost" hidden title="編集を終えてプレビューに戻る">やめる</button><button id="pmode" class="ghost" hidden title="表示 / ソースの切り替え">ソース</button><button id="pinsert" class="ghost" title="入力欄に @パス を挿入">＠ 挿入</button><button id="pclose" class="ghost" title="閉じる">✕</button></div>
+    <div id="pbody" class="pbody"></div>
+  </aside>
+</div>
+<div id="dlg" class="dlg" hidden>
+  <div class="dlg-card" role="dialog" aria-label="フォルダを選択">
+    <div class="dlg-head"><span>フォルダを選択</span><button id="dlg-close" class="ghost" title="閉じる">✕</button></div>
+    <div class="dlg-body">
+      <nav class="dlg-side"><div class="dlg-h">場所</div><div id="dlg-places"></div><div class="dlg-h">最近使った</div><div id="dlg-recent"></div></nav>
+      <section class="dlg-main">
+        <div class="dlg-path"><button id="dlg-up" class="ghost" title="ひとつ上へ">↑</button><input id="dlg-pathinput" spellcheck="false" autocomplete="off"></div>
+        <div id="dlg-note" class="dlg-note" hidden></div>
+        <input id="dlg-filter" class="dlg-filter" placeholder="フォルダ名で絞り込み (Enter で先頭を開く)" autocomplete="off">
+        <div id="dlg-list" class="dlg-list"></div>
+        <div class="dlg-opts"><label class="dlg-hid"><input type="checkbox" id="dlg-hidden"> 隠しフォルダを表示</label><label class="dlg-hid" id="dlg-onlyrepos-label" hidden><input type="checkbox" id="dlg-onlyrepos"> 🔀 Git のリポジトリだけ表示</label></div>
+      </section>
+    </div>
+    <div class="dlg-foot"><span id="dlg-cur" class="dlg-cur"></span><button id="dlg-cancel" class="ghost">キャンセル</button><button id="dlg-ok" class="send">このフォルダを開く</button></div>
+  </div>
+</div>
+<div id="fdlg" class="dlg" hidden>
+  <div class="dlg-card" role="dialog" aria-label="PC 内を探して添付">
+    <div class="dlg-head"><span>PC 内を探して添付 (元の場所のまま渡します)</span><button id="fdlg-close" class="ghost" title="閉じる">✕</button></div>
+    <div class="dlg-body">
+      <nav class="dlg-side"><div class="dlg-h">場所</div><div id="fdlg-places"></div></nav>
+      <section class="dlg-main">
+        <div class="dlg-path"><button id="fdlg-up" class="ghost" title="ひとつ上へ">↑</button><input id="fdlg-pathinput" spellcheck="false" autocomplete="off"></div>
+        <input id="fdlg-filter" class="dlg-filter" placeholder="名前で絞り込み" autocomplete="off">
+        <div id="fdlg-list" class="dlg-list"></div>
+        <div class="dlg-opts"><label class="dlg-hid"><input type="checkbox" id="fdlg-hidden"> 隠しファイル・フォルダを表示</label></div>
+      </section>
+    </div>
+    <div class="dlg-foot"><span id="fdlg-cur" class="dlg-cur"></span><button id="fdlg-cancel" class="ghost">キャンセル</button><button id="fdlg-folder" class="ghost" title="いま開いているフォルダを、丸ごと添付します">このフォルダを添付</button><button id="fdlg-ok" class="send" disabled>添付する</button></div>
+  </div>
+</div>
+<div id="dropzone" class="dropzone" hidden><div>📎 ここにドロップして添付</div></div>
+<script src="app.js" type="module"></script>
+</body>
+</html>
