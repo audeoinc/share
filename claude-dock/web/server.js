@@ -494,11 +494,13 @@ async function getInit(cwd) {
   if (cmdCache.has(cwd)) return cmdCache.get(cwd);
   async function* idle() { await new Promise(() => {}); }
   const q = query({ prompt: idle(), options: { ...claudeOpt, cwd, settingSources: ['user', 'project', 'local'], systemPrompt: { type: 'preset', preset: 'claude_code' } } });
-  let result = { commands: FALLBACK_COMMANDS, models: [] };
+  let result = { commands: FALLBACK_COMMANDS, models: [], agents: [], mcp: [] };
   try {
     const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 20000));
-    const [cmds, models] = await Promise.race([Promise.all([q.supportedCommands(), q.supportedModels()]), timeout]);
+    const [cmds, models, mcp, agents] = await Promise.race([Promise.all([q.supportedCommands(), q.supportedModels(), q.mcpServerStatus().catch(() => []), q.supportedAgents().catch(() => [])]), timeout]);
     result = {
+      agents: (Array.isArray(agents) ? agents : []).map((a) => ({ name: a.name, description: String(a.description || '').slice(0, 200) })),
+      mcp: (Array.isArray(mcp) ? mcp : []).map((m) => ({ name: m.name, status: m.status, source: m.source || '', error: m.error || '' })),
       commands: Array.isArray(cmds) && cmds.length ? cmds.map((c) => ({ name: c.name, description: c.description || '', argumentHint: c.argumentHint || '' })) : FALLBACK_COMMANDS,
       models: (Array.isArray(models) ? models : []).map((m) => ({ value: m.value, resolved: m.resolvedModel || m.value, name: m.displayName || m.value, description: m.description || '', efforts: m.supportsEffort === false ? [] : (Array.isArray(m.supportedEffortLevels) ? m.supportedEffortLevels : []) })),
     };
@@ -691,6 +693,16 @@ async function api(url, res, req) {
       if (q.trim().length < 2) return json(res, { hits: [], truncated: false, short: true });
       return json(res, await grepFiles(cwd, q, url.searchParams.get('case') === '1'));
     }
+    if (url.pathname === '/api/env') { // 環境の情報 (移した先で、うまく動かないときに、画面だけで状況が分かるように)。秘密の値 (合言葉・API キー) は含めない
+      const pkg = readJsonFile(path.join(here, 'package.json')) || {};
+      const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => /^CDOCK_/.test(k) && !/TOKEN|KEY|SECRET|PASSWORD/i.test(k)));
+      return json(res, { app: { name: 'Claude Rogue', version: pkg.version || '', node: process.version, os: `${os.type()} ${os.release()} (${os.arch()})`, dir: here, mode: LIGHT ? '配布版 (PC の Claude Code を使う)' : '開発版 (Claude Code 本体を同梱)' },
+        claude: { source: CLAUDE.source, version: CLAUDE.version, path: CLAUDE.path, warn: CLAUDE.warn, sdk: SDK_VERSION, expected: SDK_CC_VERSION },
+        paths: { cwd, config: CONFIG_DIR, links: LINKS_USER_FILE, status: STATUS_FILE, claudeHome: path.join(os.homedir(), '.claude') },
+        statusItems: loadStatusItems().map((it) => ({ id: it.id, label: it.label, command: it.command, intervalSec: it.intervalSec })), env });
+    }
+    if (url.pathname === '/api/extensions') return json(res, { dir: EXT_DIR, items: loadExtensions().map(extPublic) });
+    if (url.pathname === '/api/ext') { const g = await getInit(cwd); return json(res, { commands: g.commands.map((c) => c.name), agents: g.agents || [], mcp: g.mcp || [] }); }
     if (url.pathname === '/api/commands') return json(res, (await getInit(cwd)).commands);
     if (url.pathname === '/api/models') return json(res, (await getInit(cwd)).models);
     if (url.pathname === '/api/git/status') return json(res, await gitStatus(cwd));
@@ -799,6 +811,16 @@ const server = http.createServer((req, res) => {
   }
   if (!safeEqual(cookieToken(req), TOKEN)) { res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' }); return res.end('起動時に表示された URL (?t=...) から開いてください。'); }
   if (url.pathname === '/api/upload' && req.method === 'POST') return receiveUpload(req, res);
+  const xm = /^\/ext\/([^/]+)\/(.+)$/.exec(url.pathname); // 拡張のファイル (設定フォルダ内に限る)
+  if (xm) {
+    const nm = decodeURIComponent(xm[1]); const base = path.join(EXT_DIR, nm); const f = path.normalize(path.join(base, decodeURIComponent(xm[2])));
+    if (!EXT_NAME_RE.test(nm) || !f.startsWith(base + path.sep)) { res.writeHead(403); return res.end('forbidden'); }
+    return fs.readFile(f, (err, buf) => {
+      if (err) { res.writeHead(404); return res.end('not found'); }
+      res.writeHead(200, { 'Content-Type': MIME[path.extname(f)] || 'application/octet-stream', 'Cache-Control': 'no-store' });
+      res.end(buf);
+    });
+  }
   const mm = /^\/vendor\/(monaco|mermaid)\/(.+)$/.exec(url.pathname); // 同梱ライブラリの配信 (Monaco / Mermaid)
   if (mm) {
     const base = mm[1] === 'monaco' ? path.join(here, 'node_modules', 'monaco-editor', 'min') : path.join(here, 'node_modules', 'mermaid', 'dist');
@@ -852,6 +874,7 @@ function saveLinks(b) {
 
 // ---- Claude Code 本体。既定は SDK に同梱のもの。環境変数 CDOCK_CLAUDE_PATH で、PC にインストール済みのものを使える
 //      (パスを指定、または auto で探す)。配布版の start.cmd は、同梱のコピーを入れず (約 250MB 減)、この指定で起動する
+const SDK_VERSION = (() => { try { return JSON.parse(fs.readFileSync(path.join(here, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'package.json'), 'utf8')).version || ''; } catch { return ''; } })();
 const SDK_CC_VERSION = (() => { try { return JSON.parse(fs.readFileSync(path.join(here, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'package.json'), 'utf8')).claudeCodeVersion || ''; } catch { return ''; } })();
 function resolveClaude() {
   const want = (process.env.CDOCK_CLAUDE_PATH || '').trim();
@@ -874,6 +897,65 @@ function resolveClaude() {
       : `PC の Claude Code (${ver}) は、この画面が想定するバージョン (${SDK_CC_VERSION}) より新しいです。通常は動きますが、新しい機能が画面に出ないことがあります。動作がおかしい場合は、Claude Code を ${SDK_CC_VERSION} にそろえるか、この画面の新しい版を入手してください`;
   return { source: 'installed', path: exe, version: ver, warn };
 }
+// ---- 状態の欄 (差し込み口): 各自の PC の設定フォルダの status.json に書いた「コマンド」の出力を、画面の下に出す。
+//      例: { "items": [ { "id": "usage", "label": "トークン", "command": "powershell -NoProfile -File C:\\tools\\usage.ps1", "intervalSec": 60 } ] }
+//      コマンドは、この設定ファイルに書いたものだけを実行する (画面からは、コマンドの内容を指定できない)。
+const STATUS_FILE = path.join(CONFIG_DIR, 'status.json');
+// ---- 拡張 (extensions): 設定フォルダの extensions\<名前>\ に置いた manifest.json / ext.js / ext.css を、画面が読み込む。
+//      アプリ本体 (app\) の外にあるので、アプリを更新 (上書き) しても残る。collect のコマンドが出す JSON を、ext.js が受け取って描く。
+//      manifest.json: { "title": "使用量", "collect": { "command": "node collect.mjs", "intervalSec": 60, "timeoutSec": 20, "afterTurn": true } }
+const EXT_DIR = path.join(CONFIG_DIR, 'extensions');
+const EXT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
+function loadExtensions() {
+  let names = []; try { names = fs.readdirSync(EXT_DIR, { withFileTypes: true }).filter((d) => d.isDirectory() && EXT_NAME_RE.test(d.name)).map((d) => d.name); } catch { return []; }
+  return names.slice(0, 12).map((name) => {
+    const dir = path.join(EXT_DIR, name); const mf = path.join(dir, 'manifest.json'); const o = { name, dir, title: name, js: false, css: false, collect: null, error: '' };
+    if (!fs.existsSync(mf)) return { ...o, error: 'manifest.json がありません' };
+    let m; try { m = JSON.parse(fs.readFileSync(mf, 'utf8').replace(/^﻿/, '')); } catch (e) { return { ...o, error: 'manifest.json が読めません: ' + e.message }; }
+    o.title = cleanText(m.title || name, 30); o.js = fs.existsSync(path.join(dir, 'ext.js')); o.css = fs.existsSync(path.join(dir, 'ext.css'));
+    if (m.collect && m.collect.command) o.collect = { id: 'ext:' + name, command: String(m.collect.command).slice(0, 2000), intervalSec: Math.max(15, Number(m.collect.intervalSec) || 60), timeoutSec: Math.min(120, Math.max(2, Number(m.collect.timeoutSec) || 20)), afterTurn: m.collect.afterTurn !== false };
+    if (!o.js && !o.collect) o.error = 'ext.js も collect もありません (何も表示されません)';
+    return o;
+  });
+}
+function extPublic(e) { return { name: e.name, title: e.title, js: e.js, css: e.css, collect: !!e.collect, error: e.error }; }
+function loadStatusItems() {
+  const c = readJsonFile(STATUS_FILE); const list = c && Array.isArray(c.items) ? c.items : [];
+  return list.slice(0, 8).map((it) => ({
+    id: cleanText(it.id || it.label, 40), label: cleanText(it.label || it.id, 20), command: String(it.command || '').slice(0, 2000),
+    intervalSec: Math.max(15, Number(it.intervalSec) || 60), timeoutSec: Math.min(60, Math.max(2, Number(it.timeoutSec) || 10)), afterTurn: it.afterTurn !== false,
+  })).filter((it) => it.id && it.command);
+}
+function killProcessTree(child) {
+  if (!child || child.exitCode !== null) return;
+  if (process.platform === 'win32') execFile('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }, () => {});
+  else { try { child.kill('SIGTERM'); } catch { /* 無視 */ } }
+}
+function decodeBytes(buf) { try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { try { return new TextDecoder('shift_jis').decode(buf); } catch { return buf.toString('latin1'); } } }
+function runStatusCommand(item, extraEnv, cwd) {
+  return new Promise((resolve) => {
+    const t0 = Date.now(); const chunks = []; let size = 0; let done = false; let timedOut = false;
+    let child; try { child = spawn(item.command, { shell: true, cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...extraEnv, NO_COLOR: '1' } }); } catch (e) { return resolve({ ok: false, text: '', tip: String(e.message || e), ms: 0 }); }
+    const finish = (r) => { if (done) return; done = true; clearTimeout(timer); resolve({ ...r, ms: Date.now() - t0 }); };
+    const timer = setTimeout(() => { timedOut = true; killProcessTree(child); }, item.timeoutSec * 1000);
+    const take = (d) => { if (size < 16384) { chunks.push(d); size += d.length; } };
+    child.stdout.on('data', take); child.stderr.on('data', take);
+    child.on('error', (e) => finish({ ok: false, text: '', tip: String(e.message || e) }));
+    child.on('close', (code) => {
+      const out = decodeBytes(Buffer.concat(chunks)).trim();
+      if (timedOut) return finish({ ok: false, text: '(時間切れ)', tip: `${item.timeoutSec} 秒で終わらなかったため、止めました。\n${out}`.trim() });
+      finish({ ok: code === 0, raw: out, ...parseStatusOutput(out), ...(code === 0 ? {} : { tip: `終了コード ${code}\n${out}`.trim(), text: parseStatusOutput(out).text || '(失敗)' }) });
+    });
+  });
+}
+// 出力は、1 行の文字、または JSON { "text": "表示", "tooltip": "詳しい内容", "level": "ok|warn|bad" }
+function parseStatusOutput(out) {
+  if (!out) return { text: '', tip: '', level: '' };
+  if (out[0] === '{') { try { const j = JSON.parse(out); return { text: cleanText(j.text, 120), tip: String(j.tooltip == null ? '' : j.tooltip).slice(0, 4000), level: ['ok', 'warn', 'bad'].includes(j.level) ? j.level : '' }; } catch { /* 文字として扱う */ } }
+  const first = out.split(/\r?\n/).find((l) => l.trim()) || '';
+  return { text: cleanText(first, 120), tip: out.slice(0, 4000), level: '' };
+}
+
 const LIGHT = process.env.CDOCK_LIGHT === '1'; // 配布版 (同梱の Claude Code なし): PC の Claude Code が必須 (配布版の start.cmd が設定する)
 const CLAUDE = resolveClaude();
 if (LIGHT && CLAUDE.source !== 'installed') {
@@ -1080,10 +1162,52 @@ wss.on('connection', (ws) => {
     return options;
   }
 
+  // ---- 状態の欄 (差し込み口) の更新: 接続したとき、会話が 1 回終わるたび、設定した間隔ごと
+  let statusTimer = null; const statusState = new Map(); let statusRunning = false;
+  async function refreshStatus(onlyId) {
+    const items = loadStatusItems();
+    if (!statusRunning) {
+      statusRunning = true;
+      try {
+        await Promise.all(items.filter((it) => !onlyId || it.id === onlyId).map(async (it) => {
+          const r = await runStatusCommand(it, { CROGUE_CWD: lastCwd || DEFAULT_CWD, CROGUE_SESSION_ID: sessionId || '', CROGUE_CONFIG_DIR: CONFIG_DIR }, lastCwd && fs.existsSync(lastCwd) ? lastCwd : DEFAULT_CWD);
+          statusState.set(it.id, { ...r, updated: Date.now() });
+        }));
+      } finally { statusRunning = false; }
+    }
+    send({ type: 'status_items', file: STATUS_FILE, items: items.map((it) => ({ id: it.id, label: it.label, ...(statusState.get(it.id) || { ok: true, text: '…', tip: '', level: '' }) })) });
+  }
+  function scheduleStatus() {
+    clearInterval(statusTimer); const items = loadStatusItems(); if (!items.length) return;
+    statusTimer = setInterval(() => refreshStatus(), Math.min(...items.map((i) => i.intervalSec)) * 1000);
+  }
+  // ---- 拡張の collect: コマンドの出力 (JSON) を、そのまま拡張 (ext.js) へ渡す
+  let extTimer = null; const extState = new Map(); let extRunning = false;
+  async function refreshExt(onlyName) {
+    const exts = loadExtensions().filter((e) => e.collect && (!onlyName || e.name === onlyName));
+    if (extRunning) return; extRunning = true;
+    try {
+      await Promise.all(exts.map(async (e) => {
+        const r = await runStatusCommand({ ...e.collect, timeoutSec: e.collect.timeoutSec }, { CROGUE_CWD: lastCwd || DEFAULT_CWD, CROGUE_SESSION_ID: sessionId || '', CROGUE_CONFIG_DIR: CONFIG_DIR, CROGUE_EXT_DIR: e.dir }, e.dir);
+        let data = null, error = '';
+        if (!r.ok) error = (r.tip || r.text || '失敗').slice(0, 1000);
+        else { try { data = JSON.parse(r.raw || 'null'); } catch (x) { error = 'collect の出力が JSON ではありません: ' + String(r.raw || '').slice(0, 200); } }
+        extState.set(e.name, { name: e.name, ok: !error, data, error, updated: Date.now(), ms: r.ms });
+        send({ type: 'ext_data', ...extState.get(e.name) });
+      }));
+    } finally { extRunning = false; }
+  }
+  function scheduleExt() {
+    clearInterval(extTimer); const exts = loadExtensions().filter((e) => e.collect); if (!exts.length) return;
+    extTimer = setInterval(() => refreshExt(), Math.min(...exts.map((e) => e.collect.intervalSec)) * 1000);
+  }
+  let lastCwd = DEFAULT_CWD; // 状態の欄のコマンドを実行する場所 (いまの作業フォルダ)
+  refreshStatus(); scheduleStatus(); refreshExt(); scheduleExt(); // 接続したとき (宣言のあとで呼ぶ)
+
   async function runTurn({ text, cwd, permissionMode, model, effort, attachments }) {
     if (running) return send({ type: 'error', message: '前の応答がまだ実行中です' });
     const abort = new AbortController();
-    const workDir = cwd && fs.existsSync(cwd) ? path.resolve(cwd) : DEFAULT_CWD;
+    const workDir = cwd && fs.existsSync(cwd) ? path.resolve(cwd) : DEFAULT_CWD; lastCwd = workDir;
     const attachGrants = []; text = composePrompt(text, attachments, workDir, attachGrants);
     const options = {
       ...claudeOpt,
@@ -1135,6 +1259,8 @@ wss.on('connection', (ws) => {
     } finally {
       inbox.closed = true; if (inbox.wake) inbox.wake();
       running = null;
+      if (loadStatusItems().some((it) => it.afterTurn)) refreshStatus(); // 状態の欄を、会話のたびに更新
+      if (loadExtensions().some((e) => e.collect && e.collect.afterTurn)) refreshExt();
       pending.clear();
       send({ type: 'busy', value: false });
     }
@@ -1203,15 +1329,17 @@ wss.on('connection', (ws) => {
     else if (m.type === 'interrupt' && running) { try { await running.q.interrupt(); } catch { running.abort.abort(); } }
     else if (m.type === 'setMode' && running) { try { await running.q.setPermissionMode(m.mode); } catch {} }
     else if (m.type === 'newSession') { if (!running) { sessionId = null; sendGrants(); } }
+    else if (m.type === 'ext_refresh') refreshExt(typeof m.name === 'string' ? m.name : undefined);
+    else if (m.type === 'status_refresh') refreshStatus(typeof m.id === 'string' ? m.id : undefined);
     else if (m.type === 'grants_clear') { if (sessionId) grantStore.delete(sessionId); sendGrants(); }
     else if (m.type === 'inject' && typeof m.text === 'string' && m.text.trim()) injectMessage(m);
     else if (m.type === 'run') startRun(m.id, m.cmd, m.cwd, m.shell);
     else if (m.type === 'run_stop') killTree(runs.get(m.id));
     else if (m.type === 'run_warm') warmShell();
-    else if (m.type === 'watch') startWatch(typeof m.cwd === 'string' ? m.cwd : '');
+    else if (m.type === 'watch') { if (typeof m.cwd === 'string' && m.cwd && fs.existsSync(m.cwd)) lastCwd = path.resolve(m.cwd); startWatch(typeof m.cwd === 'string' ? m.cwd : ''); }
     else if (m.type === 'resume' && typeof m.sessionId === 'string' && /^[0-9a-f-]{36}$/i.test(m.sessionId) && !running) { sessionId = m.sessionId; sendGrants(); }
   });
-  ws.on('close', () => { for (const c of runs.values()) killTree(c); stopWatch(); if (running) running.abort.abort(); });
+  ws.on('close', () => { clearInterval(statusTimer); clearInterval(extTimer); for (const c of runs.values()) killTree(c); stopWatch(); if (running) running.abort.abort(); });
 });
 
 // --open: 起動したら、既定のブラウザで画面を開く (start.cmd をダブルクリックで使うため)。CDOCK_NO_OPEN=1 で無効

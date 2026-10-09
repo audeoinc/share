@@ -1,0 +1,12 @@
+{
+  "items": [
+    {
+      "id": "usage",
+      "label": "トークン",
+      "command": "powershell -NoProfile -File C:\path\to\usage.ps1",
+      "intervalSec": 60,
+      "timeoutSec": 10,
+      "afterTurn": true
+    }
+  ]
+}

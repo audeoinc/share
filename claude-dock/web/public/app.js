@@ -169,6 +169,8 @@ function handle(m) {
   if (m.type === 'hello') { serverFeatures = new Set(m.features || []); setupShells(m.shells || []); if (m.claude && m.claude.warn) add(el('div', 'err-box', m.claude.warn)); if (m.claude) statusEl.dataset.cc = `${m.claude.source === 'installed' ? 'PC の' : '同梱の'} Claude Code ${m.claude.version}`; if (!cwdEl.value) cwdEl.value = store.get('cwd', m.cwd); lastGoodCwd = cwdEl.value; renderCrumbs(); refreshParent(); loadSessions(); loadRoot(); loadCommands(); loadGit(); watchCwd(); }
   else if (m.type === 'busy') setBusy(m.value);
   else if (m.type === 'grants') renderGrantChip(m.items);
+  else if (m.type === 'status_items') renderStatusItems(m.items, m.file);
+  else if (m.type === 'ext_data') onExtData(m);
   else if (m.type === 'injected') { if (pendingInject) add(userBubble(pendingInject.text, pendingInject.ready)); pendingInject = null; } // 取り込まれたら、いまの応答の途中に、発言として表示する
   else if (m.type === 'inject_rejected') { const q = pendingInject; pendingInject = null; if (q) { queued = q; renderQueued(); if (!busy) sendQueued(); else toast('いまの応答が終わったら、この発言を送ります'); } } // 応答がちょうど終わっていた場合など
   else if (m.type === 'notice') add(el('div', 'err-box', m.message));
@@ -182,7 +184,7 @@ function handle(m) {
 }
 
 function onSdk(msg) {
-  if (msg.type === 'system' && msg.subtype === 'init') { currentSession = msg.session_id; if (!sessBranch.has(currentSession)) sessBranch.set(currentSession, gitBranchNow); updateBranchBanner(); lastModelId = msg.model || ''; lastEffort = msg.effort || (effortEl.disabled ? '' : effortShown()) || ''; /* 「既定」のときの実際の値は init には含まれないので、選んだ値だけを出す */ sessionLabel = modelName(lastModelId) + (lastEffort ? ` · ${lastEffort}` : ''); statusEl.title = `${lastModelId}${lastEffort ? ` / effort: ${lastEffort}` : ''}`; if (modelEl.value === '') setDefaultLabel(lastModelId); syncEffort(); statusEl.textContent = busy ? '応答中…' : sessionLabel; updateModeChip(msg.permissionMode); return; }
+  if (msg.type === 'system' && msg.subtype === 'init') { currentSession = msg.session_id; if (!sessBranch.has(currentSession)) sessBranch.set(currentSession, gitBranchNow); updateBranchBanner(); lastModelId = msg.model || ''; lastEffort = msg.effort || (effortEl.disabled ? '' : effortShown()) || ''; /* 「既定」のときの実際の値は init には含まれないので、選んだ値だけを出す */ sessionLabel = modelName(lastModelId) + (lastEffort ? ` · ${lastEffort}` : ''); statusEl.title = `${lastModelId}${lastEffort ? ` / effort: ${lastEffort}` : ''}`; if (modelEl.value === '') setDefaultLabel(lastModelId); syncEffort(); statusEl.textContent = busy ? '応答中…' : sessionLabel; updateModeChip(msg.permissionMode); lastInit = msg; return; }
   if (msg.type === 'system' && msg.subtype === 'local_command_output') { add(el('pre', 'localout', msg.content)); return; }
   if (msg.type === 'system' && msg.subtype === 'compact_boundary') {
     const md = msg.compact_metadata || {};
@@ -220,6 +222,7 @@ function onSdk(msg) {
     return;
   }
   if (msg.type === 'result') {
+    for (const [n, cb] of extTurnCbs) extSafe(n, 'onTurnEnd', () => cb());
     if (msg.is_error || (msg.subtype && msg.subtype !== 'success')) {
       turnFailed = true;
       const authLike = /authenticate|OAuth|API key|401/i.test(msg.result || '');
@@ -270,6 +273,70 @@ grantChip.onclick = () => {
   const r = grantChip.getBoundingClientRect(); grantPop.style.bottom = `${Math.round(window.innerHeight - r.top + 6)}px`; grantPop.style.right = `${Math.max(8, Math.round(window.innerWidth - r.right))}px`;
   document.addEventListener('mousedown', grantOutside, true);
 };
+// ---------- 状態の欄 (差し込み口): 設定ファイル status.json のコマンドの出力を、画面の下に出す ----------
+const statusBox = $('#statusitems'); let statusItemsData = [], statusFile = '', statusPop = null;
+function closeStatusPop() { if (!statusPop) return; statusPop.remove(); statusPop = null; document.removeEventListener('mousedown', statusOutside, true); }
+function statusOutside(e) { if (statusPop && !statusPop.contains(e.target) && !e.target.closest('.sitem')) closeStatusPop(); }
+function renderStatusItems(items, file) {
+  statusItemsData = items || []; statusFile = file || ''; statusBox.textContent = '';
+  for (const it of statusItemsData) {
+    const b = el('button', `ghost mini sitem${it.level ? ` ${it.level}` : ''}${it.ok === false ? ' bad' : ''}`); b.type = 'button';
+    b.append(el('span', 'sl', it.label), el('span', 'sv', it.text || '…')); b.title = `${it.label}: ${it.text || ''}\n(クリックで詳しい内容)`;
+    b.onclick = () => openStatusPop(it, b); statusBox.append(b);
+  }
+}
+function openStatusPop(it, anchor) {
+  if (statusPop) closeStatusPop();
+  statusPop = el('div', 'statuspop'); statusPop.append(el('div', 'sp-h', it.label), el('pre', 'sp-b', it.tip || it.text || '(出力なし)'));
+  const meta = el('div', 'sp-m', `${it.updated ? `${new Date(it.updated).toLocaleTimeString()} に更新` : ''}${it.ms != null ? ` · ${it.ms}ms` : ''}${it.ok === false ? ' · 失敗' : ''}`);
+  const foot = el('div', 'sp-f'); const re = el('button', 'ghost mini', '今すぐ更新'); re.type = 'button'; re.onclick = () => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'status_refresh', id: it.id })); closeStatusPop(); };
+  foot.append(meta, re); statusPop.append(foot); document.body.append(statusPop);
+  const r = anchor.getBoundingClientRect(); statusPop.style.bottom = `${Math.round(window.innerHeight - r.top + 6)}px`; statusPop.style.right = `${Math.max(8, Math.round(window.innerWidth - r.right))}px`;
+  document.addEventListener('mousedown', statusOutside, true);
+}
+
+// ---------- 環境の情報: 移した先で、うまく動かないときに、この画面を見れば状況が分かる (スクリーンショットで共有できる) ----------
+let lastInit = null; // 直近の会話の開始時に、Claude Code が知らせてきた内容 (プラグイン・スキル・MCP など)
+async function openEnvInfo() {
+  const box = el('div', 'dlg'); const card = el('div', 'dlg-card envcard'); card.setAttribute('role', 'dialog');
+  const head = el('div', 'dlg-head'); head.append(el('span', '', '環境の情報')); const x = el('button', 'ghost', '✕'); x.type = 'button'; head.append(x); card.append(head);
+  const body = el('div', 'env-body'); body.textContent = '読み込み中…'; card.append(body);
+  const foot = el('div', 'dlg-foot env-foot'); const copy = el('button', 'ghost', 'テキストでコピー'); copy.type = 'button'; const close = el('button', 'send', '閉じる'); close.type = 'button'; foot.append(copy, close); card.append(foot); box.append(card);
+  const done = () => { box.remove(); document.removeEventListener('keydown', onKey, true); }; const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(); } };
+  document.addEventListener('keydown', onKey, true); x.onclick = close.onclick = done; box.addEventListener('mousedown', (e) => { if (e.target === box) done(); }); document.body.append(box);
+  let env = null, ext = null; try { env = await api('/api/env', {}); } catch (e) { body.textContent = `取得できませんでした: ${e.message}`; return; }
+  try { ext = await api('/api/ext', {}); } catch { ext = null; }
+  const lines = []; body.textContent = '';
+  const section = (title, rows, opts = {}) => { // rows: [[ラベル, 値, 'bad'?]]
+    lines.push(`■ ${title}`); const sec = el('div', 'env-sec'); sec.append(el('div', 'env-h', title));
+    for (const [k, v, cls] of rows) { lines.push(`  ${k}${v === undefined ? '' : `: ${v}`}`); const r = el('div', `env-row${cls ? ` ${cls}` : ''}`); if (v === undefined) r.append(el('span', 'ev', k)); else r.append(el('span', 'ek', k), el('span', 'ev', String(v))); sec.append(r); }
+    if (opts.note) { lines.push(`  (${opts.note})`); sec.append(el('div', 'env-note', opts.note)); } body.append(sec); lines.push('');
+  };
+  const c = env.claude; const init = lastInit;
+  section('Claude Rogue', [['版', env.app.version], ['動かし方', env.app.mode], ['Node.js', env.app.node], ['OS', env.app.os], ['アプリの場所', env.app.dir]]);
+  section('Claude Code', [['使っているもの', c.source === 'installed' ? 'PC にインストール済みのもの' : 'SDK 同梱のもの'], ['版', c.version || '(不明)'], ['この画面が想定する版', `${c.expected || '(不明)'} (SDK ${c.sdk || '?'})`], ['場所', c.path || '(同梱)'], ...(c.warn ? [['警告', c.warn, 'bad']] : [])]);
+  section('場所', [['作業フォルダ', env.paths.cwd], ['この画面の設定フォルダ', env.paths.config], ['リンクの設定', env.paths.links], ['状態の欄の設定', env.paths.status], ['Claude Code の設定フォルダ', env.paths.claudeHome]]);
+  try { const xs = await api('/api/extensions', {}); section(`拡張 (${xs.dir})`, xs.items.length ? xs.items.map((x) => { const er = extErrors.get(x.name) || x.error; return [`${x.title} (${x.name})`, `${x.js ? 'ext.js ' : ''}${x.css ? 'ext.css ' : ''}${x.collect ? 'collect ' : ''}${er ? ' ⚠ ' + er : ' 正常'}`, er ? 'bad' : '']; }) : [['(なし)']]); } catch { /* 無視 */ }
+  const envRows = Object.entries(env.env); if (envRows.length) section('環境変数 (CDOCK_ で始まるもの)', envRows);
+  section('状態の欄 (差し込み口)', env.statusItems.length ? env.statusItems.map((it) => [`${it.label} (${it.id})`, `${it.command}  ※${it.intervalSec} 秒ごと`]) : [['(設定なし)']], { note: env.statusItems.length ? '' : `設定ファイル ${env.paths.status} に、items を書くと、画面の下に出ます (使い方は README)` });
+  if (init) {
+    const plugins = init.plugins || [];
+    section('プラグイン (いまの会話で、読み込まれているもの)', plugins.length ? plugins.map((p) => [p.name, `${p.version ? `v${p.version}  ` : ''}${p.source || ''}  ${p.path || ''}`]) : [['(なし)']]);
+    if ((init.plugin_errors || []).length) section('プラグインのエラー', init.plugin_errors.map((e) => [e.plugin || e.name || '(不明)', e.message || e.error || JSON.stringify(e), 'bad']));
+    const mcp = init.mcp_servers || [];
+    section('MCP サーバー', mcp.length ? mcp.map((m) => [m.name, m.status, m.status === 'connected' ? '' : (m.status === 'needs-auth' ? 'warn' : 'bad')]) : [['(なし)']]);
+    const sk = init.skills || [];
+    section(`スキル (${sk.length})`, [[sk.slice(0, 80).join(', ') || '(なし)']], { note: sk.length > 80 ? `ほか ${sk.length - 80} 個` : '' });
+    section('そのほか', [['モデル', init.model], ['権限モード', init.permissionMode], ['出力スタイル', init.output_style], ['エージェント', (init.agents || []).join(', ')], ['ツール', `${(init.tools || []).length} 個`], ['スラッシュコマンド', `${(init.slash_commands || []).length} 個`]]);
+  } else {
+    const names = ext ? ext.commands.filter((n) => n.includes(':')) : []; const byPlugin = new Map();
+    for (const n of names) { const p = n.split(':')[0]; byPlugin.set(p, (byPlugin.get(p) || 0) + 1); }
+    section('プラグイン (コマンドの名前から推定)', byPlugin.size ? [...byPlugin].map(([p, n]) => [p, `${n} 個のコマンド・スキル`]) : [['(見つかりません)']], { note: '会話をひとつ送ると、プラグインの版・場所・エラーなど、詳しい情報が出ます' });
+    if (ext) section('MCP サーバー', ext.mcp.length ? ext.mcp.map((m) => [m.name, m.status, m.status === 'connected' ? '' : (m.status === 'needs-auth' ? 'warn' : 'bad')]) : [['(なし)']]);
+  }
+  copy.onclick = async () => { try { await navigator.clipboard.writeText(lines.join('\n')); toast('環境の情報をコピーしました'); } catch { toast('コピーできませんでした', { bad: true }); } };
+}
+$('#envbtn').onclick = openEnvInfo;
 function askPermission(p) {
   prog.perm++; renderProgress();
   const card = el('div', 'card perm');
@@ -1985,5 +2052,45 @@ const otherW = (el) => (el.hidden ? 0 : el.getBoundingClientRect().width);
 setupGrip($('#grip-side'), $('#side'), '--side-w', 'sideW', 'left', 180, () => Math.min(560, window.innerWidth - otherW($('#preview')) - MIN_MAIN));
 setupGrip($('#grip-prev'), $('#preview'), '--prev-w', 'prevW', 'right', 260, () => window.innerWidth - otherW($('#side')) - MIN_MAIN);
 
+// ---- 拡張 (設定フォルダの extensions\<名前>\ の ext.js / ext.css)。アプリの更新で消えない。API は版 1。詳しくは INTEGRATION.md
+const extData = new Map(); const extDataCbs = new Map(); const extTurnCbs = []; const extErrors = new Map(); let extSlot = null;
+function extFail(name, where, e) { const msg = `${where}: ${e && e.message || e}`; extErrors.set(name, msg); console.error(`[拡張 ${name}]`, e); }
+function extSafe(name, where, fn) { try { const r = fn(); if (r && typeof r.catch === 'function') r.catch((e) => extFail(name, where, e)); } catch (e) { extFail(name, where, e); } }
+function extFooter(name) { // 左ペインの下の差し込み口。拡張ごとに 1 つの箱を渡す
+  const foot = $('#sidefoot'); let box = foot.querySelector(`[data-ext="${CSS.escape(name)}"]`);
+  if (!box) { box = el('div', 'extbox'); box.dataset.ext = name; foot.append(box); }
+  foot.hidden = false; return box;
+}
+window.crogue = {
+  version: 1,
+  register(name, init) {
+    const api = {
+      version: 1, name,
+      footer: () => extFooter(name), // 左ペインの下の箱 (div)
+      onData: (cb) => { if (!extDataCbs.has(name)) extDataCbs.set(name, []); extDataCbs.get(name).push(cb); const d = extData.get(name); if (d) extSafe(name, 'onData', () => cb(d)); }, // collect の結果 {ok,data,error,updated}
+      onTurnEnd: (cb) => { extTurnCbs.push([name, cb]); }, // 会話が 1 回終わるたび
+      session: () => ({ cwd: cwdEl.value, sessionId: currentSession }),
+      refresh: () => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'ext_refresh', name })); },
+      toast: (t) => toast(String(t)),
+      esc: (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])),
+    };
+    extSafe(name, 'init', () => init(api));
+  },
+};
+function onExtData(m) {
+  extData.set(m.name, m); if (m.error) extErrors.set(m.name, 'collect: ' + m.error); else extErrors.delete(m.name);
+  for (const cb of extDataCbs.get(m.name) || []) extSafe(m.name, 'onData', () => cb(m));
+}
+async function loadExtensions() {
+  let list; try { list = await api('/api/extensions', {}); } catch { return; }
+  for (const e of list.items) {
+    if (e.error && !e.js && !e.collect) { extErrors.set(e.name, e.error); continue; }
+    if (e.css) { const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = `/ext/${encodeURIComponent(e.name)}/ext.css?${Date.now()}`; document.head.append(l); }
+    if (e.js) await new Promise((res) => { const sc = document.createElement('script'); sc.src = `/ext/${encodeURIComponent(e.name)}/ext.js?${Date.now()}`; sc.onload = res; sc.onerror = () => { extErrors.set(e.name, 'ext.js を読み込めません'); res(); }; document.head.append(sc); });
+  }
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'ext_refresh' }));
+}
+window.addEventListener('error', (ev) => { const f = String(ev.filename || ''); const m = /\/ext\/([^/]+)\//.exec(f); if (m) extErrors.set(decodeURIComponent(m[1]), `${ev.message} (${f.split('/').pop()}:${ev.lineno})`); });
 connect();
+setTimeout(loadExtensions, 0);
 input.focus();

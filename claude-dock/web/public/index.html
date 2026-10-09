@@ -12,6 +12,7 @@
   <div class="brand"><img src="icon.png" alt="" width="20" height="20"><span>Claude Rogue</span></div>
   <div class="spacer"></div>
   <button id="docsbtn" class="ghost docsbtn" type="button" title="ドキュメント (公式ドキュメントや社内資料へのリンク)"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 5A1.5 1.5 0 0 1 4 3.5h5A3 3 0 0 1 12 6.5V20a2.2 2.2 0 0 0-2.2-2.2H4A1.5 1.5 0 0 1 2.5 16.3V5z"/><path d="M21.5 5A1.5 1.5 0 0 0 20 3.5h-5A3 3 0 0 0 12 6.5V20a2.2 2.2 0 0 1 2.2-2.2H20a1.5 1.5 0 0 0 1.5-1.5V5z"/></svg><span>ドキュメント</span></button>
+  <button id="envbtn" class="ghost envbtn" type="button" title="環境の情報 (Claude Code の版、プラグイン、設定の場所など)">ⓘ</button>
   <span class="fs" title="文字サイズ (画面全体)"><button id="fs-down" class="ghost">A−</button><button id="fs-up" class="ghost">A＋</button></span>
   <button id="density" class="ghost" title="行間">≡</button>
   <button id="theme" class="ghost theme" title="テーマ: 自動 / ライト / ダーク">◐</button>
@@ -62,6 +63,7 @@
         <textarea id="commitmsg" rows="2" placeholder="コミットメッセージ (Ctrl+Enter で確定)"></textarea>
         <div class="crow"><span id="commitnote" class="cnote"></span><button id="suggestbtn" class="ghost" type="button" disabled title="ステージ済みの差分を Claude (Haiku) に送って、メッセージの案を作ります">✨ 提案</button><button id="commitbtn" class="send" disabled>コミット</button></div>
       </div></div>
+    <div id="sidefoot" class="sidefoot" hidden></div>
   </aside>
   <section class="main">
     <div id="branchwarn" class="branchwarn" hidden></div>
@@ -72,7 +74,7 @@
         <div id="slash" class="slash" hidden></div>
         <div id="attach" class="attach" hidden></div>
         <textarea id="input" rows="1" placeholder="Claude に指示する (Enter で送信 / Shift+Enter で改行 / !コマンド で実行)"></textarea>
-        <div class="actions"><button id="attbtn" class="ghost attbtn" title="ファイルを添付 (ドラッグ＆ドロップ / Ctrl+V の貼り付けも可)">📎</button><input id="filepick" type="file" multiple hidden><span id="status" class="status"></span><span id="modechip" class="modechip" hidden></span><button id="grantchip" class="ghost mini grantchip" type="button" hidden></button><button id="stop" class="stop" hidden>■ 停止</button><button id="send" class="send">送信</button></div>
+        <div class="actions"><button id="attbtn" class="ghost attbtn" title="ファイルを添付 (ドラッグ＆ドロップ / Ctrl+V の貼り付けも可)">📎</button><input id="filepick" type="file" multiple hidden><span id="status" class="status"></span><span id="modechip" class="modechip" hidden></span><span id="statusitems" class="statusitems"></span><button id="grantchip" class="ghost mini grantchip" type="button" hidden></button><button id="stop" class="stop" hidden>■ 停止</button><button id="send" class="send">送信</button></div>
       </div>
     </footer>
   </section>

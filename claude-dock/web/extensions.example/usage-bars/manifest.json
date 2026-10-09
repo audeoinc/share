@@ -1,0 +1,4 @@
+{
+  "title": "使用量",
+  "collect": { "command": "node collect.mjs", "intervalSec": 60, "timeoutSec": 20, "afterTurn": true }
+}
