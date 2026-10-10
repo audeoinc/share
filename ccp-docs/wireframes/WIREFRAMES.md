@@ -65,13 +65,13 @@ draw.io: `drawio/01-calendar.drawio`
 | 3 | Display language | Switches the UI language between 日本語 and English |
 | 4 | Auto-draft on open | Whether opening an empty delivery starts an AI draft automatically (On / Off) |
 | 5 | New | Creates a new delivery (opens a delivery card) |
-| 6 | Filters | Filters by channel (Email / Push), department (Promotion / CRM / EC) and status. "All" clears a filter |
+| 6 | Filters | Filters by channel (Email / Push), delivery type (Promotion / CRM / EC) and status. "All" clears a filter |
 | 7 | Count | Number of deliveries shown / total |
 | 8 | Month navigation | Moves to the previous or next month |
 | 9 | View | Month / Week (08) / List (13) |
 | 10 | Export | Exports the deliveries shown to a file |
 | 11 | Status legend | The four statuses, in order of progress |
-| 12 | "+" on a day | Appears when hovering over a day. Creates a delivery on that day, with the current channel and department filters filled in |
+| 12 | "+" on a day | Appears when hovering over a day. Creates a delivery on that day, with the current channel and type filters filled in |
 | 13 | Delivery | Time, status and name. Selecting it opens the delivery card |
 | 14 | Today | Today's date is outlined |
 | 15 | Alerts | Opens Alerts (12). The number shows open alerts |
@@ -119,7 +119,7 @@ draw.io: `drawio/02-card-theme.drawio`
 | 3 | Menu | Duplicate (for another day), delete or cancel, change history |
 | 4 | Close | Closes the card (asks for confirmation if there are unsaved changes) |
 | 5 | Draft all with AI | AI drafts everything in order: theme → template and main image → headline and copy → each section → production notes. While running, it shows which step is in progress, and which step failed if any |
-| 6 | Delivery info | Name and date & time (required), channel, department, status, owner, production due date |
+| 6 | Delivery info | Name and date & time (required), channel, type, status, owner, production due date |
 | 7 | Step summary | Theme and its reason, number of products, headline, copy and angle, production notes. Shows everything adopted in one place |
 | 8 | Step tabs | 1 Theme, 2 Template, 3 Hero, 4 Sections, 5 Production. Finished steps are checked (✓) |
 | 9 | Suggest with AI | AI suggests three themes for this time of year |
@@ -466,10 +466,10 @@ draw.io: `drawio/13-list.drawio`
 
 | No. | Element | Content and actions |
 | --- | --- | --- |
-| 1 | Filters | Channel, department, status (the same as in 01) |
+| 1 | Filters | Channel, type, status (the same as in 01) |
 | 2 | View | Month / Week / List |
 | 3 | Period | The month shown |
 | 4 | Columns | Chooses which columns to show |
 | 5 | Export CSV | Exports the table |
-| 6 | Table | Date, time, name, channel, department, status, owner, theme, number of products, production due date, steps done. Columns can be sorted. Selecting a row opens the delivery card |
+| 6 | Table | Date, time, name, channel, type, status, owner, theme, number of products, production due date, steps done. Columns can be sorted. Selecting a row opens the delivery card |
 | 7 | Deadline warning | Deliveries coming up soon that are not started yet |
