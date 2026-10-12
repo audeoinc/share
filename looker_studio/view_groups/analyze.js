@@ -1,0 +1,713 @@
+'use strict';
+/**
+ * suffix 違いの View 群を「SQL ロジックが同じもの」でグループ化し、
+ * グループ内で異なるトークンをパラメータ化する。
+ *
+ *   v_sales_a … v_sales_j (10 本)
+ *     → base = v_sales, suffix = a…j
+ *     → ロジックが同じもの同士をグループ化   G1: a,c,e  G2: b,d  G3: f,g,h,i,j
+ *     → グループ内の差分を {{P1}} … に置換したパラメータ化 SQL を得る
+ *     → グループ間はこのパラメータ化 SQL を比較する（＝ロジック差分だけが残る）
+ *
+ * 「同じロジック」の判定は、トークン列が同じ長さ・同じ種類で並び、異なる箇所が
+ * 一貫した 1 対 1 対応（全単射）になっていること（α 等価）で行う。
+ * suffix の文字列置換に依存しないので、参照テーブル以外が異なっていても揃う。
+ *
+ * 判定は強い条件だが万能ではない（構造が同じで意味が違う差も同一視しうる）ので、
+ * 何をパラメータとみなしたかを必ず params として返し、画面に出せるようにしている。
+ * 隠さず見せることで、判定の当否を人が確認できる。
+ */
+
+// ---------------------------------------------------------------------
+// トークナイザ
+// ---------------------------------------------------------------------
+
+// バッククォート識別子・文字列リテラル・コメントを 1 トークンとして扱う。
+// これらを分解してしまうと α 等価の判定が壊れる。
+//
+// リテラルの書き方は lineage の lexer（lineage/javascript/src/lexer/lexer.js）に
+// そろえてある。取りこぼすと 1 つのリテラルが複数トークンに割れ、値の差なのに
+// 「トークン数が違う」で別グループになる。
+//   単一引用符 3 連 / 二重引用符 3 連（複数行リテラル）
+//   接頭辞つき r'…'（raw）/ b'…'（bytes）/ rb'…' / br'…'
+//   引用符の二重化によるエスケープ 'it''s'
+//   指数表記 1e6 / 2E-4、16 進 0x1F、先頭ドット .5
+// 順番が意味を持つ。長い形（3 連・接頭辞つき）を先に置かないと、
+// 短い形が先に当たって途中で切れる。
+//
+// 二重引用符 3 連は \u0022 で書く。ソースにその 3 文字をそのまま置くと、
+// build_udf.mjs が本体を BigQuery の生文字列に埋めるときに壊れるため
+// （生成器がその混入を検査していて、書くと生成が止まる）。
+const DQ = '\\u0022';
+const DQ3 = DQ + DQ + DQ;
+const TOKEN_RE = new RegExp([
+  '(`[^`]*`)',                                 // 1 バッククォート識別子
+  // 2 接頭辞つき文字列。raw ではバックスラッシュが引用符を打ち消さないので、
+  //   本体はエスケープを解釈しない形で読む。
+  "([rbRB]{1,2}(?:'''[\\s\\S]*?'''|" + DQ3 + "[\\s\\S]*?" + DQ3 +
+    "|'[^']*'|" + DQ + "[^" + DQ + "]*" + DQ + "))",
+  "('''[\\s\\S]*?''')",                          // 3 単一引用符 3 連
+  '(' + DQ3 + '[\\s\\S]*?' + DQ3 + ')',           // 4 二重引用符 3 連
+  "('(?:\\\\.|''|[^'\\\\])*')",                 // 5 単一引用符リテラル
+  '(' + DQ + '(?:\\\\.|' + DQ + DQ + '|[^' + DQ + '\\\\])*' + DQ + ')',
+  '(--[^\\n]*|#[^\\n]*)',                      // 7 行コメント
+  '(/\\*[\\s\\S]*?\\*/)',                      // 8 ブロックコメント
+  // 9 数値。'123.dataset' の '.' を数値に食わせないよう、小数点のあとは
+  //   数字を必須にする（lineage も同じ理由で場合分けしている）。
+  '(0[xX][0-9a-fA-F]+|(?:\\d+(?:\\.\\d+)?|\\.\\d+)(?:[eE][+-]?\\d+)?)',
+  '([A-Za-z_][A-Za-z0-9_]*)',                  // 10 識別子・予約語
+  '(\\s+)',                                    // 11 空白
+  '([^\\s])',                                  // 12 記号
+].join('|'), 'g');
+
+const KEYWORDS = new Set((
+  'SELECT FROM WHERE JOIN INNER LEFT RIGHT FULL OUTER CROSS ON USING ' +
+  'AND OR NOT IN IS NULL LIKE BETWEEN EXISTS ANY ALL SOME ' +
+  'GROUP BY HAVING ORDER ASC DESC LIMIT OFFSET QUALIFY WINDOW ' +
+  'UNION INTERSECT EXCEPT DISTINCT AS CASE WHEN THEN ELSE END ' +
+  'CREATE OR REPLACE VIEW TABLE FUNCTION IF EXISTS OPTIONS ' +
+  'WITH RECURSIVE OVER PARTITION UNNEST STRUCT ARRAY ' +
+  'CAST SAFE_CAST EXTRACT INTERVAL DATE DATETIME TIME TIMESTAMP ' +
+  'INT64 FLOAT64 NUMERIC BIGNUMERIC STRING BYTES BOOL TRUE FALSE ' +
+  'COUNT SUM AVG MIN MAX COALESCE IFNULL NULLIF ROWS RANGE PRECEDING FOLLOWING CURRENT ROW'
+).split(/\s+/));
+
+/** SQL を種類つきトークンに分解する。 */
+function tokenizeSql(sql) {
+  const out = [];
+  const s = String(sql == null ? '' : sql);
+  let m;
+  TOKEN_RE.lastIndex = 0;
+  while ((m = TOKEN_RE.exec(s)) !== null) {
+    let kind;
+    if (m[1]) kind = 'quoted';
+    else if (m[2] || m[3] || m[4] || m[5] || m[6]) kind = 'string';
+    else if (m[7] || m[8]) kind = 'comment';
+    else if (m[9]) kind = 'number';
+    else if (m[10]) kind = KEYWORDS.has(m[10].toUpperCase()) ? 'keyword' : 'ident';
+    else if (m[11]) kind = 'space';
+    else kind = 'punct';
+    out.push({ kind, text: m[0] });
+  }
+  return out;
+}
+
+/**
+ * CREATE VIEW … OPTIONS( … ) AS … の OPTIONS 句を落とす。
+ *
+ * BigQuery が返す DDL には description や作成タイムスタンプなどが OPTIONS に
+ * 入ることがある。これはメタデータであってロジックではないのに、View ごとに
+ * 値が違うので、そのままだと全部が別グループに割れる。
+ * ビュー側を書き換えるのではなく、解析側で無視する。
+ *
+ * 正規表現ではなくトークン列で処理するのは、OPTIONS の値に括弧や引用符が
+ * 入っていても対応する ')' を正しく見つけるため。
+ */
+function stripOptionsClause(tokens) {
+  const out = [];
+  let i = 0;
+  while (i < tokens.length) {
+    const t = tokens[i];
+    if (t.kind === 'keyword' && t.text.toUpperCase() === 'OPTIONS') {
+      let j = i + 1;
+      while (j < tokens.length && tokens[j].kind === 'space') j++;
+      if (j < tokens.length && tokens[j].text === '(') {
+        let depth = 0;
+        let k = j;
+        for (; k < tokens.length; k++) {
+          if (tokens[k].text === '(') depth++;
+          else if (tokens[k].text === ')') {
+            depth--;
+            if (depth === 0) { k++; break; }
+          }
+        }
+        // OPTIONS の直前の空白も落として、残りの整形を自然に保つ
+        while (out.length > 0 && out[out.length - 1].kind === 'space') out.pop();
+        i = k;
+        continue;
+      }
+    }
+    out.push(t);
+    i++;
+  }
+  return out;
+}
+
+/**
+ * FROM / JOIN が指す実体の名前に 'entity' の印を付ける。
+ *
+ * 置換してよいのは「SQL の外を指す名前」と「値」だけ、という方針のため、
+ * 実体名だけを識別子から切り出す。列名・別名・CTE 名・ウィンドウ名・関数名は
+ * SQL の中で閉じた名前なので、印を付けず完全一致を要求する
+ * （横展開はコピーで行う運用なので、そこが違えば書き換えの差）。
+ *
+ * 判定は位置だけ。パーサーは要らない。
+ *   FROM `p.d.t` / FROM p.d.t / FROM d.t / JOIN … / FROM a, b
+ * 次のものは実体名ではないので印を付けない。
+ *   FROM (SELECT …) / FROM UNNEST(x) / EXTRACT(HOUR FROM ts) の FROM
+ *
+ * 表記は正規化しない。バッククォートの有無でトークン数が変わるのはそのままで、
+ * 「意味が同じでも書き方が違えば別グループ」という方針どおりに割れる。
+ */
+function markEntities(tokens) {
+  const out = tokens.slice();
+  const skip = (i) => { let j = i + 1; while (j < out.length && out[j].kind === 'space') j++; return j; };
+  // いま開いている括弧の直前の名前。EXTRACT( … FROM … ) を除くために使う。
+  const stack = [];
+  let prevName = null;
+  for (let i = 0; i < out.length; i++) {
+    const t = out[i];
+    if (t.kind === 'space' || t.kind === 'comment') continue;
+    if (t.text === '(') { stack.push(prevName); prevName = null; continue; }
+    if (t.text === ')') { stack.pop(); prevName = null; continue; }
+    const up = t.text.toUpperCase();
+    prevName = (t.kind === 'keyword' || t.kind === 'ident') ? up : null;
+    if (t.kind !== 'keyword' || (up !== 'FROM' && up !== 'JOIN')) continue;
+    if (stack.length > 0 && stack[stack.length - 1] === 'EXTRACT') continue;
+
+    let j = skip(i);
+    for (;;) {
+      if (j >= out.length) break;
+      const s = out[j];
+      if (s.kind === 'quoted') {
+        out[j] = { kind: 'entity', text: s.text };
+        j = skip(j);
+      } else if (s.kind === 'ident') {
+        // ドット区切りのパスを集めてから決める。末尾の直後が '(' なら
+        // 実体名ではなく関数呼び出し（UNNEST(x) / ML.PREDICT(…) など）。
+        // 先に印を付けてしまうと ML.PREDICT が置換可能になり、
+        // 別の関数に差し替わっていても同じロジックに見えてしまう。
+        const path = [];
+        let k = j;
+        for (;;) {
+          path.push(k);
+          const dot = skip(k);
+          if (dot < out.length && out[dot].text === '.') {
+            const nm = skip(dot);
+            if (nm < out.length && out[nm].kind === 'ident') { k = nm; continue; }
+          }
+          break;
+        }
+        const end = skip(k);
+        if (end < out.length && out[end].text === '(') break;
+        for (const idx of path) out[idx] = { kind: 'entity', text: out[idx].text };
+        j = end;
+      } else break;
+      // 別名（AS x / x）を読み飛ばす。読み飛ばさないと 'FROM a AS x, b AS y' の
+      // b にたどり着けず、2 つ目以降の実体名を取りこぼす。
+      if (j < out.length && out[j].kind === 'keyword' && out[j].text.toUpperCase() === 'AS') {
+        const nm = skip(j);
+        if (nm < out.length && (out[nm].kind === 'ident' || out[nm].kind === 'quoted')) j = skip(nm);
+      } else if (j < out.length && out[j].kind === 'ident') {
+        j = skip(j);
+      }
+      // 'FROM a, b' のようにカンマで続くことがある
+      if (j < out.length && out[j].text === ',') { j = skip(j); continue; }
+      break;
+    }
+  }
+  return out;
+}
+
+/** 比較用に空白を 1 個へ潰す（整形の違いでロジック差と誤認しないため）。 */
+function normalizeSpace(tokens) {
+  return tokens.map((t) => (t.kind === 'space' ? { kind: 'space', text: ' ' } : t));
+}
+
+// ---------------------------------------------------------------------
+// suffix 抽出
+// ---------------------------------------------------------------------
+
+/**
+ * 末尾の "_ + 短い識別子" を suffix とみなす既定規則。
+ * v_daily_sales のような通常の複合語を誤って割らないよう、
+ * suffix 側の長さと文字種で絞る。
+ */
+const DEFAULT_SUFFIX_RE = /^(.*?)_([A-Za-z0-9]{1,6})$/;
+
+/**
+ * suffixParts（[['ab','cd','ef'], ['jp','us','uk']] のような区分の並び）から
+ * 取りうる suffix を全部作る。長いものから試すため長さ降順・辞書順で返す。
+ */
+function expandSuffixParts(parts) {
+  let acc = [''];
+  for (const part of parts) {
+    const next = [];
+    for (const a of acc) for (const b of part) next.push(a + b);
+    acc = next;
+  }
+  return acc.sort((x, y) => y.length - x.length || x.localeCompare(y));
+}
+
+/**
+ * @returns {{base: string, suffix: string, parts?: string[]} | null}
+ */
+function extractSuffix(viewName, opts) {
+  const o = opts || {};
+
+  // 区分の組み合わせで決まる場合（例: {ab,cd,ef} × {jp,us,uk} の 4 文字）。
+  // 規則が最もはっきりするので、これが使えるなら最優先。
+  if (Array.isArray(o.suffixParts) && o.suffixParts.length > 0) {
+    const list = o._expanded || (o._expanded = expandSuffixParts(o.suffixParts));
+    for (const suf of list) {
+      if (viewName.length > suf.length + 1 && viewName.endsWith('_' + suf)) {
+        // どの区分の値だったかも返す（ペイン見出しや集計に使える）
+        const parts = [];
+        let rest = suf;
+        for (const part of o.suffixParts) {
+          const hit = part.find((v) => rest.startsWith(v));
+          if (hit === undefined) { parts.length = 0; break; }
+          parts.push(hit);
+          rest = rest.slice(hit.length);
+        }
+        return {
+          base: viewName.slice(0, -(suf.length + 1)),
+          suffix: suf,
+          parts: parts.length ? parts : undefined,
+        };
+      }
+    }
+    return null;
+  }
+
+  if (Array.isArray(o.suffixList) && o.suffixList.length > 0) {
+    // 既知の suffix 一覧がある場合は突き合わせが最も確実。
+    //
+    // **当たったものの中でいちばん長いものを採る。** 一覧に並んだ順ではない。
+    // 1 つの View 名に 2 つ以上の suffix が当たることがあり（abjp と jp、
+    // zz_abjp と abjp）、どちらを採るかで base が変わる。base を決めるのは
+    // build_table.sql の keyed で、あちらは
+    //   QUALIFY ROW_NUMBER() OVER (... ORDER BY LENGTH(s.suffix) DESC) = 1
+    // つまり最長一致。**ここが先頭一致だと SQL と食い違う。**
+    // 一覧は ORDER BY suffix（辞書順）で来るので、短いほうが先に並ぶことが
+    // あり、たとえば suffix が {abjp, zz_abjp} で View が vw_x_zz_abjp のとき、
+    // SQL は base = vw_x、こちらは base = vw_x_zz になっていた。
+    // 行の base 列とカードの中身が食い違うが、どちらもエラーにはならない。
+    let hit = null;
+    for (const suf of o.suffixList) {
+      if (viewName.length > suf.length + 1 && viewName.endsWith('_' + suf) &&
+          (hit === null || suf.length > hit.length)) {
+        hit = suf;
+      }
+    }
+    return hit === null
+      ? null
+      : { base: viewName.slice(0, -(hit.length + 1)), suffix: hit };
+  }
+  const re = o.suffixPattern ? new RegExp(o.suffixPattern) : DEFAULT_SUFFIX_RE;
+  const m = String(viewName).match(re);
+  if (!m) return null;
+  return { base: m[1], suffix: m[2] };
+}
+
+// ---------------------------------------------------------------------
+// α 等価判定
+// ---------------------------------------------------------------------
+
+/**
+ * 既定で置換可能とみなす種類。
+ *
+ * 置換してよいのは「SQL の外を指す名前」（FROM / JOIN の実体名）と「値」だけ。
+ * 横展開はロジックが同じならコピーで行う運用なので、列名・別名・CTE 名・
+ * ウィンドウ名・関数名が違えば、それは環境差ではなく書き換えの差になる。
+ * 予約語・記号はもちろんロジック差。
+ */
+const DEFAULT_SUBSTITUTABLE = ['entity', 'number', 'string'];
+
+// 伏せ字の目印。SQL には現れない制御文字を使う。
+// 最小化するとソースに生の制御文字が出るので、UDF に埋めるときは
+// build_udf.mjs が \\uXXXX に戻す（生成 SQL に見えない文字を混ぜないため）。
+const SUFFIX_MARK = '\u0000';
+
+/** 手で並べた同値リテラルの目印。組ごとに違う印にする。 */
+const LITERAL_MARK = '\u0001';
+
+/**
+ * その View の suffix から作る「語彙」。リテラルの中の語と照合する。
+ * suffix そのものに加えて、区分（abjp なら ab / jp）も含める。
+ * 区分は suffixParts があればそれ、なければ長さが偶数のときの前後半。
+ */
+function suffixWords(suffix, parts) {
+  const s = String(suffix || '');
+  if (s.length < 2) return [];
+  const words = [s];
+  if (Array.isArray(parts) && parts.length > 0) {
+    for (const p of parts) if (String(p).length >= 2) words.push(String(p));
+  } else {
+    // '_' を含む suffix は、そこが区分の切れ目。真ん中で割ると
+    // abjp_xyz123456 が abjp_xy / z123456 になり、意味の無い語で
+    // リテラルを伏せることになる（実際に足せる形なので防いでおく）。
+    //
+    // **切れ目で割ったあと、区分の一つひとつにも前後半の分割を掛ける。**
+    // 掛けないと v2_txjp の語彙が [v2_txjp, v2, txjp] 止まりになり、
+    // txjp 単独の [txjp, tx, jp] と食い違う。同じ base に並ぶ 2 本なのに
+    // リテラルの 'jp' が片方でしか伏せられず、**環境差がロジック差として
+    // 出る**（中間語を suffix に取り込めるようにして初めて起きる形）。
+    //
+    // 前後半に割るのは 4 文字以上のときだけ。2 文字を割ると 1 文字の語に
+    // なり、'v' や '2' でリテラルを伏せてしまう。
+    for (const p of (s.indexOf('_') > 0 ? s.split('_') : [s])) {
+      if (p.length < 2) continue;
+      if (p !== s) words.push(p);
+      if (p.length >= 4 && p.length % 2 === 0) {
+        words.push(p.slice(0, p.length / 2), p.slice(p.length / 2));
+      }
+    }
+  }
+  const seen = {};
+  const out = [];
+  for (const w of words) {
+    const k = w.toLowerCase();
+    if (!seen[k]) { seen[k] = 1; out.push(k); }
+  }
+  return out;
+}
+
+
+/**
+ * 手で管理する「同一視するリテラル」の並びから、語 → 目印の対応を作る。
+ *
+ * suffix から機械的に導ける語（'JP' / 'US' など）は suffixWords が拾うが、
+ * 導けないものは人が並べるしかない。組を分けて持つのは、
+ * 「同じ組の値どうしだけ同一視する」ためで、
+ * ['jp','us'] と ['apac','amer'] を混ぜて 'jp' = 'apac' にはしない。
+ *
+ * literalGroups: [['jp','us','uk'], ['apac','amer','emea']]
+ *                （1 段の配列 ['jp','us'] は 1 組として扱う）
+ */
+function buildLiteralMap(groups) {
+  if (!Array.isArray(groups) || groups.length === 0) return null;
+  const list = (typeof groups[0] === 'string') ? [groups] : groups;
+  const map = {};
+  let n = 0;
+  for (let i = 0; i < list.length; i++) {
+    if (!Array.isArray(list[i])) continue;
+    const mark = LITERAL_MARK + (i + 1) + LITERAL_MARK;
+    for (const w of list[i]) {
+      const k = String(w == null ? '' : w).toLowerCase();
+      if (k) { map[k] = mark; n++; }
+    }
+  }
+  return n > 0 ? map : null;
+}
+
+/**
+ * 「同じグループとみなす文字列の組」を 1 本の配列で受ける。
+ *
+ *   equivalentLiterals: ["suffix", ["aa","bb"], ["cc","dd"]]
+ *
+ * "suffix" は予約語で、**その View 自身の** suffix とその区分（前後半）を表す。
+ * これだけは View ごとに中身が変わる（v_x_abjp なら abjp / ab / jp）ので、
+ * 値を並べて書けない。ほかの組は View に関係なく、値が一致すれば効く。
+ *
+ * 旧い書き方（literalSuffixWords と literalGroups を別々に持つ）も受ける。
+ * equivalentLiterals を書いたときだけ、そちらが一覧の唯一の定義になる。
+ */
+function parseEquivalents(opts) {
+  const o = opts || {};
+  const list = o.equivalentLiterals;
+  if (Array.isArray(list)) {
+    let useWords = false;
+    const groups = [];
+    const loose = [];
+    for (const e of list) {
+      if (Array.isArray(e)) groups.push(e);
+      else if (String(e).toLowerCase() === 'suffix') useWords = true;
+      else if (e != null) loose.push(e);
+    }
+    // 組を 1 つだけ書くときに ["aa","bb"] と書いてしまうのはありがちなので、
+    // 配列が 1 つも無ければ全体を 1 組として受ける（黙って無視しない）。
+    if (groups.length === 0 && loose.length > 0) groups.push(loose);
+    return { useWords, groups: groups.length > 0 ? groups : null };
+  }
+  return {
+    useWords: o.literalSuffixWords !== false,
+    groups: Array.isArray(o.literalGroups) ? o.literalGroups : null,
+  };
+}
+
+/**
+ * 比較用のトークン列から「差ではないと分かっている違い」を伏せ字にする。
+ *
+ * 1. その View 自身の suffix（文字列として、どのトークンでも）
+ *    参照先の識別子もデータセット名も View と同じ suffix を持つ運用なら、
+ *    伏せ字にした時点で同じ文字列になる。
+ * 2. リテラルの値そのもの（大文字小文字を無視、値の全体が一致したときだけ）
+ *    a. その View の suffix 語彙 … 'JP' / 'US' のように suffix と連動する値
+ *    b. literalGroups の並び  … suffix から導けない、人が並べた同値リテラル
+ *
+ * 2 はリテラルの中を語単位で探さない。区切り文字で割って探すと、
+ * 'ORDER_IN_TRANSIT' の IN のような無関係な語まで拾ってしまう。
+ * 引用符の中身がまるごと語彙と一致したときだけ置き換える。
+ * 対象は文字列リテラルと数値リテラルだけ。バッククォート識別子は
+ * substitutable が面倒を見るので触らない。
+ *
+ * 置換可能種別（substitutable）を緩めるのと違い、リテラルでも
+ * 「連動しているから同じ」と「値そのものが違う」を区別できる。
+ * WHERE region = 'abjp' と 'abus' は同一視されるが、
+ * WHERE status = 'A' と 'B' はロジック差として残る。
+ */
+function maskTokens(tokens, suffix, parts, opts) {
+  const s = String(suffix || '');
+  const useSuffix = s.length >= 2;
+  // リテラルの値の照合。suffix と連動する国コードなどを吸収する。
+  const eq = parseEquivalents(opts);
+  const words = (useSuffix && eq.useWords) ? suffixWords(s, parts) : [];
+  const map = buildLiteralMap(eq.groups);
+  if (!useSuffix && words.length === 0 && !map) return tokens;
+  // 伏せ字は置換とは別の仕組みなので、置換対象かどうかでは絞らない。
+  // 既定ではリテラルが置換対象なので出番が無いが、substitutable を
+  // 絞った運用（リテラル差を残したい場合）ではこちらが効く。
+  return tokens.map((t) => {
+    if (t.kind === 'space') return t;
+    let text = t.text;
+    if (useSuffix && text.indexOf(s) >= 0) text = text.split(s).join(SUFFIX_MARK);
+    if (words.length > 0 || map) {
+      // 引用符を外した中身。数値は引用符が無いのでそのまま。
+      const body = t.kind === 'string' && text.length >= 2 ? text.slice(1, -1)
+        : (t.kind === 'number' ? text : null);
+      if (body) {
+        const k = body.toLowerCase();
+        const mark = words.indexOf(k) >= 0 ? SUFFIX_MARK : (map && map[k]);
+        if (mark) text = t.kind === 'string' ? text[0] + mark + text[0] : mark;
+      }
+    }
+    return text === t.text ? t : { kind: t.kind, text };
+  });
+}
+
+/**
+ * 2 つのトークン列が「一貫した 1 対 1 置換で一致するか」を判定し、
+ * 一致しない場合はどこで止まったかも返す。
+ *
+ * グループが想定より細かく割れたとき、原因が
+ * 「リテラル差を既定でロジック差にしている」なのか本物の差なのかを
+ * 切り分けられないと詰まるので、理由を出せるようにしている。
+ *
+ * @returns {{ok:true, fwd:Map, rev:Map} | {ok:false, reason:string, ...}}
+ */
+function alphaMapDetail(a, b, opts) {
+  if (a.length !== b.length) {
+    return { ok: false, reason: 'length', aLen: a.length, bLen: b.length };
+  }
+  const sub = new Set((opts && opts.substitutable) || DEFAULT_SUBSTITUTABLE);
+  const fwd = new Map();
+  const rev = new Map();
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i], y = b[i];
+    const at = (r) => ({ ok: false, reason: r, index: i, kind: x.kind,
+      otherKind: y.kind, aText: x.text, bText: y.text });
+    if (x.kind !== y.kind) return at('kind');
+    if (x.text === y.text) continue;
+    // 予約語・記号の違いはロジック差。既定ではリテラルもここで弾く。
+    if (!sub.has(x.kind)) return at('not-substitutable');
+    if (fwd.has(x.text) && fwd.get(x.text) !== y.text) return at('inconsistent');
+    if (rev.has(y.text) && rev.get(y.text) !== x.text) return at('not-injective');
+    fwd.set(x.text, y.text);
+    rev.set(y.text, x.text);
+  }
+  return { ok: true, fwd, rev };
+}
+
+/**
+ * @returns {{fwd: Map, rev: Map} | null}  一致しなければ null
+ */
+function alphaMap(a, b, opts) {
+  const d = alphaMapDetail(a, b, opts);
+  return d.ok ? { fwd: d.fwd, rev: d.rev } : null;
+}
+
+// ---------------------------------------------------------------------
+// グループ化とパラメータ化
+// ---------------------------------------------------------------------
+
+/**
+ * グループ内で値が割れているトークン位置を {{P1}} … に置換する。
+ * 全メンバでトークン数が揃っている（α 等価の前提）ことを利用して添字で突き合わせる。
+ * 同じ「値の並び」を持つ位置には同じパラメータ名を割り当てるので、
+ * 参照テーブルの suffix のように複数箇所に出るものは 1 つのパラメータにまとまる。
+ */
+function parameterize(members, rep) {
+  const n = rep.tokens.length;
+  const byTuple = new Map();
+  const params = [];
+  const out = [];
+  // メンバは代表との差分（diff）だけを持つ。無い添字は代表と同じ文字。
+  const textAt = (m, i) => (m.diff.has(i) ? m.diff.get(i) : rep.raw[i].text);
+  for (let i = 0; i < n; i++) {
+    // 表示は raw（元の空白・改行）を使う。tokens は比較用に空白を潰してあるので、
+    // そのまま出すと 1 行に潰れて差分ペインに出せなくなる。
+    // 空白は整形の差であってロジックの差ではないため、代表のものを採用する。
+    if (rep.tokens[i].kind === 'space') {
+      out.push(rep.raw[i].text);
+      continue;
+    }
+    const texts = members.map((m) => textAt(m, i));
+    let allSame = true;
+    for (let j = 1; j < texts.length; j++) if (texts[j] !== texts[0]) { allSame = false; break; }
+    if (allSame) { out.push(texts[0]); continue; }
+    const key = JSON.stringify(texts);
+    if (!byTuple.has(key)) {
+      const name = 'P' + (params.length + 1);
+      byTuple.set(key, name);
+      const values = {};
+      members.forEach((m, j) => { values[m.suffix] = texts[j]; });
+      // 種類は代表から採る。α 等価なら同じ添字の種類は一致する
+      // （食い違えば別グループになっているので、ここには来ない）。
+      params.push({ name, kind: rep.raw[i].kind, values });
+    }
+    out.push('{{' + byTuple.get(key) + '}}');
+  }
+  return { sql: out.join(''), params };
+}
+
+/**
+ * 同じ base を持つ View 群をロジックでグループ化する。
+ *
+ * @param {Array<{suffix: string, ddl: string, viewName?: string}>} views
+ * @param {{substitutable?: string[]}} [opts]
+ * @returns {Array<{suffixes: string[], members: object[], sql: string, params: object[]}>}
+ */
+function groupByLogic(views, opts) {
+  const stripOpts = !(opts && opts.stripOptions === false);
+  const suffixAware = !(opts && opts.suffixAware === false);
+  // **トークン列はグループの代表ぶんしか残さない。**
+  //
+  // 以前は全 View を先に prepared に展開していた。raw は
+  // { kind, text } の配列で、3 KB の SQL が 560 トークン ≒ 37 KB になる
+  // （オブジェクトの分だけ 12 倍に膨らむ）。View が 120 本あれば 4.5 MB で、
+  // リージョンを足すたびに増える。**これが UDF のメモリを使い切っていた**
+  // （Resources exceeded during execution: UDF out of memory）。
+  //
+  // ところが同じグループのメンバは α 等価、つまり**実体名と値しか違わない。**
+  // だから代表の raw と「違う添字だけ」を持てば元に戻せる。保持量は
+  //   従来  View 数 × SQL の大きさ
+  //   いま  グループ数 × SQL の大きさ ＋ 差分
+  // になる。リージョンを足しても増えるのはメンバ数であってグループ数では
+  // ないので、**リージョンの本数がメモリから外れる**のが効く。
+  //
+  // 添字が揃うことは normalizeSpace が 1 対 1（空白の文字だけ差し替える）
+  // であることと、α 等価が長さと種類の一致を要求することから言える。
+  const groups = [];
+  for (const v of views) {
+    let raw = tokenizeSql(v.ddl);
+    // OPTIONS はメタデータ。既定で落とす（stripOptions: false で無効化）
+    if (stripOpts) raw = stripOptionsClause(raw);
+    // FROM / JOIN の実体名に印を付ける。表示にも影響しない（テキストは変えない）。
+    raw = markEntities(raw);
+    // raw は表示用（元の整形を保つ）、tokens は比較用
+    //   空白を潰し、さらに自分の suffix を伏せ字にする
+    const tokens = maskTokens(normalizeSpace(raw), suffixAware ? v.suffix : null,
+      v.parts, opts);
+    // ddl は入力の文字列をそのまま指すだけ（複製ではない）ので持っていてよい。
+    // 重かったのはトークンの配列のほうで、文字列の参照は 1 本 8 バイト。
+    const meta = { viewName: v.viewName, suffix: v.suffix, parts: v.parts, ddl: v.ddl };
+    // α 等価は推移的（全単射の合成）なので、代表 1 本と比べれば足りる
+    let hit = null;
+    for (const g of groups) {
+      if (alphaMapDetail(g.rep.tokens, tokens, opts).ok) { hit = g; break; }
+    }
+    if (hit) {
+      // 代表と違う添字だけ控えて、この View の raw / tokens は手放す。
+      const diff = new Map();
+      for (let i = 0; i < raw.length; i++) {
+        if (raw[i].text !== hit.rep.raw[i].text) diff.set(i, raw[i].text);
+      }
+      hit.members.push({ ...meta, diff });
+    } else {
+      const rep = { ...meta, raw, tokens };
+      groups.push({ rep, members: [{ ...meta, diff: new Map() }] });
+    }
+  }
+
+  // 大きいグループを先頭に（比較の基準に使う）
+  groups.sort((a, b) => b.members.length - a.members.length ||
+    String(a.members[0].suffix).localeCompare(String(b.members[0].suffix)));
+
+  // 基準はレポート側で選べるので、「なぜ別グループになったか」も
+  // 基準ごとに要る。全順序対の「最初の差」を持っておく。
+  // グループ数はせいぜい数個なので、G² でも走査は実質ゼロ。
+  // 向きで理由が変わりうる（inconsistent / not-injective）ため対称にはしない。
+  const reps = groups.map((g) => g.rep);
+
+  return groups.map((g, i) => {
+    const members = g.members
+      .slice()
+      .sort((x, y) => String(x.suffix).localeCompare(String(y.suffix)));
+    // 並べ替えた先頭ではなく**代表**を渡す。トークン列を持っているのは
+    // 代表だけで、メンバは代表との差分しか持たない。
+    const p = parameterize(members, g.rep);
+    // missBy[k] = 「グループ k を基準にしたとき、この群がなぜ別扱いか」
+    const missBy = reps.map((r, k) => (k === i ? null : {
+      vs: r.suffix,
+      detail: alphaMapDetail(r.tokens, g.rep.tokens, opts),
+    }));
+    return {
+      suffixes: members.map((m) => m.suffix),
+      // 差分は復元に使い終わったので落とす（ここから先は誰も見ない）。
+      // ddl は残す。suffix を認識できなかった View はこれが唯一のソースで、
+      // 落とすと画面から消える。文字列の参照なので大きさは変わらない。
+      members: members.map((m) =>
+        ({ viewName: m.viewName, suffix: m.suffix, parts: m.parts, ddl: m.ddl })),
+      sql: p.sql,
+      params: p.params,
+      missBy,
+      // 既定（基準 = 先頭グループ）の分。先頭グループ自身は null。
+      miss: missBy[0],
+    };
+  });
+}
+
+/**
+ * INFORMATION_SCHEMA 相当の行（view_name, ddl）を base 名ごとに束ねてグループ化する。
+ *
+ * suffix を認識できなかった View も、既定では単独の base として並べる
+ * （base = View 名 / 1 グループ / 1 View）。出さないとソースが画面から消えてしまい、
+ * 命名規則から外れた View ほど気づけなくなる。`includeUnmatched: false` で従来どおり
+ * 除外できる。どちらの場合も `unmatched` には元の行が入るので、件数は数えられる。
+ *
+ * @returns {{bases: Array<{base: string, viewCount: number, groupCount: number,
+ *            groups: object[], unmatched?: boolean}>, unmatched: object[]}}
+ */
+function analyze(rows, opts) {
+  const includeUnmatched = !(opts && opts.includeUnmatched === false);
+  const byBase = new Map();
+  const unmatched = [];
+  for (const r of rows) {
+    const ex = extractSuffix(r.view_name, opts);
+    if (!ex) { unmatched.push(r); continue; }
+    if (!byBase.has(ex.base)) byBase.set(ex.base, []);
+    byBase.get(ex.base).push({
+      viewName: r.view_name, suffix: ex.suffix, parts: ex.parts, ddl: r.ddl,
+    });
+  }
+  const out = [];
+  for (const [base, views] of byBase) {
+    const groups = groupByLogic(views, opts);
+    out.push({ base, viewCount: views.length, groupCount: groups.length, groups });
+  }
+  if (includeUnmatched) {
+    for (const r of unmatched) {
+      // suffix は null。比較相手がいないので伏せ字もパラメータ化も働かない。
+      const views = [{ viewName: r.view_name, suffix: null, parts: null, ddl: r.ddl }];
+      out.push({
+        base: r.view_name,
+        viewCount: 1,
+        groupCount: 1,
+        groups: groupByLogic(views, opts),
+        unmatched: true,
+      });
+    }
+  }
+  out.sort((a, b) => b.groupCount - a.groupCount || a.base.localeCompare(b.base));
+  return { bases: out, unmatched };
+}
+
+module.exports = {
+  tokenizeSql, normalizeSpace, stripOptionsClause, markEntities,
+  maskTokens, suffixWords, buildLiteralMap,
+  parseEquivalents,
+  extractSuffix, expandSuffixParts, alphaMap, alphaMapDetail,
+  parameterize, groupByLogic, analyze,
+  DEFAULT_SUFFIX_RE, DEFAULT_SUBSTITUTABLE, KEYWORDS,
+};

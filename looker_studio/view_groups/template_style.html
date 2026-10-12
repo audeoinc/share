@@ -1,0 +1,196 @@
+<!--
+  Templated Record のテンプレートに貼る CSS（mode='class' のとき）。
+  中身は SELECT `<project>.<udf_dataset>.viewlgc_group_css`(...) の出力そのもの。
+  このファイルは build_udf.mjs が生成する。直接編集しないこと。
+
+  ここは固定。差分の内容が変わっても書き換え不要。
+  この下にフィールド（diff_html）を差し込む。
+
+  注意: templated_record/samples/04_template_style.html とは別物。
+  あちらは DIFF_CSS の出力で、見出し・タブ・パラメータ表の .vg-* 規則を
+  含まないため、こちらの表示には使えない（タブが動かない）。
+-->
+<style>
+.vg-cssgen11{display:none}
+.vg-root{font:13px/1.6 'Roboto','Segoe UI',system-ui,-apple-system,sans-serif;color:#24292F}
+.vg-header{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 10px}
+.vg-title{font-weight:600;font-size:15px;line-height:1.6;color:#1A1A1A}
+.vg-badge{display:inline-block;padding:1px 8px;border-radius:10px;font-weight:600;font-size:12px}
+.vg-notice{margin:8px 0;padding:8px 12px;border:1px solid #D0D7DE;border-left:4px solid #57606A;border-radius:4px;background:#F6F8FA;color:#57606A}
+.vg-r{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}
+.vg-tablist{display:flex;flex-wrap:wrap;gap:4px;border-bottom:1px solid #D0D7DE;margin-bottom:-1px}
+.vg-tab{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border:1px solid #D0D7DE;background:#F6F8FA;border-bottom:none;border-radius:6px 6px 0 0;color:#57606A;cursor:pointer;user-select:none;font-weight:600}
+.vg-tab:hover{background:#EAEEF2;color:#24292F}
+.vg-tbase{background:#fbeded;border-color:#efb6b6;color:#24292F;cursor:default}
+.vg-tbase:hover{background:#fbeded;color:#24292F}
+.vg-tbadge{padding:0 6px;border-radius:8px;background:#f6d7d7;color:#87494a;font-size:11px;font-weight:600}
+.vg-tabn{padding:0 6px;border-radius:8px;background:#EAEEF2;color:#57606A;font-size:11px}
+.vg-panels{border:1px solid #D0D7DE;border-radius:0 6px 6px 6px;padding:10px;background:#fff}
+.vg-panel{display:none}
+.vg-params{margin:12px 0 0;border:1px solid #D0D7DE;border-radius:6px;background:#F6F8FA}
+.vg-psummary{padding:8px 12px;cursor:pointer;color:#57606A;font-weight:600;font-size:12px}
+.vg-pblock{padding:0 12px 10px}
+.vg-plabel{font-weight:600;font-size:12px;line-height:1.8;color:#24292F}
+.vg-pnone{color:#57606A;font-size:12px}
+.vg-ptable{border-collapse:collapse;width:100%}
+.vg-pname{width:44px;text-align:left;vertical-align:top;padding:3px 8px 3px 0;color:#8250DF;font:600 12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace}
+.vg-pvals{padding:3px 0}
+.vg-pv{font:11px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;color:#57606A;word-break:break-all}
+.vg-psuf{display:inline-block;min-width:44px;color:#24292F;font-weight:600}
+.vg-mhint{padding:0 12px 8px;color:#57606A;font-size:12px}
+.vg-mname{text-align:left;vertical-align:top;padding:3px 10px 3px 0;font-weight:600;font-size:12px;line-height:1.6;color:#24292F;white-space:nowrap}
+.vg-mvs{vertical-align:top;padding:3px 10px 3px 0;color:#57606A;font-size:12px;white-space:nowrap}
+.vg-mreason{padding:3px 0;color:#57606A;font-size:12px}
+.vg-mcode{padding:1px 5px;border-radius:3px;background:#FFEBE9;color:#82071E;font:11px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace}
+.vg-mkind{margin-left:6px;color:#8250DF;font-size:11px}
+.vg-ph{position:relative;margin:0 -2px;padding:0 2px;border-radius:3px;background:#F1E8FD;color:#6639BA;font-weight:700;box-shadow:inset 0 0 0 1px #CDB6F2;cursor:help}
+.vg-ph:hover{background:#E4D3FB}
+.vg-ph::after{content:attr(data-tip);display:none;position:absolute;z-index:20;left:0;top:calc(100% + 5px);width:max-content;max-width:340px;padding:6px 10px;border-radius:6px;background:#24292F;color:#fff;font:11px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;text-align:left;box-shadow:0 2px 10px rgba(0,0,0,.30);pointer-events:none}
+.vg-ph:hover::after{display:block}
+.vg-ph.vg-phr::after{left:auto;right:0}
+.vg-refhead{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 10px;padding:0 0 8px;border-bottom:1px solid #D0D7DE}
+.vg-blabel{color:#57606A;font-size:12px;font-weight:600;margin-right:2px}
+.vg-refname{display:inline-flex;align-items:center;gap:6px;font-weight:600;font-size:13px;color:#24292F;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.vg-refnote{color:#57606A;font-size:11px}
+.vg-or{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}
+.vg-outer{max-height:min(100vh,2000px);overflow:auto;--vg-bar:75px}
+.vg-otablist,.vg-ohead{display:flex;flex-wrap:wrap;align-items:center;gap:6px;position:sticky;top:0;z-index:5;background:#fff;margin:0 0 10px;padding:8px 0;box-shadow:0 1px 0 #EAEEF2}
+.vg-otablist>.vg-header,.vg-ohead>.vg-header{flex:0 0 100%;margin:0}
+.vg-ohead>.vg-otablist{position:static;padding:0;margin:0;box-shadow:none;flex:0 0 100%}
+.vg-opanel .vg-header{display:none}
+.vg-otab{display:inline-flex;align-items:center;padding:5px 16px;border:1px solid #D0D7DE;border-radius:16px;color:#57606A;cursor:pointer;user-select:none;font-weight:600;font-size:12px}
+.vg-otab:hover{background:#EAEEF2;color:#24292F}
+.vg-opanel{display:none}
+.vg-erdblock{margin:0 0 28px;border:1px solid #D0D7DE;border-radius:6px;background:#fff}
+.vg-erdblock:last-child{margin-bottom:0}
+.vg-erdhead{display:flex;align-items:center;gap:6px;padding:7px 12px;border-bottom:1px solid #EAEEF2;background:#F6F8FA;border-radius:6px 6px 0 0}
+.vg-erdname{font-weight:600;color:#24292F;font-size:12px}
+.vg-erdbox{overflow-x:auto;padding:6px 10px 10px}
+.vg-legend{display:flex;flex-wrap:wrap;gap:14px;margin:8px 0 10px;color:#57606A;font-size:11px}
+.vg-lg{display:inline-flex;align-items:center;gap:5px}
+.vg-lgm{display:inline-block;width:10px;height:10px;border-radius:2px;border:1px solid #8C96A0}
+.vg-lgt{background:#C9A227;border-color:#8C6D3F}
+.vg-lgc{background:#4E8FBF;border-color:#3F6D8C}
+.vg-lgo{background:#8250DF;border-color:#6D3F8C}
+.vg-lgd{display:inline-block;width:18px;border-top:1.5px dashed #8C96A0}
+.vg-or1:checked ~ .vg-opanels > .vg-op1,.vg-or2:checked ~ .vg-opanels > .vg-op2,.vg-or3:checked ~ .vg-opanels > .vg-op3,.vg-or4:checked ~ .vg-opanels > .vg-op4,.vg-or5:checked ~ .vg-opanels > .vg-op5,.vg-or6:checked ~ .vg-opanels > .vg-op6,.vg-or7:checked ~ .vg-opanels > .vg-op7,.vg-or8:checked ~ .vg-opanels > .vg-op8{display:block}
+.vg-or1:checked ~ .vg-otablist > .vg-ot1,.vg-or1:checked ~ .vg-ohead > .vg-otablist > .vg-ot1,.vg-or2:checked ~ .vg-otablist > .vg-ot2,.vg-or2:checked ~ .vg-ohead > .vg-otablist > .vg-ot2,.vg-or3:checked ~ .vg-otablist > .vg-ot3,.vg-or3:checked ~ .vg-ohead > .vg-otablist > .vg-ot3,.vg-or4:checked ~ .vg-otablist > .vg-ot4,.vg-or4:checked ~ .vg-ohead > .vg-otablist > .vg-ot4,.vg-or5:checked ~ .vg-otablist > .vg-ot5,.vg-or5:checked ~ .vg-ohead > .vg-otablist > .vg-ot5,.vg-or6:checked ~ .vg-otablist > .vg-ot6,.vg-or6:checked ~ .vg-ohead > .vg-otablist > .vg-ot6,.vg-or7:checked ~ .vg-otablist > .vg-ot7,.vg-or7:checked ~ .vg-ohead > .vg-otablist > .vg-ot7,.vg-or8:checked ~ .vg-otablist > .vg-ot8,.vg-or8:checked ~ .vg-ohead > .vg-otablist > .vg-ot8{background:#24292F;border-color:#24292F;color:#fff}
+.vg-r1:checked ~ .vg-panels > .vg-p1,.vg-r2:checked ~ .vg-panels > .vg-p2,.vg-r3:checked ~ .vg-panels > .vg-p3,.vg-r4:checked ~ .vg-panels > .vg-p4,.vg-r5:checked ~ .vg-panels > .vg-p5,.vg-r6:checked ~ .vg-panels > .vg-p6,.vg-r7:checked ~ .vg-panels > .vg-p7,.vg-r8:checked ~ .vg-panels > .vg-p8,.vg-r9:checked ~ .vg-panels > .vg-p9,.vg-r10:checked ~ .vg-panels > .vg-p10,.vg-r11:checked ~ .vg-panels > .vg-p11,.vg-r12:checked ~ .vg-panels > .vg-p12{display:block}
+.vg-r1:checked ~ .vg-tablist > .vg-t1,.vg-r2:checked ~ .vg-tablist > .vg-t2,.vg-r3:checked ~ .vg-tablist > .vg-t3,.vg-r4:checked ~ .vg-tablist > .vg-t4,.vg-r5:checked ~ .vg-tablist > .vg-t5,.vg-r6:checked ~ .vg-tablist > .vg-t6,.vg-r7:checked ~ .vg-tablist > .vg-t7,.vg-r8:checked ~ .vg-tablist > .vg-t8,.vg-r9:checked ~ .vg-tablist > .vg-t9,.vg-r10:checked ~ .vg-tablist > .vg-t10,.vg-r11:checked ~ .vg-tablist > .vg-t11,.vg-r12:checked ~ .vg-tablist > .vg-t12{background:#f0f4ea;border-color:#c4d2ac;color:#24292F}
+.vg-r1:checked ~ .vg-tablist > .vg-t1 .vg-tabn,.vg-r2:checked ~ .vg-tablist > .vg-t2 .vg-tabn,.vg-r3:checked ~ .vg-tablist > .vg-t3 .vg-tabn,.vg-r4:checked ~ .vg-tablist > .vg-t4 .vg-tabn,.vg-r5:checked ~ .vg-tablist > .vg-t5 .vg-tabn,.vg-r6:checked ~ .vg-tablist > .vg-t6 .vg-tabn,.vg-r7:checked ~ .vg-tablist > .vg-t7 .vg-tabn,.vg-r8:checked ~ .vg-tablist > .vg-t8 .vg-tabn,.vg-r9:checked ~ .vg-tablist > .vg-t9 .vg-tabn,.vg-r10:checked ~ .vg-tablist > .vg-t10 .vg-tabn,.vg-r11:checked ~ .vg-tablist > .vg-t11 .vg-tabn,.vg-r12:checked ~ .vg-tablist > .vg-t12 .vg-tabn{background:#dfe7d2;color:#58683e}
+.vg-md{font:13px/1.75 'Roboto','Segoe UI',system-ui,-apple-system,sans-serif;color:#24292F;overflow-wrap:anywhere}
+.vg-mdempty{color:#8C959F}
+.vg-md>:first-child{margin-top:0}
+.vg-md>:last-child,.vg-mdq>:last-child{margin-bottom:0}
+.vg-mdh1{font-weight:600;font-size:15px;line-height:1.6;color:#1A1A1A;margin:18px 0 8px}
+.vg-mdh2{font-weight:600;font-size:14px;line-height:1.6;color:#1A1A1A;margin:16px 0 8px;padding-bottom:4px;border-bottom:1px solid #EAEEF2}
+.vg-mdh3{font-weight:600;font-size:13px;line-height:1.6;color:#24292F;margin:14px 0 6px}
+.vg-mdh4,.vg-mdh5,.vg-mdh6{font-weight:600;font-size:12px;line-height:1.6;color:#57606A;margin:12px 0 6px}
+.vg-mdp{margin:0 0 10px}
+.vg-mdul,.vg-mdol{margin:0 0 10px;padding-left:22px}
+.vg-mdli{margin:2px 0}
+.vg-mdli>.vg-mdul,.vg-mdli>.vg-mdol{margin:2px 0 0}
+.vg-mdtw{overflow-x:auto;margin:0 0 12px}
+.vg-mdtable{border-collapse:collapse;font-size:12px}
+.vg-mdth{border:1px solid #D0D7DE;padding:5px 10px;background:#F6F8FA;font-weight:600;text-align:left;white-space:nowrap}
+.vg-mdtd{border:1px solid #D0D7DE;padding:5px 10px;vertical-align:top}
+.vg-mdtl{text-align:left}
+.vg-mdtc{text-align:center}
+.vg-mdtr{text-align:right}
+.vg-mdpre{margin:0 0 12px;padding:10px 12px;border:1px solid #D0D7DE;border-radius:6px;background:#F6F8FA;overflow-x:auto}
+.vg-mdpre code{font:11px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;color:#24292F}
+.vg-mdcode{padding:1px 5px;border-radius:3px;background:#EFF1F3;color:#24292F;font:11px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace}
+.vg-mdq{margin:0 0 12px;padding:2px 0 2px 12px;border-left:3px solid #D0D7DE;color:#57606A}
+.vg-mdhr{margin:14px 0;border:none;border-top:1px solid #D0D7DE}
+.vg-mda{color:#0969DA;text-decoration:none}
+.vg-mda:hover{text-decoration:underline}
+.vg-ctablewrap{width:100%}
+.vg-ctable{border-collapse:collapse;font-size:12px;width:100%;max-width:1000px;table-layout:fixed}
+.vg-chead{position:sticky;top:var(--vg-bar);z-index:1;padding:6px 12px;border:1px solid #D0D7DE;background:#F6F8FA;color:#24292F;font-weight:600;font-size:11px;text-align:left;overflow-wrap:anywhere}
+.vg-cname{position:sticky;left:0;z-index:1;background:#fff;padding:5px 12px;border:1px solid #D0D7DE;text-align:left;box-shadow:1px 0 0 #D0D7DE;vertical-align:top;font-weight:600;font-size:12px;color:#24292F;overflow-wrap:anywhere;word-break:break-all;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.vg-cnamehead{left:0;z-index:2;box-shadow:1px 0 0 #D0D7DE}
+.vg-cdesc{margin:2px 0 0;font:11px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;font-weight:400;color:#57606A}
+.vg-cdtable{margin:3px 0 0;border-collapse:collapse;width:100%}
+.vg-cdk{padding:1px 6px 1px 0;border-right:1px solid #EAEEF2;text-align:left;vertical-align:top;white-space:nowrap;font:10px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;color:#8C959F}
+.vg-cdv{padding:1px 0 1px 6px;vertical-align:top;width:100%;font:11px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;font-weight:400;color:#57606A;overflow-wrap:anywhere}
+.vg-cdescwho{margin:4px 0 0;font:10px/1.5 'Roboto','Segoe UI',system-ui,sans-serif;font-weight:600;color:#8C959F}
+.vg-cd1{padding-left:26px}
+.vg-cd2{padding-left:40px}
+.vg-cd3{padding-left:54px}
+.vg-cnestmark{margin-right:4px;color:#8C959F;font-weight:400}
+.vg-ccell{padding:5px 12px;border:1px solid #D0D7DE;vertical-align:top;color:#24292F;overflow-wrap:anywhere;word-break:break-all;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.vg-cmeta{margin-left:6px;font:8px/1.6 'Roboto','Segoe UI',system-ui,sans-serif;letter-spacing:.04em;color:#8C959F;white-space:nowrap}
+.vg-cdiff{background:#dfe7d2}
+.vg-cnone{color:#8C959F;background:#FAFAFA}
+.vg-cmix{box-shadow:inset 0 0 0 2px #D4A72C}
+.vg-cwarn{position:relative;margin-left:6px;color:#9A6700;cursor:help}
+.vg-cwarn::after{content:attr(data-tip);display:none;position:absolute;z-index:20;left:0;top:calc(100% + 5px);width:max-content;max-width:340px;padding:6px 10px;border-radius:6px;background:#24292F;color:#fff;font:11px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;text-align:left;box-shadow:0 2px 10px rgba(0,0,0,.30);pointer-events:none}
+.vg-cwarn:hover::after{display:block}
+.vg-sr{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}
+.vg-stablist{display:grid;grid-template-columns:max-content minmax(0,1fr);align-items:baseline;column-gap:12px;margin:0 0 10px}
+.vg-srule{grid-column:1/-1;border-top:1px solid #EAEEF2;margin:5px 0}
+.vg-sregname{color:#57606A;font-size:11px;font-weight:600;white-space:nowrap;line-height:1.9;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.vg-sreg{display:flex;flex-wrap:wrap;gap:6px}
+.vg-stab{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border:1px solid #D0D7DE;border-radius:14px;color:#57606A;cursor:pointer;user-select:none;font-weight:600;font-size:12px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.vg-stab:hover{background:#EAEEF2;color:#24292F}
+.vg-spanel{display:none}
+.vg-sqlhead{display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:7px 12px;border:1px solid #D0D7DE;border-bottom:none;border-radius:6px 6px 0 0;background:#F6F8FA}
+.vg-sqlname{font-weight:600;font-size:12px;line-height:1.6;color:#24292F;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.vg-sqlmeta{color:#57606A;font-size:11px;line-height:1.6}
+.vg-sqlbox{overflow-x:auto;border:1px solid #D0D7DE;border-radius:0 0 6px 6px;background:#fff}
+.vg-sqlpre{margin:0;padding:8px 12px;white-space:pre;font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;color:#24292F}
+.vg-sqln{color:#8C959F;user-select:none}
+.vg-sr1:checked ~ .vg-spanels > .vg-sp1,.vg-sr2:checked ~ .vg-spanels > .vg-sp2,.vg-sr3:checked ~ .vg-spanels > .vg-sp3,.vg-sr4:checked ~ .vg-spanels > .vg-sp4,.vg-sr5:checked ~ .vg-spanels > .vg-sp5,.vg-sr6:checked ~ .vg-spanels > .vg-sp6,.vg-sr7:checked ~ .vg-spanels > .vg-sp7,.vg-sr8:checked ~ .vg-spanels > .vg-sp8,.vg-sr9:checked ~ .vg-spanels > .vg-sp9,.vg-sr10:checked ~ .vg-spanels > .vg-sp10,.vg-sr11:checked ~ .vg-spanels > .vg-sp11,.vg-sr12:checked ~ .vg-spanels > .vg-sp12,.vg-sr13:checked ~ .vg-spanels > .vg-sp13,.vg-sr14:checked ~ .vg-spanels > .vg-sp14,.vg-sr15:checked ~ .vg-spanels > .vg-sp15,.vg-sr16:checked ~ .vg-spanels > .vg-sp16,.vg-sr17:checked ~ .vg-spanels > .vg-sp17,.vg-sr18:checked ~ .vg-spanels > .vg-sp18,.vg-sr19:checked ~ .vg-spanels > .vg-sp19,.vg-sr20:checked ~ .vg-spanels > .vg-sp20,.vg-sr21:checked ~ .vg-spanels > .vg-sp21,.vg-sr22:checked ~ .vg-spanels > .vg-sp22,.vg-sr23:checked ~ .vg-spanels > .vg-sp23,.vg-sr24:checked ~ .vg-spanels > .vg-sp24,.vg-sr25:checked ~ .vg-spanels > .vg-sp25,.vg-sr26:checked ~ .vg-spanels > .vg-sp26,.vg-sr27:checked ~ .vg-spanels > .vg-sp27,.vg-sr28:checked ~ .vg-spanels > .vg-sp28,.vg-sr29:checked ~ .vg-spanels > .vg-sp29,.vg-sr30:checked ~ .vg-spanels > .vg-sp30,.vg-sr31:checked ~ .vg-spanels > .vg-sp31,.vg-sr32:checked ~ .vg-spanels > .vg-sp32,.vg-sr33:checked ~ .vg-spanels > .vg-sp33,.vg-sr34:checked ~ .vg-spanels > .vg-sp34,.vg-sr35:checked ~ .vg-spanels > .vg-sp35,.vg-sr36:checked ~ .vg-spanels > .vg-sp36,.vg-sr37:checked ~ .vg-spanels > .vg-sp37,.vg-sr38:checked ~ .vg-spanels > .vg-sp38,.vg-sr39:checked ~ .vg-spanels > .vg-sp39,.vg-sr40:checked ~ .vg-spanels > .vg-sp40,.vg-sr41:checked ~ .vg-spanels > .vg-sp41,.vg-sr42:checked ~ .vg-spanels > .vg-sp42,.vg-sr43:checked ~ .vg-spanels > .vg-sp43,.vg-sr44:checked ~ .vg-spanels > .vg-sp44,.vg-sr45:checked ~ .vg-spanels > .vg-sp45,.vg-sr46:checked ~ .vg-spanels > .vg-sp46,.vg-sr47:checked ~ .vg-spanels > .vg-sp47,.vg-sr48:checked ~ .vg-spanels > .vg-sp48,.vg-sr49:checked ~ .vg-spanels > .vg-sp49,.vg-sr50:checked ~ .vg-spanels > .vg-sp50,.vg-sr51:checked ~ .vg-spanels > .vg-sp51,.vg-sr52:checked ~ .vg-spanels > .vg-sp52,.vg-sr53:checked ~ .vg-spanels > .vg-sp53,.vg-sr54:checked ~ .vg-spanels > .vg-sp54,.vg-sr55:checked ~ .vg-spanels > .vg-sp55,.vg-sr56:checked ~ .vg-spanels > .vg-sp56,.vg-sr57:checked ~ .vg-spanels > .vg-sp57,.vg-sr58:checked ~ .vg-spanels > .vg-sp58,.vg-sr59:checked ~ .vg-spanels > .vg-sp59,.vg-sr60:checked ~ .vg-spanels > .vg-sp60,.vg-sr61:checked ~ .vg-spanels > .vg-sp61,.vg-sr62:checked ~ .vg-spanels > .vg-sp62,.vg-sr63:checked ~ .vg-spanels > .vg-sp63,.vg-sr64:checked ~ .vg-spanels > .vg-sp64,.vg-sr65:checked ~ .vg-spanels > .vg-sp65,.vg-sr66:checked ~ .vg-spanels > .vg-sp66,.vg-sr67:checked ~ .vg-spanels > .vg-sp67,.vg-sr68:checked ~ .vg-spanels > .vg-sp68,.vg-sr69:checked ~ .vg-spanels > .vg-sp69,.vg-sr70:checked ~ .vg-spanels > .vg-sp70,.vg-sr71:checked ~ .vg-spanels > .vg-sp71,.vg-sr72:checked ~ .vg-spanels > .vg-sp72,.vg-sr73:checked ~ .vg-spanels > .vg-sp73,.vg-sr74:checked ~ .vg-spanels > .vg-sp74,.vg-sr75:checked ~ .vg-spanels > .vg-sp75,.vg-sr76:checked ~ .vg-spanels > .vg-sp76,.vg-sr77:checked ~ .vg-spanels > .vg-sp77,.vg-sr78:checked ~ .vg-spanels > .vg-sp78,.vg-sr79:checked ~ .vg-spanels > .vg-sp79,.vg-sr80:checked ~ .vg-spanels > .vg-sp80,.vg-sr81:checked ~ .vg-spanels > .vg-sp81,.vg-sr82:checked ~ .vg-spanels > .vg-sp82,.vg-sr83:checked ~ .vg-spanels > .vg-sp83,.vg-sr84:checked ~ .vg-spanels > .vg-sp84,.vg-sr85:checked ~ .vg-spanels > .vg-sp85,.vg-sr86:checked ~ .vg-spanels > .vg-sp86,.vg-sr87:checked ~ .vg-spanels > .vg-sp87,.vg-sr88:checked ~ .vg-spanels > .vg-sp88,.vg-sr89:checked ~ .vg-spanels > .vg-sp89,.vg-sr90:checked ~ .vg-spanels > .vg-sp90,.vg-sr91:checked ~ .vg-spanels > .vg-sp91,.vg-sr92:checked ~ .vg-spanels > .vg-sp92,.vg-sr93:checked ~ .vg-spanels > .vg-sp93,.vg-sr94:checked ~ .vg-spanels > .vg-sp94,.vg-sr95:checked ~ .vg-spanels > .vg-sp95,.vg-sr96:checked ~ .vg-spanels > .vg-sp96,.vg-sr97:checked ~ .vg-spanels > .vg-sp97,.vg-sr98:checked ~ .vg-spanels > .vg-sp98,.vg-sr99:checked ~ .vg-spanels > .vg-sp99,.vg-sr100:checked ~ .vg-spanels > .vg-sp100,.vg-sr101:checked ~ .vg-spanels > .vg-sp101,.vg-sr102:checked ~ .vg-spanels > .vg-sp102,.vg-sr103:checked ~ .vg-spanels > .vg-sp103,.vg-sr104:checked ~ .vg-spanels > .vg-sp104,.vg-sr105:checked ~ .vg-spanels > .vg-sp105,.vg-sr106:checked ~ .vg-spanels > .vg-sp106,.vg-sr107:checked ~ .vg-spanels > .vg-sp107,.vg-sr108:checked ~ .vg-spanels > .vg-sp108,.vg-sr109:checked ~ .vg-spanels > .vg-sp109,.vg-sr110:checked ~ .vg-spanels > .vg-sp110,.vg-sr111:checked ~ .vg-spanels > .vg-sp111,.vg-sr112:checked ~ .vg-spanels > .vg-sp112,.vg-sr113:checked ~ .vg-spanels > .vg-sp113,.vg-sr114:checked ~ .vg-spanels > .vg-sp114,.vg-sr115:checked ~ .vg-spanels > .vg-sp115,.vg-sr116:checked ~ .vg-spanels > .vg-sp116,.vg-sr117:checked ~ .vg-spanels > .vg-sp117,.vg-sr118:checked ~ .vg-spanels > .vg-sp118,.vg-sr119:checked ~ .vg-spanels > .vg-sp119,.vg-sr120:checked ~ .vg-spanels > .vg-sp120,.vg-sr121:checked ~ .vg-spanels > .vg-sp121,.vg-sr122:checked ~ .vg-spanels > .vg-sp122,.vg-sr123:checked ~ .vg-spanels > .vg-sp123,.vg-sr124:checked ~ .vg-spanels > .vg-sp124,.vg-sr125:checked ~ .vg-spanels > .vg-sp125,.vg-sr126:checked ~ .vg-spanels > .vg-sp126,.vg-sr127:checked ~ .vg-spanels > .vg-sp127,.vg-sr128:checked ~ .vg-spanels > .vg-sp128{display:block}
+.vg-sr1:checked ~ .vg-stablist > .vg-sreg > .vg-st1,.vg-sr2:checked ~ .vg-stablist > .vg-sreg > .vg-st2,.vg-sr3:checked ~ .vg-stablist > .vg-sreg > .vg-st3,.vg-sr4:checked ~ .vg-stablist > .vg-sreg > .vg-st4,.vg-sr5:checked ~ .vg-stablist > .vg-sreg > .vg-st5,.vg-sr6:checked ~ .vg-stablist > .vg-sreg > .vg-st6,.vg-sr7:checked ~ .vg-stablist > .vg-sreg > .vg-st7,.vg-sr8:checked ~ .vg-stablist > .vg-sreg > .vg-st8,.vg-sr9:checked ~ .vg-stablist > .vg-sreg > .vg-st9,.vg-sr10:checked ~ .vg-stablist > .vg-sreg > .vg-st10,.vg-sr11:checked ~ .vg-stablist > .vg-sreg > .vg-st11,.vg-sr12:checked ~ .vg-stablist > .vg-sreg > .vg-st12,.vg-sr13:checked ~ .vg-stablist > .vg-sreg > .vg-st13,.vg-sr14:checked ~ .vg-stablist > .vg-sreg > .vg-st14,.vg-sr15:checked ~ .vg-stablist > .vg-sreg > .vg-st15,.vg-sr16:checked ~ .vg-stablist > .vg-sreg > .vg-st16,.vg-sr17:checked ~ .vg-stablist > .vg-sreg > .vg-st17,.vg-sr18:checked ~ .vg-stablist > .vg-sreg > .vg-st18,.vg-sr19:checked ~ .vg-stablist > .vg-sreg > .vg-st19,.vg-sr20:checked ~ .vg-stablist > .vg-sreg > .vg-st20,.vg-sr21:checked ~ .vg-stablist > .vg-sreg > .vg-st21,.vg-sr22:checked ~ .vg-stablist > .vg-sreg > .vg-st22,.vg-sr23:checked ~ .vg-stablist > .vg-sreg > .vg-st23,.vg-sr24:checked ~ .vg-stablist > .vg-sreg > .vg-st24,.vg-sr25:checked ~ .vg-stablist > .vg-sreg > .vg-st25,.vg-sr26:checked ~ .vg-stablist > .vg-sreg > .vg-st26,.vg-sr27:checked ~ .vg-stablist > .vg-sreg > .vg-st27,.vg-sr28:checked ~ .vg-stablist > .vg-sreg > .vg-st28,.vg-sr29:checked ~ .vg-stablist > .vg-sreg > .vg-st29,.vg-sr30:checked ~ .vg-stablist > .vg-sreg > .vg-st30,.vg-sr31:checked ~ .vg-stablist > .vg-sreg > .vg-st31,.vg-sr32:checked ~ .vg-stablist > .vg-sreg > .vg-st32,.vg-sr33:checked ~ .vg-stablist > .vg-sreg > .vg-st33,.vg-sr34:checked ~ .vg-stablist > .vg-sreg > .vg-st34,.vg-sr35:checked ~ .vg-stablist > .vg-sreg > .vg-st35,.vg-sr36:checked ~ .vg-stablist > .vg-sreg > .vg-st36,.vg-sr37:checked ~ .vg-stablist > .vg-sreg > .vg-st37,.vg-sr38:checked ~ .vg-stablist > .vg-sreg > .vg-st38,.vg-sr39:checked ~ .vg-stablist > .vg-sreg > .vg-st39,.vg-sr40:checked ~ .vg-stablist > .vg-sreg > .vg-st40,.vg-sr41:checked ~ .vg-stablist > .vg-sreg > .vg-st41,.vg-sr42:checked ~ .vg-stablist > .vg-sreg > .vg-st42,.vg-sr43:checked ~ .vg-stablist > .vg-sreg > .vg-st43,.vg-sr44:checked ~ .vg-stablist > .vg-sreg > .vg-st44,.vg-sr45:checked ~ .vg-stablist > .vg-sreg > .vg-st45,.vg-sr46:checked ~ .vg-stablist > .vg-sreg > .vg-st46,.vg-sr47:checked ~ .vg-stablist > .vg-sreg > .vg-st47,.vg-sr48:checked ~ .vg-stablist > .vg-sreg > .vg-st48,.vg-sr49:checked ~ .vg-stablist > .vg-sreg > .vg-st49,.vg-sr50:checked ~ .vg-stablist > .vg-sreg > .vg-st50,.vg-sr51:checked ~ .vg-stablist > .vg-sreg > .vg-st51,.vg-sr52:checked ~ .vg-stablist > .vg-sreg > .vg-st52,.vg-sr53:checked ~ .vg-stablist > .vg-sreg > .vg-st53,.vg-sr54:checked ~ .vg-stablist > .vg-sreg > .vg-st54,.vg-sr55:checked ~ .vg-stablist > .vg-sreg > .vg-st55,.vg-sr56:checked ~ .vg-stablist > .vg-sreg > .vg-st56,.vg-sr57:checked ~ .vg-stablist > .vg-sreg > .vg-st57,.vg-sr58:checked ~ .vg-stablist > .vg-sreg > .vg-st58,.vg-sr59:checked ~ .vg-stablist > .vg-sreg > .vg-st59,.vg-sr60:checked ~ .vg-stablist > .vg-sreg > .vg-st60,.vg-sr61:checked ~ .vg-stablist > .vg-sreg > .vg-st61,.vg-sr62:checked ~ .vg-stablist > .vg-sreg > .vg-st62,.vg-sr63:checked ~ .vg-stablist > .vg-sreg > .vg-st63,.vg-sr64:checked ~ .vg-stablist > .vg-sreg > .vg-st64,.vg-sr65:checked ~ .vg-stablist > .vg-sreg > .vg-st65,.vg-sr66:checked ~ .vg-stablist > .vg-sreg > .vg-st66,.vg-sr67:checked ~ .vg-stablist > .vg-sreg > .vg-st67,.vg-sr68:checked ~ .vg-stablist > .vg-sreg > .vg-st68,.vg-sr69:checked ~ .vg-stablist > .vg-sreg > .vg-st69,.vg-sr70:checked ~ .vg-stablist > .vg-sreg > .vg-st70,.vg-sr71:checked ~ .vg-stablist > .vg-sreg > .vg-st71,.vg-sr72:checked ~ .vg-stablist > .vg-sreg > .vg-st72,.vg-sr73:checked ~ .vg-stablist > .vg-sreg > .vg-st73,.vg-sr74:checked ~ .vg-stablist > .vg-sreg > .vg-st74,.vg-sr75:checked ~ .vg-stablist > .vg-sreg > .vg-st75,.vg-sr76:checked ~ .vg-stablist > .vg-sreg > .vg-st76,.vg-sr77:checked ~ .vg-stablist > .vg-sreg > .vg-st77,.vg-sr78:checked ~ .vg-stablist > .vg-sreg > .vg-st78,.vg-sr79:checked ~ .vg-stablist > .vg-sreg > .vg-st79,.vg-sr80:checked ~ .vg-stablist > .vg-sreg > .vg-st80,.vg-sr81:checked ~ .vg-stablist > .vg-sreg > .vg-st81,.vg-sr82:checked ~ .vg-stablist > .vg-sreg > .vg-st82,.vg-sr83:checked ~ .vg-stablist > .vg-sreg > .vg-st83,.vg-sr84:checked ~ .vg-stablist > .vg-sreg > .vg-st84,.vg-sr85:checked ~ .vg-stablist > .vg-sreg > .vg-st85,.vg-sr86:checked ~ .vg-stablist > .vg-sreg > .vg-st86,.vg-sr87:checked ~ .vg-stablist > .vg-sreg > .vg-st87,.vg-sr88:checked ~ .vg-stablist > .vg-sreg > .vg-st88,.vg-sr89:checked ~ .vg-stablist > .vg-sreg > .vg-st89,.vg-sr90:checked ~ .vg-stablist > .vg-sreg > .vg-st90,.vg-sr91:checked ~ .vg-stablist > .vg-sreg > .vg-st91,.vg-sr92:checked ~ .vg-stablist > .vg-sreg > .vg-st92,.vg-sr93:checked ~ .vg-stablist > .vg-sreg > .vg-st93,.vg-sr94:checked ~ .vg-stablist > .vg-sreg > .vg-st94,.vg-sr95:checked ~ .vg-stablist > .vg-sreg > .vg-st95,.vg-sr96:checked ~ .vg-stablist > .vg-sreg > .vg-st96,.vg-sr97:checked ~ .vg-stablist > .vg-sreg > .vg-st97,.vg-sr98:checked ~ .vg-stablist > .vg-sreg > .vg-st98,.vg-sr99:checked ~ .vg-stablist > .vg-sreg > .vg-st99,.vg-sr100:checked ~ .vg-stablist > .vg-sreg > .vg-st100,.vg-sr101:checked ~ .vg-stablist > .vg-sreg > .vg-st101,.vg-sr102:checked ~ .vg-stablist > .vg-sreg > .vg-st102,.vg-sr103:checked ~ .vg-stablist > .vg-sreg > .vg-st103,.vg-sr104:checked ~ .vg-stablist > .vg-sreg > .vg-st104,.vg-sr105:checked ~ .vg-stablist > .vg-sreg > .vg-st105,.vg-sr106:checked ~ .vg-stablist > .vg-sreg > .vg-st106,.vg-sr107:checked ~ .vg-stablist > .vg-sreg > .vg-st107,.vg-sr108:checked ~ .vg-stablist > .vg-sreg > .vg-st108,.vg-sr109:checked ~ .vg-stablist > .vg-sreg > .vg-st109,.vg-sr110:checked ~ .vg-stablist > .vg-sreg > .vg-st110,.vg-sr111:checked ~ .vg-stablist > .vg-sreg > .vg-st111,.vg-sr112:checked ~ .vg-stablist > .vg-sreg > .vg-st112,.vg-sr113:checked ~ .vg-stablist > .vg-sreg > .vg-st113,.vg-sr114:checked ~ .vg-stablist > .vg-sreg > .vg-st114,.vg-sr115:checked ~ .vg-stablist > .vg-sreg > .vg-st115,.vg-sr116:checked ~ .vg-stablist > .vg-sreg > .vg-st116,.vg-sr117:checked ~ .vg-stablist > .vg-sreg > .vg-st117,.vg-sr118:checked ~ .vg-stablist > .vg-sreg > .vg-st118,.vg-sr119:checked ~ .vg-stablist > .vg-sreg > .vg-st119,.vg-sr120:checked ~ .vg-stablist > .vg-sreg > .vg-st120,.vg-sr121:checked ~ .vg-stablist > .vg-sreg > .vg-st121,.vg-sr122:checked ~ .vg-stablist > .vg-sreg > .vg-st122,.vg-sr123:checked ~ .vg-stablist > .vg-sreg > .vg-st123,.vg-sr124:checked ~ .vg-stablist > .vg-sreg > .vg-st124,.vg-sr125:checked ~ .vg-stablist > .vg-sreg > .vg-st125,.vg-sr126:checked ~ .vg-stablist > .vg-sreg > .vg-st126,.vg-sr127:checked ~ .vg-stablist > .vg-sreg > .vg-st127,.vg-sr128:checked ~ .vg-stablist > .vg-sreg > .vg-st128{background:#DDF4FF;border-color:#54AEFF;color:#0969DA}
+.vg-nsec{margin:0 0 18px}
+.vg-nsec:last-child{margin-bottom:0}
+.vg-loctable{border-collapse:collapse}
+.vg-loctable tr+tr th,.vg-loctable tr+tr td{border-top:1px solid #EAEEF2}
+.vg-lock{text-align:left;vertical-align:top;padding:5px 12px 5px 0;white-space:nowrap;font-weight:600;font-size:12px;line-height:1.8;color:#24292F;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.vg-locn{text-align:right;vertical-align:top;padding:5px 10px 5px 0;white-space:nowrap;color:#57606A;font-size:11px;line-height:1.9}
+.vg-locv{padding:5px 0;font-size:12px;line-height:1.8;color:#57606A;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.vg-nhead{margin:0 0 6px;padding:0 0 4px;border-bottom:1px solid #EAEEF2;font:11px/1.6 'Roboto','Segoe UI',system-ui,sans-serif;font-weight:600;letter-spacing:.04em;color:#57606A}
+.vg-dr,.vg-lbr{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}
+.vg-dtablist,.vg-lbtablist{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 8px}
+.vg-dtab,.vg-lbtab{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border:1px solid #D0D7DE;border-radius:14px;color:#57606A;cursor:pointer;user-select:none;font-weight:600;font-size:12px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.vg-dtab:hover,.vg-lbtab:hover{background:#F6F8FA;color:#24292F}
+.vg-dpanel,.vg-lbpanel{display:none}
+.vg-dtab.vg-dstatic{background:#EAEEF2;border-color:#8C959F;color:#24292F;cursor:default}
+.vg-lbchips{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 14px}
+.vg-lbchip{display:inline-flex;align-items:stretch;border:1px solid #D0D7DE;border-radius:4px;overflow:hidden;font:11px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace}
+.vg-lbk{padding:1px 7px;background:#F6F8FA;color:#57606A;font-weight:600;border-right:1px solid #D0D7DE}
+.vg-lbv{padding:1px 8px;color:#24292F}
+.vg-lbpanels .vg-lbchips{margin-bottom:0}
+.vg-dr1:checked ~ .vg-dpanels > .vg-dp1,.vg-dr2:checked ~ .vg-dpanels > .vg-dp2,.vg-dr3:checked ~ .vg-dpanels > .vg-dp3,.vg-dr4:checked ~ .vg-dpanels > .vg-dp4,.vg-dr5:checked ~ .vg-dpanels > .vg-dp5,.vg-dr6:checked ~ .vg-dpanels > .vg-dp6,.vg-dr7:checked ~ .vg-dpanels > .vg-dp7,.vg-dr8:checked ~ .vg-dpanels > .vg-dp8,.vg-dr9:checked ~ .vg-dpanels > .vg-dp9,.vg-dr10:checked ~ .vg-dpanels > .vg-dp10,.vg-dr11:checked ~ .vg-dpanels > .vg-dp11,.vg-dr12:checked ~ .vg-dpanels > .vg-dp12,.vg-dr13:checked ~ .vg-dpanels > .vg-dp13,.vg-dr14:checked ~ .vg-dpanels > .vg-dp14,.vg-dr15:checked ~ .vg-dpanels > .vg-dp15,.vg-dr16:checked ~ .vg-dpanels > .vg-dp16{display:block}
+.vg-dr1:checked ~ .vg-dtablist > .vg-dt1,.vg-dr2:checked ~ .vg-dtablist > .vg-dt2,.vg-dr3:checked ~ .vg-dtablist > .vg-dt3,.vg-dr4:checked ~ .vg-dtablist > .vg-dt4,.vg-dr5:checked ~ .vg-dtablist > .vg-dt5,.vg-dr6:checked ~ .vg-dtablist > .vg-dt6,.vg-dr7:checked ~ .vg-dtablist > .vg-dt7,.vg-dr8:checked ~ .vg-dtablist > .vg-dt8,.vg-dr9:checked ~ .vg-dtablist > .vg-dt9,.vg-dr10:checked ~ .vg-dtablist > .vg-dt10,.vg-dr11:checked ~ .vg-dtablist > .vg-dt11,.vg-dr12:checked ~ .vg-dtablist > .vg-dt12,.vg-dr13:checked ~ .vg-dtablist > .vg-dt13,.vg-dr14:checked ~ .vg-dtablist > .vg-dt14,.vg-dr15:checked ~ .vg-dtablist > .vg-dt15,.vg-dr16:checked ~ .vg-dtablist > .vg-dt16{background:#EAEEF2;border-color:#8C959F;color:#24292F}
+.vg-lbr1:checked ~ .vg-lbpanels > .vg-lbp1,.vg-lbr2:checked ~ .vg-lbpanels > .vg-lbp2,.vg-lbr3:checked ~ .vg-lbpanels > .vg-lbp3,.vg-lbr4:checked ~ .vg-lbpanels > .vg-lbp4,.vg-lbr5:checked ~ .vg-lbpanels > .vg-lbp5,.vg-lbr6:checked ~ .vg-lbpanels > .vg-lbp6,.vg-lbr7:checked ~ .vg-lbpanels > .vg-lbp7,.vg-lbr8:checked ~ .vg-lbpanels > .vg-lbp8{display:block}
+.vg-lbr1:checked ~ .vg-lbtablist > .vg-lbt1,.vg-lbr2:checked ~ .vg-lbtablist > .vg-lbt2,.vg-lbr3:checked ~ .vg-lbtablist > .vg-lbt3,.vg-lbr4:checked ~ .vg-lbtablist > .vg-lbt4,.vg-lbr5:checked ~ .vg-lbtablist > .vg-lbt5,.vg-lbr6:checked ~ .vg-lbtablist > .vg-lbt6,.vg-lbr7:checked ~ .vg-lbtablist > .vg-lbt7,.vg-lbr8:checked ~ .vg-lbtablist > .vg-lbt8{background:#EAEEF2;border-color:#8C959F;color:#24292F}
+.d13bjngc{padding:0 4px;background-color:#FAFAFA;background-image:repeating-linear-gradient(45deg,rgba(120,130,140,.10),rgba(120,130,140,.10) 3px,transparent 3px,transparent 7px);}
+.d13c6wgv{padding:0 4px;text-align:center;color:#6a7d4b;}
+.d199it5c{color:#874a4a;font-weight:400;}
+.d19psjdt{color:#1A7F37;background:#DAFBE1}
+.d1cqaqta{background:#efb6b6;border-radius:2px;}
+.d1gyu01d{border-collapse:collapse;border:1px solid #E0E0E0;border-radius:4px;overflow:visible;font-size:12px;background:#ffffff;width:100%;max-width:100%;table-layout:fixed;box-shadow:0 1px 3px rgba(0,0,0,.10),0 1px 2px rgba(0,0,0,.18);-webkit-text-size-adjust:100%;text-size-adjust:100%;}
+.d1ha5k0q{padding:0 4px;text-align:center;color:#a25959;}
+.d1hduafk{color:#098658;}
+.d1imcu2c{color:#CF222E;}
+.d1r87v19{padding:0 12px;white-space:pre-wrap;border-left:1px solid #E0E0E0;background-color:#FAFAFA;background-image:repeating-linear-gradient(45deg,rgba(120,130,140,.10),rgba(120,130,140,.10) 3px,transparent 3px,transparent 7px);}
+.d1rgbq4v{padding:0 10px;border-right:1px solid #ECEFF1;border-left:1px solid #E0E0E0;background-color:#FAFAFA;background-image:repeating-linear-gradient(45deg,rgba(120,130,140,.10),rgba(120,130,140,.10) 3px,transparent 3px,transparent 7px);}
+.d1s1c2xa{color:#57606A;background:#EAEEF2}
+.d1xrfuoj{width:40px}
+.d1xthima{padding:0 10px;text-align:right;color:#B0BAC5;background:#fef8f8;border-right:1px solid #ECEFF1;white-space:nowrap;}
+.d2gmdtm{padding:0 10px;text-align:right;color:#B0BAC5;background:#fafbf7;border-right:1px solid #ECEFF1;border-left:1px solid #E0E0E0;white-space:nowrap;}
+.ddcvljg{text-align:left;font-family:'Roboto','Segoe UI',system-ui,-apple-system,sans-serif;font-weight:600;color:#1A1A1A;background:#fbeded;border-bottom:2px solid #E17B7B;padding:7px 12px;}
+.dee9yni{padding:0 10px;border-right:1px solid #ECEFF1;background-color:#FAFAFA;background-image:repeating-linear-gradient(45deg,rgba(120,130,140,.10),rgba(120,130,140,.10) 3px,transparent 3px,transparent 7px);}
+.deev4tz{font-family:'Roboto Mono','SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;color:#24292F;line-height:1.35;-webkit-text-size-adjust:100%;-moz-text-size-adjust:100%;text-size-adjust:100%;}
+.defi7oa{color:#9A6700;background:#FFF8C5}
+.dg299g6{padding:0 12px;white-space:pre-wrap;overflow-wrap:anywhere;color:#24292F;}
+.dh8ndk{background:#c4d2ac;border-radius:2px;}
+.dh8u7zg{padding:0 12px;white-space:pre-wrap;background-color:#FAFAFA;background-image:repeating-linear-gradient(45deg,rgba(120,130,140,.10),rgba(120,130,140,.10) 3px,transparent 3px,transparent 7px);}
+.dn9u3nl{padding:0 4px;text-align:center;color:#90A4AE;}
+.dokucl1{padding:0 12px;white-space:pre-wrap;overflow-wrap:anywhere;color:#24292F;background:#dfe7d2;border-left:2px solid #93AE68;}
+.dqwmvn2{color:#58683e;font-weight:400;}
+.drap2zl{text-align:left;font-family:'Roboto','Segoe UI',system-ui,-apple-system,sans-serif;font-weight:600;color:#1A1A1A;background:#f0f4ea;border-bottom:2px solid #93AE68;border-left:1px solid #E0E0E0;padding:7px 12px;}
+.ds01o67{width:22px}
+.duywfcf{padding:0 12px;white-space:pre-wrap;overflow-wrap:anywhere;color:#24292F;background:#f6d7d7;border-left:2px solid #E17B7B;}
+</style>

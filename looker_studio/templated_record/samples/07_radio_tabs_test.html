@@ -1,0 +1,194 @@
+<!--
+  Templated Record で「radio + :checked」による CSS だけのタブが動くかを確認する。
+  JavaScript は一切使っていない（innerHTML 経由の <script> は実行されないため）。
+
+  判定:
+    A) 上の灰色の帯だけ見える            → HTML/CSS は通っているが radio が効いていない
+    B) タブが出るが押しても切り替わらない → input が残っているが :checked が効いていない
+    C) タブを押すと中身が入れ替わる       → 成功。4 グループ以上をタブで出せる
+    D) 何も見えない                       → HTML 自体が届いていない
+-->
+<style>
+  .vg-wrap {
+    font: 13px/1.6 'Roboto', 'Segoe UI', system-ui, -apple-system, sans-serif;
+    color: #24292F;
+    max-width: 100%;
+  }
+  .vg-note {
+    margin: 0 0 12px;
+    padding: 8px 12px;
+    border: 1px solid #D0D7DE;
+    border-left: 4px solid #57606A;
+    border-radius: 4px;
+    background: #F6F8FA;
+    color: #57606A;
+  }
+  .vg-note b { color: #24292F; }
+
+  /* radio 本体は見せない。ラベルの for= でクリックを受ける。
+     display:none にするとキーボード操作ができなくなるので、位置をずらして隠す。 */
+  .vg-radio {
+    position: absolute;
+    opacity: 0;
+    width: 1px;
+    height: 1px;
+    pointer-events: none;
+  }
+
+  .vg-tablist {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    border-bottom: 1px solid #D0D7DE;
+    margin-bottom: -1px;
+  }
+  .vg-tab {
+    display: inline-block;
+    padding: 6px 14px;
+    border: 1px solid transparent;
+    border-bottom: none;
+    border-radius: 6px 6px 0 0;
+    background: transparent;
+    color: #57606A;
+    cursor: pointer;
+    user-select: none;
+    font-weight: 600;
+  }
+  .vg-tab:hover { background: #EAEEF2; color: #24292F; }
+
+  .vg-panels {
+    border: 1px solid #D0D7DE;
+    border-radius: 0 6px 6px 6px;
+    padding: 12px;
+    background: #fff;
+  }
+  .vg-panel { display: none; }
+
+  /* ここが本体。radio が checked のときだけ対応するパネルを出す。 */
+  #vgtab1:checked ~ .vg-panels .vg-p1,
+  #vgtab2:checked ~ .vg-panels .vg-p2,
+  #vgtab3:checked ~ .vg-panels .vg-p3 { display: block; }
+
+  /* 選択中のタブを見た目でも分かるようにする */
+  #vgtab1:checked ~ .vg-tablist label[for="vgtab1"],
+  #vgtab2:checked ~ .vg-tablist label[for="vgtab2"],
+  #vgtab3:checked ~ .vg-tablist label[for="vgtab3"] {
+    background: #fff;
+    border-color: #D0D7DE;
+    color: #24292F;
+  }
+
+  /* キーボードで移動したときに分かるように */
+  .vg-radio:focus ~ .vg-tablist label { outline: none; }
+  #vgtab1:focus ~ .vg-tablist label[for="vgtab1"],
+  #vgtab2:focus ~ .vg-tablist label[for="vgtab2"],
+  #vgtab3:focus ~ .vg-tablist label[for="vgtab3"] {
+    box-shadow: 0 0 0 2px rgba(9, 105, 218, .4);
+  }
+
+  /* 本番の 2 ペイン比較を模したもの。実際は DIFF_HTML の出力が入る。 */
+  .vg-mock { display: flex; gap: 10px; }
+  .vg-pane { flex: 1 1 0; min-width: 0; border: 1px solid #E0E0E0; border-radius: 4px; overflow: hidden; }
+  .vg-head { padding: 6px 10px; font-weight: 600; font-size: 12px; }
+  .vg-head-l { background: #FBEDED; border-bottom: 2px solid #E17B7B; }
+  .vg-head-r { background: #F1F6EA; border-bottom: 2px solid #93AE68; }
+  .vg-code {
+    margin: 0;
+    padding: 8px 10px;
+    font: 12px/1.35 'Roboto Mono', SFMono-Regular, Consolas, monospace;
+    white-space: pre-wrap;
+  }
+  .vg-del { background: rgba(225, 123, 123, .30); }
+  .vg-add { background: rgba(147, 174, 104, .30); }
+  .vg-cap { margin: 10px 0 0; color: #57606A; font-size: 12px; }
+</style>
+
+<div class="vg-wrap">
+  <div class="vg-note">
+    <b>この帯が見えていれば HTML と CSS は届いています。</b><br>
+    下のタブを押して中身が入れ替われば、CSS だけのタブが使えます（JavaScript は不使用）。
+    押しても変わらない場合は、その旨を報告してください。
+  </div>
+
+  <div class="vg-tabs">
+    <input class="vg-radio" type="radio" name="vgtab" id="vgtab1" checked>
+    <input class="vg-radio" type="radio" name="vgtab" id="vgtab2">
+    <input class="vg-radio" type="radio" name="vgtab" id="vgtab3">
+
+    <div class="vg-tablist">
+      <label class="vg-tab" for="vgtab1">cd 系 (3)</label>
+      <label class="vg-tab" for="vgtab2">ef 系 (3)</label>
+      <label class="vg-tab" for="vgtab3">gh 系 (2)</label>
+    </div>
+
+    <div class="vg-panels">
+      <div class="vg-panel vg-p1">
+        <div class="vg-mock">
+          <div class="vg-pane">
+            <div class="vg-head vg-head-l">ab 系 — abjp, abuk, abus（基準）</div>
+<pre class="vg-code">SELECT
+  o.order_date,
+<span class="vg-del">  o.region,</span>
+  COUNT(DISTINCT o.order_id) AS order_count
+FROM {{P2}} AS o</pre>
+          </div>
+          <div class="vg-pane">
+            <div class="vg-head vg-head-r">cd 系 — cdjp, cduk, cdus</div>
+<pre class="vg-code">SELECT
+  o.order_date,
+<span class="vg-add">  c.region,</span>
+  COUNT(DISTINCT o.order_id) AS order_count
+FROM {{P2}} AS o</pre>
+          </div>
+        </div>
+        <p class="vg-cap">タブ 1 — 基準（ab 系）と cd 系の比較。</p>
+      </div>
+
+      <div class="vg-panel vg-p2">
+        <div class="vg-mock">
+          <div class="vg-pane">
+            <div class="vg-head vg-head-l">ab 系 — abjp, abuk, abus（基準）</div>
+<pre class="vg-code">SELECT
+  o.order_date,
+  o.region,
+  COUNT(DISTINCT o.order_id) AS order_count
+FROM {{P2}} AS o</pre>
+          </div>
+          <div class="vg-pane">
+            <div class="vg-head vg-head-r">ef 系 — efjp, efuk, efus</div>
+<pre class="vg-code">SELECT
+  o.order_date,
+  o.region,
+<span class="vg-add">  o.currency,</span>
+  COUNT(DISTINCT o.order_id) AS order_count
+FROM {{P2}} AS o</pre>
+          </div>
+        </div>
+        <p class="vg-cap">タブ 2 — 基準（ab 系）と ef 系の比較。中身が変わっていれば成功です。</p>
+      </div>
+
+      <div class="vg-panel vg-p3">
+        <div class="vg-mock">
+          <div class="vg-pane">
+            <div class="vg-head vg-head-l">ab 系 — abjp, abuk, abus（基準）</div>
+<pre class="vg-code">SELECT
+  o.order_date,
+  o.region,
+  COUNT(DISTINCT o.order_id) AS order_count
+<span class="vg-del">FROM {{P2}} AS o</span></pre>
+          </div>
+          <div class="vg-pane">
+            <div class="vg-head vg-head-r">gh 系 — ghjp, ghus</div>
+<pre class="vg-code">SELECT
+  o.order_date,
+  o.region,
+  COUNT(DISTINCT o.order_id) AS order_count
+<span class="vg-add">FROM {{P2}} AS o
+LEFT JOIN {{P3}} AS c USING (customer_id)</span></pre>
+          </div>
+        </div>
+        <p class="vg-cap">タブ 3 — 4 グループ以上でもタブが増えるだけで済みます。</p>
+      </div>
+    </div>
+  </div>
+</div>

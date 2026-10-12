@@ -1,0 +1,25 @@
+{
+  "name": "DDL Diff",
+  "organization": "audeo",
+  "description": "BigQuery View の DDL を GitHub compare 風に左右比較するビジュアライゼーション",
+  "logoUrl": "GCS_HTTPS_BASE/icon.png",
+  "organizationUrl": "https://github.com/audeoinc/share",
+  "supportUrl": "https://github.com/audeoinc/share",
+  "privacyPolicyUrl": "https://github.com/audeoinc/share",
+  "termsOfServiceUrl": "https://github.com/audeoinc/share",
+  "packageUrl": "https://github.com/audeoinc/share",
+  "devMode": true,
+  "components": [
+    {
+      "id": "ddlDiff",
+      "name": "DDL Diff",
+      "description": "変更前後の DDL を渡すと、ブラウザ内で行差分を計算して左右2ペインで表示します。",
+      "iconUrl": "GCS_HTTPS_BASE/icon.png",
+      "resource": {
+        "js": "GCS_URI_BASE/index.js",
+        "config": "GCS_URI_BASE/index.json",
+        "css": "GCS_URI_BASE/index.css"
+      }
+    }
+  ]
+}

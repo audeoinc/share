@@ -1,0 +1,1996 @@
+// suffix 違い View のロジック グループ比較を BigQuery の JS UDF にする。
+//
+//   node build_udf.mjs          -> view_group_html.sql を生成
+//   node build_udf.mjs --check  -> 生成せず、Node 上で UDF 本体を実行して検証だけ
+//
+// 生成するのは 7 つ:
+//   viewlgc_analyze(views ARRAY<STRUCT<view_name STRING, ddl STRING>>, options_json STRING) -> JSON
+//   viewlgc_render(analysis_json STRING, options_json STRING) -> HTML
+//   viewlgc_erd(analysis_json STRING, options_json STRING) -> HTML（参照関係の図）
+//   viewlgc_page(analysis_json STRING, diff_html STRING, erd_html STRING, ...) -> HTML
+//   viewlgc_markdown(md STRING) -> HTML   -- base ごとのメモ。ビューの中から呼ぶ
+//   viewlgc_group_css(options_json STRING)
+//   viewlgc_render_dynamic_sql(...)  -- SQL 関数。build_table.sql の __…__ を展開する
+//
+// HTML とメタデータ（グループ数・ラベル）を 1 回の呼び出しで返すのは、
+// 事前生成テーブルに両方入れたいため。分けると同じ解析を 2 回走らせることになる。
+// 数値を FLOAT64 で返しているのは JS UDF が INT64 を扱えないため。SQL 側で CAST する。
+//
+// サイズについて:
+//   BigQuery の UDF はインラインのコード ブロブが 32 KB までに制限される
+//   （標準 SQL でも同じ）。素の連結は約 45 KB あって確実に弾かれるため、
+//   esbuild で最小化してから埋め込む。生成時に閾値を超えたら失敗させて、
+//   BigQuery に弾かれるものを出荷しないようにしている。
+import { readFile, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
+
+// 生成する SQL の DECLARE / SET @@location に入れる既定値。
+// 実際の値は生成後の view_group_html.sql の先頭で書き換える。
+// build_table.sql と同じロケーションにしないと、作った UDF を参照できない。
+const region = 'asia-northeast1';
+
+// インラインで埋め込んでよい上限。32 KB に対して余裕を持たせる。
+const SIZE_LIMIT = 30 * 1024;
+
+// 解析側と描画側は別々の UDF にする。インラインのコード ブロブは 1 個あたり
+// 32 KB までなので、1 本にまとめると枠が 1 つしか使えない。依存も素直に割れる
+// （解析は analyze.js だけ、描画は diff/render/render_groups だけ）。
+// JS UDF の中から別の UDF は呼べないので、つなぐのは呼び出し側の SQL。
+const ANALYZE_SOURCES = [
+  ['analyze.js', join(here, 'analyze.js')],
+];
+const RENDER_SOURCES = [
+  ['chrome.js', join(here, 'chrome.js')],
+  ['lib/diff.js', join(here, '..', 'ddl_diff_viz', 'src', 'lib', 'diff.js')],
+  ['lib/render.js', join(here, '..', 'ddl_diff_viz', 'src', 'lib', 'render.js')],
+  ['render_groups.js', join(here, 'render_groups.js')],
+];
+// 参照関係の UDF。差分エンジン（diff.js / render.js）は要らないので積まない。
+// 積むと 1 個 32 KB のインライン上限に収まらなくなる。
+//
+// **カラム定義・SQL・外枠とは別の UDF にしてある。** 図を描くには SQL の
+// トークナイザ（analyze.js）が要り、それだけで最小化後 9 KB ある。同居させて
+// いた頃は 1 本で 28 KB（上限比 92%）まで来ていて、カラム定義に手を入れるたびに
+// 枠を気にすることになっていた。依存が独立している場所で割るのが素直。
+const ERD_SOURCES = [
+  ['chrome.js', join(here, 'chrome.js')],
+  ['analyze.js', join(here, 'analyze.js')],
+  ['erd.js', join(here, 'erd.js')],
+];
+// カラム定義・SQL・外枠の UDF。トークナイザは要らない。
+const PAGE_SOURCES = [
+  ['chrome.js', join(here, 'chrome.js')],
+  ['columns.js', join(here, 'columns.js')],
+  ['sqltext.js', join(here, 'sqltext.js')],
+  ['viewdesc.js', join(here, 'viewdesc.js')],
+];
+// base ごとのメモ（Markdown）の UDF。ほかとは何も共有しない。
+// これだけビューの中から呼ぶ（＝クエリのたびに走る）ので、事前生成の
+// テーブルには焼き込まない。焼き込むと次の日次実行までメモが古いままになる。
+const MARKDOWN_SOURCES = [
+  ['markdown.js', join(here, 'markdown.js')],
+];
+// テンプレートに貼る CSS は 1 枚にまとめて配る。差分カード側の chromeCss() と
+// メモ側の memoCss() を両方持つ必要があるので、CSS の UDF だけ両方を積む。
+// markdown.js の描画側は要らないので下の UNUSED_CSS で落とす。
+const CSS_SOURCES = RENDER_SOURCES.concat([
+  ['markdown.js', join(here, 'markdown.js')],
+  ['columns.js', join(here, 'columns.js')],
+  ['sqltext.js', join(here, 'sqltext.js')],
+  ['viewdesc.js', join(here, 'viewdesc.js')],
+]);
+
+/**
+ * 使わないトップレベル関数を落とす。
+ *
+ * 3 ペイン横並びは使わない方針にしたので、3-way 系の関数を UDF から外す。
+ * インラインの 32 KB 枠がぎりぎりなので、載せない分だけ余裕になる。
+ *
+ * esbuild は format を指定しない限り未使用のトップレベル宣言を残す
+ * （指定するとラップされて必要なものまで落ちる）ため、ここで明示的に削る。
+ * 消しすぎればこの後の実行検証で必ず落ちるので、取り違えは検出できる。
+ */
+function dropFunctions(src, names) {
+  let out = src;
+  for (const name of names) {
+    // `function name(` から、列 0 の `}` までを 1 つの宣言とみなす。
+    // 改行は「あれば」。バンドルの最後の関数には後ろに改行が無い
+    // （strip が trim するため）ので、\n を必須にすると落とせない。
+    const re = new RegExp(`^function ${name}\\([\\s\\S]*?^\\}(?:\\n|$)`, 'm');
+    if (!re.test(out)) throw new Error(`dropFunctions: ${name} が見つかりません`);
+    out = out.replace(re, '');
+    if (new RegExp(`^function ${name}\\(`, 'm').test(out)) {
+      throw new Error(`dropFunctions: ${name} が残っています`);
+    }
+  }
+  return out;
+}
+
+// 3 ペイン横並びを使わないので不要になったもの。
+// build3Way / mapToBase / baseCell / segsText は 3-way 専用。
+// alphaMap は alphaMapDetail の薄い包み。UDF は Detail 側しか呼ばない。
+const UNUSED_ANALYZE = ['alphaMap'];
+// ERD 側はグループ化もパラメータ化もしない。トークナイザと実体名の判定だけ使う。
+// 外枠（wrapPage）を組むのは page の仕事なので、そちらも落とす。
+const UNUSED_ERD = ['alphaMap', 'alphaMapDetail', 'parameterize', 'groupByLogic',
+  'analyze', 'maskTokens', 'buildLiteralMap', 'suffixWords', 'parseEquivalents',
+  'extractSuffix', 'expandSuffixParts', 'normalizeSpace', 'stripOptionsClause',
+  'wrapPage', 'cssGuard'];
+// CSS は viewlgc_group_css が配る。page も erd も markup しか作らないので、
+// CSS の文字列を積むだけ無駄（1 個 32 KB のインライン上限に効いてくる）。
+const UNUSED_PAGE = ['columnsCss', 'sqlCss', 'descCss'];
+// 外枠で束ねるのは page の仕事。render はロジック差分のカードを作るだけなので
+// wrapPage は要らない（chrome.js を共有しているぶん付いてくる）。
+// cssGuard は wrapPage（＝ page）専用。CSS_GEN のほうは chromeCss() が使うので残す。
+const UNUSED_RENDER = ['renderFragment3', 'build3Way', 'mapToBase', 'baseCell',
+  'segsText', 'wrapPage', 'cssGuard'];
+// CSS の UDF は markdown.js から memoCss() しか呼ばない。Markdown を HTML に
+// する側は viewlgc_markdown が持っているので、こちらには積まない。
+const UNUSED_CSS = UNUSED_RENDER.concat([
+  'markdownHtml', 'mdRender', 'mdBlocks', 'mdList', 'mdAligns', 'mdCells',
+  'mdKind', 'mdIndent', 'mdInline', 'mdLink', 'mdUrl', 'mdEsc',
+  'renderColumnsBase', 'renderColumns', 'groupColumns', 'columnOrder',
+  'cellInfo', 'mixedTip', 'uniq', 'majority', 'descHtml', 'parseDesc', 'pickKey',
+  'renderSqlBase', 'renderSql', 'sqlViews', 'sqlBody', 'sqlPanel',
+  'renderNote', 'renderDesc', 'descGroups', 'descPanel', 'suffixByView',
+  'tabGroups', 'labelGroups', 'labelChips', 'labelsSplit', 'renderLabels']);
+
+/** CommonJS の体裁を落として素の関数群にする。 */
+function strip(src, file) {
+  const out = src
+    .replace(/^'use strict';\s*$/m, '')
+    .replace(/^const\s*\{[^}]*\}\s*=\s*require\([^)]*\);\s*$/gm, '')
+    .replace(/^module\.exports\s*=[\s\S]*?\};\s*$/m, '')
+    .replace(/^module\.exports\s*=[^;]*;\s*$/m, '');
+  if (/\brequire\s*\(/.test(out) || /\bmodule\.exports\b/.test(out)) {
+    throw new Error(`${file}: require / module.exports が残っています`);
+  }
+  if (out.includes('"""')) {
+    throw new Error(`${file}: 三重引用符が含まれており raw string を壊します`);
+  }
+  return out.trim();
+}
+
+async function bundle(sources, unused) {
+  const libs = [];
+  for (const [name, path] of sources) {
+    libs.push(strip(await readFile(path, 'utf8'), name));
+  }
+  return dropFunctions(libs.join('\n\n'), unused);
+}
+const analyzeLib = await bundle(ANALYZE_SOURCES, UNUSED_ANALYZE);
+const renderLib = await bundle(RENDER_SOURCES, UNUSED_RENDER);
+const erdLib = await bundle(ERD_SOURCES, UNUSED_ERD);
+const pageLib = await bundle(PAGE_SOURCES, UNUSED_PAGE);
+const markdownLib = await bundle(MARKDOWN_SOURCES, []);
+const cssLib = await bundle(CSS_SOURCES, UNUSED_CSS);
+
+// --- 共通ヘルパ（DIFF_HTML と同じ考え方） ------------------------------
+// 両方の UDF に入れるもの。
+const sharedBase = `
+function __opts(options_json) {
+  if (!options_json) return {};
+  try { return JSON.parse(options_json) || {}; } catch (e) { return {}; }
+}
+
+function __notice(text) {
+  return '<div class="vg-notice">' + String(text).replace(/[<>&]/g, '') + '</div>';
+}
+`.trim();
+
+// 描画側の UDF にだけ入れるもの。chromeCss() を使うので解析側には入らない。
+const sharedRender = `
+/* style 属性の中身のハッシュからクラス名を決める。内容や出現順に依存しないので、
+   テンプレート側の固定 CSS と markup 側のクラス名がズレない。 */
+function __hashClass(s) {
+  var h = 0x811c9dc5;
+  for (var i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return 'd' + h.toString(36);
+}
+
+function __split(html) {
+  var rules = {};
+  var markup = html.replace(/ style="([^"]*)"/g, function (_m, css) {
+    var cls = __hashClass(css);
+    rules[cls] = css;
+    return ' class="' + cls + '"';
+  });
+  return { markup: markup, rules: rules };
+}
+
+function __rulesToCss(rules) {
+  var keys = Object.keys(rules).sort();
+  var out = [];
+  for (var i = 0; i < keys.length; i++) out.push('.' + keys[i] + '{' + rules[keys[i]] + '}');
+  return out.join('\\n');
+}
+
+function __applyMode(html, mode) {
+  if (mode === 'class') return __split(html).markup;
+  if (mode === 'embed') {
+    var s = __split(html);
+    return '<style>\\n' + chromeCss() + '\\n' + __rulesToCss(s.rules) + '\\n</style>\\n' + s.markup;
+  }
+  return html;
+}
+`.trim();
+
+// --- analyze のドライバ ------------------------------------------------
+// 解析結果を JSON で返す。描画側の UDF がそれを受け取って HTML にする。
+// 渡すのは描画に要る分だけに削る。members の tokens / raw / ddl を積むと
+// サンプル 9 本で 62 KB になるが、削れば 3 KB で済む（描画結果は同じ）。
+const analyzeDriver = `
+function __trimBase(bs) {
+  var groups = [];
+  for (var i = 0; i < bs.groups.length; i++) {
+    var g = bs.groups[i];
+    var members = [];
+    for (var j = 0; j < g.members.length; j++) {
+      members.push({ viewName: g.members[j].viewName });
+    }
+    groups.push({
+      suffixes: g.suffixes, members: members,
+      // missBy は「どのグループを基準にしたときの差か」の行列。基準を
+      // レポート側で選べるようにしたので、描画側にも渡す必要がある。
+      sql: g.sql, params: g.params, miss: g.miss, missBy: g.missBy
+    });
+  }
+  return {
+    base: bs.base, viewCount: bs.viewCount, groupCount: bs.groupCount,
+    unmatched: bs.unmatched, groups: groups
+  };
+}
+
+function __label(g) {
+  var out = [];
+  for (var i = 0; i < g.suffixes.length; i++) {
+    out.push(g.suffixes[i] || (g.members[i] && g.members[i].viewName) || '(suffix なし)');
+  }
+  return out.join(', ');
+}
+
+function __payload(lead) {
+  return {
+    viewCount: 0, groupCount: 0, groupLabels: [], groupSizes: [],
+    suffixes: [], unmatchedCount: 0, bases: [], lead: lead || '', tail: ''
+  };
+}
+
+function __run(views, options_json) {
+  var opts = __opts(options_json);
+  if (!views || views.length === 0) {
+    return JSON.stringify(__payload('View が渡されていません。'));
+  }
+
+  var rows = [];
+  for (var i = 0; i < views.length; i++) {
+    if (views[i]) rows.push({ view_name: views[i].view_name, ddl: views[i].ddl });
+  }
+
+  var res = analyze(rows, opts);
+  if (res.bases.length === 0) {
+    var e = __payload(rows.length + ' 件すべて suffix を認識できませんでした。' +
+      'suffixParts / suffixList / suffixPattern の指定を確認してください。');
+    e.unmatchedCount = res.unmatched.length;
+    return JSON.stringify(e);
+  }
+
+  // 呼び出し側で base ごとに束ねている前提。混ざっていても全部返す。
+  var out = __payload('');
+  for (var b = 0; b < res.bases.length; b++) {
+    var bs = res.bases[b];
+    out.bases.push(__trimBase(bs));
+    out.viewCount += bs.viewCount;
+    out.groupCount += bs.groupCount;
+    for (var g = 0; g < bs.groups.length; g++) {
+      var grp = bs.groups[g];
+      // suffix が null（未認識）のときは View 名。表示の見出しと同じ規則にする。
+      out.groupLabels.push(__label(grp));
+      out.groupSizes.push(grp.members.length);
+      for (var k = 0; k < grp.suffixes.length; k++) {
+        out.suffixes.push(grp.suffixes[k] || grp.members[k].viewName);
+      }
+    }
+  }
+  out.suffixes.sort();
+  out.unmatchedCount = res.unmatched.length;
+  // 未認識の View は base として描いてある（includeUnmatched: false のときだけ案内）
+  if (res.unmatched.length > 0 && opts.includeUnmatched === false) {
+    out.tail = 'suffix を認識できなかった View が ' + res.unmatched.length + ' 件あります。';
+  }
+  return JSON.stringify(out);
+}
+
+return __run(views, options_json);
+`.trim();
+
+// --- render のドライバ -------------------------------------------------
+// analyze の JSON を受け取って HTML にする。解析はしない。
+const renderDriver = `
+function __run(analysis_json, options_json, ref_index) {
+  var opts = __opts(options_json);
+  var a;
+  try { a = JSON.parse(analysis_json); } catch (e) { a = null; }
+  if (!a) return __notice('解析結果を読み取れませんでした。');
+
+  // 基準は行で決まる。NULL なら従来どおり全基準をタブで載せる。
+  // **INT64 は JS UDF が扱えない**ので FLOAT64 で受けて丸める。
+  if (ref_index !== null && ref_index !== undefined) {
+    opts.refIndex = Math.floor(Number(ref_index));
+  }
+
+  var html = a.lead ? __notice(a.lead) : '';
+  var bases = a.bases || [];
+  for (var i = 0; i < bases.length; i++) html += renderBase(bases[i], opts);
+  if (a.tail) html += __notice(a.tail);
+  return __applyMode(html, opts.mode || 'inline');
+}
+
+return __run(analysis_json, options_json, ref_index);
+`.trim();
+
+// --- erd のドライバ -----------------------------------------------------
+// 解析結果から参照関係の図を作る。図だけを返し、束ねるのは page の仕事。
+const erdDriver = `
+function __run(analysis_json, options_json) {
+  var a;
+  try { a = JSON.parse(analysis_json); } catch (e) { a = null; }
+  if (!a) return __notice('解析結果を読み取れませんでした。');
+  var out = '';
+  var bases = a.bases || [];
+  for (var i = 0; i < bases.length; i++) out += renderErdBase(bases[i]);
+  return out || __notice('図にできる View がありません。');
+}
+
+return __run(analysis_json, options_json);
+`.trim();
+
+// --- page のドライバ ---------------------------------------------------
+// カラム定義の表と View ごとの素の SQL を作り、渡された差分 HTML・参照関係の図と
+// 合わせて外側タブで束ねる。差分も図も作らない（どちらも別の UDF）。
+const pageDriver = `
+function __run(analysis_json, diff_html, erd_html, columns_json, sql_json, descs_json, labels_json, regions_json, options_json) {
+  var opts = __opts(options_json);
+  var a;
+  try { a = JSON.parse(analysis_json); } catch (e) { a = null; }
+  if (!a) return String(diff_html || __notice('解析結果を読み取れませんでした。'));
+  // カラム定義は取れないこともある（権限や INFORMATION_SCHEMA の差）。
+  // 落とさず、そのタブだけ案内にする。
+  // SQL からは [{v: View 名, cols: [...]}] の並びで来る。View 名で引ける形に直す。
+  var byView = {};
+  try {
+    var arr = JSON.parse(columns_json) || [];
+    for (var k = 0; k < arr.length; k++) byView[arr[k].v] = arr[k].cols || [];
+  } catch (e) { byView = {}; }
+  // 素の SQL も同じ形（[{v: View 名, s: SQL}]）で受け取る。解析結果には
+  // 積んでいない（描画に要らないものを UDF 間で運ぶと JSON が 20 倍になる）。
+  var sqlByView = {};
+  try {
+    var sarr = JSON.parse(sql_json) || [];
+    for (var m = 0; m < sarr.length; m++) sqlByView[sarr[m].v] = sarr[m].s;
+  } catch (e) { sqlByView = {}; }
+
+  // View 自身の description。[{v: [View 名...], h: HTML}] で来る。
+  // **Markdown を HTML にするのは SQL 側（viewlgc_markdown）。** JS UDF から
+  // 別の UDF は呼べないので、ここへは変換済みのものが来る。
+  var descs = [];
+  try { descs = JSON.parse(descs_json) || []; } catch (e) { descs = []; }
+
+  // View に付いた labels。[{v: [View 名...], l: [{k, v}...]}] で来る。
+  // 大半の base では 1 組（全 View で同じ）になる。
+  var labels = [];
+  try { labels = JSON.parse(labels_json) || []; } catch (e) { labels = []; }
+
+  // View がどのリージョンに居るか。[{r: リージョン, v: [View 名...]}] で来る。
+  // note の見出しを suffix の羅列からリージョンごとの束に変えるのに使う。
+  var regions = [];
+  try { regions = JSON.parse(regions_json) || []; } catch (e) { regions = []; }
+
+  var col = '';
+  var sql = '';
+  var bases = a.bases || [];
+  for (var i = 0; i < bases.length; i++) {
+    col += renderColumnsBase(bases[i], byView);
+    sql += renderSqlBase(bases[i], sqlByView, regions);
+  }
+  if (!col) col = __notice('カラム定義を出せる View がありません。');
+  if (!sql) sql = __notice('SQL を出せる View がありません。');
+  var b0 = a.bases && a.bases.length ? a.bases[0] : null;
+  return wrapPage(String(diff_html || ''),
+    String(erd_html || __notice('参照関係を取得できませんでした。')), col, sql,
+    renderNote(b0, descs, NOTE_MARK, labels, regions), b0, labelsSplit(b0, labels));
+}
+
+return __run(analysis_json, diff_html, erd_html, columns_json, sql_json, descs_json, labels_json, regions_json, options_json);
+`.trim();
+
+// --- markdown のドライバ -----------------------------------------------
+// メモの Markdown を HTML にする。空・NULL でも枠を返す（呼び出し側の
+// COALESCE を要らなくする）。ビューの中から呼ぶので、落ちないことが要件。
+const markdownDriver = `
+function __run(md) {
+  try { return markdownHtml(md); }
+  catch (e) { return __notice('メモを表示できませんでした: ' + e); }
+}
+
+return __run(md);
+`.trim();
+
+// --- group_css のドライバ ----------------------------------------------
+// 全パターンを描画して、そこに出る規則を集める。markup と同じコードから作るので
+// クラス名が食い違わない。chromeCss() はもともとクラス方式なのでそのまま足す。
+//
+// fixture は analyze() を通さず手で組む。解析側の UDF と分けた以上、
+// CSS のためだけに analyze.js を積むと 7 KB を無駄にするため。
+// 手組みが実物とズレていないかは、生成時のクラス網羅チェックが見張る。
+const cssDriver = `
+function __fixtureRules(opts) {
+  var rules = {};
+  function collect(b) {
+    var r = __split(renderBase(b, opts)).rules;
+    for (var k in r) rules[k] = r[k];
+  }
+  function grp(sufs, sql, params, miss) {
+    var members = [];
+    for (var i = 0; i < sufs.length; i++) members.push({ viewName: 'v_fixture_' + sufs[i] });
+    return { suffixes: sufs, members: members, sql: sql, params: params || [], miss: miss };
+  }
+  function base(name, groups, unmatched) {
+    var n = 0;
+    for (var i = 0; i < groups.length; i++) n += groups[i].members.length;
+    return {
+      base: name, viewCount: n, groupCount: groups.length,
+      unmatched: unmatched, groups: groups
+    };
+  }
+
+  // 差分の見た目（追加 / 削除 / 変更 / ハッチ）が全部出るように SQL を作る。
+  var A = 'SELECT\\n  a,\\n  b\\nFROM t_{{P1}}\\nWHERE x = 1';
+  var B = 'SELECT\\n  a,\\n  c.b\\nFROM t_{{P1}}\\nLEFT JOIN u_{{P1}} AS c USING (a)\\nWHERE x = 2';
+  var C = 'SELECT\\n  a\\nFROM t_{{P1}}\\nWHERE x = 1';
+  var P = [{ name: '{{P1}}', values: { abjp: 't_abjp', abus: 't_abus' } }];
+  var MISS = { vs: 'abjp, abus', detail: {
+    reason: 'not-substitutable', kind: 'string', aText: "'apac'", bText: "'amer'" } };
+
+  // 1 グループ（基準タブ 1 枚 ＋ 1 ペイン）。params 無しの「差分なし」も出す。
+  collect(base('v_fixture_one', [grp(['abjp', 'abus'], A, [])]));
+  // 2 グループ（基準 ＋ 比較 1 枚）。パラメータ表と「なぜ別グループか」も出す。
+  collect(base('v_fixture_two', [grp(['abjp', 'abus'], A, P), grp(['cdjp'], B, P, MISS)]));
+  // 3 グループ以上（タブが増える）
+  collect(base('v_fixture_many', [
+    grp(['abjp', 'abus'], A, P), grp(['cdjp'], B, P, MISS), grp(['efjp'], C, P, MISS)]));
+  // suffix 未認識（単独表示。バッジが 1 つ増える）
+  collect(base('v_fixture_no_suffix',
+    [{ suffixes: [null], members: [{ viewName: 'v_fixture_no_suffix' }],
+       sql: A, params: [] }], true));
+
+  return rules;
+}
+
+return chromeCss() + '\\n' + memoCss() + '\\n' + columnsCss() + '\\n' + sqlCss() + '\\n' +
+  descCss() + '\\n' +
+  __rulesToCss(__fixtureRules(__opts(options_json)));
+`.trim();
+
+// --- 最小化 -------------------------------------------------------------
+let esbuild = null;
+try {
+  const req = createRequire(join(here, '..', 'ddl_diff_viz', 'package.json'));
+  esbuild = req('esbuild');
+} catch {
+  console.warn('WARN: esbuild が見つからないため最小化をスキップします');
+  console.warn('      (looker_studio/ddl_diff_viz で npm install してください)');
+}
+
+function pack(driver, label, lib, extra) {
+  const raw = [lib, '', sharedBase, '', extra || '', '', driver].join('\n');
+  if (!esbuild) return { code: raw, raw: raw.length, min: null, label };
+  // format を指定するとラップされて未使用の関数が落ちるので、指定しない
+  const min = esbuild.transformSync(raw, { loader: 'js', minify: true, target: 'es2017' }).code;
+  // 最小化器は '\u0001' のような文字列を生の制御文字として書き出す。
+  // そのまま SQL に埋めると、生成物に見えない文字が混ざり、エディタでも
+  // BigQuery のエラーでも追えなくなる。JS のエスケープに戻してから埋める。
+  // 制御文字が出るのは文字列・正規表現リテラルの中だけなので、置換して等価。
+  const code = min.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g,
+    (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
+  return { code, raw: raw.length, min: code.length, label };
+}
+
+const analyzePack = pack(analyzeDriver, 'viewlgc_analyze', analyzeLib);
+const renderPack = pack(renderDriver, 'viewlgc_render', renderLib, sharedRender);
+const cssPack = pack(cssDriver, 'viewlgc_group_css', cssLib, sharedRender);
+
+// 配る CSS を載せる関数の数。**本文の 32 KB は関数ごとの上限**なので、
+// 分ければ天井が上がる（1 本に載せていた頃は 43,771 B で CREATE が落ちた）。
+//
+// 数を固定にしてあるのは、増減させると使われない関数がデータセットに残る
+// ため。4 本なら余裕を見ても 100 KB 以上を載せられ、いまの 3 倍以上ある。
+const CSS_PARTS = 4;
+
+/**
+ * CSS を行の切れ目で n 個に分ける。**連結すると元に戻る**
+ * （chunks.join('') === css）。行の途中で切らないのは、生成物を読むときに
+ * 規則が真っ二つになっていると追えないため。
+ */
+function splitCss(text, n) {
+  const lines = String(text).split('\n');
+  const pieces = lines.map((l, i) => (i < lines.length - 1 ? l + '\n' : l));
+  // 残りの長さを残りの本数で割り直しながら詰める。最後にまとめて余りを
+  // 押し込む形にすると、**最後の部品だけが伸びて**そこが先に上限へ当たる。
+  let rest = String(text).length;
+  const out = [];
+  let cur = '';
+  for (const p of pieces) {
+    const target = Math.ceil(rest / (n - out.length));
+    if (out.length < n - 1 && cur.length > 0 && cur.length + p.length > target) {
+      out.push(cur);
+      rest -= cur.length;
+      cur = '';
+    }
+    cur += p;
+  }
+  out.push(cur);
+  while (out.length < n) out.push('');
+  return out;
+}
+const erdPack = pack(erdDriver, 'viewlgc_erd', erdLib);
+const pagePack = pack(pageDriver, 'viewlgc_page', pageLib);
+const markdownPack = pack(markdownDriver, 'viewlgc_markdown', markdownLib);
+
+// --- 検証: 最小化した本体をそのまま実行する -----------------------------
+const S = require(join(here, 'sample_views.js'));
+const VIEWLGC_ANALYZE = new Function('views', 'options_json', analyzePack.code);
+const VIEWLGC_RENDER = new Function('analysis_json', 'options_json', 'ref_index',
+  renderPack.code);
+const VIEWLGC_ERD = new Function('analysis_json', 'options_json', erdPack.code);
+const VIEWLGC_PAGE = new Function('analysis_json', 'diff_html', 'erd_html',
+  'columns_json', 'sql_json', 'descs_json', 'labels_json', 'regions_json', 'options_json',
+  pagePack.code);
+const VIEWLGC_MARKDOWN = new Function('md', markdownPack.code);
+const VIEW_GROUP_CSS = new Function('options_json', cssPack.code);
+
+// JS UDF から別の UDF は呼べないので、つなぐのは呼び出し側の SQL の仕事。
+// ここではその合成を JS で再現して、分割前と同じ検証をそのまま通す。
+// build_table.sql も同じ順（analyze を 1 回 → その結果を render へ）で呼ぶ。
+// カラム定義の代わり。実際は INFORMATION_SCHEMA.COLUMNS から作った JSON が来る。
+// 表の列はロジック グループではなくカラム定義で束ね直すので、両方の分かれ方を
+// 通しておく。us だけ型を変えて（別の列になる）、uk だけ並び順を入れ替える
+// （並び順は束ね方の鍵に入れていないので同じ列にまとまり、⚠ だけ出る）。
+function fakeColumns(views) {
+  return JSON.stringify(views.map((v) => {
+    const swap = v.view_name.endsWith('uk');
+    return {
+      v: v.view_name,
+      cols: [
+        { n: 'order_date', t: 'DATE', o: 1, u: 'NO', d: '受注日' },
+        { n: 'region', t: 'STRING', o: swap ? 3 : 2, u: 'YES', d: '' },
+        { n: 'gross_amount', t: v.view_name.endsWith('us') ? 'FLOAT64' : 'NUMERIC',
+          o: swap ? 2 : 3, u: 'YES', d: '税抜き' },
+      ],
+    };
+  }));
+}
+
+// 素の SQL の代わり。実際は INFORMATION_SCHEMA.VIEWS.view_definition が来る。
+function fakeSql(views) {
+  return JSON.stringify(views.map((v) => ({ v: v.view_name, s: v.ddl })));
+}
+
+// View 自身の description の代わり。実際は TABLE_OPTIONS の description を
+// base の中で文面ごとに畳み、viewlgc_markdown を通したものが来る（HTML）。
+// jp だけ別の文面にして、note タブの上段がタブになることを通す。
+function fakeDescs(views) {
+  const by = {};
+  for (const v of views) {
+    const md = /jp$/.test(v.view_name)
+      ? '## 日本向け\n\n税は内税。'
+      : '## 共通\n\n税は外税。';
+    (by[md] = by[md] || []).push(v.view_name);
+  }
+  return JSON.stringify(Object.keys(by).map((md) => ({
+    v: by[md], h: VIEWLGC_MARKDOWN(md),
+  })));
+}
+
+// ラベルの代わり。実際は INFORMATION_SCHEMA.TABLE_OPTIONS の labels から
+// 作った JSON が来る。**全 View で同じ値**にしてある（これが普通の姿で、
+// そのときカードは見出しを持たないチップ 1 列になる）。割れたときの姿は
+// 下の表明で別に作って確かめる。
+// キーはわざと逆順（tier → domain）で渡す。並べ直しは描画側の仕事。
+function fakeLabels(views) {
+  return JSON.stringify([{
+    v: views.map((v) => v.view_name),
+    l: [{ k: 'tier', v: 'gold' }, { k: 'domain', v: 'sales' }],
+  }]);
+}
+
+function VIEW_GROUP_INFO(views, options_json) {
+  const a = VIEWLGC_ANALYZE(views, options_json);
+  const j = JSON.parse(a);
+  return {
+    view_count: j.viewCount,
+    group_count: j.groupCount,
+    group_labels: j.groupLabels,
+    group_sizes: j.groupSizes,
+    suffixes: j.suffixes,
+    unmatched_count: j.unmatchedCount,
+    html: VIEWLGC_RENDER(a, options_json, null),
+    // build_table.sql は render の結果をさらに page へ渡す。ここも同じ順で通し、
+    // 最小化した page 本体が実際に動くことを確かめる。
+    erd: VIEWLGC_ERD(a, options_json),
+    page: VIEWLGC_PAGE(a, VIEWLGC_RENDER(a, options_json, null),
+      VIEWLGC_ERD(a, options_json),
+      fakeColumns(views), fakeSql(views), fakeDescs(views), fakeLabels(views),
+      '[]', options_json),
+  };
+}
+
+const views = S.sampleRows().map((r) => ({ view_name: r.view_name, ddl: r.ddl }));
+const OPTS = JSON.stringify({ suffixParts: S.SUFFIX_PARTS });
+const info = VIEW_GROUP_INFO(views, OPTS);
+const html = info.html;
+const classed = VIEW_GROUP_INFO(views, JSON.stringify({ suffixParts: S.SUFFIX_PARTS, mode: 'class' })).html;
+const embed = VIEW_GROUP_INFO(views, JSON.stringify({ suffixParts: S.SUFFIX_PARTS, mode: 'embed' })).html;
+const css = VIEW_GROUP_CSS(JSON.stringify({ suffixParts: S.SUFFIX_PARTS }));
+// 生成する SQL の断片。CSS は 1 本の関数に載らないので分けて載せ、
+// まとめ役の関数がそれを連結して返す（外から呼ぶ名前は従来どおり 1 つ）。
+const cssChunks = splitCss(css, CSS_PARTS);
+const cssPartVar = (i) => `css_part_${i + 1}`;
+const cssPartNameVar = (i) => `udf_css_p${i + 1}_function_name`;
+const Q3 = '"'.repeat(3);
+const cssPartDecls = cssChunks.map((c, i) =>
+  `DECLARE ${cssPartVar(i)} STRING DEFAULT r${Q3}${c}${Q3};`).join('\n\n');
+const cssPartNameDecls = cssChunks.map((_, i) =>
+  `DECLARE ${cssPartNameVar(i)} STRING;`).join('\n');
+const cssPartNameSets = cssChunks.map((_, i) =>
+  `SET ${cssPartNameVar(i)} =\n` +
+  `  udf_name_prefix || system_name || '_' || 'group_css_p${i + 1}' || udf_name_suffix;`
+).join('\n');
+const cssPartNameAsserts = cssChunks.map((_, i) =>
+  `ASSERT REGEXP_CONTAINS(${cssPartNameVar(i)}, r'^[A-Za-z0-9_]+$') AS\n` +
+  `  '${cssPartNameVar(i)} が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';`
+).join('\n');
+const cssPartCreates = cssChunks.map((_, i) => [
+  `EXECUTE IMMEDIATE FORMAT('''`,
+  'CREATE OR REPLACE FUNCTION `%s.%s.%s`()',
+  'RETURNS STRING',
+  'AS (%s)',
+  `''',`,
+  `  udf_project_id, udf_dataset, ${cssPartNameVar(i)},`,
+  `  TO_JSON_STRING(${cssPartVar(i)}));`,
+].join('\n')).join('\n\n');
+const cssConcatExpr = cssChunks.map(() => '`%s.%s.%s`()').join(' || ');
+const cssConcatArgs = cssChunks.map((_, i) =>
+  `  udf_project_id, udf_dataset, ${cssPartNameVar(i)}`).join(',\n');
+
+
+const text = html.replace(/<[^>]*>/g, '');
+
+// 複雑な SQL を最小化後の本体に通す（多段 CTE / 名前付きウィンドウ / QUALIFY /
+// UNION / UNNEST / 相関サブクエリ）。素の analyze.js では test.mjs が見ている。
+const C = require(join(here, 'sample_complex.js'));
+const COMPLEX_OPTS = JSON.stringify({ suffixParts: C.COMPLEX_PARTS });
+const COMPLEX = VIEW_GROUP_INFO(
+  C.complexRows().map((r) => ({ view_name: r.view_name, ddl: r.ddl })), COMPLEX_OPTS);
+const COMPLEX_SPLIT = VIEW_GROUP_INFO(
+  C.complexRows({ abus: (q) => q.replace('AS gross_amount', 'AS total_amount') })
+    .map((r) => ({ view_name: r.view_name, ddl: r.ddl })), COMPLEX_OPTS);
+// クラスの網羅は全レイアウトで見る。タブ（3 グループ）だけを見ていると、
+// 1 ペインや suffix 未認識の描き分けで増えたクラスを取りこぼす。
+// 取りこぼすと、テンプレートに貼った CSS を貼り直すまでそこだけ素で表示される。
+const classedAll = [
+  classed,
+  VIEW_GROUP_INFO(views.filter((v) => v.view_name.includes('_ab')),
+    JSON.stringify({ suffixParts: S.SUFFIX_PARTS, mode: 'class' })).html,
+  VIEW_GROUP_INFO([{ view_name: 'no_suffix_here', ddl: 'SELECT 1' }],
+    JSON.stringify({ suffixParts: S.SUFFIX_PARTS, mode: 'class' })).html,
+].join('');
+const used = [...new Set([...classedAll.matchAll(/class="(d[0-9a-z]+)"/g)].map((m) => m[1]))];
+const defined = new Set([...css.matchAll(/^\.(d[0-9a-z]+)\{/gm)].map((m) => m[1]));
+
+const checks = [
+  ['最小化後も動く（HTML を生成）', html.includes('vg-root')],
+  ['page も最小化後に動く（外側タブと図が出る）',
+    info.page.includes('vg-otab') && info.page.includes('<svg ') &&
+    info.page.includes(html)],
+  // 図は別の UDF。page は受け取ったものをそのまま外枠に入れるだけ。
+  ['erd は図だけを返す（外枠は付けない）',
+    info.erd.includes('<svg ') && !info.erd.includes('vg-otab') &&
+    // page はそれをそのまま持っている
+    info.page.includes(info.erd)],
+  ['page は図が渡されなくても落ちない',
+    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]', '[]', '[]', '[]', OPTS)
+      .includes('参照関係を取得できませんでした')],
+  // メモだけは作り置きしない。カードには目印だけを置き、ビューが
+  // REPLACE で note_html に差し替える。焼き込むと、シートを直しても
+  // 次の日次実行までレポートが古いままになる。
+  ['page は見出しをタブと同じ帯に置く（どのタブでも見える）',
+    /<div class="vg-otablist"><div class="vg-header">.*?<label class="vg-otab vg-ot1"/s
+      .test(info.page) &&
+    info.page.indexOf('vg-otablist') < info.page.indexOf('<!--VG_NOTE-->')],
+  // **基準を行に分ける道。** 全基準を 1 枚に載せると比較ペインは G×(G−1) 枚で
+  // グループ数の二乗になり、リージョンをまたぐと UDF のメモリを使い切る。
+  // ref_index を渡した行は、その基準ぶん（G−1 枚）だけを作る。
+  ['カードに載る基準は 1 つだけ（比較は G−1 枚・線形）', (() => {
+    const a = VIEWLGC_ANALYZE(views, OPTS);
+    const G = info.group_count;
+    const one = VIEWLGC_RENDER(a, OPTS, 1);
+    const paneCount = (h) => (h.match(/<th colspan=/g) || []).length / 2;
+    return G > 1 &&
+      // 基準を選ぶタブは無い。いま何を基準にしているかは文字で出す
+      !one.includes('vg-btab') && !one.includes('vg-bpanel') &&
+      one.includes('vg-refhead') && one.includes('基準グループ') &&
+      // 枚数は G×(G−1) ではなく G−1
+      paneCount(one) === G - 1 &&
+      // 基準が違えば中身も違う
+      one !== VIEWLGC_RENDER(a, OPTS, 0);
+  })()],
+  ['ref_index を省いても落ちない（先頭の基準になる）', (() => {
+    const a = VIEWLGC_ANALYZE(views, OPTS);
+    return VIEWLGC_RENDER(a, OPTS, null) === VIEWLGC_RENDER(a, OPTS, 0);
+  })()],
+  ['ref_index が範囲外でも落ちない（端に丸める）', (() => {
+    const a = VIEWLGC_ANALYZE(views, OPTS);
+    const G = info.group_count;
+    return VIEWLGC_RENDER(a, OPTS, 99) === VIEWLGC_RENDER(a, OPTS, G - 1) &&
+      VIEWLGC_RENDER(a, OPTS, -5) === VIEWLGC_RENDER(a, OPTS, 0);
+  })()],
+  ['基準を載せきれないときは、選べないだけだと書く', (() => {
+    const a = VIEWLGC_ANALYZE(views, OPTS);
+    const capped = VIEWLGC_RENDER(a,
+      JSON.stringify({ suffixParts: S.SUFFIX_PARTS, maxRefRows: 2 }), 0);
+    // 3 グループあるので上限 2 は超える
+    return info.group_count > 2 &&
+      capped.includes('基準にできるのは先頭 2 グループまで') &&
+      capped.includes(`全 ${info.group_count} 件`) &&
+      // 上限に達していなければ出さない
+      !VIEWLGC_RENDER(a,
+        JSON.stringify({ suffixParts: S.SUFFIX_PARTS, maxRefRows: 99 }), 0)
+        .includes('基準にできるのは');
+  })()],
+  // 基準を選ぶタブの機構は**残していない。** 残すと G×(G−1) の二乗が
+  // いつでも戻せてしまい、UDF のメモリを使い切った経路が生き続ける。
+  ['基準を選ぶタブの機構が残っていない',
+    !css.includes('.vg-btab') && !css.includes('.vg-bpanel') &&
+    !classed.includes('vg-btab') && !info.page.includes('vg-btab') &&
+    typeof require(join(here, 'chrome.js')).REF_BUDGET === 'undefined'],
+  ['参照関係とカラム定義には基準を出さない（差分でだけ意味を持つ）', (() => {
+    // パネルは note / カラム定義 / 参照関係 / ロジック差分 / SQL の順
+    const at = (n) => info.page.indexOf(`<div class="vg-opanel vg-op${n}">`);
+    const cols = info.page.slice(at(2), at(3));
+    const erd = info.page.slice(at(3), at(4));
+    const sql = info.page.slice(at(5));
+    return at(2) > 0 && at(3) > at(2) && at(4) > at(3) && at(5) > at(4) &&
+      !cols.includes('基準') && !erd.includes('基準') && !sql.includes('基準') &&
+      // 差分側にはある
+      info.page.slice(at(4), at(5)).includes('基準');
+  })()],
+  ['page は View ごとの素の SQL を出す（インナー タブは suffix）', (() => {
+    const at = (n) => info.page.indexOf(`<div class="vg-opanel vg-op${n}">`);
+    const sql = info.page.slice(at(5));
+    const tabs = [...sql.matchAll(/class="vg-stab vg-st\d+"[^>]*>([^<]*)</g)]
+      .map((m) => m[1]);
+    return tabs.length === info.view_count &&
+      tabs.join(',') === info.suffixes.join(',') &&
+      // パラメータ化していない素のテキスト。{{P1}} は出ない
+      sql.includes('vg-sqlpre') && !sql.includes('{{P') &&
+      // 行番号が本文として入る（CSS のカウンタに頼らない）
+      sql.includes('<span class="vg-sqln">');
+  })()],
+  ['page は SQL が渡されなくても落ちない',
+    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '{ broken', '[]', '[]',
+      '[]', OPTS)
+      .includes('SQL を取得できませんでした')],
+  ['page はカラム定義の表を出す（定義ごとの列と並び順の ⚠）', (() => {
+    const at = (n) => info.page.indexOf(`<div class="vg-opanel vg-op${n}">`);
+    const cols = info.page.slice(at(2), at(3));
+    // 列はロジック グループではなくカラム定義。us だけ FLOAT64 なので
+    // jp+uk の列と us の列に分かれ、多数派と違う側に色が付く。
+    const heads = [...cols.matchAll(/<th class="vg-chead">([^<]*)</g)].map((m) => m[1]);
+    return cols.includes('vg-ctable') && cols.includes('gross_amount') &&
+      heads.length === 2 &&
+      heads[0].split(', ').length === info.view_count - 3 &&
+      heads[1].split(', ').every((s) => s.endsWith('us')) &&
+      cols.includes('FLOAT64') && cols.includes('vg-cdiff') &&
+      // uk だけ並び順が違う。列は分かれず ⚠ だけ出る
+      cols.includes('vg-cmix') && cols.includes('vg-cwarn');
+  })()],
+  ['page はカラム定義が空でも落ちない',
+    typeof VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '{ broken', '[]', '[]', '[]',
+      '[]', OPTS)
+      === 'string' &&
+    VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', null, '[]', '[]', '[]', '[]', OPTS)
+      .includes('カラム定義を取得できませんでした')],
+  ['page はメモの目印を 1 つだけ置く（本体は焼き込まない）', (() => {
+    const MARK = require(join(here, 'chrome.js')).NOTE_MARK;
+    return info.page.split(MARK).length - 1 === 1 &&
+      // メモの段の中身は目印だけ。すぐ後ろに本体が付いていないこと
+      info.page.includes('<div class="vg-nhead">メモ</div>' + MARK) &&
+      // 「未登録」の枠も焼き込まない（メモが空かどうかはビューが決める）
+      !info.page.includes('vg-mdempty');
+  })()],
+  // note タブは二段構え。上段の description は作り置き（デプロイでしか
+  // 変わらない）、下段のメモはビューが差し込む（シートを直すとその場で変わる）。
+  ['note タブは description の段とメモの段に分かれる', (() => {
+    const at = (n) => info.page.indexOf(`<div class="vg-opanel vg-op${n}">`);
+    const note = info.page.slice(at(1), at(2));
+    return note.includes('<div class="vg-nhead">View の description</div>') &&
+      note.includes('<div class="vg-nhead">メモ</div>') &&
+      // description が先、メモが後
+      note.indexOf('View の description') < note.indexOf('vg-nhead">メモ') &&
+      // 上段の中身は焼き込み済み（Markdown を HTML にするのは SQL 側）
+      note.includes('日本向け') && note.includes('共通');
+  })()],
+  ['description が割れていたらタブになる（見出しは suffix）', (() => {
+    const at = (n) => info.page.indexOf(`<div class="vg-opanel vg-op${n}">`);
+    const note = info.page.slice(at(1), at(2));
+    const tabs = [...note.matchAll(/class="vg-dtab vg-dt\d+"[^>]*>([^<]*)</g)]
+      .map((m) => m[1]);
+    // fixture は jp とそれ以外の 2 文面。見出しは View 名ではなく suffix
+    return tabs.length === 2 &&
+      tabs.every((t) => /^[a-z]{4}(, [a-z]{4})*$/.test(t));
+  })()],
+  // 1 種類でも見出しは出す。あれは飾りではなく caption で、「どの View の
+  // description か」は description そのものと同じくらい大事な情報。
+  // ただしラジオは持たせない（押せそうに見えて何も起きない状態を作らない）。
+  ['description が 1 種類でも suffix の見出しを出す（押せない <span>）', (() => {
+    const names = views.map((v) => v.view_name);
+    const one = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
+      JSON.stringify([{ v: names, h: '<p>ひとつ</p>' }]), '[]', '[]', OPTS);
+    const m = one.match(/<span class="vg-dtab vg-dstatic">([^<]*)<span class="vg-tabn">(\d+)</);
+    return m !== null && one.includes('ひとつ') &&
+      // 全 View ぶんの suffix が並ぶ
+      m[1].split(', ').length === info.view_count &&
+      Number(m[2]) === info.view_count &&
+      // ラジオも <label> も出さない
+      !one.includes('vg-dr') && !one.includes('<label class="vg-dtab');
+  })()],
+  // 1 つも設定されていないなら段ごと出さない。ただし**取れなかった場合とは
+  // 書き分ける**（あちらは INFORMATION_SCHEMA が読めていないという別の話で、
+  // 黙って消すと気づけない）。
+  ['description が 1 つも無ければ段ごと出さない（取得失敗とは書き分ける）', (() => {
+    const names = views.map((v) => v.view_name);
+    const unset = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
+      JSON.stringify([{ v: names, h: '' }]), '[]', '[]', OPTS);
+    // descs_json が空 = 組が作れない。これは未設定ではなく取れなかったほう
+    const gone = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
+      '[]', '[]', '[]', OPTS);
+    return !unset.includes('description が設定されていません') &&
+      !unset.includes('View の description') &&
+      gone.includes('description を取得できませんでした') &&
+      !gone.includes('設定されていません') &&
+      // どちらでもメモの段は出る
+      [unset, gone].every((h) => h.includes('vg-nhead">メモ'));
+  })()],
+  // **引数の並びがずれても落ちない。** regions_json を足したとき、呼び出し側を
+  // 直さないまま OPTS が regions の位置に入り、options_json が undefined に
+  // なっていた（それでも全部通っていた）。page は options をほとんど見ないので
+  // 出力の違いでは捕まえられない。呼び出しの引数の数そのものを見る。
+  ['page の呼び出しが全部そろっている（引数の並びのずれ）', (() => {
+    const src = readFileSync(join(here, 'build_udf.mjs'), 'utf8');
+    const want = (src.match(
+      /const VIEWLGC_PAGE = new Function\(([\s\S]*?)pagePack\.code\)/) || [, ''])[1]
+      .split(',').filter((x) => /'/.test(x)).length;
+    const bad = [];
+    let i = 0;
+    for (;;) {
+      const at = src.indexOf('VIEWLGC_PAGE(', i);
+      if (at < 0) break;
+      const st = at + 'VIEWLGC_PAGE('.length;
+      // この検査自身が持つ文字列リテラルは呼び出しではない
+      if (/['"`]/.test(src[at - 1] || '')) { i = st; continue; }
+      let d = 1, j = st;
+      while (j < src.length && d > 0) {
+        const c = src[j];
+        if (c === '(') d++;
+        else if (c === ')') d--;
+        j++;
+      }
+      let dep = 0, n = 1;
+      for (const c of src.slice(st, j - 1)) {
+        if ('(['.includes(c)) dep++;
+        else if (')]'.includes(c)) dep--;
+        else if (c === ',' && dep === 0) n++;
+      }
+      if (n !== want) bad.push(`${src.slice(0, at).split('\n').length} 行目 ${n} 個`);
+      i = j;
+    }
+    return want > 0 && bad.length === 0;
+  })()],
+  ['page は description が壊れていても落ちない',
+    typeof VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
+      '{ broken', '{ broken', '[]', OPTS) === 'string'],
+  // ラベルは内容の量に合わせて重さを変える。揃っているのが普通なので、
+  // そのときは見出しも罫線もタブも出さず、チップ 1 列だけにする。
+  ['ラベルが揃っているときは見出しもタブも出さない（チップだけ）', (() => {
+    const chips = [...info.page.matchAll(
+      /<span class="vg-lbk">([^<]*)<\/span><span class="vg-lbv">([^<]*)</g)]
+      .map((m) => m[1] + '=' + m[2]);
+    return chips.join(',') === 'domain=sales,tier=gold' &&
+      // キー名のアルファベット順（渡したのは tier → domain の順）
+      !info.page.includes('vg-nhead">ラベル') &&
+      !info.page.includes('vg-lbtab') && !info.page.includes('vg-lbr') &&
+      // 見出しのバッジも出ない（揃っているのは正常）
+      !info.page.includes('ラベル不一致');
+  })()],
+  ['ラベルが割れているときは段に昇格してタブになる', (() => {
+    const names = views.map((v) => v.view_name);
+    const split = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
+      '[]', JSON.stringify([
+        { v: names.slice(0, 8), l: [{ k: 'domain', v: 'sales' }] },
+        { v: names.slice(8), l: [{ k: 'domain', v: 'finance' }] },
+      ]), '[]', OPTS);
+    const tabs = [...split.matchAll(/class="vg-lbtab vg-lbt\d+"[^>]*>([^<]*)</g)]
+      .map((m) => m[1]);
+    return split.includes('vg-nhead">ラベル') &&
+      split.includes('ラベルが割れています') &&
+      tabs.length === 2 &&
+      // 多い側が先（＝既定で開く）
+      tabs[0].split(', ').length === 8 && tabs[1].split(', ').length === 1 &&
+      split.includes('finance') &&
+      // 見出しのバッジで、note を開かなくても割れが拾える
+      split.includes('ラベル不一致');
+  })()],
+  ['ラベルが片方だけ付いていないのも割れとして出す', (() => {
+    const names = views.map((v) => v.view_name);
+    const half = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
+      '[]', JSON.stringify([
+        { v: names.slice(0, 8), l: [{ k: 'domain', v: 'sales' }] },
+        { v: names.slice(8), l: [] },
+      ]), '[]', OPTS);
+    return half.includes('ラベル不一致') &&
+      half.includes('ラベルが設定されていません') &&
+      // 中身のある側が先頭（既定で開くタブ）
+      half.indexOf('vg-lbp1') < half.indexOf('ラベルが設定されていません');
+  })()],
+  ['ラベルが 1 つも無ければ何も出さない', (() => {
+    const names = views.map((v) => v.view_name);
+    const none = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
+      '[]', JSON.stringify([{ v: names, l: [] }]), '[]', OPTS);
+    // 取り込めなかったときも同じ（付いていないのが正常でありうるので、
+    // description のように「未設定」と書いて全カードに 1 行増やさない）
+    const gone = VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]',
+      '[]', '[]', '[]', OPTS);
+    return [none, gone].every((h) =>
+      !h.includes('vg-lb') && !h.includes('ラベル不一致') &&
+      // note の段そのものは出る
+      h.includes('vg-nhead">メモ'));
+  })()],
+  ['page はラベルが壊れていても落ちない',
+    typeof VIEWLGC_PAGE(VIEWLGC_ANALYZE(views, OPTS), '', '', '[]', '[]', '[]',
+      '{ broken', '[]', OPTS) === 'string'],
+  ['タイトルが base 名', text.includes('v_daily_sales')],
+  ['3 グループでタブになる', html.includes('vg-tablist')],
+  ['ペイン見出しに suffix が列記される', text.includes('abjp, abuk, abus')],
+  ['パラメータ一覧が付く', text.includes('パラメータ化した箇所')],
+  ['class モードは style 属性を残さない', !/ style="/.test(classed)],
+  ['group_css が markup の全クラスを網羅', used.every((c) => defined.has(c))],
+  ['group_css に chrome の規則が入る', css.includes('.vg-tablist') && css.includes('.vg-r1:checked')],
+  ['embed モードは style ブロックを含む', embed.includes('<style>') && embed.includes('.vg-panel')],
+  ['メタデータ: View 数', info.view_count === 9],
+  ['メタデータ: グループ数', info.group_count === 3],
+  ['メタデータ: グループ ラベル',
+    info.group_labels.join(' | ') === 'abjp, abuk, abus | cdjp, cduk, cdus | efjp, efuk, efus'],
+  ['メタデータ: グループの規模', info.group_sizes.join(',') === '3,3,3'],
+  ['メタデータ: suffix 一覧', info.suffixes.length === 9 && info.suffixes[0] === 'abjp'],
+  ['メタデータ: 未認識は 0', info.unmatched_count === 0],
+  ['空入力で案内を返す',
+    VIEW_GROUP_INFO([], OPTS).html.includes('View が渡されていません')],
+  ['suffix 未認識でもソースを単独で描く',
+    (() => {
+      const r = VIEW_GROUP_INFO([{ view_name: 'no_suffix_here', ddl: 'SELECT 1' }], OPTS);
+      const t = r.html.replace(/<[^>]*>/g, '');
+      return r.view_count === 1 && r.group_count === 1 && r.unmatched_count === 1 &&
+        r.group_labels.join('') === 'no_suffix_here' &&
+        t.includes('no_suffix_here') && t.includes('suffix を認識できなかった View です');
+    })()],
+  ['suffix 未認識は includeUnmatched:false で従来どおり除外できる',
+    VIEW_GROUP_INFO([{ view_name: 'no_suffix_here', ddl: 'SELECT 1' }],
+      JSON.stringify({ suffixParts: S.SUFFIX_PARTS, includeUnmatched: false }))
+      .html.includes('suffix を認識できませんでした')],
+  ['未認識の View は混在していても描かれる',
+    (() => {
+      const r = VIEW_GROUP_INFO(
+        S.sampleRows().concat([{ view_name: 'v_daily_sales_zzz', ddl: 'SELECT 1' }]), OPTS);
+      return r.view_count === 10 && r.unmatched_count === 1 &&
+        r.html.replace(/<[^>]*>/g, '').includes('v_daily_sales_zzz');
+    })()],
+  ['リテラルの suffix 連動コードを吸収する',
+    VIEW_GROUP_INFO([
+      { view_name: 'v_c_abjp', ddl: "SELECT a FROM t_abjp WHERE c = 'JP'" },
+      { view_name: 'v_c_abus', ddl: "SELECT a FROM t_abus WHERE c = 'US'" },
+    ], OPTS).group_count === 1],
+  ['値の差は既定でパラメータ化して同じグループにする',
+    VIEW_GROUP_INFO([
+      { view_name: 'v_c_abjp', ddl: "SELECT a FROM t_abjp WHERE s = 'A'" },
+      { view_name: 'v_c_abus', ddl: "SELECT a FROM t_abus WHERE s = 'B'" },
+    ], OPTS).group_count === 1],
+  ['substitutable を絞れば値の差を残せる',
+    VIEW_GROUP_INFO([
+      { view_name: 'v_c_abjp', ddl: "SELECT a FROM t_abjp WHERE s = 'A'" },
+      { view_name: 'v_c_abus', ddl: "SELECT a FROM t_abus WHERE s = 'B'" },
+    ], JSON.stringify({ suffixParts: S.SUFFIX_PARTS, substitutable: ['entity'] }))
+      .group_count === 2],
+  ['列名が違えば別グループ',
+    VIEW_GROUP_INFO([
+      { view_name: 'v_c_abjp', ddl: 'SELECT amount FROM t_abjp' },
+      { view_name: 'v_c_abus', ddl: 'SELECT revenue FROM t_abus' },
+    ], OPTS).group_count === 2],
+  ['CTE 名が違えば別グループ',
+    VIEW_GROUP_INFO([
+      { view_name: 'v_c_abjp', ddl: 'WITH d AS (SELECT a FROM t_abjp) SELECT * FROM d' },
+      { view_name: 'v_c_abus', ddl: 'WITH e AS (SELECT a FROM t_abus) SELECT * FROM e' },
+    ], OPTS).group_count === 2],
+  ['バッククォートの有無が違えば別グループ',
+    VIEW_GROUP_INFO([
+      { view_name: 'v_c_abjp', ddl: 'SELECT a FROM `p.d.t_abjp`' },
+      { view_name: 'v_c_abus', ddl: 'SELECT a FROM p.d.t_abus' },
+    ], OPTS).group_count === 2],
+  ['literalGroups で手動の同値リテラルを吸収する',
+    VIEW_GROUP_INFO([
+      { view_name: 'v_g_abjp', ddl: "SELECT a FROM t_abjp WHERE z = 'apac'" },
+      { view_name: 'v_g_abus', ddl: "SELECT a FROM t_abus WHERE z = 'amer'" },
+    ], JSON.stringify({ suffixParts: S.SUFFIX_PARTS,
+      literalGroups: [['apac', 'amer', 'emea']] })).group_count === 1],
+  ['literalGroups にない値は残す（substitutable を絞ったとき）',
+    VIEW_GROUP_INFO([
+      { view_name: 'v_g_abjp', ddl: "SELECT a FROM t_abjp WHERE z = 'apac'" },
+      { view_name: 'v_g_abus', ddl: "SELECT a FROM t_abus WHERE z = 'zzz'" },
+    ], JSON.stringify({ suffixParts: S.SUFFIX_PARTS, substitutable: ['entity'],
+      literalGroups: [['apac', 'amer', 'emea']] })).group_count === 2],
+  ['壊れた options_json でも落ちない',
+    typeof VIEW_GROUP_INFO(views, '{ broken').html === 'string'],
+  ['script タグを含まない', !/<script/i.test(html)],
+  // 分割の要。解析結果は UDF 間を JSON で渡るので、素の解析結果をそのまま
+  // 積むと 60 KB を超える。描画に要る分だけに削れているかを見る。
+  ['解析結果の受け渡しが小さい（描画に要る分だけ）',
+    Buffer.byteLength(VIEWLGC_ANALYZE(views, OPTS)) < 8 * 1024],
+  ['解析結果に tokens / ddl を積んでいない',
+    !/"tokens"|"ddl"|"raw"/.test(VIEWLGC_ANALYZE(views, OPTS))],
+  ['render は壊れた JSON でも落ちない',
+    typeof VIEWLGC_RENDER('{ broken', OPTS, null) === 'string'],
+  // 複雑な SQL（多段 CTE / ウィンドウ / UNION / UNNEST / 相関サブクエリ）が
+  // 最小化した本体でも通ること。単純な SELECT だけだと実体名の検出が素通りする。
+  ['複雑な SQL でもコピー展開なら 1 グループ', COMPLEX.group_count === 1],
+  ['複雑な SQL でも HTML を返す',
+    COMPLEX.html.includes('vg-root') &&
+    COMPLEX.html.replace(/<[^>]*>/g, '').includes('QUALIFY')],
+  ['複雑な SQL のパラメータは実体名と値だけ',
+    COMPLEX.group_labels.length === 1 &&
+    /orders_/.test(JSON.stringify(COMPLEX.suffixes)) === false],
+  ['複雑な SQL で列名を変えると割れる', COMPLEX_SPLIT.group_count === 2],
+  // メモ（Markdown）。ビューの中から呼ぶので、落ちないことと、出すクラスが
+  // すべて group_css に定義されていることが要件。定義が無いと、テンプレートに
+  // CSS を貼っていても表だけ罫線なしで出るような崩れ方をする。
+  ['markdown が最小化後も動く',
+    VIEWLGC_MARKDOWN('# 見出し\n\n- a\n- b').includes('<h1 class="vg-mdh1">')],
+  ['markdown は空・NULL でも枠を返す',
+    VIEWLGC_MARKDOWN(null).includes('vg-mdempty') &&
+    VIEWLGC_MARKDOWN('   ').includes('vg-mdempty')],
+  ['markdown は生の HTML を通さない',
+    !/<script/i.test(VIEWLGC_MARKDOWN('<script>alert(1)</script>')) &&
+    !/href="javascript/i.test(VIEWLGC_MARKDOWN('[x](javascript:alert(1))'))],
+  ['markdown の出すクラスが group_css に全部ある', (() => {
+    const sample = [
+      '# h1', '## h2', '### h3', '#### h4', '##### h5', '###### h6', '',
+      'p **b** *i* ~~d~~ `c` [a](https://e.com)', '',
+      '| a | b | c |', '|:--|:-:|--:|', '| 1 | 2 | 3 |', '',
+      '- x', '  - y', '1. z', '', '> q', '', '```', 'code', '```', '', '---', '',
+    ].join('\n');
+    const out = VIEWLGC_MARKDOWN(sample) + VIEWLGC_MARKDOWN('');
+    const used = [...new Set([...out.matchAll(/class="([^"]+)"/g)]
+      .flatMap((m) => m[1].split(' ')))].filter((c) => c.indexOf('vg-md') === 0);
+    // 網羅の確認なので、素の chromeCss ではなく実際に配る CSS を見る。
+    // 前方一致で数えないよう、定義側もクラス名として取り出して突き合わせる
+    // （'.vg-md' は '.vg-mdh1{' にも含まれてしまう）。
+    const defined = new Set([...css.matchAll(/\.(vg-md[a-z0-9]*)/g)].map((m) => m[1]));
+    return used.length >= 18 && used.every((c) => defined.has(c));
+  })()],
+  // CSS は手で貼り、カードは日次で作り直す。順序はいつも「カードが先・CSS が
+  // 後」なので、その間カードは新しい markup ＋ 古い CSS で表示される。
+  // クラスの頭ごと増える機能はどうやっても吸収できないので、
+  // **せめて原因が画面から読めるようにする。** カードに世代の印を埋め、
+  // その世代の CSS だけがそれを消す。
+  ['カードに CSS の世代の印がある（古い CSS では案内が出る）', (() => {
+    const { CSS_GEN } = require(join(here, 'chrome.js'));
+    const mark = `class="vg-cssgen${CSS_GEN}"`;
+    return info.page.split(mark).length - 1 === 1 &&
+      // CSS が 1 行も効いていない場面で出るものなので、飾りは style 属性に直書き
+      /class="vg-cssgen\d+" style="[^"]*background:#FFF8C5/.test(info.page) &&
+      info.page.includes('template_style.html を貼り直してください') &&
+      // 印はいちばん上（どのタブを開いていても見える）
+      info.page.indexOf(mark) < info.page.indexOf('vg-otablist');
+  })()],
+  ['配る CSS がいまの世代の印を消す（古い世代の規則では消えない）', (() => {
+    const { CSS_GEN } = require(join(here, 'chrome.js'));
+    return css.includes(`.vg-cssgen${CSS_GEN}{display:none}`) &&
+      // 世代をまたいで残さない。1 つ前の規則が残っていると、古い CSS でも
+      // 案内が消えてしまい仕掛けが働かない
+      !css.includes(`.vg-cssgen${CSS_GEN - 1}{`);
+  })()],
+  // 最小化するとエスケープの書き方が変わりうるので、リテラルの読み分けが
+  // 生き残っているかを本体そのもので見る。割れていれば値の差で別グループになる。
+  ['最小化後もリテラルの書き方を取りこぼさない', (() => {
+    const D3 = String.fromCharCode(34, 34, 34);
+    const pairs = [
+      ['n > 1e6', 'n > 2e7'],
+      ['n = 0x1F', 'n = 0x2A'],
+      ["s = 'it''s'", "s = 'ok'"],
+      ["REGEXP_CONTAINS(s, r'^A\\d+$')", "REGEXP_CONTAINS(s, r'^B\\d+$')"],
+      ["s = '''alpha'''", "s = '''beta'''"],
+      [`s = ${D3}alpha${D3}`, `s = ${D3}beta${D3}`],
+    ];
+    return pairs.every(([x, y]) => VIEW_GROUP_INFO([
+      { view_name: 'v_l_abjp', ddl: 'SELECT a FROM t_abjp WHERE ' + x },
+      { view_name: 'v_l_abus', ddl: 'SELECT a FROM t_abus WHERE ' + y },
+    ], OPTS).group_count === 1);
+  })()],
+];
+
+// サイズ検証
+for (const p of [analyzePack, renderPack, erdPack, pagePack, markdownPack]) {
+  const size = Buffer.byteLength(p.code);
+  checks.push([`${p.label} が ${(SIZE_LIMIT / 1024).toFixed(0)} KB 以内`, size <= SIZE_LIMIT]);
+}
+
+// 焼き込んだ CSS の本文サイズ。
+//
+// **32 KB の上限は「関数の定義本文」に掛かる。JavaScript でも SQL でも同じ。**
+// cssPack はインラインの JS 枠に収まらなくなったので SQL 側へ焼き込んだ経緯が
+// あり、そのとき「SQL なら上限と無関係」と書いてここを見張っていなかった。
+// SQL タブの上限を 24 → 128 に上げたときに 43,771 バイトになり、
+//   Definition body too long 43771; max allowed 32768 bytes
+// で viewlgc_group_css の CREATE が落ちた。**生成は通り、BigQuery で落ちる**
+// ので、ここで止めないと気づけない。
+//
+// 本文は AS (<TO_JSON_STRING(css_text)>) なので、JSON にした長さ + 括弧 2 文字。
+// CSS はほぼ ASCII で、TO_JSON_STRING の逃がし方も JSON.stringify と同じ。
+//
+// 伸びるのはタブの上限（とくに MAX_SQL_TABS。1 枚あたり約 89 バイト）。
+// 固定ぶんが約 20 KB あるので、載るのは 140 枚あたりが頭打ち。それ以上を
+// 出したくなったら、CSS を分割して複数の関数に載せ、group_css が連結する形に
+// する（本文の上限は関数ごとなので、分ければ天井が上がる）。
+const CSS_BODY_LIMIT = 32 * 1024;
+// **上限は関数ごと**なので、見るのは部品 1 つぶん。まとめ役の本体は部品を
+// 連結する式だけなので数百バイトにしかならない。
+const cssPartBytes = cssChunks.map((c) => Buffer.byteLength(JSON.stringify(c)) + 2);
+const cssWorst = Math.max(...cssPartBytes);
+checks.push([
+  `CSS の部品が ${(CSS_BODY_LIMIT / 1024).toFixed(0)} KB 以内` +
+  `（${CSS_PARTS} 分割。いちばん大きい部品で ${cssWorst} B / 残り ` +
+  `${CSS_BODY_LIMIT - cssWorst} B。足りなくなったら CSS_PARTS を増やす）`,
+  cssWorst <= CSS_BODY_LIMIT]);
+
+let failed = 0;
+for (const [name, ok] of checks) {
+  if (!ok) failed++;
+  console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`);
+}
+
+const kb = (n) => (n / 1024).toFixed(1) + ' KB';
+console.log(`\n${checks.length - failed}/${checks.length} passed\n`);
+console.log('UDF 本体のサイズ（インライン上限 32 KB）');
+for (const p of [analyzePack, renderPack, erdPack, pagePack, markdownPack]) {
+  console.log(`  ${p.label.padEnd(20)} 素 ${kb(p.raw).padStart(8)} → ` +
+    (p.min === null ? '最小化なし' : `最小化 ${kb(p.min).padStart(8)}`) +
+    `  （上限比 ${(Buffer.byteLength(p.code) / SIZE_LIMIT * 100).toFixed(0)}%）`);
+}
+console.log(`\n出力 HTML: inline ${kb(Buffer.byteLength(html))} / ` +
+  `class ${kb(Buffer.byteLength(classed))} / CSS ${kb(Buffer.byteLength(css))}`);
+
+if (failed > 0) process.exit(1);
+if (process.argv.includes('--check')) process.exit(0);
+
+// --- SQL を書き出す ----------------------------------------------------
+const sql = `-- =====================================================================
+-- suffix 違い View のロジック グループ比較の UDF を作る
+--
+-- ※ このファイルは build_udf.mjs が生成する。直接編集しないこと。
+--    再生成: node looker_studio/view_groups/build_udf.mjs
+--    本体は esbuild で最小化してある（インラインのコード ブロブは
+--    32 KB までに制限されるため。素の連結は約 48 KB で確実に弾かれる）。
+--
+-- 作る関数は 7 つ。名前はすべて CONFIGURATION の値から組み立てる。
+--   viewlgc_analyze             View 群を解析して JSON を返す（JavaScript）
+--   viewlgc_render              その JSON を比較 HTML にする（JavaScript）
+--   viewlgc_erd                 参照関係の図を作る（JavaScript）
+--   viewlgc_page                カラム定義と SQL を作り、外側タブで束ねる（JavaScript）
+--   viewlgc_markdown            base ごとのメモ（Markdown）を HTML にする（JavaScript）
+--   viewlgc_group_css           テンプレートに貼る CSS を返す（JavaScript）
+--   viewlgc_render_dynamic_sql  build_table.sql の __…__ を展開する（SQL）
+--
+-- 解析と描画を分けてあるのは、インラインのコード ブロブが 1 個あたり 32 KB
+-- までのため。JS UDF の中から別の UDF は呼べないので、つなぐのは呼び出し側
+-- の SQL（build_table.sql が analyze を 1 回呼び、その結果を render に渡す）。
+--
+-- 命名と設定の書き方は lineage プロジェクト（lineage/sql/setup/
+-- 01_setup_lineage_environment.sql）にそろえてある。
+--   UDF 名: udf_name_prefix + system_name + '_' + 基本名 + udf_name_suffix
+-- =====================================================================
+
+
+SET @@location = '${region}';
+
+BEGIN
+-- ---------------------------------------------------------------------
+-- CONFIGURATION（書き換えるのはここだけ）
+--
+--   [A] 環境ごとに必ず見るもの
+--   [B] 既定のままで動くもの
+--   [C] 導出・内部用。編集しない
+--
+--   リージョンは先頭の SET @@location が唯一の置き場所。
+--   SET @@location は DECLARE より前に置く。このスクリプトは
+--   EXECUTE IMMEDIATE で DDL を投げるだけで、ロケーションを推測できる
+--   テーブル参照が無いため、指定しないと既定のロケーションで実行される。
+-- ---------------------------------------------------------------------
+-- [A] 環境ごとに必ず見るもの ------------------------------------------
+-- プロジェクト ID は実行時に自動検出する（[C]）。別プロジェクトに作る
+-- ときだけ [C] の udf_project_id にリテラルを入れて固定する。
+--
+-- プロジェクト トークンの置換
+DECLARE project_token_pattern STRING DEFAULT r'^([^-]+)';
+-- このシステムを表す名前。すべてのオブジェクト名の先頭に入る
+DECLARE system_name STRING DEFAULT 'viewlgc';
+-- UDF の置き場所
+DECLARE udf_dataset STRING DEFAULT 'ops_meta';
+-- UDF の命名（prefix / suffix）
+DECLARE udf_name_prefix STRING DEFAULT '';
+DECLARE udf_name_suffix STRING DEFAULT '';
+--
+-- 変数の説明:
+--   project_token_pattern
+--     自動検出したプロジェクト ID からこの正規表現で切り出したトークン
+--     （REGEXP_EXTRACT。キャプチャがあればグループ 1）が、下の名前に書いた
+--     '{project_token}' をすべて置き換える。例: プロジェクト
+--     'mycompany-prod-123' に r'-([^-]+)-' なら 'prod' になるので、
+--     udf_name_suffix='_{project_token}' が '_prod' になる。
+--     一致しなければ '' になり、残った '{project_token}' は下の ASSERT で落ちる。
+--   system_name
+--     このシステムを表す名前。関数もテーブルもビューも、この名前と '_' が
+--     先頭に入る（既定なら viewlgc_analyze / viewlgc_t_diff）。
+--     同じプロジェクトに別のシステムを同居させたときに、どのオブジェクトが
+--     どのシステムのものかを名前だけで見分けるためのもの。
+--     **build_table.sql の同名の変数と必ず同じ値にすること。**
+--     違う値だと関数が見つからない。英数字と '_' だけ（'-' は不可）。
+--   udf_dataset
+--     3 つの関数を作るデータセット。build_table.sql の同名の変数と合わせること。
+--   udf_name_prefix / udf_name_suffix
+--     関数名は udf_name_prefix + system_name + '_' + 基本名 + udf_name_suffix で
+--     組み立てる。system_name は環境ではなくシステムを表すので、prefix とは別。
+--     ルーチン名は英数字と '_' しか使えない（'-' は不可）ので、テーブル側の
+--     prefix / suffix とは別に持つ。build_table.sql の同名の変数と合わせること。
+
+-- [B] 既定のままで動くもの --------------------------------------------
+-- 関数名（[C] で組み立てる）。基本名はリテラルで、変えるならここではなく
+-- 下の SET を直す。build_table.sql の同名の変数と必ず同じ値にすること。
+DECLARE udf_analyze_function_name  STRING;
+DECLARE udf_render_function_name   STRING;
+DECLARE udf_erd_function_name      STRING;
+DECLARE udf_page_function_name     STRING;
+DECLARE udf_markdown_function_name STRING;
+DECLARE udf_css_function_name      STRING;
+${cssPartNameDecls}
+DECLARE udf_sql_function_name      STRING;
+
+-- [C] 導出・内部用。編集しない ----------------------------------------
+-- プロジェクトは自動検出した値を使う。別プロジェクトに作るときだけ
+-- DEFAULT にリテラルを入れて固定する（COALESCE で非 NULL が勝つ）。
+DECLARE default_project_id STRING;
+DECLARE udf_project_id     STRING DEFAULT NULL;
+DECLARE project_token      STRING;
+
+-- 関数の本体（JavaScript）。ここは触らない。
+-- SQL 文に直接埋めず変数に置くのは、本体を r\"\"\" \"\"\" で囲む必要があり、
+-- それをさらに EXECUTE IMMEDIATE の文字列に入れ子にできないため。
+-- 埋め込むときは TO_JSON_STRING で SQL の文字列リテラルに変換する
+-- （JSON のエスケープは BigQuery の文字列リテラルと互換）。
+DECLARE js_analyze STRING DEFAULT r"""
+${analyzePack.code}
+""";
+
+DECLARE js_render STRING DEFAULT r"""
+${renderPack.code}
+""";
+
+DECLARE js_erd STRING DEFAULT r"""
+${erdPack.code}
+""";
+
+DECLARE js_page STRING DEFAULT r"""
+${pagePack.code}
+""";
+DECLARE js_markdown STRING DEFAULT r"""
+${markdownPack.code}
+""";
+
+-- CSS は本文そのもの（JavaScript ではない）。生成時に組み立ててここに焼き込む。
+-- 中身は template_style.html と 1 バイトも違わない。
+-- 配る CSS。**関数の定義本文は 32 KB まで**（JavaScript でも SQL でも同じ）
+-- なので、1 本には載らない。分けて載せ、まとめ役が連結して返す。
+${cssPartDecls}
+
+-- 実行中のプロジェクトを INFORMATION_SCHEMA.SCHEMATA から自動検出する
+-- （catalog_name = ジョブが動いているプロジェクト）。リージョン修飾の
+-- 識別子はパラメータにできないので @@location から組み立てる。
+EXECUTE IMMEDIATE FORMAT(
+  "SELECT DISTINCT catalog_name FROM \`region-%s\`.INFORMATION_SCHEMA.SCHEMATA LIMIT 1",
+  @@location
+) INTO default_project_id;
+ASSERT default_project_id IS NOT NULL AS
+  'プロジェクト ID を自動検出できません（このリージョンにデータセットが無い？）。udf_project_id にリテラルを入れて固定してください。';
+SET udf_project_id = COALESCE(udf_project_id, default_project_id);
+
+-- 名前を組み立てる前に '{project_token}' を置き換える。
+SET project_token =
+  COALESCE(REGEXP_EXTRACT(default_project_id, project_token_pattern), '');
+SET udf_dataset     = REPLACE(udf_dataset,     '{project_token}', project_token);
+SET udf_name_prefix = REPLACE(udf_name_prefix, '{project_token}', project_token);
+SET udf_name_suffix = REPLACE(udf_name_suffix, '{project_token}', project_token);
+
+ASSERT REGEXP_CONTAINS(udf_dataset, r'^[A-Za-z0-9_]+$') AS
+  'udf_dataset は英数字と _ だけにしてください（置換されていない {project_token} が残っていませんか）。';
+
+-- 関数名: udf_name_prefix + system_name + '_' + 基本名 + udf_name_suffix
+ASSERT REGEXP_CONTAINS(system_name, r'^[A-Za-z0-9_]+$') AS
+  'system_name は英数字と _ だけにしてください（ルーチン名に - は使えません）。';
+SET udf_analyze_function_name =
+  udf_name_prefix || system_name || '_' || 'analyze' || udf_name_suffix;
+SET udf_render_function_name =
+  udf_name_prefix || system_name || '_' || 'render' || udf_name_suffix;
+SET udf_css_function_name =
+  udf_name_prefix || system_name || '_' || 'group_css' || udf_name_suffix;
+${cssPartNameSets}
+SET udf_erd_function_name =
+  udf_name_prefix || system_name || '_' || 'erd' || udf_name_suffix;
+SET udf_page_function_name =
+  udf_name_prefix || system_name || '_' || 'page' || udf_name_suffix;
+SET udf_markdown_function_name =
+  udf_name_prefix || system_name || '_' || 'markdown' || udf_name_suffix;
+SET udf_sql_function_name =
+  udf_name_prefix || system_name || '_' || 'render_dynamic_sql' || udf_name_suffix;
+ASSERT REGEXP_CONTAINS(udf_analyze_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_analyze_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_render_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_render_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_erd_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_erd_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_page_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_page_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_css_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_css_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+${cssPartNameAsserts}
+ASSERT REGEXP_CONTAINS(udf_markdown_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_markdown_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_sql_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_sql_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+
+
+-- ---------------------------------------------------------------------
+-- 1. viewlgc_analyze
+--    base 1 件分の View 群を渡すと、解析結果を JSON で返す
+--
+-- 解析と描画を別の UDF に分けてある。インラインのコード ブロブは 1 個あたり
+-- 32 KB までなので、1 本にまとめると枠が 1 つしか使えない。JS UDF の中から
+-- 別の UDF は呼べないため、つなぐのは呼び出し側の SQL の仕事
+-- （build_table.sql は analyze を 1 回呼び、その結果を render に渡す）。
+--
+-- 引数:
+--   views         ARRAY<STRUCT<view_name STRING, ddl STRING>>
+--                 同じ base を持つ View を全部渡す
+--   options_json  NULL または '{}' で既定
+--
+-- 戻り値 STRING（JSON）:
+--   viewCount      渡された View 数
+--   groupCount     ロジックのグループ数（1 なら全部同一＝正常）
+--   groupLabels    ["abjp, abuk, abus", …] タブ / ペイン見出し
+--   groupSizes     各グループの View 数
+--   suffixes       認識した suffix 一覧
+--   unmatchedCount suffix を認識できなかった数
+--   bases          描画に渡す本体。lead / tail は案内文
+--   （メタデータは SQL 側で JSON_VALUE / JSON_VALUE_ARRAY で取り出す）
+--
+-- options_json のキー:
+--   suffixParts   [["ab","cd","ef"],["jp","us","uk"]] のような区分の並び
+--   suffixList    既知の suffix 一覧
+--   suffixPattern 正規表現（既定は末尾の _ + 1〜6 文字）
+--   substitutable 同一ロジックとみなす際に置換を許すトークン種別。
+--                 既定 ["entity","number","string"]。置換してよいのは
+--                 FROM / JOIN が指す実体名（entity）と値（number / string）
+--                 だけ、という方針。列名・別名・CTE 名・ウィンドウ名・
+--                 関数名は SQL の中で閉じた名前なので完全一致を要求する
+--                 （横展開はコピーで行う運用なので、違えば書き換えの差）。
+--                 値の差もロジック差として残したいなら ["entity"] にする。
+--                 バッククォートの有無やパスの部分数は正規化しないので、
+--                 意味が同じでも書き方が違えば別グループになる
+--   suffixAware   比較の前に自分の suffix を伏せ字にする（既定 true）。
+--                 リテラルに入った suffix でグループが割れるのを防ぐ
+--   equivalentLiterals 同じグループとみなす文字列の組を 1 本の配列で並べる。
+--                 ["suffix", ["aa","bb"], ["cc","dd"]]
+--                 "suffix" は予約語で、その View 自身の suffix とその区分
+--                 （abjp なら abjp / ab / jp）を表す。View ごとに中身が変わる
+--                 ので値を並べて書けない。ほかの組は View に関係なく効く。
+--                 1 つの配列が 1 つの同値類で、別の配列どうしは同一視しない
+--                 （'aa' と 'cc' は別のまま）。照合は値の全体が一致したとき
+--                 だけで、'x_aa_y' の aa は巻き込まない。大文字小文字は無視。
+--                 文字列リテラルと数値リテラルが対象。
+--   literalSuffixWords / literalGroups
+--                 equivalentLiterals を書く前の旧い書き方。前者が "suffix"、
+--                 後者が組の並びに当たる。equivalentLiterals を書くと
+--                 そちらが一覧の唯一の定義になり、この 2 つは見ない
+--   includeUnmatched suffix を認識できなかった View を単独の base として
+--                 表示する（既定 true）。false で従来どおり除外
+--   stripOptions  OPTIONS( … ) 句を落としてから比較する（既定 true）
+--   layout        'auto'（既定・3 グループ以上はタブ）/ 'panes' / 'tabs'
+--   mode          'inline'（既定）/ 'class'（CSS は group_css へ）/ 'embed'
+--   fontSize / lineHeight / colors / diffLineOpacity / diffCharOpacity / syntax
+-- ---------------------------------------------------------------------
+EXECUTE IMMEDIATE FORMAT('''
+CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
+  views ARRAY<STRUCT<view_name STRING, ddl STRING>>,
+  options_json STRING
+)
+RETURNS STRING
+LANGUAGE js AS %s
+''',
+  udf_project_id, udf_dataset, udf_analyze_function_name,
+  TO_JSON_STRING(js_analyze));
+
+
+-- ---------------------------------------------------------------------
+-- 2. viewlgc_render
+--    viewlgc_analyze が返した JSON を受け取って比較 HTML にする
+--
+-- 解析はしない。options_json は analyze に渡したものと同じものを渡すこと
+-- （mode / layout / 色の指定はこちらで効く）。
+--
+-- ref_index は「どのグループを基準にするか」。
+--   NULL      … 全基準をカードの中のタブで選べる形（従来）
+--   0, 1, 2 … … その基準ぶんだけを作る。**行を基準ごとに分けるための道。**
+--
+-- **全基準を 1 枚に載せると比較ペインは G×(G−1) 枚で、グループ数の二乗**に
+-- なる。リージョンをまたいで View を集めると G が伸び、UDF のメモリを
+-- 使い切って日次の生成ごと落ちる（実際に落ちた）。二乗の係数 G は
+-- 「どのグループも基準にできる」ことから来ているので、基準を行に分けると
+-- 1 行 G−1 枚の線形に戻る。どの基準を見るかはレポートのコントロールで選ぶ。
+--
+-- **INT64 ではなく FLOAT64。** JS UDF は INT64 を扱えない。
+-- ---------------------------------------------------------------------
+EXECUTE IMMEDIATE FORMAT('''
+CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
+  analysis_json STRING,
+  options_json STRING,
+  ref_index FLOAT64
+)
+RETURNS STRING
+LANGUAGE js AS %s
+''',
+  udf_project_id, udf_dataset, udf_render_function_name,
+  TO_JSON_STRING(js_render));
+
+
+-- ---------------------------------------------------------------------
+-- 3. viewlgc_erd
+--    参照関係の図を作る
+--
+-- 図だけを返す。束ねるのは viewlgc_page の仕事。
+--
+-- **カラム定義・SQL・外枠とは別の UDF にしてある。** 図を描くには SQL の
+-- トークナイザ（analyze.js）が要り、それだけで最小化後 9 KB ある。同居させて
+-- いた頃は 1 本で 28 KB（インライン上限 32 KB に対して 92%）まで来ていて、
+-- カラム定義に手を入れるたびに枠を気にすることになっていた。依存が独立して
+-- いる場所で割ってある。
+-- ---------------------------------------------------------------------
+EXECUTE IMMEDIATE FORMAT('''
+CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
+  analysis_json STRING,
+  options_json STRING
+)
+RETURNS STRING
+LANGUAGE js AS %s
+''',
+  udf_project_id, udf_dataset, udf_erd_function_name,
+  TO_JSON_STRING(js_erd));
+
+
+-- ---------------------------------------------------------------------
+-- 4. viewlgc_page
+--    カラム定義の表と View ごとの素の SQL を作り、渡された差分 HTML・
+--    参照関係の図と合わせて外側タブで束ねて 1 枚にする
+--
+-- タブは左から note / カラム定義 / 参照関係 / ロジック差分 / SQL で、
+-- 既定で開くのは note。
+-- カラム定義は columns_json（INFORMATION_SCHEMA.COLUMNS を base ごとにまとめた
+-- もの）から作る。取れなくても落とさず、そのタブだけ案内にする。
+-- SQL タブは sql_json（INFORMATION_SCHEMA.VIEWS.view_definition を base ごとに
+-- まとめたもの）から作る。パラメータ化していない素のテキストで、インナーの
+-- タブは グループではなく View（suffix）単位。
+-- 差分も図も作らない。viewlgc_render / viewlgc_erd の出力をそのまま受け取る。
+--
+-- note タブは三段。先頭が View に付いた labels、次が View 自身の description、
+-- 最後がメモ。
+--
+-- ラベルは labels_json（[{v: [View 名...], l: [{k, v}...]}]）から作る。
+-- **量に合わせて重さを変える。** 全 View で同じなら見出しを持たないチップ
+-- 1 列、base の中で割れていればタブ付きの段に昇格し、見出しにも
+-- 「ラベル不一致」のバッジが出る。1 つも付いていなければ何も出さない
+-- （labels は付いていない View のほうが普通なので、「未設定」と書くと
+-- 使っていない base 全部にその行が並ぶ）。キーはアルファベット順に並べ直す。
+--
+-- description は descs_json（[{v: [View 名...], h: HTML}]）から作る。
+-- **Markdown を HTML にするのは呼び出し側の SQL（viewlgc_markdown）。**
+-- JS UDF から別の UDF は呼べない。
+-- 文面が割れている base ではタブになり、1 種類ならタブは出ない。
+--
+-- メモの中身はここでは入れない。パネルには目印 '<!--VG_NOTE-->' だけを
+-- 置き、ビューが REPLACE で note_html に差し替える。ここで焼き込むと、シートを
+-- 直しても次の日次実行までレポートが古いままになる。
+-- ---------------------------------------------------------------------
+EXECUTE IMMEDIATE FORMAT('''
+CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
+  analysis_json STRING,
+  diff_html STRING,
+  erd_html STRING,
+  columns_json STRING,
+  sql_json STRING,
+  descs_json STRING,
+  labels_json STRING,
+  regions_json STRING,
+  options_json STRING
+)
+RETURNS STRING
+LANGUAGE js AS %s
+''',
+  udf_project_id, udf_dataset, udf_page_function_name,
+  TO_JSON_STRING(js_page));
+
+
+-- ---------------------------------------------------------------------
+-- 5. viewlgc_markdown
+--    base ごとのメモ（Markdown）を HTML にする
+--
+-- これだけはビューの中から呼ぶ（＝レポートを開くたびに走る）。事前生成の
+-- テーブルに焼き込むと、メモを直しても次の日次実行まで古いままになるため。
+-- Markdown は 1 件が数 KB なので、クエリのたびに変換しても実行時間に響かない。
+--
+-- 生の HTML は通さない（必ずエスケープする）。画像も読み込まない。
+-- 出す markup のクラスは viewlgc_group_css の CSS と 1 対 1 で対応する。
+-- ---------------------------------------------------------------------
+EXECUTE IMMEDIATE FORMAT('''
+CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(md STRING)
+RETURNS STRING
+LANGUAGE js AS %s
+''',
+  udf_project_id, udf_dataset, udf_markdown_function_name,
+  TO_JSON_STRING(js_markdown));
+
+
+-- ---------------------------------------------------------------------
+-- 6. viewlgc_group_css
+--    mode='class' のときテンプレートへ貼る CSS を返す
+--
+--   SELECT \`<project>.<udf_dataset>.viewlgc_group_css\`(NULL);
+--
+-- 結果を <style> … </style> で囲んで Templated Record のテンプレートに貼る。
+-- 見出し・タブ・パラメータ表の規則と、差分表の規則の両方を含む。
+-- タブの CSS は ID ではなくクラスで書いてあるので、レコードが変わっても
+-- この CSS のまま使える。
+--
+-- **JavaScript ではなく SQL の関数で、固定の文字列を返すだけ。**
+-- 以前は描画コード一式を積んで実行時に組み立てていたが、それだと CSS を
+-- 足すたびにインラインの 32 KB 枠に近づき、実際に上限へ当たった。CSS の
+-- 中身は生成時に決まっていて実行時に変わる要素が無いので、build_udf.mjs が
+-- 組み立てた結果をそのまま焼き込む。組み立てには実物の描画コードを通して
+-- いるので、markup とクラス名が食い違わない点は変わらない
+-- （生成時のクラス網羅チェックが見張る）。
+--
+-- options_json は受け取るが見ない。色やフォントを変えたときは
+-- node build_udf.mjs で作り直し、この SQL ごと流し直すこと。
+-- ---------------------------------------------------------------------
+-- 部品。**関数の定義本文は 32 KB まで**なので、CSS はここに分けて載せる
+-- （1 本に載せていた頃は 43,771 B になって CREATE が落ちた）。
+-- 引数は取らない。呼ぶのは下のまとめ役だけで、直に呼ぶ用途は無い。
+${cssPartCreates}
+
+-- まとめ役。**外から呼ぶのはこの名前**（build_table.sql の __UDF_CSS__）。
+-- 部品を連結して返すだけなので、本体は数百バイトにしかならない。
+-- 足りなくなったら CSS_PARTS を増やす（build_udf.mjs）。
+EXECUTE IMMEDIATE FORMAT('''
+CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(options_json STRING)
+RETURNS STRING
+AS (${cssConcatExpr})
+''',
+  udf_project_id, udf_dataset, udf_css_function_name,
+${cssConcatArgs});
+
+
+-- ---------------------------------------------------------------------
+-- 7. viewlgc_render_dynamic_sql
+--    build_table.sql の SQL テンプレートに含まれる __…__ を展開する
+--
+-- BigQuery は識別子（プロジェクト・データセット・テーブル・関数名）を
+-- クエリ パラメータにできない。@param が使えるのは値だけ。そこで
+-- テンプレートの目印をこの関数で置き換えてから EXECUTE IMMEDIATE する。
+--
+-- 永続関数にしてあるのは、スクリプトの TEMP FUNCTION を 1 つでも置くと
+-- その DDL が子ジョブすべてのクエリ本文に前置され、コンソールの結果一覧が
+-- どれも TEMP FUNCTION の DDL に見えてしまうため（CREATE VIEW も通らない）。
+--
+-- 置き換える目印:
+--   __TARGET_PROJECT__     読み取り対象のプロジェクト
+--   __JOB_REGION__         region- を除いたロケーション
+--   __T_DIFF_SRC__         生成した素のカードのテーブル（project.dataset.table）
+--   __T_DIFF__             メモを差し込み済みのテーブル。レポートはこれを読む
+--   __T_BASE_NOTE__        base ごとのメモの外部テーブル（同上）
+--   __V_DIFF__             メモを差し込むビュー（3b の材料。レポートは 3b が
+--                          焼き込んだ __T_DIFF__ のほうを読む）
+--   __V_MATRIX__           base × suffix のマトリクス用ビュー（同上）
+--   __UDF_ANALYZE__        analyze 関数（project.dataset.function）
+--   __UDF_RENDER__         render 関数（同上）
+--   __UDF_ERD__            参照関係の図を作る関数（同上）
+--   __UDF_PAGE__           page 関数（同上）
+--   __UDF_MARKDOWN__       markdown 関数（同上）
+--   __UDF_CSS__            group_css 関数（同上）
+--   __TZ__                 snapshot_date（生成日）の基準タイムゾーン
+--   __SUFFIX_PATTERN__     suffix を切り出す正規表現
+--   __NOTE_SHEET_URL__     メモのスプレッドシートの URL
+--   __NOTE_SHEET_RANGE__   その中の読み取り範囲
+--   __SCHEMA_COND__        SCHEMATA 用の絞り込み条件（SQL 片）
+--   __VIEW_DATASET_COND__  VIEWS 用のデータセット条件（SQL 片）
+--   __VIEW_NAME_COND__     VIEWS 用の View 名条件（SQL 片）
+--   __SRC_SCHEMATA__       SCHEMATA の読み元（SQL 片）
+--   __SRC_VIEWS__          VIEWS の読み元（同上）
+--   __SRC_COLUMNS__        COLUMNS の読み元（同上）
+--   __SRC_FIELD_PATHS__    COLUMN_FIELD_PATHS の読み元（同上）
+--   __SRC_TABLE_OPTS__     TABLE_OPTIONS の読み元（同上）
+--
+-- __SRC_*__ は「読み元」をまるごと差し替えるための目印。拠点だけを見るなら
+-- リージョン修飾の INFORMATION_SCHEMA がそのまま入り、別リージョンぶんを
+-- 混ぜるなら「拠点の INFORMATION_SCHEMA UNION ALL 運んできたテーブル」に
+-- なる。**どちらを入れるかは build_table.sql が決める。** テンプレートは
+-- 読み元の形を知らないので、混ぜる／混ぜないでテンプレートは変わらない。
+--
+-- 中身が SQL になるもの（__*_COND__ と __SRC_*__）を最後に置くのは、
+-- 置き換えた中身がさらに走査されないようにするため。
+-- ---------------------------------------------------------------------
+EXECUTE IMMEDIATE FORMAT('''
+CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
+  sql_template STRING,
+  work_project_id STRING,
+  work_dataset STRING,
+  udf_project_id STRING,
+  udf_dataset STRING,
+  target_project_id STRING,
+  job_region STRING,
+  objects STRUCT<
+    diff_src          STRING,
+    diff_table        STRING,
+    diff_view         STRING,
+    matrix_view       STRING,
+    base_note         STRING,
+    analyze_function  STRING,
+    render_function   STRING,
+    erd_function      STRING,
+    page_function     STRING,
+    markdown_function STRING,
+    css_function      STRING
+  >,
+  options STRUCT<
+    time_zone        STRING,
+    suffix_pattern   STRING,
+    note_sheet_url   STRING,
+    note_sheet_range STRING
+  >,
+  conditions STRUCT<
+    schema_condition       STRING,
+    view_dataset_condition STRING,
+    view_name_condition    STRING
+  >,
+  sources STRUCT<
+    schemata    STRING,
+    views       STRING,
+    columns     STRING,
+    field_paths STRING,
+    table_opts  STRING
+  >
+)
+RETURNS STRING
+AS (
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+  REPLACE(
+    sql_template,
+    '__TARGET_PROJECT__', target_project_id),
+    '__JOB_REGION__', job_region),
+    '__T_DIFF_SRC__',
+      work_project_id || '.' || work_dataset || '.' || objects.diff_src),
+    '__T_DIFF__',
+      work_project_id || '.' || work_dataset || '.' || objects.diff_table),
+    '__T_BASE_NOTE__',
+      work_project_id || '.' || work_dataset || '.' || objects.base_note),
+    '__V_DIFF__',
+      work_project_id || '.' || work_dataset || '.' || objects.diff_view),
+    '__V_MATRIX__',
+      work_project_id || '.' || work_dataset || '.' || objects.matrix_view),
+    '__UDF_ANALYZE__',
+      udf_project_id || '.' || udf_dataset || '.' || objects.analyze_function),
+    '__UDF_RENDER__',
+      udf_project_id || '.' || udf_dataset || '.' || objects.render_function),
+    '__UDF_ERD__',
+      udf_project_id || '.' || udf_dataset || '.' || objects.erd_function),
+    '__UDF_PAGE__',
+      udf_project_id || '.' || udf_dataset || '.' || objects.page_function),
+    '__UDF_MARKDOWN__',
+      udf_project_id || '.' || udf_dataset || '.' || objects.markdown_function),
+    '__UDF_CSS__',
+      udf_project_id || '.' || udf_dataset || '.' || objects.css_function),
+    '__TZ__', options.time_zone),
+    '__SUFFIX_PATTERN__', options.suffix_pattern),
+    '__NOTE_SHEET_URL__', options.note_sheet_url),
+    '__NOTE_SHEET_RANGE__', options.note_sheet_range),
+    '__SCHEMA_COND__', conditions.schema_condition),
+    '__VIEW_DATASET_COND__', conditions.view_dataset_condition),
+    '__VIEW_NAME_COND__', conditions.view_name_condition),
+    '__SRC_SCHEMATA__', sources.schemata),
+    '__SRC_VIEWS__', sources.views),
+    '__SRC_COLUMNS__', sources.columns),
+    '__SRC_FIELD_PATHS__', sources.field_paths),
+    '__SRC_TABLE_OPTS__', sources.table_opts)
+)
+''',
+  udf_project_id, udf_dataset, udf_sql_function_name);
+
+
+-- 作った 7 つの名前を出す。build_table.sql に同じ値を入れる。
+SELECT
+  FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_analyze_function_name)  AS analyze_function,
+  FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_render_function_name)   AS render_function,
+  FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_erd_function_name)      AS erd_function,
+  FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_page_function_name)     AS page_function,
+  FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_markdown_function_name) AS markdown_function,
+  FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_css_function_name)      AS css_function,
+  FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_sql_function_name)      AS sql_function,
+  CURRENT_TIMESTAMP() AS created_at;
+END;
+`;
+
+// 生成物の検証。r""" """ の中に """ が現れると文字列がそこで切れる。
+{
+  const opens = (sql.match(/r"""/g) || []).length;
+  const triples = (sql.match(/"""/g) || []).length;
+  if (triples !== opens * 2) {
+    console.log(`  FAIL  三重引用符の数が合いません（開始 ${opens} 個に対して ${triples} 個）`);
+    process.exit(1);
+  }
+  // 埋め込んだ JS が本物か。上の JS 検証は pack の .code を直接評価するので、
+  // SQL に埋めるときに .code を書き忘れて '[object Object]' が入っても
+  // 素通りしてしまう。BigQuery まで持っていって初めて JS の構文エラーになる。
+  const marker = 'DECLARE (js_[a-z_]+) STRING DEFAULT r' + '"'.repeat(3) + '\\n';
+  const blobs = [...sql.matchAll(
+    new RegExp(marker + '([\\s\\S]*?)\\n' + '"'.repeat(3), 'g'))];
+  if (blobs.length !== 5) {
+    console.log(`  FAIL  埋め込んだ JS が 5 つ見つかりません（${blobs.length} 個）`);
+    process.exit(1);
+  }
+  for (const [, name, code] of blobs) {
+    if (!code.includes('function ') || code.length < 1000) {
+      console.log(`  FAIL  ${name} の中身が JS になっていません: ${code.slice(0, 40)}`);
+      process.exit(1);
+    }
+  }
+  console.log('  PASS  埋め込んだ JS が 5 つとも本物');
+
+  // CSS は JS ではないので別に見る。焼き込んだ本文が template_style.html と
+  // 食い違うと、貼った CSS と UDF が返す CSS が別物になる。
+  // **分けて載せているので、連結して突き合わせる。** 部品の切り方を変えても
+  // 連結結果が変わらないことをここで担保する（splitCss は行の切れ目で割り、
+  // join('') で元に戻る前提）。
+  const Q = '"'.repeat(3);
+  const cssBlobs = [...sql.matchAll(
+    new RegExp('DECLARE css_part_\\d+ STRING DEFAULT r' + Q + '([\\s\\S]*?)' + Q + ';', 'g'))]
+    .map((m) => m[1]);
+  if (cssBlobs.length !== CSS_PARTS || cssBlobs.join('') !== css) {
+    console.log(`  FAIL  焼き込んだ CSS が組み立てた CSS と一致しません` +
+      `（部品 ${cssBlobs.length} 個 / 期待 ${CSS_PARTS} 個、` +
+      `連結 ${cssBlobs.join('').length} 文字 / 期待 ${css.length} 文字）`);
+    process.exit(1);
+  }
+  // まとめ役が部品を全部つないでいるか。1 つ落とすと CSS が黙って欠ける。
+  // **組み立てに使った変数とは突き合わせない**（同じものを見比べても、
+  // 組み立て側を間違えたときに一緒に動いてしまい何も検出できない）。
+  // 生成物だけを読み、部品の数と名前がそろっているかで見る。
+  const agg = sql.match(
+    /CREATE OR REPLACE FUNCTION `%s\.%s\.%s`\(options_json STRING\)\nRETURNS STRING\nAS \(([^\n]*)\)\n''',\n([\s\S]*?)\);\n/);
+  if (!agg) {
+    console.log('  FAIL  CSS のまとめ役が見つかりません');
+    process.exit(1);
+  }
+  const aggCalls = (agg[1].match(/`%s\.%s\.%s`\(\)/g) || []).length;
+  const missingParts = cssChunks
+    .map((_, i) => `udf_css_p${i + 1}_function_name`)
+    .filter((n) => !agg[2].includes(n));
+  if (aggCalls !== CSS_PARTS || missingParts.length) {
+    console.log(`  FAIL  まとめ役が部品を全部つないでいません` +
+      `（呼び出し ${aggCalls} 個 / 期待 ${CSS_PARTS} 個` +
+      (missingParts.length ? `、渡していない名前: ${missingParts.join(' ')}` : '') + '）');
+    process.exit(1);
+  }
+  console.log(`  PASS  焼き込んだ CSS が template_style.html と同じ（${CSS_PARTS} 分割）`);
+
+  // FORMAT のテンプレートに素の % があると書式指定と解釈される。
+  // 引数側（JS 本体）の % は無関係なので、''' … ''' の中だけを見る。
+  const templates = [...sql.matchAll(/FORMAT\('''([\s\S]*?)'''/g)].map((m) => m[1]);
+  // 関数 7 本（analyze / render / erd / page / markdown / group_css / dynamic_sql）
+  // ＋ CSS の部品ぶん。部品を増やすとここも増える。
+  const WANT_TEMPLATES = 7 + CSS_PARTS;
+  if (templates.length !== WANT_TEMPLATES) {
+    console.log(`  FAIL  FORMAT のテンプレートが ${WANT_TEMPLATES} つ見つかりません（${templates.length} 個）`);
+    process.exit(1);
+  }
+  for (const t of templates) {
+    const bad = t.match(/%(?![s])/);
+    if (bad) {
+      console.log(`  FAIL  FORMAT テンプレートに %s 以外の % があります: ${bad[0]}`);
+      process.exit(1);
+    }
+  }
+  const stale = sql.match(/@@[A-Z_]+@@/);
+  if (stale) {
+    console.log(`  FAIL  旧いプレースホルダが残っています: ${stale[0]}`);
+    process.exit(1);
+  }
+  console.log('\n  PASS  DDL は FORMAT の書式で組み立て（% は %s のみ）');
+}
+
+const outPath = join(here, 'view_group_html.sql');
+await writeFile(outPath, sql);
+console.log(`\nwrote ${outPath} (${kb(Buffer.byteLength(sql))})`);
+
+// テンプレートに貼る CSS も書き出しておく。中身は
+// SELECT viewlgc_group_css(...) の出力そのものなので、BigQuery を叩かずに
+// 貼り付けたいときはこのファイルを使える（内容は同じ）。
+const cssPath = join(here, 'template_style.html');
+await writeFile(cssPath,
+  `<!--
+  Templated Record のテンプレートに貼る CSS（mode='class' のとき）。
+  中身は SELECT \`<project>.<udf_dataset>.viewlgc_group_css\`(...) の出力そのもの。
+  このファイルは build_udf.mjs が生成する。直接編集しないこと。
+
+  ここは固定。差分の内容が変わっても書き換え不要。
+  この下にフィールド（diff_html）を差し込む。
+
+  注意: templated_record/samples/04_template_style.html とは別物。
+  あちらは DIFF_CSS の出力で、見出し・タブ・パラメータ表の .vg-* 規則を
+  含まないため、こちらの表示には使えない（タブが動かない）。
+-->
+<style>
+${css}
+</style>
+`);
+console.log(`wrote ${cssPath} (${kb(Buffer.byteLength(css))} の CSS)`);
+
+// メモを書くための下書きページ。BigQuery も Looker も通さずに、Markdown の
+// 見え方をブラウザだけで確かめられるようにする。シートに貼る前の推敲用。
+//
+// 中身は viewlgc_markdown と同じ markdown.js と、viewlgc_group_css が出す
+// メモの CSS そのもの。ここで見た形がレポートでもそのまま出る。
+// 単体のファイルとして開ける（外部への読み込みが 1 つも無い）。
+const NOTE_SAMPLE = [
+  '# v_daily_sales について',
+  '',
+  '各リージョンの日次売上。**jp だけ税込** で、ほかは税抜き。',
+  '',
+  '## 参照元',
+  '',
+  '| suffix | 参照元 | 更新 |',
+  '|:--|:--|:-:|',
+  '| abjp | `orders_abjp` | 03:00 |',
+  '| abus | `orders_abus` | 04:00 |',
+  '',
+  '## 注意点',
+  '',
+  '- 一次集計は CTE `daily` で行う',
+  '  - `region` は 2 段目で付与する',
+  '- 列名 `gross_amount` は 2026-04 に変更予定',
+  '',
+  '> 使えるのは見出し / 表 / 箇条書き / コード / 強調 / リンクまで。',
+  '> 生の HTML と画像は出ません。強調は `**` と `*` だけで、',
+  '> `_` は対象外です（`table_name_abjp` のような名前が斜体にならないように）。',
+].join('\n');
+
+// 貼るのは最小化前の markdown.js。ここは人が開いて中を覗くこともある
+// ファイルなので、読める形のまま入れる（サイズの制約が無い）。
+const noteLib = markdownLib;
+const memoCssOut = require(join(here, 'markdown.js')).memoCss();
+if (noteLib.includes('</scr' + 'ipt')) {
+  console.log('  FAIL  markdown.js に </script> が含まれており下書きページを壊します');
+  process.exit(1);
+}
+if (!noteLib.includes('function markdownHtml') || !memoCssOut.includes('.vg-mdtable')) {
+  console.log('  FAIL  下書きページに変換器か CSS が入っていません');
+  process.exit(1);
+}
+
+const notePath = join(here, 'note_preview.html');
+await writeFile(notePath, `<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>メモの下書き（view_groups）</title>
+<!--
+  base ごとのメモ（note_md）の下書き用。左に Markdown を書くと右に出る。
+  出来上がったら左の内容をそのままスプレッドシートの note_md のセルに貼る。
+
+  このファイルは build_udf.mjs が生成する。直接編集しないこと。
+  変換も CSS も BigQuery の viewlgc_markdown / viewlgc_group_css と同じもの。
+-->
+<style>
+body{margin:0;font:13px/1.6 'Roboto','Segoe UI',system-ui,sans-serif;color:#24292F;background:#F6F8FA}
+header{padding:10px 16px;background:#fff;border-bottom:1px solid #D0D7DE}
+h1{margin:0;font-size:14px}
+.hint{margin:3px 0 0;color:#57606A;font-size:12px}
+.wrap{display:flex;gap:14px;padding:14px;align-items:stretch;min-height:calc(100vh - 76px)}
+.col{flex:1;min-width:0;display:flex;flex-direction:column}
+.col > h2{margin:0 0 6px;font-size:12px;color:#57606A}
+textarea{flex:1;width:100%;box-sizing:border-box;padding:12px;resize:none;
+  border:1px solid #D0D7DE;border-radius:6px;background:#fff;
+  font:12px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;color:#24292F}
+/* レポートのカードと同じ地色・余白にして、見え方をそろえる */
+.card{flex:1;overflow:auto;padding:14px 16px;border:1px solid #D0D7DE;border-radius:6px;background:#fff}
+${memoCssOut}
+</style>
+</head>
+<body>
+<header>
+  <h1>メモの下書き（base ごとの note_md）</h1>
+  <p class="hint">左に書くと右に出ます。できたら左の内容をそのままスプレッドシートの <code>note_md</code> のセルに貼ってください。</p>
+</header>
+<div class="wrap">
+  <div class="col"><h2>Markdown</h2><textarea id="src" spellcheck="false"></textarea></div>
+  <div class="col"><h2>レポートでの見え方</h2><div class="card" id="out"></div></div>
+</div>
+<script>
+${noteLib}
+
+var src = document.getElementById('src');
+var out = document.getElementById('out');
+function draw() { out.innerHTML = markdownHtml(src.value); }
+src.value = ${JSON.stringify(NOTE_SAMPLE)};
+src.addEventListener('input', draw);
+draw();
+</script>
+</body>
+</html>
+`);
+console.log(`wrote ${notePath}`);

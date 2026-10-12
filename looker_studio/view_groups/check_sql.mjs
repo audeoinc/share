@@ -1,0 +1,862 @@
+// build_table.sql と view_group_html.sql の食い違いを機械で見つける。
+//
+//   node check_sql.mjs
+//
+// build_table.sql は手で編集するファイルで、動的 SQL のプレースホルダは
+// viewlgc_render_dynamic_sql が展開する。両者は別ファイルなので、
+// 目印を足したのに関数側に置換を足し忘れる、という壊れ方をする。
+// それは実行して初めて分かる（しかも ASSERT が出るのは対象の SQL だけ）ので、
+// ここで静的に突き合わせる。
+import { readFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const table = await readFile(join(here, 'build_table.sql'), 'utf8');
+const udf = await readFile(join(here, 'view_group_html.sql'), 'utf8');
+const chrome = await readFile(join(here, 'chrome.js'), 'utf8');
+const sqltext = await readFile(join(here, 'sqltext.js'), 'utf8');
+const usage = await readFile(join(here, 'usage.md'), 'utf8');
+
+const checks = [];
+const add = (name, ok, detail) => checks.push([name, ok, detail]);
+
+// --- テンプレートを取り出す -------------------------------------------
+// SET sql_template = """ … """; の中身。
+// コメント行（-- で始まる例示）は数えない。
+// 行頭の空白は許す。IF … THEN の中に置く 4 手は字下げしてあるため。
+const templates = [...table.matchAll(/^ *SET sql_template = """([\s\S]*?)""";/gm)]
+  .map((m) => m[1]);
+add('sql_template が 1 つ以上ある', templates.length > 0, `${templates.length} 個`);
+
+// --- 1. 使っている目印が関数側で展開されるか ---------------------------
+// こちらはコメント中の例（セクション 4 の CSS 取得）も対象にする。
+// 外して実行したときに落ちては困るので、展開できることは常に保証する。
+const allTemplates = [...table.matchAll(/SET sql_template = """([\s\S]*?)""";/g)]
+  .map((m) => m[1]);
+const used = new Set();
+for (const t of allTemplates) {
+  for (const m of t.matchAll(/__[A-Z0-9_]+__/g)) used.add(m[0]);
+}
+// 関数本体の REPLACE(…, '__X__', …) から、展開できる目印を拾う。
+const handled = new Set(
+  [...udf.matchAll(/'(__[A-Z0-9_]+__)',/g)].map((m) => m[1])
+);
+const missing = [...used].filter((t) => !handled.has(t));
+add('テンプレートの目印はすべて render 関数が展開できる',
+  missing.length === 0, missing.join(' '));
+
+// 逆向き。使われていない置換は消し忘れなので落とす。
+const unusedTokens = [...handled].filter((t) => !used.has(t));
+add('render 関数の置換に使われていないものが無い',
+  unusedTokens.length === 0, unusedTokens.join(' '));
+
+// --- 2. 4 手の型を守っているか ----------------------------------------
+// SET sql_template → render → ASSERT → EXECUTE の並びを数で確かめる。
+const renderCalls = (table.match(
+  /^ *EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;/gm) || []).length;
+const asserts = (table.match(
+  /^ *ASSERT NOT REGEXP_CONTAINS\(rendered_sql, r'__\[A-Z0-9_\]\+__'\) AS/gm) || []).length;
+const execs = (table.match(/^ *EXECUTE IMMEDIATE rendered_sql/gm) || []).length;
+add('テンプレートと render 呼び出しが同数', templates.length === renderCalls,
+  `template ${templates.length} / render ${renderCalls}`);
+add('render 呼び出しと未展開チェックが同数', renderCalls === asserts,
+  `render ${renderCalls} / assert ${asserts}`);
+add('未展開チェックと実行が同数', asserts === execs,
+  `assert ${asserts} / exec ${execs}`);
+
+// --- 3. テンプレートに \ が無いか（あれば r""" が要る） ----------------
+const withBackslash = templates.filter((t) => t.includes('\\'));
+add('テンプレートにバックスラッシュが無い', withBackslash.length === 0,
+  `${withBackslash.length} 個のテンプレート`);
+
+// --- 4. 旧い書き方が残っていないか ------------------------------------
+add('@@…@@ 形式のプレースホルダが残っていない',
+  !/@@[A-Z_]+@@/.test(table) && !/@@[A-Z_]+@@/.test(udf));
+add('IF … RAISE ではなく ASSERT を使っている',
+  !/RAISE USING MESSAGE/.test(table));
+
+// --- 4b. WITH の CTE がカンマで区切られているか ------------------------
+// 直前の CTE を閉じる ')' の後ろにカンマを置き忘れると構文エラーになる。
+// CTE の間に説明コメントを挟んでいるので目視では気づきにくい。
+{
+  const missing = [];
+  for (const [i, t] of templates.entries()) {
+    const lines = t.split('\n');
+    for (let n = 0; n < lines.length; n++) {
+      // 列 0 の 'name AS (' だけを見る＝トップレベルの CTE
+      if (!/^[A-Za-z_][A-Za-z0-9_]* AS \($/.test(lines[n])) continue;
+      let p = n - 1;
+      while (p >= 0 && (lines[p].trim() === '' || lines[p].trim().startsWith('--'))) p--;
+      const prev = p >= 0 ? lines[p].trim() : '';
+      if (prev === 'WITH' || prev.endsWith(',')) continue;
+      missing.push(`テンプレート ${i + 1}: ${lines[n].split(' ')[0]}`);
+    }
+  }
+  add('WITH の CTE がカンマで区切られている', missing.length === 0,
+    missing.join(' / '));
+}
+
+// --- 5. render_call_sql の書式と引数の数が合うか ----------------------
+{
+  const m = table.match(/SET render_call_sql = FORMAT\(\n\s*"""([\s\S]*?)""",([\s\S]*?)\);\n/);
+  if (!m) {
+    add('render_call_sql を読み取れる', false);
+  } else {
+    const spec = (m[1].match(/%[sT]/g) || []).length;
+    // 引数は深さ 0 のカンマで区切る（CAST(… AS STRING) の中は数えない）
+    let depth = 0, args = 1;
+    for (const ch of m[2]) {
+      if (ch === '(') depth++;
+      else if (ch === ')') depth--;
+      else if (ch === ',' && depth === 0) args++;
+    }
+    add('render_call_sql の書式と引数の数が合う', spec === args,
+      `%s/%T ${spec} 個 / 引数 ${args} 個`);
+
+    // 関数呼び出しの引数の数（@sql_template + %T の並び）と、
+    // 関数定義の引数の数が合うか。
+    const callArgs = m[1].split('`(')[1];
+    let d = 0, callCount = 1;
+    for (const ch of callArgs.slice(0, callArgs.lastIndexOf(')'))) {
+      if (ch === '(' || ch === '<') d++;
+      else if (ch === ')' || ch === '>') d--;
+      else if (ch === ',' && d === 0) callCount++;
+    }
+    // 関数は 3 つあるので、REPLACE 連鎖を持つ render 関数の塊だけを見る。
+    const renderChunk = udf.split('CREATE OR REPLACE FUNCTION')
+      .find((c) => c.includes('REPLACE(\n    sql_template,'));
+    const def = (renderChunk || '').match(
+      /^ `%s\.%s\.%s`\(\n([\s\S]*?)\n\)\nRETURNS STRING\nAS \(/);
+    let defCount = 0;
+    if (def) {
+      let dd = 0;
+      defCount = 1;
+      for (const ch of def[1]) {
+        if (ch === '(' || ch === '<') dd++;
+        else if (ch === ')' || ch === '>') dd--;
+        else if (ch === ',' && dd === 0) defCount++;
+      }
+    }
+    add('render 関数の引数の数が定義と一致', def !== null && callCount === defCount,
+      `呼び出し ${callCount} 個 / 定義 ${defCount} 個`);
+  }
+}
+
+// --- 5a1. テンプレートの @param が USING で渡されているか -----------------
+// テンプレートの中で @x を使ったら、その文の
+//   EXECUTE IMMEDIATE rendered_sql USING x AS x
+// に x が並んでいなければならない。足りないと BigQuery は
+//   Query parameter 'x' not found
+// で落ちる。設定を 1 つ足したときに片方だけ直す形で必ず起きるうえ、実行して
+// 初めて分かる（しかもセクション 2 は重い）ので静的に見る。
+// DECLARE してあるかも一緒に確かめる。
+{
+  // 「SET sql_template = """…""";」から次の「SET sql_template」までを 1 文とみなす。
+  const blocks = [...table.matchAll(
+    /^ *SET sql_template = """([\s\S]*?)""";([\s\S]*?)(?=^ *SET sql_template = |\nEND;)/gm)];
+  const declared = new Set(
+    [...table.matchAll(/^DECLARE ([a-z_][a-z0-9_]*) /gm)].map((m) => m[1]));
+  const bad = [];
+  for (const [i, b] of blocks.entries()) {
+    const params = new Set([...b[1].matchAll(/@([a-z_][a-z0-9_]*)/g)].map((m) => m[1]));
+    if (!params.size) continue;
+    // 本文を組み立てる 1 手目（render_call_sql の USING sql_template）は数えない
+    const tail = b[2].replace(/EXECUTE IMMEDIATE render_call_sql[\s\S]*?;/, '');
+    const m = tail.match(/EXECUTE IMMEDIATE rendered_sql\s*(?:USING([\s\S]*?))?;/);
+    const passed = new Set(
+      [...((m && m[1]) || '').matchAll(/\bAS\s+([a-z_][a-z0-9_]*)/g)].map((x) => x[1]));
+    for (const p of params) {
+      if (!passed.has(p)) bad.push(`${i + 1} 文目: @${p} が USING に無い`);
+      if (!declared.has(p)) bad.push(`${i + 1} 文目: ${p} が DECLARE されていない`);
+    }
+  }
+  add('テンプレートの @param が USING で渡されている', bad.length === 0,
+    bad.join(' / '));
+}
+
+// --- 5a2. JS UDF の呼び出しと定義で引数の数が合うか ---------------------
+// 描画は 5 本の UDF に分かれていて、SQL 側からは目印（__UDF_PAGE__ など）で
+// 呼ぶ。引数を 1 本足したときに片方だけ直すと、**BigQuery は落ちずに
+// 「引数が足りない/多い」で関数が見つからないと言う**か、詰めた位置が
+// ずれたまま動く（実際、erd_html を足したときに sql_json の位置へ
+// 別の値が入ったことがある）。実行するまで分からないので静的に見る。
+{
+  const NAMES = {
+    udf_analyze_function_name: '__UDF_ANALYZE__',
+    udf_render_function_name: '__UDF_RENDER__',
+    udf_erd_function_name: '__UDF_ERD__',
+    udf_page_function_name: '__UDF_PAGE__',
+    udf_markdown_function_name: '__UDF_MARKDOWN__',
+  };
+  // 深さ 0 のカンマで引数を数える。< > も数えるのは STRUCT<…> のため。
+  const countArgs = (s) => {
+    let d = 0, n = 1;
+    for (const ch of s) {
+      if (ch === '(' || ch === '<') d++;
+      else if (ch === ')' || ch === '>') d--;
+      else if (ch === ',' && d === 0) n++;
+    }
+    return n;
+  };
+  // 呼び出し側: `__UDF_X__`( … ) の中身を括弧の対応で切り出す
+  const callArgs = (mark) => {
+    const out = [];
+    const open = '`' + mark + '`(';
+    let at = table.indexOf(open);
+    while (at >= 0) {
+      let d = 0, end = -1;
+      for (let i = at + open.length - 1; i < table.length; i++) {
+        const ch = table.charAt(i);
+        if (ch === '(') d++;
+        else if (ch === ')' && --d === 0) { end = i; break; }
+      }
+      if (end < 0) break;
+      out.push(countArgs(table.slice(at + open.length, end)));
+      at = table.indexOf(open, end);
+    }
+    return out;
+  };
+  // 引数が 1 個の markdown だけ 1 行に書いてある（`(md STRING)`）ので、
+  // 改行で割る形と 1 行の形の両方を受ける。
+  const defs = [...udf.matchAll(
+    /CREATE OR REPLACE FUNCTION `%s\.%s\.%s`\((?:\n)?([\s\S]*?)(?:\n)?\)\nRETURNS STRING\nLANGUAGE js AS %s\n''',\n\s*udf_project_id, udf_dataset, (udf_[a-z_]+_function_name)/g)];
+  add('JS UDF の定義を 5 本とも読み取れる', defs.length === 5,
+    `見つかった定義 ${defs.length} 本`);
+  for (const d of defs) {
+    const mark = NAMES[d[2]];
+    if (!mark) continue;
+    const want = countArgs(d[1]);
+    const calls = callArgs(mark);
+    add(`${mark} の引数の数が定義と一致`,
+      calls.length > 0 && calls.every((n) => n === want),
+      `定義 ${want} 個 / 呼び出し [${calls.join(', ')}]`);
+  }
+}
+
+// --- 5b. CTAS の列リストと SELECT の列が一致するか ---------------------
+// 生成は CREATE OR REPLACE TABLE (列リスト) ... AS SELECT で、テーブルごと
+// 差し替える。列リストは説明（OPTIONS）を持たせるために書いてあるので、
+// SELECT 側に列を足したときに片方だけ直すと BigQuery が「列数が合わない」で
+// 落ちる。実行するまで分からないので、ここで並びまで突き合わせる。
+{
+  const m = table.match(
+    /CREATE OR REPLACE TABLE `__T_DIFF_SRC__`\n\(\n([\s\S]*?)\n\)\nCLUSTER BY/);
+  const declared = m
+    ? m[1].split('\n').map((l) => (l.trim().match(/^([a-z_][a-z0-9_]*)\s/) || [])[1])
+      .filter(Boolean)
+    : [];
+  // 最後の SELECT（… AS diff_html まで）を深さ 0 のカンマで割る
+  // 'FROM refs' の直前の SELECT。前方から非貪欲に取るとファイル先頭の別の
+  // SELECT に当たるので、切り出してから最後の SELECT を採る。
+  const upto = table.slice(0, table.indexOf('\nFROM refs\n'));
+  const body0 = upto.slice(upto.lastIndexOf('\nSELECT\n') + '\nSELECT\n'.length);
+  // コメント行は**割る前に**落とす。説明に JSON の例（[{"r": …, "v": […]}]）を
+  // 書くと、その ',' が深さ 0 のカンマとして数えられ、ありもしない列に割れる。
+  // 括弧しか数えていないので、角括弧や波括弧の中かどうかは見分けられない。
+  const body = body0.split('\n').filter((l) => !l.trim().startsWith('--')).join('\n');
+  const cols = [];
+  {
+    // 括弧だけを数える。ここは型を書かないので < > は比較演算子
+    // （has_multiple の '> 1'）で、型引数の括弧として数えると深さが狂う。
+    let depth = 0, cur = '';
+    for (const ch of body) {
+      if (ch === '(') depth++;
+      else if (ch === ')') depth--;
+      if (ch === ',' && depth === 0) { cols.push(cur); cur = ''; } else cur += ch;
+    }
+    cols.push(cur);
+  }
+  // 別名があればそれ、無ければ末尾の識別子が列名になる
+  const selected = cols
+    .map((c) => c.split('\n').filter((l) => !l.trim().startsWith('--')).join(' ').trim())
+    .filter((c) => c !== '')
+    .map((c) => {
+      const as = c.match(/\sAS\s+([A-Za-z_][A-Za-z0-9_]*)\s*$/);
+      return as ? as[1] : (c.match(/([A-Za-z_][A-Za-z0-9_]*)\s*$/) || [])[1];
+    });
+  add('CTAS の列リストと SELECT の列が同じ並び',
+    declared.length > 0 && declared.join(',') === selected.join(','),
+    `列リスト [${declared.join(',')}] / SELECT [${selected.join(',')}]`);
+}
+
+// --- 5c. 生成が 1 文で差し替わるか ------------------------------------
+// 最新の 1 世代しか持たないので、DELETE + INSERT や TRUNCATE + INSERT に
+// 戻すと、その隙間にレポートを開いた人には何も出ない。以前はビューが
+// MAX(snapshot_date) を採っていたので隙間があっても前日分が出ていた。
+for (const t of ['__T_DIFF_SRC__', '__T_DIFF__']) {
+  add(`${t} はテーブルごと差し替える（読み手に空を見せない）`,
+    new RegExp(`CREATE OR REPLACE TABLE \`${t}\`[\\s\\S]*?\\nAS\\n(WITH|SELECT)`).test(table) &&
+    !new RegExp(`DELETE FROM \`${t}\``).test(table) &&
+    !new RegExp(`TRUNCATE TABLE \`${t}\``).test(table) &&
+    !new RegExp(`INSERT INTO \`${t}\``).test(table));
+}
+
+// --- 5d. メモを繋ぐ書き方が 1 か所か ------------------------------------
+// メモを繋ぐのはビューの定義だけ。焼き込み（__T_DIFF__）はそれを SELECT * で
+// 写すだけにしておく。同じ SQL を 2 か所に書くと、片方だけ直したときに
+// 「レポートには出るがリアルタイムには出ない」ような食い違いが起きる。
+//
+// ビューは 1 本ではない（3c のマトリクスもビュー）ので、本数ではなく
+// **diff_html を触る箇所が 1 つだけか**を見る。数で見ていた頃は、ビューを
+// 1 本足しただけでここが落ちた（メモの繋ぎ方は何も変わっていないのに）。
+{
+  const vAt = table.indexOf('CREATE OR REPLACE VIEW `__V_DIFF__`');
+  const tAt = table.indexOf('CREATE OR REPLACE TABLE `__T_DIFF__`');
+  const splice = table.indexOf("REPLACE(diff_html, '<!--VG_NOTE-->'");
+  const spliceCount = (table.match(/REPLACE\(diff_html,/g) || []).length;
+  add('メモを繋ぐのはビューだけ（焼き込みは SELECT * で写す）',
+    vAt > 0 && tAt > vAt && splice > vAt && splice < tAt &&
+    spliceCount === 1 &&
+    /CREATE OR REPLACE TABLE `__T_DIFF__`[\s\S]*?\nAS\nSELECT \* FROM `__V_DIFF__`/
+      .test(table),
+    `diff_html への REPLACE ${spliceCount} 回（1 回であること）`);
+}
+
+// --- 5d2. 確認クエリはテーブルを読む ------------------------------------
+// 5 系がビューを読むと、確認 1 本ごとにシート（Drive の外部テーブル）の読み取り・
+// Markdown の JS UDF・数 MB の diff_html への REPLACE をやり直す。base と
+// group_count しか見ない 5-2 でもそれが走る。3b が直前で焼き込んでいるので
+// テーブルを読めば中身は同じで、待ち時間だけが消える。
+//
+// **見張るのは __V_DIFF__ だけ。** 3c のマトリクスもビューだが、あちらは
+// Drive も JS UDF も通らず、読むのも小さい列だけなので 5 系から読んでよい。
+{
+  const at = table.indexOf('-- 5. 確認');
+  const sec5 = at > 0 ? table.slice(at) : '';
+  add('確認（5 系）はビューではなくテーブルを読む',
+    at > 0 && !sec5.includes('__V_DIFF__') && sec5.includes('`__T_DIFF__`'));
+}
+
+// --- 5d3. マトリクスのビュー（3c） --------------------------------------
+// base × suffix のマトリクスは 1 行 = 1 View。カードのテーブルとは grain が
+// 違うので、間違えやすいところを 4 つ押さえる。
+{
+  const at = table.indexOf('CREATE OR REPLACE VIEW `__V_MATRIX__`');
+  const end = at > 0 ? table.indexOf('\n""";', at) : -1;
+  const sec = at > 0 && end > at ? table.slice(at, end) : '';
+  add('マトリクスのビューがある', sec !== '');
+
+  // 基準（ref_index）ごとに行が増える。絞らないとグループ数ぶんの重複になり、
+  // ピボットのセルが「1」ではなく「グループ数」になる。エラーは出ない。
+  add('マトリクスは基準の先頭の行だけを読む',
+    /FROM `__T_DIFF_SRC__`\n *WHERE ref_index = 0/.test(sec));
+
+  // suffix は列の配列をそのまま割ったもの。ここで切り直すと、一覧との
+  // 最長一致や中間語（suffix_middle_list）の扱いがセクション 2 の keyed と
+  // 食い違い、**カードの見出しと列見出しで別の suffix が出る**。
+  add('マトリクスは suffix を切り直さない（列の配列をそのまま割る）',
+    sec.includes('UNNEST(b.suffixes)') &&
+    !sec.includes('SUBSTR') && !sec.includes('@suffix_list') &&
+    !sec.includes('ENDS_WITH') && !sec.includes('__SUFFIX_PATTERN__'));
+
+  // 3 本の配列は添字でしか対応していない。割るときに WITH OFFSET でそろえ
+  // 忘れると**総当たりになり**、行数が View 数の 3 乗に膨らむ。
+  add('マトリクスは 3 本の配列を添字でそろえて割る',
+    /UNNEST\(b\.suffixes\)\s+AS s WITH OFFSET AS o/.test(sec) &&
+    /UNNEST\(b\.locations\)\s+AS l WITH OFFSET AS ol/.test(sec) &&
+    /UNNEST\(b\.view_names\) AS v WITH OFFSET AS ov/.test(sec) &&
+    /WHERE o = ol AND o = ov/.test(sec));
+
+  // ビューのまま置く。焼き込むと、スケジュールドクエリに 3c を足し忘れた
+  // ときに古いマトリクスが黙って残る（ビューなら 2 に自動で追従する）。
+  add('マトリクスは焼き込まない（ビューのまま）',
+    !table.includes('__T_MATRIX__') &&
+    !/CREATE OR REPLACE TABLE `__V_MATRIX__`/.test(table));
+
+  // 読むのは小さい列だけ。diff_html に触ると列指向の利点が消え、
+  // ピボットを開くたびに数 MB × base 数を走査する。
+  add('マトリクスは diff_html を読まない', sec !== '' && !sec.includes('diff_html'));
+}
+
+// --- 5d4. objects の STRUCT が両ファイルで同じか ------------------------
+// 目印を 1 つ足すと、build_table.sql の STRUCT(… AS x) と
+// view_group_html.sql の STRUCT<x STRING> の両方を直すことになる。
+// **名前付きの STRUCT は並びも型も一致していないと渡せない**ので、片方だけ
+// 直すと「引数の型が違う」で落ちる。実行するまで分からないので静的に見る。
+{
+  // 呼び出し側は render_call_sql の FORMAT の中。フィールドに括弧は
+  // 現れない（どれも %T）ので、最初の ')' までを 1 つの STRUCT と見てよい。
+  const call = table.match(/STRUCT\(%T AS diff_src[^)]*\)/);
+  const callNames = call
+    ? [...call[0].matchAll(/%T AS ([a-z_]+)/g)].map((m) => m[1]).join(',')
+    : '';
+  const decl = udf.match(/objects STRUCT<\n([\s\S]*?)\n  >,/);
+  const declNames = decl
+    ? decl[1].split('\n').map((l) => (l.trim().match(/^([a-z_]+)\s+STRING/) || [])[1])
+      .filter(Boolean).join(',')
+    : '';
+  add('objects の STRUCT のフィールドが両ファイルで同じ並び',
+    callNames !== '' && callNames === declNames,
+    `build_table.sql=[${callNames}] / view_group_html.sql=[${declNames}]`);
+}
+
+// --- 5e. STRING_AGG の区切りがリテラルか ------------------------------
+// BigQuery は STRING_AGG の第 2 引数（区切り文字）にリテラルかクエリ
+// パラメータしか許さない。CHR(10) のような式を書くと
+//   Argument 2 to STRING_AGG must be a literal or query parameter
+// で落ちる。テンプレートにはバックスラッシュを書けない（= 改行のリテラルを
+// 作れない）ので、改行を挟みたいときは ARRAY_TO_STRING を使う。あちらに
+// この制限は無い。実行して初めて分かる種類の間違いなので静的に見る。
+{
+  const bad = [];
+  for (const [i, t] of templates.entries()) {
+    for (const m of t.matchAll(/STRING_AGG\(/g)) {
+      // 第 1 引数を読み飛ばして、深さ 0 のカンマの次を見る
+      let depth = 0;
+      let j = m.index + m[0].length;
+      for (; j < t.length; j++) {
+        const ch = t[j];
+        if (ch === '(') depth++;
+        else if (ch === ')') { if (depth === 0) break; depth--; }
+        else if (ch === ',' && depth === 0) { j++; break; }
+      }
+      const arg2 = t.slice(j).replace(/^\s+/, '');
+      // 区切りを省いた STRING_AGG(x) は既定の ',' なので問題ない
+      if (arg2 === '' || arg2[0] === ')') continue;
+      if (arg2[0] === "'" || arg2[0] === '"' || arg2[0] === '@') continue;
+      bad.push(`テンプレート ${i + 1}: ${arg2.slice(0, 40)}`);
+    }
+  }
+  add('STRING_AGG の区切りがリテラルかパラメータ', bad.length === 0,
+    bad.join(' / '));
+}
+
+// --- 5f. ラベルの取り込み ----------------------------------------------
+// ラベルは「揃っているかどうか」を見るためのものなので、取り込み方を間違えると
+// 静かに嘘をつく。落ちずに間違った絵を出す 3 通りを静的に止める。
+{
+  const at = table.indexOf('view_labels AS (');
+  const sec = at > 0 ? table.slice(at, table.indexOf('analyzed AS (', at)) : '';
+
+  // (1) 付いていない View を落とすと、8 本に付いていて 1 本だけ無い状態が
+  //     「全 View に付いている」と読めてしまう。差そのものが消える。
+  add('ラベルは LEFT JOIN で取り込む（付いていない View も 1 組として残す）',
+    at > 0 && /LEFT JOIN view_labels AS l ON l\.view_name = k\.view_name/.test(sec));
+
+  // (2) option_value は JSON ではなく [STRUCT("k", "v")] というリテラル風の
+  //     文字列。PARSE_JSON で読もうとすると NULL になり、ラベルが 1 つも
+  //     付いていないのと同じ見え方（何も出ない）になる。
+  add('ラベルは option_value を JSON として読まない（[STRUCT(...)] の形）',
+    at > 0 && sec.includes("option_name = 'labels'") &&
+    sec.includes('REGEXP_EXTRACT_ALL(option_value') &&
+    !/PARSE_JSON\(option_value\)/.test(sec));
+
+  // (3) 既に JSON の文字列を STRUCT に入れて TO_JSON_STRING すると、
+  //     文字列として再エスケープされ、描画側の JSON.parse で
+  //     配列ではなく文字列になる（＝ラベルが 1 つも読めない）。
+  add('ラベルの JSON を二重にエンコードしない（labels_text をそのまま埋める）',
+    at > 0 && table.includes(`',"l":', labels_text, '}'`) &&
+    !/STRUCT\([^)]*labels_text/.test(table));
+}
+
+// --- 5g. 別リージョンのメタデータの混ぜ方 -------------------------------
+// import_sources が空なら**いままでとまったく同じ SQL** になり、並べたときだけ
+// UNION ALL になる。ここを壊すと、混ぜていないつもりで混ざる／混ぜたつもりで
+// 混ざらない、のどちらかが静かに起きる。
+{
+  const srcs = ['schemata', 'views', 'columns', 'field_paths', 'table_opts'];
+
+  // (1) INFORMATION_SCHEMA の直読みがテンプレートに残っていないか。
+  //     残っていると、そこだけ拠点のぶんしか見ない（そのリージョンの View が
+  //     カードから消えるが、辻褄は合うので画面から気づけない）。
+  //     5 系（確認クエリ）は拠点だけを見る診断なので対象外。
+  const at5 = table.indexOf('-- 5. 確認');
+  const head = at5 > 0 ? table.slice(0, at5) : table;
+  const direct = [...head.matchAll(
+    /region-__JOB_REGION__\.INFORMATION_SCHEMA\.([A-Z_]+)/g)].map((m) => m[1]);
+  add('解析の読み元に INFORMATION_SCHEMA の直読みが残っていない',
+    direct.length === 0, direct.join(','));
+
+  // (2) 5 つの読み元がすべて使われているか。
+  const unused = srcs.filter((k) => !head.includes(`__SRC_${k.toUpperCase()}__`));
+  add('5 つの読み元がすべてテンプレートで使われている',
+    unused.length === 0, unused.join(','));
+
+  // (3) 空なら従来どおり、並べたら UNION ALL。両方の枝があるか。
+  const bad = srcs.filter((k) => {
+    const at = table.indexOf(`SET src_${k} =`);
+    if (at < 0) return true;
+    const body = table.slice(at, table.indexOf('AS g));', at));
+    return !body.includes('IF(ARRAY_LENGTH(import_sources) = 0,') ||
+      !body.includes('UNION ALL');
+  });
+  add('読み元は「空なら従来どおり・並べたら UNION ALL」の 2 枝',
+    bad.length === 0, bad.join(','));
+
+  // (3b) 空のときの枝が**リージョン修飾の INFORMATION_SCHEMA そのもの**か。
+  //      ここに余計なものが混ざると、import_sources を空にしても
+  //      「足す前とまったく同じ」ではなくなる。取り込みテーブルを 1 か所も
+  //      参照しないからこそ、テーブルが存在しなくても流せる。
+  //      **形ではなく「何を参照しているか」で見る。** views だけは
+  //      source_region を定数で足すため副問い合わせの形になっており、
+  //      書き方を固定すると直せなくなる。守りたいのは「取り込みテーブルを
+  //      参照しない」ことのほう。
+  const IS = { schemata: 'SCHEMATA', views: 'VIEWS', columns: 'COLUMNS',
+    field_paths: 'COLUMN_FIELD_PATHS', table_opts: 'TABLE_OPTIONS' };
+  const emptyBranch = (k) => {
+    const m = table.match(new RegExp(
+      `SET src_${k} = IF\\(ARRAY_LENGTH\\(import_sources\\) = 0,([\\s\\S]*?)\\n  \\(SELECT `));
+    return m ? m[1] : null;
+  };
+  const plain = srcs.filter((k) => {
+    const b = emptyBranch(k);
+    return b === null ||
+      !b.includes(`INFORMATION_SCHEMA.${IS[k]}`) ||
+      // 取り込みテーブルも作業データセットも参照しない
+      /meta_|work_dataset|work_project_id|table_name_prefix/.test(b);
+  });
+  add('空のときの読み元が INFORMATION_SCHEMA だけ（取り込みを参照しない）',
+    plain.length === 0, plain.join(','));
+  // views だけはリージョンを定数で足す（ローカルの INFORMATION_SCHEMA に
+  // その列が無いため）。足し忘れると keyed の組み立てで落ちる。
+  add('空のときでも views はリージョンを足している',
+    /AS source_region/.test(emptyBranch('views') || ''));
+
+  // (3c) 取り込みテーブルの名前を組み立てている箇所が、想定の 2 か所だけか。
+  //      増えると、空判定の外から参照される余地が生まれる（＝空にしても
+  //      「そんなテーブルは無い」で落ちる）。名前の組み立ては
+  //        ・SET src_*        … 'meta_<種類>' || g.sfx（空判定の内側）
+  //        ・取り込みの確認   … 'meta_views'  || s.table_name_suffix
+  //                            （IF ARRAY_LENGTH(import_sources) > 0 の内側）
+  //      の 2 形しかない。ほかの形が出たら、どこから参照されるか確かめる。
+  {
+    const shapes = [...table.matchAll(/'meta_[a-z_]+' \|\| ([A-Za-z_.]+)/g)]
+      .map((m) => m[1]);
+    const unexpected = shapes.filter((v) => v !== 'g.sfx' && v !== 's.table_name_suffix');
+    const bySfx = shapes.filter((v) => v === 'g.sfx').length;
+    const byTail = shapes.filter((v) => v === 's.table_name_suffix').length;
+    // 確認の 1 か所は IF ブロックの内側にあること
+    const at = table.indexOf('IF ARRAY_LENGTH(import_sources) > 0 THEN');
+    const end = table.indexOf('END IF;', at);
+    const tailAt = table.indexOf("'meta_views' || s.table_name_suffix");
+    add('取り込みテーブルの参照が想定の 2 形だけ（空にしても参照されない）',
+      unexpected.length === 0 && bySfx === srcs.length && byTail === 1 &&
+      at > 0 && tailAt > at && tailAt < end,
+      unexpected.length ? `想定外: ${unexpected.join(',')}`
+        : `g.sfx ${bySfx} 個 / s.table_name_suffix ${byTail} 個`);
+  }
+
+  // (4) 運んできたテーブルは**送り元ごとに分かれうる**。
+  //     cross_region_import.sql の table_name_suffix に送り元を表す値
+  //     （'_sgp' など）を付ける運用ができるので、import_sources の suffix
+  //     ごとに枝を出す。1 本決め打ちにすると、2 つ目の送り元が黙って
+  //     解析から落ちる（辻褄は合うので画面から気づけない）。
+  const fan = srcs.filter((k) => {
+    const at = table.indexOf(`SET src_${k} =`);
+    const body = at < 0 ? '' : table.slice(at, table.indexOf('AS g));', at));
+    return !body.includes('STRING_AGG(') ||
+      !body.includes('GROUP BY table_name_suffix') ||
+      !body.includes("|| g.sfx");
+  });
+  add('読み元が送り元ごとのテーブルに枝分かれする', fan.length === 0,
+    fan.join(','));
+
+  // (5) 運んできた側を source_region で絞っているか。
+  //     絞らないと、import_sources から外したリージョンや、誤って拠点で
+  //     書き出した自分のぶんまで解析に入る（＝二重計上）。
+  const n = (table.match(/WHERE source_region IN UNNEST\(%T\)/g) || []).length;
+  add('運んできた側を source_region で絞っている（5 か所）', n === srcs.length,
+    `${n} か所`);
+
+  // (6) テーブル名を変数と規則で組み立てているか。
+  //     リテラルで書くと prefix / suffix が効かない。prefix が空の環境では
+  //     動いてしまい、リージョンの略称を入れた環境でだけ落ちる。
+  const lit = srcs.filter((k) => !new RegExp(
+    `table_name_prefix \\|\\| system_name \\|\\| '_' \\|\\| 't_' \\|\\| 'meta_${k}' \\|\\| g\\.sfx`
+  ).test(table));
+  add('読み元の名前が命名規則どおり組み立てられている（prefix が効く）',
+    lit.length === 0, lit.join(','));
+
+  // (7) 拠点自身を並べていないか／同じ送り元を 2 回並べていないか。
+  add('拠点自身を import_sources に入れられない',
+    /ASSERT job_region NOT IN \(SELECT source_region FROM UNNEST\(import_sources\)\)/
+      .test(table));
+  add('同じ送り元を 2 回並べられない',
+    /ASSERT ARRAY_LENGTH\(import_sources\) = ARRAY_LENGTH\(\s*\n?\s*ARRAY\(SELECT DISTINCT source_region FROM UNNEST\(import_sources\)\)\)/
+      .test(table));
+
+  // (8) 並べた送り元の行が無いまま通さないか。
+  //     取り込みが落ちても build_table は動くので、ここが最後の砦になる。
+  // 止め方は ASSERT ではなく ERROR()。ASSERT の説明文は文字列リテラルしか
+  // 書けず、「どのテーブルの、どの source_region を探したか」を埋め込めない。
+  // それが無いと、書き方違い／suffix の食い違い／取り込み未実行 のどれかを
+  // 落ちた人が自分で切り分けることになる（実際にそうなった）。
+  add('並べた送り元の行が無ければ止まる（探したものと実際にあったものを出す）',
+    /INTO import_diag;/.test(table) &&
+    /IF import_diag IS NOT NULL THEN\s*\n\s*SELECT ERROR\(/.test(table) &&
+    // 期待した source_region と、そのテーブルに実際にある値の両方を出す
+    /source_region = %%s の行がありません（そのテーブルにあるのは: %%s）/.test(table) &&
+    /STRING_AGG\(DISTINCT source_region/.test(table));
+}
+
+// --- 5h. 基準を行に分ける ------------------------------------------------
+// 全基準を 1 枚のカードに載せると比較ペインは G×(G−1) 枚 ―― **グループ数の
+// 二乗**になる。リージョンをまたいで G が伸びたとき、UDF のメモリを使い切って
+// 日次の生成ごと落ちた。基準を行に分けると 1 行 G−1 枚の線形に戻る。
+// ここが戻ると同じ落ち方をするので、形を固定する。
+{
+  // (1) 基準ごとに行を立てているか。
+  add('基準ごとに行を立てている（1 行 1 基準）',
+    /CROSS JOIN UNNEST\(\s*\n\s*IF\(ARRAY_LENGTH\(JSON_VALUE_ARRAY\(a\.analysis, '\$\.groupLabels'\)\) = 0,/
+      .test(table) &&
+    /\) AS lbl WITH OFFSET AS off/.test(table) &&
+    /g\.off AS ref_index/.test(table) && /g\.lbl AS ref_label/.test(table));
+
+  // (2) グループが 0 件の base でも行が消えないか。
+  //     空の配列を CROSS JOIN で展開すると base ごと落ちて、**カードが黙って
+  //     消える**（解析できなかった base ほど見たいのに）。
+  add('グループが 0 件でも base の行が消えない',
+    /\[CAST\(NULL AS STRING\)\],/.test(table));
+
+  // (3) 描画に基準を渡しているか。渡さないと全部が先頭基準のカードになる
+  //     （落ちないので気づけない）。
+  add('描画に基準の番号を渡している',
+    /`__UDF_RENDER__`\(analysis, options_json, CAST\(ref_index AS FLOAT64\)\)/
+      .test(table));
+
+  // (3b) メモを繋ぐビューが ref_index / ref_label を落としていないか。
+  //      1 行 = 1 base × 1 基準なので、この 2 列が無いと**どの行がどの基準か
+  //      分からなくなる**。レポートの「基準」コントロールが使う列でもある。
+  //      基準がカードの中のタブだった頃は常に 0 の残骸だったので落として
+  //      いた ―― 行に分けたあとも落としたままだと、t_diff_src にはあるのに
+  //      t_diff に無い、という気づきにくい形で表に出る（実際に出した）。
+  add('メモを繋ぐビューが ref_index / ref_label を落としていない',
+    !/EXCEPT \([^)]*ref_index/.test(table) &&
+    !/EXCEPT \([^)]*ref_label/.test(table));
+
+  // (3c) 基準グループの View 数。「既定の基準を View が最多のグループに」
+  //      を、グラフの並べ替えだけで決められるようにするための列。
+  //      groupSizes は groupLabels と同じ並びなので ref_index で引ける。
+  //      添字が外れうる（打ち切り・解析できなかった base）ので SAFE_OFFSET。
+  //      OFFSET に変えると base ごとクエリが落ちる。
+  add('基準グループの View 数を列で持っている',
+    /\$\.groupSizes'\)\[SAFE_OFFSET\(ref_index\)\]/.test(table) &&
+    /AS ref_view_count/.test(table) &&
+    /ref_view_count *INT64/.test(table) &&
+    !/EXCEPT \([^)]*ref_view_count/.test(table));
+
+  // (4) 行数の上限があり、**それを描画側にも渡している**か。
+  //     渡さないと、打ち切られたことをカードに書けない ―― 選べないだけなのに
+  //     「グループが無い」と読めてしまう。
+  add('基準の行数に上限があり、描画側にも渡している',
+    /WHERE g\.off < @max_ref_rows/.test(table) &&
+    /'.?"maxRefRows":', CAST\(@max_ref_rows AS STRING\)/.test(table) &&
+    /^DECLARE max_ref_rows INT64 DEFAULT \d+;$/m.test(table));
+}
+
+// --- 6. 両ファイルで一致させる必要がある値 -----------------------------
+for (const base of ['analyze', 'render', 'erd', 'page', 'markdown', 'group_css',
+  'render_dynamic_sql']) {
+  const line = `udf_name_prefix || system_name || '_' || '${base}' || udf_name_suffix`;
+  add(`${base} の名前の組み立てが両ファイルで同じ`,
+    table.includes(line) && udf.includes(line));
+}
+
+// system_name が食い違うと関数が見つからない。既定値まで突き合わせる。
+{
+  const re = /^DECLARE system_name STRING DEFAULT '([^']*)';$/m;
+  const t = table.match(re), u = udf.match(re);
+  add('system_name の既定値が両ファイルで同じ',
+    t !== null && u !== null && t[1] === u[1],
+    `build_table=${t ? t[1] : 'なし'} / view_group_html=${u ? u[1] : 'なし'}`);
+}
+
+// メモの差し込み口。カードは作り置き、メモはビューで毎回作るので、
+// 外枠に置いた目印をビューが REPLACE で差し替えている。文字列が食い違うと
+// 置換が起きず、メモ タブが黙って空になる（エラーにはならない）。
+{
+  const m = chrome.match(/^const NOTE_MARK = '([^']+)';$/m);
+  const mark = m ? m[1] : null;
+  // ビューは 1 本。目印が食い違うと置換が起きず、メモ タブが黙って空になる。
+  const used = mark ? table.split(`REPLACE(diff_html, '${mark}'`).length - 1 : 0;
+  add('メモの目印が chrome.js とビューで同じ', mark !== null && used === 1,
+    `chrome.js=${mark || 'なし'} / build_table.sql での使用 ${used} 回`);
+}
+
+// View がどのリージョンに居るか。note の見出しをリージョンごとに束ねるのに
+// 使う。**この値は INFORMATION_SCHEMA からは取れない**（ローカル側にその列が
+// 無い）ので、src_views の組み立てでジョブのリージョンを定数として足している。
+// 足し忘れると列が無いまま keyed を作ろうとしてクエリごと落ちる。
+{
+  add('View の取得元にリージョンを持たせている',
+    /AS source_region/.test(table) &&
+    // ローカル側（import_sources が空）でも定数で足す
+    /INFORMATION_SCHEMA\.VIEWS`\)'/.test(table) &&
+    // 運んできた側は列をそのまま選ぶ
+    /'table_schema, table_name, view_definition, source_region'/.test(table));
+
+  // base ごとにまとめて描画側へ渡す。labels_json と同じ形。
+  const cte = table.match(/^base_regions AS \(([\s\S]*?)^\),$/m);
+  add('base ごとのリージョンを組み立てて渡している',
+    cte !== null &&
+    /'\{"r":'/.test(cte ? cte[1] : '') &&
+    /COALESCE\(br\.regions_json, '\[\]'\) AS regions_json/.test(table) &&
+    /LEFT JOIN base_regions AS br ON br\.base = a\.base/.test(table));
+
+  // **描画側へ渡す JSON は列の配列から作る。** keyed から取り直すと、列に出る
+  // ものとカードに出るものが別経路になり、片方だけ直したときに食い違う
+  // （note の見出しと列の中身が違う、という形で出る。エラーにはならない）。
+  add('リージョンの JSON は列の配列から組み立てる',
+    cte !== null &&
+    /FROM base_views AS bv/.test(cte ? cte[1] : '') &&
+    !/FROM keyed/.test(cte ? cte[1] : ''));
+
+  // 列に出す 3 本の配列。**同じ ORDER BY で畳んでいないと添字で対応しない。**
+  // 対応が崩れると、マトリクスの location が別の View のものになる
+  // （行数は合うので画面からは気づけない）。
+  {
+    const bv = table.match(/^base_views AS \(([\s\S]*?)^\),$/m);
+    const aggs = [...(bv ? bv[1] : '')
+      .matchAll(/ARRAY_AGG\(\s*\w+\s+ORDER BY ([^)]+)\)\s+AS (\w+)/g)];
+    const orders = [...new Set(aggs.map((m) => m[1].trim()))];
+    add('View ごとの 3 本の配列を同じ並びで畳んでいる',
+      bv !== null && aggs.length === 3 &&
+      aggs.map((m) => m[2]).sort().join(',') === 'locations,suffixes,view_names' &&
+      orders.length === 1,
+      `畳んでいる列=[${aggs.map((m) => m[2]).join(',')}] / ORDER BY=[${orders.join(' | ')}]`);
+    // 配列は NULL 要素を持てない。suffix も source_region も欠けうるので、
+    // 畳む前に代替を入れておく。**行ごと落とす手は採れない**（添字がずれる）。
+    add('配列に入れる前に NULL をつぶしている',
+      bv !== null &&
+      /COALESCE\(suffix, view_name\) AS suffix/.test(bv[1]) &&
+      /IFNULL\(source_region, ''\) AS location/.test(bv[1]));
+  }
+
+  // page の引数は順番で効く。SQL 側の並びと UDF 側の宣言が食い違うと、
+  // labels に regions が入るような形で**静かに壊れる**。
+  // 呼び出し側は入れ子の __UDF_RENDER__(…) を跨ぐので、深さ 0 のカンマで割る。
+  const callArgs = (() => {
+    const m = table.match(/`__UDF_PAGE__`\(([\s\S]*?)\n  \) AS diff_html/);
+    if (!m) return null;
+    const out = [];
+    let depth = 0, cur = '';
+    for (const ch of m[1]) {
+      if (ch === '(') depth++;
+      else if (ch === ')') depth--;
+      if (ch === ',' && depth === 0) { out.push(cur); cur = ''; continue; }
+      cur += ch;
+    }
+    out.push(cur);
+    return out.map((x) => x.trim()).filter(Boolean);
+  })();
+  // 定義側は **page の塊**を名前ではなく regions_json の有無で選ぶ
+  // （render にも analysis_json があるので、頭から探すとそちらに当たる）。
+  const declArgs = (() => {
+    const chunk = udf.split('CREATE OR REPLACE FUNCTION')
+      .find((c) => /\n  regions_json STRING,/.test(c));
+    if (!chunk) return null;
+    const m = chunk.match(/\(\n([\s\S]*?)\n\)\nRETURNS STRING\nLANGUAGE js/);
+    return m ? m[1].split(',').map((x) => x.trim().split(/\s+/)[0]).filter(Boolean) : null;
+  })();
+  // 先頭 3 つ（解析結果・差分 HTML・図 HTML）は呼び出し側では式なので名前が
+  // 無い。数がそろっていることと、4 つ目から先の名前がそろっていることを見る。
+  const tail = (a) => (a || []).slice(3).join(',');
+  add('page の引数の数と並びが SQL と UDF で同じ',
+    callArgs !== null && declArgs !== null &&
+    callArgs.length === declArgs.length &&
+    tail(callArgs) === tail(declArgs),
+    `SQL(${(callArgs || []).length})=${tail(callArgs)} / ` +
+    `UDF(${(declArgs || []).length})=${tail(declArgs)}`);
+}
+
+// suffix 一覧の組み立てと、それを説明する 5-4 は**同じ材料**でなければ
+// ならない。片方だけ直すと、5-4 が「実際に使う suffix」と言いながら本体と
+// 違う一覧を出す。エラーにはならず、しかも 5-4 は原因を調べるための窓口
+// なので、食い違っていると調査そのものが誤った方向に進む。
+{
+  // 一覧を組み立てている材料（パラメータ）を両方から拾って突き合わせる。
+  // **除外は数えない。** 本体は suffixes の中で落とすが、5-4 はわざと落とさず
+  // excluded の列で「消えた」と見せる（消えた理由を読むための表なので、
+  // 行ごと消してしまうと何も分からない）。ここだけは食い違っていて正しい。
+  const params = (s) => [...new Set(
+    (s.match(/@suffix_[a-z_]+/g) || []))]
+    .filter((p) => p !== '@suffix_exclude_list').sort().join(',');
+  const build = table.match(/^suffixes AS \(([\s\S]*?)^\),$/m);
+  const report = table.match(/^listed AS \(([\s\S]*?)^\)$/m);
+  // 本体は suffix_derived 経由なので、そちらも材料に含める。
+  const derived = table.match(/^suffix_derived AS \(([\s\S]*?)^\),$/m);
+  const reportDerived = table.match(/^derived AS \(([\s\S]*?)^\),$/m);
+  add('suffix 一覧の組み立てと 5-4 が同じ材料を使っている',
+    build !== null && report !== null && derived !== null && reportDerived !== null &&
+    params(derived[1] + build[1]) === params(reportDerived[1] + report[1]),
+    build && report && derived && reportDerived
+      ? `本体=${params(derived[1] + build[1])} / 5-4=${params(reportDerived[1] + report[1])}`
+      : 'CTE を見つけられなかった（名前を変えたらここも直す）');
+  // 上で除外を数えないことにしたぶん、両者の扱いが逆であることは別に確かめる。
+  add('除外は本体では落とし、5-4 では列で見せる',
+    build !== null && report !== null &&
+    build[1].includes('NOT IN UNNEST(@suffix_exclude_list)') &&
+    !report[1].includes('@suffix_exclude_list') &&
+    /suffix IN UNNEST\(@suffix_exclude_list\) *AS excluded/.test(table));
+}
+
+// 中間語（suffix_middle_list）。導出済みの一覧と掛け算して suffix を増やす。
+// 掛け算の相手が suffix_base（末尾の導出より前）だと、jp / us との組が
+// できない。**suffix_derived と掛けること。**
+{
+  const build = table.match(/^suffixes AS \(([\s\S]*?)^\),$/m);
+  add('中間語は導出済みの一覧と掛け算する',
+    build !== null &&
+    /FROM suffix_derived AS d, UNNEST\(@suffix_middle_list\) AS m/.test(build[1]));
+}
+
+// 宣言と受け渡し。DECLARE しても USING に足し忘れると、EXECUTE IMMEDIATE の
+// 中で @suffix_middle_list が未定義になって落ちる。5-4 も同じ値を要る。
+{
+  const usings = (table.match(/^ *suffix_middle_list AS suffix_middle_list,$/gm) || []).length;
+  add('suffix_middle_list を宣言して両方の USING で渡している',
+    /^DECLARE suffix_middle_list ARRAY<STRING> DEFAULT \[\];$/m.test(table) &&
+    usings === 2, `USING に ${usings} 回（2 回であること）`);
+}
+
+// 'viewlgc' を直に書いた組み立てが残っていないか（system_name の付け忘れ）
+for (const [name, src] of [['build_table.sql', table], ['view_group_html.sql', udf]]) {
+  add(`${name} に 'viewlgc_' のリテラル連結が残っていない`,
+    !/\|\|\s*'viewlgc_?'/.test(src));
+}
+
+// --- 6. usage.md の言い回しがコードとずれていないか ---------------------
+// usage.md は**レポートを見る人**が読む唯一の資料で、画面に出る文言をそのまま
+// 引用している。引用元を直したのにこちらを直し忘れると、読む人は画面と資料の
+// どちらが正しいのか判断できない（しかもコードは動いているので誰も気づかない）。
+// 引用しているものだけを機械で突き合わせる。
+{
+  // 外側のタブの並び。増減はもちろん、順番が変わっても資料は使えなくなる。
+  const m = chrome.match(/^const OUTER_TABS = \[([^\]]*)\];/m);
+  const tabs = m ? m[1].split(',').map((s) => s.trim().replace(/^'|'$/g, '')) : [];
+  const u = usage.match(/タブは左から \*\*([^*]+)\*\* の (\d+) 枚/);
+  const listed = u ? u[1].split(' / ').map((s) => s.trim()) : [];
+  add('usage.md のタブの並びが chrome.js の OUTER_TABS と同じ',
+    tabs.length > 0 && listed.join(',') === tabs.join(',') &&
+    u !== null && Number(u[2]) === tabs.length,
+    `chrome.js=[${tabs.join(',')}] / usage.md=[${listed.join(',')}]`);
+
+  // 打ち切りの案内文。usage.md は「困ったとき」の表に実物の文言を載せている。
+  const cap = (chrome.match(/^const MAX_SQL_TABS = (\d+);/m) || [])[1];
+  const tpl = sqltext.match(/notice\(`(View が多いため先頭 \$\{MAX_SQL_TABS\} 件[^`]*)`/);
+  const real = cap && tpl ? tpl[1].replace('${MAX_SQL_TABS}', cap) : null;
+  // 実物は `（全 ${views.length} 件）。` で終わる。資料側は件数を N と書くので、
+  // その手前までを突き合わせる。
+  const head = real ? real.slice(0, real.indexOf('（全')) : null;
+  add('usage.md の打ち切りの案内文が sqltext.js と同じ',
+    head !== null && usage.includes(head), `実物=${head || '読み取れなかった'}`);
+
+  // 読むオブジェクトの既定名。データソースの指定を間違えると何も出ない。
+  for (const [label, expr] of [
+    ['viewlgc_t_diff', "'t_' || 'diff'"],
+    ['viewlgc_vw_t_matrix', "'vw_' || 't_' || 'matrix'"],
+  ]) {
+    add(`usage.md の ${label} が build_table.sql の組み立てと同じ`,
+      table.includes(expr) && usage.includes(label), `組み立て: ${expr}`);
+  }
+}
+
+// --- 結果 --------------------------------------------------------------
+let failed = 0;
+for (const [name, ok, detail] of checks) {
+  if (!ok) failed++;
+  console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}${detail && !ok ? `  … ${detail}` : ''}`);
+}
+console.log(`\n${checks.length - failed}/${checks.length} passed`);
+if (failed > 0) process.exit(1);

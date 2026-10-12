@@ -1,0 +1,2055 @@
+-- =====================================================================
+-- suffix 違い View のロジック グループ比較を事前生成してテーブルに持つ
+--
+-- ※ このファイルを直接編集する。生成物ではない。
+--    設定は CONFIGURATION の DECLARE だけ。ほかに設定を置く場所はない。
+--
+-- Looker Studio の操作のたびに UDF を回すのは重い（DDL をトークン化 →
+-- α 等価判定 → パラメータ化 → 差分 → HTML 生成）。INFORMATION_SCHEMA の中身は
+-- View をデプロイしたときしか変わらないので、スケジュールドクエリで作り置きする。
+--
+-- 持つのは最新の 1 世代だけ。日次の生成は CREATE OR REPLACE TABLE ... AS SELECT で
+-- テーブルごと差し替える。**差し替えは 1 文で終わるので、読み手から見て
+-- 「空のテーブル」が見える瞬間が無い。** DELETE + INSERT や TRUNCATE + INSERT だと
+-- その隙間にレポートを開いた人には何も出ない。
+--
+-- 前提: view_group_html.sql で 7 つの UDF を作成済み。
+--       system_name / udf_dataset / udf_name_prefix / udf_name_suffix は
+--       両ファイルで一致させること。食い違うと関数が見つからない。
+--
+-- 命名と設定の書き方、動的 SQL の組み立ては lineage プロジェクト
+-- （lineage/sql/pipeline/03_run_daily_lineage_pipeline.sql）にそろえてある。
+--
+-- 動的 SQL の書き方（4 手）:
+--   1. SET sql_template          … __…__ を含む SQL を置く
+--   2. EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template
+--   3. ASSERT で未展開のプレースホルダが残っていないことを確かめる
+--   4. EXECUTE IMMEDIATE rendered_sql [INTO …] [USING …]
+--
+-- プレースホルダ（展開は viewlgc_render_dynamic_sql が行う）:
+--   __TARGET_PROJECT__     読み取り対象のプロジェクト
+--   __JOB_REGION__         region- を除いたロケーション
+--   __T_DIFF_SRC__         生成した素のカードのテーブル（project.dataset.table）
+--   __T_DIFF__             メモを差し込み済みのテーブル。レポートはこれを読む
+--   __T_BASE_NOTE__        base ごとのメモの外部テーブル（同上）
+--   __V_DIFF__             素のカードにメモを繋ぐビュー。3b の材料であり、
+--                          シートを直した内容をその場で見たいときの窓口
+--                          （レポートも確認クエリもこれは読まない。遅いので）
+--   __V_MATRIX__           base × suffix のマトリクス用ビュー。1 行 = 1 View で
+--                          location と suffix を別々の列に持つ（セクション 3c）
+--   __UDF_ANALYZE__        analyze 関数（project.dataset.function）
+--   __UDF_RENDER__         render 関数（同上）
+--   __UDF_ERD__            参照関係の図を作る関数（同上）
+--   __UDF_PAGE__           カラム定義と SQL を作り、外側タブで束ねる関数（同上）
+--   __UDF_MARKDOWN__       メモの Markdown を HTML にする関数（同上）
+--   __UDF_CSS__            group_css 関数（同上）
+--   __TZ__                 snapshot_date（生成日）の基準タイムゾーン
+--   __SUFFIX_PATTERN__     suffix を切り出す正規表現
+--   __NOTE_SHEET_URL__     メモのスプレッドシートの URL
+--   __NOTE_SHEET_RANGE__   その中の読み取り範囲（シート名!A:E）
+--   __SCHEMA_COND__        SCHEMATA 用の絞り込み条件（SQL 片）
+--   __VIEW_DATASET_COND__  VIEWS 用のデータセット条件（SQL 片）
+--   __VIEW_NAME_COND__     VIEWS 用の View 名条件（SQL 片）
+--   __SRC_SCHEMATA__       SCHEMATA の読み元（SQL 片）
+--   __SRC_VIEWS__          VIEWS の読み元（同上）
+--   __SRC_COLUMNS__        COLUMNS の読み元（同上）
+--   __SRC_FIELD_PATHS__    COLUMN_FIELD_PATHS の読み元（同上）
+--   __SRC_TABLE_OPTS__     TABLE_OPTIONS の読み元（同上）
+--
+-- __SRC_*__ は読み元をまるごと差し替える目印。import_sources が空なら
+-- リージョン修飾の INFORMATION_SCHEMA がそのまま入り、並べると
+-- 「このリージョンの INFORMATION_SCHEMA UNION ALL 運んできたテーブル」になる。
+-- **テンプレートは読み元の形を知らない**ので、混ぜる／混ぜないでテンプレートは
+-- 変わらない。組み立ては下の SET src_* を参照。
+--
+-- 識別子（プロジェクト・データセット・テーブル・関数名・正規表現）は
+-- クエリ パラメータにできないのでこの目印で渡す。配列や JSON は値なので
+-- USING のパラメータで渡す。
+--
+-- スケジュールドクエリには CONFIGURATION と セクション 2・3・3b を登録する
+-- （1 は初回だけ、4 と 5 は確認用なので不要）。
+-- 3c（マトリクス用ビュー）は入れても入れなくてもよい。ビューなので 1 度
+-- 作れば中身は毎日のセクション 2 に自動で追従する。このファイルを直したら
+-- 定義を作り直したいので、入れておくほうが手間は少ない。
+--
+-- メモ（base ごとの補足説明）について:
+--   note_sheet_url にスプレッドシートの URL を入れると、その内容を外部テーブル
+--   として読み、base で突き合わせてビューに note_html（Markdown を HTML に
+--   したもの）として出す。未設定なら空のテーブルを作るので、ビューの形は
+--   変わらない（メモ欄が「未登録」になるだけ）。
+--   メモを HTML にするのはビュー（セクション 3）。**シートを直した内容が
+--   その場で出るのはこちら**なので、繋ぎ方を直したいときはここを見る。
+--   ただし読むたびに Drive を読んで JS UDF を回し、数 MB の diff_html に
+--   REPLACE をかけるので遅い。**レポートも確認（5 系）もビューは読まない。**
+--   どちらも、それを写した __T_DIFF__（セクション 3b）のほうを読む。
+--   シートを直した内容を出したいときは 3b だけを流し直す（解析も描画も
+--   やり直さないので早い）。
+-- =====================================================================
+SET @@location = 'asia-northeast1';
+
+BEGIN
+-- ---------------------------------------------------------------------
+-- CONFIGURATION（書き換えるのはここだけ）
+--
+--   [A] 環境ごとに必ず見るもの
+--   [B] 既定のままで動くもの
+--   [C] 導出・内部用。編集しない
+--
+--   リージョンは先頭の SET @@location が唯一の置き場所。job_region は
+--   そこから受け取る。SET @@location は DECLARE より前に置く。
+-- ---------------------------------------------------------------------
+-- [A] 環境ごとに必ず見るもの ------------------------------------------
+-- プロジェクト ID は実行時に自動検出する（[C]）。別プロジェクトを見る
+-- ときだけ [C] の *_project_id にリテラルを入れて固定する。
+--
+-- プロジェクト トークンの置換
+DECLARE project_token_pattern STRING DEFAULT r'^([^-]+)';
+-- このシステムを表す名前。すべてのオブジェクト名の先頭に入る
+DECLARE system_name STRING DEFAULT 'viewlgc';
+-- データセット（作る先 / UDF）
+DECLARE work_dataset STRING DEFAULT 'ops_meta';
+DECLARE udf_dataset  STRING DEFAULT 'ops_meta';
+-- テーブル・ビューの命名（prefix / suffix）
+DECLARE table_name_prefix STRING DEFAULT '';
+DECLARE table_name_suffix STRING DEFAULT '';
+-- UDF の命名（prefix / suffix）
+DECLARE udf_name_prefix STRING DEFAULT '';
+DECLARE udf_name_suffix STRING DEFAULT '';
+-- 解析対象のデータセット（どのデータセットの View を集めるか）
+DECLARE analysis_include_dataset_patterns ARRAY<STRING> DEFAULT [r'_([A-Za-z]{4})$'];
+DECLARE analysis_exclude_dataset_patterns ARRAY<STRING> DEFAULT [];
+-- 解析対象の View 名（どの View を集めるか）
+DECLARE analysis_include_object_patterns ARRAY<STRING> DEFAULT [];
+DECLARE analysis_exclude_object_patterns ARRAY<STRING> DEFAULT [];
+-- 自動抽出した suffix 一覧に**足す**値。データセット名にも、その末尾にも
+-- 現れない suffix を混ぜたいとき（詳しくは下の説明）
+DECLARE suffix_extra_list ARRAY<STRING> DEFAULT [];
+-- base と suffix の間に挟まる語（枝番・版）の一覧。**suffix 側に取り込む。**
+-- 例: ['v2'] と書くと sales_v2_txjp の base が sales になる（詳しくは下の説明）
+DECLARE suffix_middle_list ARRAY<STRING> DEFAULT [];
+-- 別リージョンから運んできたメタデータを混ぜる送り元の一覧。
+--
+-- **空なら混ぜない**（このリージョンの INFORMATION_SCHEMA だけを見る。
+-- 従来どおりの動き）。並べると、cross_region_import.sql が作ったテーブルの
+-- 中から**そのリージョンの行だけ**を足して解析する。
+--
+-- 同じ base の View がリージョンをまたいでいるとき、ここに並べて初めて
+-- 「両方を並べた 1 枚のカード」になる。並べないと、リージョンごとに
+-- 別々のカードができてリージョン間の差が見えない。
+--
+-- **table_name_suffix は送り元ごとに持つ。**
+-- 取り込んだテーブルの名前は cross_region_import.sql の設定で決まり、
+-- 送り元を表す suffix（'_sgp' など）を付けて送り元ごとに分ける運用ができる。
+-- そのときテーブルは送り元の数だけあるので、下の table_name_suffix
+-- （このシステム自身の環境 suffix。t_diff などに付く）とは別に持つ必要がある。
+--
+--   STRUCT('asia-southeast1', '_sgp')  → viewlgc_t_meta_views_sgp を読む
+--
+-- **cross_region_import.sql の table_name_suffix と同じ値を書くこと。**
+-- 1 つのテーブルに複数の送り元を入れている（あちらの sources に 2 つ以上
+-- 並べた）なら、同じ suffix を複数行に書けばよい。まとめて 1 回だけ読み、
+-- source_region で絞る。
+--
+-- **このリージョン自身は入れない。** 拠点のぶんは INFORMATION_SCHEMA から
+-- 直接読んでいるので、入れると同じ View が 2 回入る（下の ASSERT で止める）。
+-- 取り込みの鮮度は cross_region_import.sql が見る。ここでは「行があるか」
+-- だけを確かめる。
+DECLARE import_sources ARRAY<STRUCT<source_region STRING, table_name_suffix STRING>>
+  DEFAULT [];
+-- 1 つの base につき作る「基準」の数の上限。
+--
+-- **カードは基準ごとに 1 行。** 比較ペインは基準 1 つにつき G−1 枚なので、
+-- 行を分ければ 1 行は G に対して線形に収まる。全基準を 1 枚に載せていた頃は
+-- G×(G−1) 枚（二乗）で、リージョンをまたいで G が伸びたときに UDF の
+-- メモリを使い切って生成ごと落ちた。
+--
+-- ここで止めるのは行数のほう。G が極端に大きい base では、基準を全部
+-- 用意しても読む人が選びきれないし、行数と生成時間だけが伸びる。
+-- 打ち切ったことはカードに書く（選べないだけで、グループが無いのではない）。
+DECLARE max_ref_rows INT64 DEFAULT 24;
+-- snapshot_date の基準タイムゾーン
+DECLARE snapshot_time_zone STRING DEFAULT 'Asia/Tokyo';
+-- base ごとのメモ（Markdown）を置くスプレッドシート。空ならメモ機能を使わない
+DECLARE note_sheet_url   STRING DEFAULT '';
+DECLARE note_sheet_range STRING DEFAULT 'notes!A:E';
+--
+-- 変数の説明:
+--   project_token_pattern
+--     自動検出したプロジェクト ID からこの正規表現で切り出したトークン
+--     （REGEXP_EXTRACT。キャプチャがあればグループ 1）が、下のデータセット名と
+--     prefix / suffix に書いた '{project_token}' をすべて置き換える。例:
+--     プロジェクト 'mycompany-prod-123' に r'-([^-]+)-' なら 'prod' になるので、
+--     table_name_prefix='{project_token}_' が 'prod_' になる。既定は最初の
+--     ハイフン区切り。一致しなければ '' になり、残った '{project_token}' は
+--     下の ASSERT で落ちる。view_group_html.sql と合わせること。
+--   system_name
+--     このシステムを表す名前。テーブルもビューも関数も、この名前と '_' が
+--     先頭に入る（既定なら viewlgc_t_diff / viewlgc_analyze）。
+--     同じプロジェクトに別のシステムを同居させたときに、どのオブジェクトが
+--     どのシステムのものかを名前だけで見分けるためのもの。
+--     環境ではなくシステムを表すので、prefix / suffix とは別に持つ。
+--     **view_group_html.sql の同名の変数と必ず同じ値にすること。**
+--     違う値だと関数が見つからない。英数字と '_' だけ（ルーチン名に '-' は不可）。
+--   work_dataset / udf_dataset
+--     テーブルとビューを作るデータセット / UDF が置いてあるデータセット。
+--     udf_dataset は view_group_html.sql と同じ値にすること。
+--   table_name_prefix / table_name_suffix
+--     テーブル・ビューの命名。物理名は下の SET で
+--       prefix + system_name + '_' + 区分 + 基本名 + suffix
+--     と組み立てる。区分は 'm_'（master）/ 't_'（transaction）でリテラル。
+--     環境ごとに変わるのは prefix と suffix だけなので、変数はこの 2 つ。
+--     区切りの '_' は値に含めて書く。
+--     例: prefix='ope_' / suffix='_tky' で ope_viewlgc_t_diff_tky。
+--     使える文字は英数字と '_' と '-'（参照はすべてバッククォート引用なので
+--     '-tky' のようなハイフンも安全）。データセット名と UDF 名は '-' 不可。
+--   note_sheet_url / note_sheet_range
+--     base ごとのメモを置くスプレッドシートの URL と、その中の読み取り範囲。
+--     URL はアドレスバーのものをそのまま貼ってよい。'/d/<ID>' までを下の SET で
+--     自動的に切り出す（'/edit?gid=0#gid=0' は落ちる）。
+--     切るのは、'#gid=' が「タブを ID で指定する」意味を持つため。こちらは
+--     note_sheet_range でタブを名前で指定しているので、両方あると指定が二重になる。
+--     読み取り範囲の左側（既定 'notes'）は**タブの名前**。新規作成した直後の
+--     タブは 'シート1' なので、タブをリネームするかこちらを合わせること。
+--     1 行目は見出しで、列は左から base / note_md / updated_at / updated_by /
+--     is_hidden の順（この順序が唯一の取り決め。見出しの文言は見ない）。
+--       base       メモを付ける base の名前。ビューの base と完全一致で突き合わせる
+--       note_md    Markdown 本文
+--       updated_at 更新時刻。ISO 8601（2026-08-26T09:00:00Z）。同じ base が
+--                  複数行あるときは、これがいちばん新しい 1 行だけを採る
+--       updated_by 更新者。表示にだけ使う
+--       is_hidden  TRUE / 1 / yes なら出さない。消さずに下書きへ戻すためのもの
+--     URL を空にすると、外部テーブルの代わりに同じ列を持つ空のテーブルを作る。
+--     ビューの形は変わらないので、あとから URL を入れてセクション 1 を流し
+--     直せばメモが出るようになる。
+--     **注意**: スプレッドシートの外部テーブルを読むには Drive のスコープが要る。
+--     スケジュールドクエリを作るときに Drive を許可し、Looker Studio の
+--     データソースの認証にもシートを開ける権限を持たせること。
+--   udf_name_prefix / udf_name_suffix
+--     UDF の命名。関数名は [C] で
+--       udf_prefix + system_name + '_' + 基本名 + udf_suffix
+--     と組み立て、view_group_html.sql が作った名前と一致させる必要がある。
+--     ルーチン名は英数字と '_' しか使えない（'-' 不可）ので、テーブル側の
+--     prefix / suffix とは別に持つ。ハイフンは下の ASSERT で落ちる。
+--   analysis_include_dataset_patterns / analysis_exclude_dataset_patterns
+--   analysis_include_object_patterns  / analysis_exclude_object_patterns
+--     対象の絞り込み。4 つとも形は同じ。
+--       include … 空配列なら絞らない。指定すると**いずれか**に一致するものだけ
+--       exclude … **いずれか**に一致したものを落とす。include のあとに効く
+--     正規表現は部分一致（REGEXP_CONTAINS）。完全一致にしたいなら ^…$ を付ける。
+--     View 名は INFORMATION_SCHEMA.VIEWS.table_name（suffix を含んだ実際の名前）
+--     に効く。base 名ではないので、ある base だけ見たいなら
+--     r'^v_daily_sales_' のように書く。
+--       include 例: [r'^mart_']  [r'^mart_abjp$', r'^mart_abus$']
+--       exclude 例: [r'_tmp$', r'_bk$', r'^wk_']
+--   suffix_extra_list
+--     自動抽出した suffix 一覧に**足す**値。**自動抽出はそのまま残る。**
+--     データセット名にも、その末尾（suffix_tail_lengths）にも現れない suffix を
+--     混ぜたいときに使う。環境ごとに中身が違うので [A] に置いてある。
+--
+--       mart_abjp.vw_sample_abjp            → suffix は abjp（自動で取れる）
+--       mart_abjp.vw_sample_abjp_xyz123456  → suffix は abjp_xyz123456（取れない）
+--
+--     どちらも base を vw_sample にしたいなら:
+--       suffix_extra_list = ['abjp_xyz123456']
+--
+--     **末尾の導出はここには効かない。** 書いた文字列がそのまま 1 つ増える
+--     だけで、'abjp_xyz123456' から '56' が増えたりはしない（「強制的に
+--     足す」ための設定なので、勝手に増やさない）。除外
+--     （suffix_exclude_list）は最後に効くので、両方に書けば消える。
+--
+--     **[B] の suffix_list とは別物。** あちらは一覧を丸ごと置き換える
+--     （書くと自動抽出が行われなくなる）。足したいだけならこちら。
+--     最終的にどうなったかは 5-4 が全部出す（suffix_origin に出どころが入る）。
+--
+--     **suffix ごとに 1 行ずつ要る。** 枝番が全 suffix に付くなら
+--     suffix_middle_list のほう（下）。あちらは掛け算で増やす。
+--   suffix_middle_list
+--     base と suffix の**間に挟まる語**の一覧。書いた語を suffix 側に取り込む。
+--
+--     View 名は '_' で繋がっているが、base のほうも '_' を含むので、
+--     **どこから suffix なのかは名前だけでは決まらない。**
+--
+--       sales_txjp        → base=sales     suffix=txjp      （迷いようがない）
+--       sales_v2_txjp     → base=sales_v2  suffix=txjp      （既定はこう解釈する）
+--                         → base=sales     suffix=v2_txjp   （こう読みたい）
+--
+--     どちらも名前としては成り立つので、**どちらに読むかは人が決めるしかない。**
+--     v2 を「間に挟まる語」だと宣言するのがこの設定:
+--
+--       suffix_middle_list = ['v2']
+--
+--     すると suffix 一覧に v2_<suffix> が全 suffix ぶん増える（txjp → v2_txjp、
+--     txus → v2_txus、…）。View 名との照合は**最長一致**なので、
+--     sales_v2_txjp は v2_txjp のほうで切れて base=sales になり、
+--     sales_txjp は txjp で切れて base=sales のまま。**両方が同じ base に並ぶ。**
+--
+--     suffix_extra_list との違いは掛け算になること。suffix が 20 個あっても
+--     書くのは 1 語で、20 個の組み合わせが増える。suffix ごとに 1 行ずつ
+--     並べる必要は無い。
+--
+--     2 段挟まるなら '_' で繋いで 1 語として書く（['v2_beta'] → v2_beta_txjp）。
+--     複数の語を並べれば、それぞれが全 suffix と組む（['v2','v3'] なら 2 倍）。
+--
+--     **末尾の導出（suffix_tail_lengths）のあとに掛かる。** つまり
+--     tail で増えた jp / us にも v2_jp / v2_us として組み合わさる。
+--     除外（suffix_exclude_list）は最後なので、要らない組み合わせは消せる。
+--
+--     何が増えたかは 5-4 が出す（suffix_origin = 'suffix_middle_list との組'）。
+--   snapshot_time_zone
+--     snapshot_date（いつ時点の内容かを表す列）をどの日付で刻むか。
+--     このツールはリージョンをまたいで使うので、置き場所によって変える。
+--     ジョブのリージョンとは別物で、@@location からは決まらない。
+--     履歴を積まなくなったので、ずれても壊れるものは無い。ただし「いつの
+--     内容か」を読む人が見るので、運用しているタイムゾーンに合わせること。
+--     IANA のタイムゾーン名（'Asia/Tokyo' / 'UTC' / 'America/New_York' など）。
+
+-- [B] 既定のままで動くもの --------------------------------------------
+-- suffix の切り出し。1 つ目のキャプチャが suffix になる。
+-- analysis_include_dataset_patterns が「どのデータセットを見るか」なのに対し、
+-- こちらは「同じ意味を持つ文字列をどう取り出すか」。役割が違う。
+DECLARE suffix_pattern STRING DEFAULT r'_([A-Za-z]{4})$';
+-- suffix 一覧。空ならデータセット名から suffix_pattern で自動抽出する。
+--
+-- **書くと自動抽出は行われない（足すのではなく置き換える）。** 1 つ書いた
+-- つもりが、データセット名から取れていた分もろとも消えるので注意。
+-- ここに書くのは「一覧を丸ごと自分で決める」ときだけ。
+-- 末尾の導出（suffix_tail_lengths）と除外（suffix_exclude_list）は、
+-- ここに書いた値に対しても効く。
+--
+-- **1 つだけ足したいなら [A] の suffix_extra_list のほう。**
+-- あちらは自動抽出を残したまま値を足す。環境ごとに中身が違うので [A] に置いてある。
+DECLARE suffix_list ARRAY<STRING> DEFAULT [];
+-- 取り出した suffix の**末尾 n 文字も suffix として扱う**長さの一覧。
+-- 既定の [2] で abjp / abus から jp / us が増える。空にすると何も足さない。
+--
+-- 用途は「データセット名には現れない suffix」。データセットが mart_abjp
+-- （suffix = abjp）で、その中に v_x_jp のように地域だけを持つ View がある場合、
+-- jp はどのデータセット名の末尾にも出てこないので自動抽出では拾えない。
+-- 4 文字の suffix が <系統 2 文字><地域 2 文字> の組になっているなら、
+-- その後ろ 2 文字がそのまま地域だけの suffix になる。
+--
+-- **suffix_pattern を r'_([A-Za-z]{2,4})$' に広げても解決しない。** あれは
+-- データセット名に当たるので、mart_abjp からはやはり abjp しか出てこない。
+-- そのうえ 2〜3 文字で終わるデータセットの語尾が片端から suffix になる。
+DECLARE suffix_tail_lengths ARRAY<INT64> DEFAULT [2];
+-- suffix 一覧から落とす値。
+--
+-- **まず analysis_exclude_dataset_patterns を検討すること。** データセットごと
+-- 対象外にすれば、その名前から suffix は取り出されず（末尾の導出も起きず）、
+-- 中の View も集められない。「データセットを除外したらその中のオブジェクトも
+-- 全部除外」が素直に成り立つ。作業用データセット（既定の条件だと ops_meta が
+-- 入ってしまい meta / ta が増える）はこちらで落とすのが筋。
+--
+--   analysis_exclude_dataset_patterns = [r'^ops_meta$']
+--     → suffix から meta と ta が消え、viewlgc 自身の View も対象外になる
+--
+-- こちらが要るのは、**解析対象にはしたいが名前の語尾が suffix ではない**
+-- データセットがある場合だけ。混ざったゴミは全 View 名に ENDS_WITH で当たるので、
+-- v_summary_ta のような無関係な View の base が切られる。base が変わると
+-- メモ（base で突き合わせている）が黙って外れる。
+--
+-- **効くのは出来上がった一覧に対してだけ**（導出のあと）。落とした値からの
+-- 導出は止まらないので、「4 文字のほうは要らないが末尾は要る」が書ける。
+--   ghkr を落とす → 一覧から ghkr だけが消え、kr は残る
+--   meta と ta を消したい → 両方並べる（meta だけでは ta が残る）
+-- 段階を分けて効かせるほうが短く書けるが、書いた値と消える値が 1 対 1 で
+-- 対応しないほうが分かりにくい。5-4 が最終的な一覧を全部出すので、
+-- 消したいものはそれを見て並べればよい。
+--
+-- **正規表現ではなく値そのもの**（完全一致）。ここだけ *_patterns と流儀が違う
+-- のは、suffix が短くて部分一致だと巻き添えが大きいため（'ta' を弾くつもりが
+-- REGEXP_CONTAINS では 'meta' まで消える）。
+DECLARE suffix_exclude_list ARRAY<STRING> DEFAULT [];
+-- カラム定義に STRUCT の中身（ネストした項目）を出すか。
+-- TRUE なら amount_breakdown の下に amount_breakdown.currency のような行が
+-- 並ぶ。型が ARRAY<STRUCT<...>> のままだと中の定義が読めないので既定は TRUE。
+-- STRUCT が多い View だと表が縦に伸びるので、最上位だけ見たいときは FALSE。
+DECLARE include_nested_fields BOOL DEFAULT TRUE;
+-- UDF に渡す解析オプション（JSON）。1 つ以上のキーを持つオブジェクトにすること。
+-- 指定できるキーは view_group_html.sql の冒頭に一覧がある。
+--   substitutable / equivalentLiterals / suffixAware / includeUnmatched /
+--   stripOptions / layout / mode / 表示の調整
+--
+-- 既定の分類方針: 置換してよいのは FROM / JOIN が指す実体名と値だけ。
+-- 列名・別名・CTE 名・ウィンドウ名・関数名が違えば別グループにする
+-- （横展開はロジックが同じならコピーで行う運用なので、そこが違えば
+-- 環境差ではなく書き換えの差）。バッククォートの有無やパスの部分数も
+-- 正規化しないので、意味が同じでも書き方が違えば別グループになる。
+--
+-- 値の差もロジック差として残したいなら "substitutable":["entity"] を指定する。
+-- そのとき効くのが equivalentLiterals（同じとみなす文字列の組の一覧）。
+-- suffixList は下の suffixes から自動で入るので、ここには書かない。
+-- 綴りを間違えたキーは UDF 側で黙って無視される。
+DECLARE analyze_options STRING DEFAULT '{"mode":"class"}';
+
+-- [C] 導出・内部用。編集しない ----------------------------------------
+-- リージョンは @@location が唯一の置き場所。
+DECLARE job_region STRING DEFAULT @@location;
+-- プロジェクトは自動検出した値を使う。役割ごとに別プロジェクトにするときだけ
+-- DEFAULT にリテラルを入れて固定する（COALESCE で非 NULL が勝つ）。
+DECLARE default_project_id STRING;
+DECLARE work_project_id    STRING DEFAULT NULL;  -- テーブル・ビューの置き場所
+DECLARE udf_project_id     STRING DEFAULT NULL;  -- UDF の置き場所
+DECLARE target_project_id  STRING DEFAULT NULL;  -- 読み取り対象
+DECLARE project_token      STRING;
+
+-- 作るオブジェクトの物理名（下の SET で組み立てる）。データセット名は含まない。
+-- オブジェクトが増えたらここに 1 行足し、SET と本文の __…__ を対で増やし、
+-- viewlgc_render_dynamic_sql にも置換を 1 段足す。
+DECLARE table_diff_src  STRING;  -- 生成した素のカード（メモを差し込む前）
+DECLARE table_diff      STRING;  -- レポートが読むテーブル（メモ差し込み済み）
+DECLARE table_base_note STRING;  -- base ごとのメモ（スプレッドシートの外部テーブル）
+DECLARE view_diff       STRING;  -- 素のカードにメモを繋ぐビュー（3b の材料）
+DECLARE view_matrix     STRING;  -- base × suffix のマトリクス（1 行 = 1 View）
+-- 5 つの読み元（SQL 片）。拠点だけなら INFORMATION_SCHEMA がそのまま入り、
+-- 混ぜるなら UNION ALL になる。テンプレートは形を知らない。
+DECLARE src_schemata    STRING;
+DECLARE src_views       STRING;
+DECLARE src_columns     STRING;
+DECLARE src_field_paths STRING;
+DECLARE src_table_opts  STRING;
+DECLARE import_diag STRING;  -- 取り込みが足りないときの説明。足りていれば NULL
+
+-- view_group_html.sql が作った関数名。同じ規則で組み立てて突き合わせる。
+-- 解析と描画が別の UDF なのは、インラインのコード ブロブが 1 個あたり 32 KB
+-- までのため。JS UDF から別の UDF は呼べないので、つなぐのはこの SQL の仕事。
+DECLARE udf_analyze_function_name  STRING;
+DECLARE udf_render_function_name   STRING;
+DECLARE udf_erd_function_name      STRING;
+DECLARE udf_page_function_name     STRING;
+DECLARE udf_markdown_function_name STRING;
+DECLARE udf_css_function_name      STRING;
+DECLARE udf_sql_function_name      STRING;
+
+-- 動的 SQL。render_call_sql は 1 度だけ組み立てて全テンプレートで使い回す。
+-- 呼び出しごとに変わるのは @sql_template だけ。
+DECLARE render_call_sql STRING;
+DECLARE sql_template    STRING;
+DECLARE rendered_sql    STRING;
+
+-- include / exclude から組み立てる条件文。見る列が違うので 3 本作る。
+DECLARE schema_condition       STRING;  -- SCHEMATA.schema_name
+DECLARE view_dataset_condition STRING;  -- VIEWS.table_schema
+DECLARE view_name_condition    STRING;  -- VIEWS.table_name
+DECLARE target_dataset_count INT64;
+DECLARE target_view_count    INT64;
+DECLARE udf_found_count      INT64;
+
+
+-- 実行中のプロジェクトを INFORMATION_SCHEMA.SCHEMATA から自動検出する
+-- （catalog_name = ジョブが動いているプロジェクト）。リージョン修飾の
+-- 識別子はパラメータにできないので @@location から組み立てる。
+EXECUTE IMMEDIATE FORMAT(
+  "SELECT DISTINCT catalog_name FROM `region-%s`.INFORMATION_SCHEMA.SCHEMATA LIMIT 1",
+  @@location
+) INTO default_project_id;
+ASSERT default_project_id IS NOT NULL AS
+  'プロジェクト ID を自動検出できません（このリージョンにデータセットが無い？）。work_project_id などにリテラルを入れて固定してください。';
+SET work_project_id   = COALESCE(work_project_id,   default_project_id);
+SET udf_project_id    = COALESCE(udf_project_id,    default_project_id);
+SET target_project_id = COALESCE(target_project_id, default_project_id);
+
+-- 名前を組み立てる前に '{project_token}' を置き換える。
+SET project_token =
+  COALESCE(REGEXP_EXTRACT(default_project_id, project_token_pattern), '');
+SET work_dataset      = REPLACE(work_dataset,      '{project_token}', project_token);
+SET udf_dataset       = REPLACE(udf_dataset,       '{project_token}', project_token);
+SET table_name_prefix = REPLACE(table_name_prefix, '{project_token}', project_token);
+SET table_name_suffix = REPLACE(table_name_suffix, '{project_token}', project_token);
+SET udf_name_prefix   = REPLACE(udf_name_prefix,   '{project_token}', project_token);
+SET udf_name_suffix   = REPLACE(udf_name_suffix,   '{project_token}', project_token);
+
+ASSERT REGEXP_CONTAINS(work_dataset, r'^[A-Za-z0-9_]+$') AS
+  'work_dataset は英数字と _ だけにしてください（置換されていない {project_token} が残っていませんか）。';
+ASSERT REGEXP_CONTAINS(udf_dataset, r'^[A-Za-z0-9_]+$') AS
+  'udf_dataset は英数字と _ だけにしてください（置換されていない {project_token} が残っていませんか）。';
+
+-- テーブル: prefix + system_name + '_' + 区分 + 基本名 + suffix
+-- ビュー  : prefix + system_name + '_' + 'vw_' + 区分 + 基本名 + suffix
+-- 区分 't_' は transaction（'m_' は master）。
+-- テーブルとビューは基本名が同じ 'diff' で、'vw_' の有無だけで見分ける。
+-- 素のカードだけを持つ中間テーブルには '_src' を付ける。
+ASSERT REGEXP_CONTAINS(system_name, r'^[A-Za-z0-9_]+$') AS
+  'system_name は英数字と _ だけにしてください（ルーチン名に - は使えません）。';
+SET table_diff_src =
+  table_name_prefix || system_name || '_' || 't_' || 'diff_src' || table_name_suffix;
+SET table_diff =
+  table_name_prefix || system_name || '_' || 't_' || 'diff' || table_name_suffix;
+-- メモは View のデプロイでは変わらない台帳なので 'm_'（master）。
+SET table_base_note =
+  table_name_prefix || system_name || '_' || 'm_' || 'base_note' || table_name_suffix;
+SET view_diff =
+  table_name_prefix || system_name || '_' || 'vw_' || 't_' || 'diff' || table_name_suffix;
+-- マトリクスはカードとは grain が違う（1 行 = 1 View）ので基本名も分ける。
+-- 実体はビューだけ。読むのは __T_DIFF_SRC__ の小さい列だけなので、
+-- テーブルに焼き込まなくてもレポートから直接読んで十分に速い。
+SET view_matrix =
+  table_name_prefix || system_name || '_' || 'vw_' || 't_' || 'matrix' || table_name_suffix;
+ASSERT REGEXP_CONTAINS(table_diff_src, r'^[A-Za-z0-9_-]+$') AS
+  'table_diff_src の名前が不正です。';
+ASSERT REGEXP_CONTAINS(table_diff, r'^[A-Za-z0-9_-]+$') AS
+  'table_diff の名前が不正です。';
+ASSERT REGEXP_CONTAINS(table_base_note, r'^[A-Za-z0-9_-]+$') AS
+  'table_base_note の名前が不正です。';
+ASSERT REGEXP_CONTAINS(view_diff, r'^[A-Za-z0-9_-]+$') AS
+  'view_diff の名前が不正です。';
+ASSERT REGEXP_CONTAINS(view_matrix, r'^[A-Za-z0-9_-]+$') AS
+  'view_matrix の名前が不正です。';
+
+-- 運んできたメタデータのテーブルは、送り元ごとに名前が違いうるので
+-- ここでは組み立てない（下の SET src_* が import_sources から作る）。
+-- 名前の規則は cross_region_import.sql と同じ:
+--   table_name_prefix + system_name + '_' + 't_' + 'meta_' + 種類
+--     + その送り元の table_name_suffix
+-- prefix と system_name はあちらと同じ値でなければ見つからない
+-- （node check_cross_region.mjs が既定値を突き合わせる）。
+
+ASSERT job_region NOT IN (SELECT source_region FROM UNNEST(import_sources)) AS
+  'import_sources にこのリージョン自身が入っています。拠点のぶんは INFORMATION_SCHEMA から直接読むので、入れると同じ View が 2 回入ります。';
+ASSERT ARRAY_LENGTH(import_sources) = ARRAY_LENGTH(
+    ARRAY(SELECT DISTINCT source_region FROM UNNEST(import_sources))) AS
+  'import_sources に同じ source_region が 2 回出てきます。同じ View が 2 回入ります。';
+
+-- UDF: udf_prefix + system_name + '_' + 基本名 + udf_suffix
+--      （view_group_html.sql と同じ。system_name も同じ値でなければ見つからない）
+SET udf_analyze_function_name =
+  udf_name_prefix || system_name || '_' || 'analyze' || udf_name_suffix;
+SET udf_render_function_name =
+  udf_name_prefix || system_name || '_' || 'render' || udf_name_suffix;
+SET udf_erd_function_name =
+  udf_name_prefix || system_name || '_' || 'erd' || udf_name_suffix;
+SET udf_page_function_name =
+  udf_name_prefix || system_name || '_' || 'page' || udf_name_suffix;
+SET udf_markdown_function_name =
+  udf_name_prefix || system_name || '_' || 'markdown' || udf_name_suffix;
+SET udf_css_function_name =
+  udf_name_prefix || system_name || '_' || 'group_css' || udf_name_suffix;
+SET udf_sql_function_name =
+  udf_name_prefix || system_name || '_' || 'render_dynamic_sql' || udf_name_suffix;
+ASSERT REGEXP_CONTAINS(udf_analyze_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_analyze_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_render_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_render_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_erd_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_erd_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_page_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_page_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_markdown_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_markdown_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_css_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_css_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_sql_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_sql_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+
+ASSERT note_sheet_url = '' OR
+  REGEXP_CONTAINS(note_sheet_url, r'^https://docs\.google\.com/spreadsheets/d/[A-Za-z0-9_-]+') AS
+  'note_sheet_url はスプレッドシートの URL（https://docs.google.com/spreadsheets/d/...）にしてください。メモを使わないなら空にします。';
+ASSERT REGEXP_CONTAINS(note_sheet_range, r"^[^'`]+![A-Z]+[0-9]*:[A-Z]+[0-9]*$") AS
+  'note_sheet_range は「シート名!A:E」の形にしてください。';
+-- アドレスバーの URL をそのまま貼れるように、'/d/<ID>' までに切り詰める。
+-- 上の ASSERT を通っていれば必ず取り出せるので、COALESCE が効くのは '' のときだけ。
+SET note_sheet_url = COALESCE(
+  REGEXP_EXTRACT(note_sheet_url, r'^https://docs\.google\.com/spreadsheets/d/[A-Za-z0-9_-]+'),
+  note_sheet_url);
+
+ASSERT REGEXP_CONTAINS(TRIM(analyze_options), r'^\{\s*"') AS
+  'analyze_options は 1 つ以上のキーを持つ JSON オブジェクトにしてください（例: {"mode":"class"}）。';
+
+-- include / exclude を条件文に組み立てる。3 本とも形は同じで、見る列が違うだけ。
+--   データセット名は SCHEMATA では schema_name、VIEWS では table_schema。
+--   View 名は VIEWS の table_name。
+SET schema_condition = CONCAT(
+  IF(ARRAY_LENGTH(analysis_include_dataset_patterns) = 0, 'TRUE',
+    (SELECT CONCAT('(', STRING_AGG(FORMAT("REGEXP_CONTAINS(schema_name, r'%s')", p), ' OR '), ')')
+     FROM UNNEST(analysis_include_dataset_patterns) AS p)),
+  IF(ARRAY_LENGTH(analysis_exclude_dataset_patterns) = 0, '',
+    (SELECT CONCAT(' AND NOT (', STRING_AGG(FORMAT("REGEXP_CONTAINS(schema_name, r'%s')", p), ' OR '), ')')
+     FROM UNNEST(analysis_exclude_dataset_patterns) AS p)));
+
+SET view_dataset_condition = CONCAT(
+  IF(ARRAY_LENGTH(analysis_include_dataset_patterns) = 0, 'TRUE',
+    (SELECT CONCAT('(', STRING_AGG(FORMAT("REGEXP_CONTAINS(table_schema, r'%s')", p), ' OR '), ')')
+     FROM UNNEST(analysis_include_dataset_patterns) AS p)),
+  IF(ARRAY_LENGTH(analysis_exclude_dataset_patterns) = 0, '',
+    (SELECT CONCAT(' AND NOT (', STRING_AGG(FORMAT("REGEXP_CONTAINS(table_schema, r'%s')", p), ' OR '), ')')
+     FROM UNNEST(analysis_exclude_dataset_patterns) AS p)));
+
+SET view_name_condition = CONCAT(
+  IF(ARRAY_LENGTH(analysis_include_object_patterns) = 0, 'TRUE',
+    (SELECT CONCAT('(', STRING_AGG(FORMAT("REGEXP_CONTAINS(table_name, r'%s')", p), ' OR '), ')')
+     FROM UNNEST(analysis_include_object_patterns) AS p)),
+  IF(ARRAY_LENGTH(analysis_exclude_object_patterns) = 0, '',
+    (SELECT CONCAT(' AND NOT (', STRING_AGG(FORMAT("REGEXP_CONTAINS(table_name, r'%s')", p), ' OR '), ')')
+     FROM UNNEST(analysis_exclude_object_patterns) AS p)));
+
+-- ---------------------------------------------------------------------
+-- 5 つの読み元を組み立てる
+--
+-- **import_sources が空なら、いままでとまったく同じ SQL になる。**
+-- リージョン修飾の INFORMATION_SCHEMA がそのまま入るだけ。
+--
+-- 並べたときは「このリージョンの INFORMATION_SCHEMA UNION ALL 運んできた
+-- テーブル…」にする。UNION ALL は列の並びと数がそろっている必要があるので、
+-- **どの枝でも列を明示する。** 運んできた側には source_region 列が余分に
+-- あり、拠点側には無いので、SELECT * では合わない。
+--
+-- **運んできたテーブルは 1 つとは限らない。** cross_region_import.sql の
+-- table_name_suffix に送り元を表す値（'_sgp' など）を付けて送り元ごとに
+-- テーブルを分ける運用ができるので、import_sources の suffix ごとに枝を
+-- 足す。同じ suffix に複数の送り元が入っている（1 つのテーブルにまとめて
+-- 取り込んでいる）なら、その枝は 1 回だけ出て source_region で複数を拾う。
+--
+-- 運んできた側は必ず source_region で絞る。テーブルには過去に運んだ他の
+-- リージョンの行が残っていることがあり、そのまま混ぜると import_sources から
+-- 外したはずのリージョンが解析に入ってしまう。**万一 cross_region_export.sql を
+-- 拠点で流して自分のメタデータを書き込んでしまっても、この絞り込みがあれば
+-- 二重計上にはならない。**
+--
+-- 条件（__*_COND__）はテンプレート側の WHERE が当てる。ここでは読み元の
+-- 形だけを作るので、混ぜる／混ぜないでテンプレートは変わらない。
+-- ---------------------------------------------------------------------
+SET src_schemata = IF(ARRAY_LENGTH(import_sources) = 0,
+  FORMAT('`%s.region-%s.INFORMATION_SCHEMA.SCHEMATA`', target_project_id, job_region),
+  (SELECT FORMAT('(SELECT %s FROM `%s.region-%s.INFORMATION_SCHEMA.SCHEMATA`%s)',
+     'catalog_name, schema_name', target_project_id, job_region,
+     STRING_AGG(
+       FORMAT(' UNION ALL SELECT %s FROM `%s.%s.%s` WHERE source_region IN UNNEST(%T)',
+         'catalog_name, schema_name', work_project_id, work_dataset,
+         table_name_prefix || system_name || '_' || 't_' || 'meta_schemata' || g.sfx,
+         g.regions),
+       '' ORDER BY g.sfx))
+   FROM (
+     SELECT table_name_suffix AS sfx, ARRAY_AGG(source_region ORDER BY source_region) AS regions
+     FROM UNNEST(import_sources) GROUP BY table_name_suffix
+   ) AS g));
+
+-- View だけは **source_region も一緒に持ち出す**（note が View をリージョン
+-- ごとにまとめるのに要る）。ローカルの INFORMATION_SCHEMA にはその列が無い
+-- ので、ジョブのリージョンを定数で置く。運んできたテーブルには列がある。
+SET src_views = IF(ARRAY_LENGTH(import_sources) = 0,
+  FORMAT('(SELECT table_schema, table_name, view_definition, %T AS source_region'
+         ' FROM `%s.region-%s.INFORMATION_SCHEMA.VIEWS`)',
+         job_region, target_project_id, job_region),
+  (SELECT FORMAT('(SELECT %s, %T AS source_region FROM `%s.region-%s.INFORMATION_SCHEMA.VIEWS`%s)',
+     'table_schema, table_name, view_definition', job_region, target_project_id, job_region,
+     STRING_AGG(
+       FORMAT(' UNION ALL SELECT %s FROM `%s.%s.%s` WHERE source_region IN UNNEST(%T)',
+         'table_schema, table_name, view_definition, source_region', work_project_id, work_dataset,
+         table_name_prefix || system_name || '_' || 't_' || 'meta_views' || g.sfx,
+         g.regions),
+       '' ORDER BY g.sfx))
+   FROM (
+     SELECT table_name_suffix AS sfx, ARRAY_AGG(source_region ORDER BY source_region) AS regions
+     FROM UNNEST(import_sources) GROUP BY table_name_suffix
+   ) AS g));
+
+SET src_columns = IF(ARRAY_LENGTH(import_sources) = 0,
+  FORMAT('`%s.region-%s.INFORMATION_SCHEMA.COLUMNS`', target_project_id, job_region),
+  (SELECT FORMAT('(SELECT %s FROM `%s.region-%s.INFORMATION_SCHEMA.COLUMNS`%s)',
+     'table_schema, table_name, column_name, ordinal_position, data_type, is_nullable', target_project_id, job_region,
+     STRING_AGG(
+       FORMAT(' UNION ALL SELECT %s FROM `%s.%s.%s` WHERE source_region IN UNNEST(%T)',
+         'table_schema, table_name, column_name, ordinal_position, data_type, is_nullable', work_project_id, work_dataset,
+         table_name_prefix || system_name || '_' || 't_' || 'meta_columns' || g.sfx,
+         g.regions),
+       '' ORDER BY g.sfx))
+   FROM (
+     SELECT table_name_suffix AS sfx, ARRAY_AGG(source_region ORDER BY source_region) AS regions
+     FROM UNNEST(import_sources) GROUP BY table_name_suffix
+   ) AS g));
+
+SET src_field_paths = IF(ARRAY_LENGTH(import_sources) = 0,
+  FORMAT('`%s.region-%s.INFORMATION_SCHEMA.COLUMN_FIELD_PATHS`', target_project_id, job_region),
+  (SELECT FORMAT('(SELECT %s FROM `%s.region-%s.INFORMATION_SCHEMA.COLUMN_FIELD_PATHS`%s)',
+     'table_schema, table_name, column_name, field_path, data_type, description', target_project_id, job_region,
+     STRING_AGG(
+       FORMAT(' UNION ALL SELECT %s FROM `%s.%s.%s` WHERE source_region IN UNNEST(%T)',
+         'table_schema, table_name, column_name, field_path, data_type, description', work_project_id, work_dataset,
+         table_name_prefix || system_name || '_' || 't_' || 'meta_field_paths' || g.sfx,
+         g.regions),
+       '' ORDER BY g.sfx))
+   FROM (
+     SELECT table_name_suffix AS sfx, ARRAY_AGG(source_region ORDER BY source_region) AS regions
+     FROM UNNEST(import_sources) GROUP BY table_name_suffix
+   ) AS g));
+
+SET src_table_opts = IF(ARRAY_LENGTH(import_sources) = 0,
+  FORMAT('`%s.region-%s.INFORMATION_SCHEMA.TABLE_OPTIONS`', target_project_id, job_region),
+  (SELECT FORMAT('(SELECT %s FROM `%s.region-%s.INFORMATION_SCHEMA.TABLE_OPTIONS`%s)',
+     'table_schema, table_name, option_name, option_value', target_project_id, job_region,
+     STRING_AGG(
+       FORMAT(' UNION ALL SELECT %s FROM `%s.%s.%s` WHERE source_region IN UNNEST(%T)',
+         'table_schema, table_name, option_name, option_value', work_project_id, work_dataset,
+         table_name_prefix || system_name || '_' || 't_' || 'meta_table_opts' || g.sfx,
+         g.regions),
+       '' ORDER BY g.sfx))
+   FROM (
+     SELECT table_name_suffix AS sfx, ARRAY_AGG(source_region ORDER BY source_region) AS regions
+     FROM UNNEST(import_sources) GROUP BY table_name_suffix
+   ) AS g));
+
+
+-- 永続関数への呼び出しを 1 度だけ組み立てて使い回す。関数の場所は
+-- udf_project_id / udf_dataset / udf_render_function_name で決まる。
+-- 固定の設定はここで焼き込み、テンプレートだけを @sql_template で渡す。
+-- 値は %T で埋める。条件文には引用符が入るので、%s だと壊れる。
+SET render_call_sql = FORMAT(
+  """SELECT `%s.%s.%s`(@sql_template, %T, %T, %T, %T, %T, %T, STRUCT(%T AS diff_src, %T AS diff_table, %T AS diff_view, %T AS matrix_view, %T AS base_note, %T AS analyze_function, %T AS render_function, %T AS erd_function, %T AS page_function, %T AS markdown_function, %T AS css_function), STRUCT(%T AS time_zone, %T AS suffix_pattern, %T AS note_sheet_url, %T AS note_sheet_range), STRUCT(%T AS schema_condition, %T AS view_dataset_condition, %T AS view_name_condition), STRUCT(%T AS schemata, %T AS views, %T AS columns, %T AS field_paths, %T AS table_opts))""",
+  udf_project_id, udf_dataset, udf_sql_function_name,
+  work_project_id, work_dataset, udf_project_id, udf_dataset,
+  target_project_id, job_region,
+  table_diff_src, table_diff, view_diff, view_matrix, table_base_note,
+  udf_analyze_function_name, udf_render_function_name,
+  udf_erd_function_name, udf_page_function_name,
+  udf_markdown_function_name, udf_css_function_name,
+  snapshot_time_zone, suffix_pattern,
+  note_sheet_url, note_sheet_range,
+  schema_condition, view_dataset_condition, view_name_condition,
+  src_schemata, src_views, src_columns, src_field_paths, src_table_opts);
+
+
+-- 前提の確認。UDF を作り直す前にこのファイルを流すと、動的 SQL の展開や
+-- 関数の引数が食い違って、原因の分かりにくいエラーになる。先に数えておく。
+-- ここは render_call_sql を通さない。その仕組み自体が UDF に依存しているので、
+-- 依存する前に確かめる必要がある（プロジェクト自動検出と同じ書き方）。
+EXECUTE IMMEDIATE FORMAT(
+  "SELECT COUNT(*) FROM `%s.%s.INFORMATION_SCHEMA.ROUTINES` WHERE routine_name IN UNNEST(%T)",
+  udf_project_id, udf_dataset,
+  [udf_analyze_function_name, udf_render_function_name, udf_erd_function_name,
+   udf_page_function_name, udf_markdown_function_name, udf_css_function_name,
+   udf_sql_function_name]
+) INTO udf_found_count;
+ASSERT udf_found_count = 7 AS
+  'UDF が 7 つそろっていません。先に view_group_html.sql を実行してください（system_name / udf_dataset / udf_name_prefix / udf_name_suffix は両ファイルで同じ値に）。';
+
+
+-- 事前チェック。0 件のまま進むと空のテーブルができ、設定の間違いに気づけない。
+SET sql_template = """
+SELECT
+  (SELECT COUNT(*)
+   FROM __SRC_SCHEMATA__
+   WHERE REGEXP_CONTAINS(schema_name, r'__SUFFIX_PATTERN__') AND (__SCHEMA_COND__)),
+  (SELECT COUNT(*)
+   FROM __SRC_VIEWS__
+   WHERE (__VIEW_DATASET_COND__) AND (__VIEW_NAME_COND__))
+""";
+EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+  '事前チェックの SQL に未展開のプレースホルダが残っています。';
+EXECUTE IMMEDIATE rendered_sql INTO target_dataset_count, target_view_count;
+
+ASSERT target_view_count > 0 AS
+  '対象の View が 0 件です。@@location / analysis_include_dataset_patterns / analysis_include_object_patterns を確認してください。';
+ASSERT target_dataset_count > 0
+    OR ARRAY_LENGTH(suffix_list) > 0
+    OR ARRAY_LENGTH(suffix_extra_list) > 0 AS
+  'suffix を持つデータセットが 0 件です。suffix_pattern / analysis_include_dataset_patterns を確認するか、suffix_list に一覧を並べる（自動抽出は行われなくなります）か、suffix_extra_list に足してください。';
+
+
+-- 運んできたぶんが本当に入っているか。
+--
+-- **並べたリージョンの行が 1 つも無いまま通さない。** 取り込みが失敗しても
+-- （cross_region_import.sql は別のスケジュールなので落ちても止まらない）
+-- ここは動いてしまい、**そのリージョンの View だけが消えたカード**ができる。
+-- グループ数も差分も辻褄が合ったまま出るので、画面から間違いに気づけない。
+-- 落ちれば前の日のカードが残る（欠けたカードで上書きされない）。
+--
+-- 鮮度そのものは cross_region_import.sql が見る。ここは「テーブルがあるか・
+-- 並べたリージョンの行があるか」だけを確かめる。
+--
+-- ここは render_call_sql（テンプレートの仕組み）を通さない。読むテーブルの
+-- 名前はもう組み立て済みで、目印に置き換えるものが無いため。プロジェクトの
+-- 自動検出や UDF の数え上げと同じ書き方にそろえてある。
+IF ARRAY_LENGTH(import_sources) > 0 THEN
+  --
+  -- **見つからなかったときは、探したものと実際にあったものを両方出す。**
+  -- ASSERT の説明文は文字列リテラルしか書けず、「どのテーブルの、どの
+  -- source_region を探したか」を埋め込めない。それが無いと、原因が
+  --   ・source_region の書き方違い（リージョン名そのもの。'sgp' などの略称ではない）
+  --   ・table_name_suffix の食い違い（別のテーブルを見ている）
+  --   ・そもそも取り込みが流れていない
+  -- のどれなのか、落ちた人が自分で切り分けることになる。ERROR() なら
+  -- 文言を組み立てられるので、そちらを使う。
+  -- （RAISE は使わない。このファイルの他の停止は ASSERT にそろえてある。）
+  EXECUTE IMMEDIATE FORMAT("""
+    SELECT STRING_AGG(msg, ' / ') FROM (
+      SELECT FORMAT('%%s に source_region = %%s の行がありません（そのテーブルにあるのは: %%s）',
+                    tbl, want, IFNULL(have, '(空)')) AS msg
+      FROM (%s) WHERE n = 0)
+  """, (
+    SELECT STRING_AGG(
+      FORMAT("SELECT %T AS tbl, %T AS want, (SELECT COUNT(*) FROM `%s` WHERE source_region = %T) AS n, (SELECT STRING_AGG(DISTINCT source_region, ', ') FROM `%s`) AS have",
+        tbl, s.source_region, tbl, s.source_region, tbl),
+      ' UNION ALL ' ORDER BY s.source_region)
+    FROM UNNEST(import_sources) AS s,
+      UNNEST([FORMAT('%s.%s.%s', work_project_id, work_dataset,
+        table_name_prefix || system_name || '_' || 't_' || 'meta_views' || s.table_name_suffix
+      )]) AS tbl))
+  INTO import_diag;
+
+  IF import_diag IS NOT NULL THEN
+    SELECT ERROR(CONCAT(
+      '運んできたメタデータが足りません: ', import_diag,
+      '。import_sources の source_region はリージョン名そのもの（asia-southeast1 など）で、',
+      'sgp のような略称ではありません。table_name_suffix が cross_region_import.sql と',
+      '同じ値かも確認してください。cross_region_import.sql が流れているかも。'));
+  END IF;
+END IF;
+
+
+-- ---------------------------------------------------------------------
+-- 1. base ごとのメモの置き場所（初回とシートを変えたときだけ）
+--
+--    差分のテーブルはここでは作らない。セクション 2 が毎回
+--    CREATE OR REPLACE TABLE ... AS SELECT で作り直すので、置き場所を先に
+--    用意しておく必要がない。初回もセクション 2 だけで揃う。
+--
+--    作るオブジェクトは 5 つ。
+--
+--      viewlgc_t_diff_src   セクション 2。素のカード（メモ差し込み前）
+--      viewlgc_vw_t_diff    セクション 3。src ＋ メモ。**シートの内容がその場で出る**
+--      viewlgc_t_diff       セクション 3b。ビューを写したもの。**レポートはこれを読む**
+--      viewlgc_vw_t_matrix  セクション 3c。base × suffix のマトリクス（1 行 = 1 View）
+--      viewlgc_m_base_note  ここで作る。メモのスプレッドシート
+--
+--    【1 回きりの後片付け】名前を変える前・ビューを 2 本作っていた頃の
+--    オブジェクトは、名前が違うので新しい実行では触られず、そのまま残る。
+--    中身は作り直せるものしか入っていないので、確認のうえ手で消すこと。
+--    自動では消さない（消してよいかはこのスクリプトからは判断できない）。
+--
+--      DROP TABLE IF EXISTS `<project>.<dataset>.viewlgc_t_diff_hist`;
+--      DROP VIEW  IF EXISTS `<project>.<dataset>.viewlgc_vw_t_diff_by_ref`;
+--
+--    prefix / suffix を付けているなら、その名前に読み替える。
+-- ---------------------------------------------------------------------
+-- base ごとのメモ。実体はスプレッドシートで、ここでは外部テーブルとして
+-- 見えるようにするだけ。列はすべて STRING で受けて、型はビューで付ける。
+-- シートは書き手が自由に触るので、日付や真偽値の書き方を強制できない。
+-- STRING で受けて SAFE_CAST すれば、書き間違いのある 1 行がクエリ全体を
+-- 落とすことがない。
+--
+-- 列は左から base / note_md / updated_at / updated_by / is_hidden の順。
+-- この順序が唯一の取り決めで、見出しの文言は見ない（skip_leading_rows = 1）。
+--
+-- note_sheet_url が空のときは、同じ列を持つ空のテーブルを作る。ビューは
+-- どちらでも同じ形になるので、メモを使わない環境でも下のビューがそのまま通る。
+-- あとから URL を入れてこのセクションを流し直せば、メモが出るようになる。
+-- 分岐の中でも 4 手（template → render → ASSERT → EXECUTE）はそろえてある。
+--
+-- 空のテーブルと外部テーブルは種別が違う。CREATE OR REPLACE が種別をまたげず
+-- 「Cannot replace a table with a different type」になる場合は、先に
+--   DROP TABLE IF EXISTS `<work_project>.<work_dataset>.viewlgc_m_base_note`
+-- を流してからこのセクションを実行する。中身はシート側にあるので失うものはない。
+IF note_sheet_url = '' THEN
+  SET sql_template = """
+CREATE OR REPLACE TABLE `__T_BASE_NOTE__`
+(
+  base       STRING,
+  note_md    STRING,
+  updated_at STRING,
+  updated_by STRING,
+  is_hidden  STRING
+)
+OPTIONS (
+  description = 'base ごとのメモ（未設定。note_sheet_url を入れると外部テーブルに置き換わる）'
+)
+""";
+  EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+    'メモのテーブル（空）の SQL に未展開のプレースホルダが残っています。';
+  EXECUTE IMMEDIATE rendered_sql;
+ELSE
+  SET sql_template = """
+CREATE OR REPLACE EXTERNAL TABLE `__T_BASE_NOTE__`
+(
+  base       STRING,
+  note_md    STRING,
+  updated_at STRING,
+  updated_by STRING,
+  is_hidden  STRING
+)
+OPTIONS (
+  format = 'GOOGLE_SHEETS',
+  uris = ['__NOTE_SHEET_URL__'],
+  sheet_range = '__NOTE_SHEET_RANGE__',
+  skip_leading_rows = 1,
+  description = 'base ごとのメモ（Markdown）。実体は Google スプレッドシート'
+)
+""";
+  EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+    'メモの外部テーブルの SQL に未展開のプレースホルダが残っています。';
+  EXECUTE IMMEDIATE rendered_sql;
+END IF;
+
+
+-- ---------------------------------------------------------------------
+-- 2. 生成（スケジュールドクエリに登録する本体・その 1）
+--
+--    出すのは**素のカード**（メモを差し込む前）。メモを繋ぐのはセクション 3。
+--    分けてあるのは、シートを直したときに 3b だけを流し直せるようにするため。
+--    こちらは解析も描画もやり直すので重い。
+--
+--    持つのは最新の 1 世代だけ。テーブルごと作り直す。
+--
+--    **1 文で差し替わるので、読み手から見て「空のテーブル」が見える瞬間が無い。**
+--    DELETE + INSERT や TRUNCATE + INSERT だと、その隙間にレポートを開いた人には
+--    何も出ない。以前は履歴を積んでいて、ビューが MAX(snapshot_date) を採って
+--    いたので隙間があっても前日分が出ていた。最新しか持たなくなった以上、
+--    途中経過を見せない書き方に替える必要がある。
+--
+--    列の説明（OPTIONS）は列リストに書く。CTAS でもスキーマを明示できるので、
+--    作り直すたびに説明が消えることはない。
+--
+--    初回もこの 1 文でテーブルができる。セクション 1 は要らない。
+--
+--    **速さについて（WITH は実体化されない）。**
+--    BigQuery の WITH は「名前を付けた式」で、参照するたびに展開される。
+--    同じ CTE を n 回参照すると、その中の INFORMATION_SCHEMA 読みも n 回
+--    走りうる（オプティマイザが同じ計画をまとめてくれることもあるが、
+--    保証は無い）。いま残っている複数参照は次の 2 つで、どちらも読む先が
+--    小さいので放置している。
+--      keyed       3 回（base_cols / desc_by_base / analyzed）→ VIEWS
+--      suffix_base 2 回（suffixes の UNION ALL）             → SCHEMATA
+--    大きいほう（COLUMNS と COLUMN_FIELD_PATHS）は col_entries の JOIN を
+--    1 回にまとめて 2 回 → 1 回にしてある。opts も 1 回だけの参照にした。
+--    ここが効いていないと分かったら、この塊を CREATE TEMP TABLE で
+--    受けてから最後の SELECT を別文にする（そうすれば全部 1 回になる）。
+--
+--    いちばん重いのは JS UDF（analyze → render / erd → page）で、これは
+--    base ごとに 1 回ずつ。analyzed は集約なので、外側の SELECT が analysis を
+--    何度参照しても解析はやり直されない（集約は展開できないため）。
+-- ---------------------------------------------------------------------
+SET sql_template = """
+CREATE OR REPLACE TABLE `__T_DIFF_SRC__`
+(
+  snapshot_date   DATE           OPTIONS (description = '生成日。履歴は持たないので、常に最後に実行した日'),
+  base            STRING         OPTIONS (description = 'suffix を除いた View 名。Looker のキー。suffix を認識できなかった View は View 名そのもの'),
+  ref_index       INT64          OPTIONS (description = '基準グループの番号（0 起点）。base ごとに 0..グループ数-1 の行ができる'),
+  ref_label       STRING         OPTIONS (description = '基準グループの見出し（suffix の列記）。レポートの「基準」コントロールはこれを使う'),
+  ref_view_count  INT64          OPTIONS (description = '基準グループに属する View 数。グループは大きい順に並ぶので ref_index=0 が最多。既定の基準を「View が最多のグループ」にしたいときは、グラフの並べ替えを ref_index 昇順にする'),
+  view_count      INT64          OPTIONS (description = 'この base に属する View 数'),
+  group_count     INT64          OPTIONS (description = 'ロジックのグループ数。1 なら全部同一'),
+  has_multiple    BOOL           OPTIONS (description = 'group_count > 1。ロジック逸脱の検知用'),
+  group_labels    ARRAY<STRING>  OPTIONS (description = 'タブ見出し（同一ロジックの suffix 列記）'),
+  group_sizes     ARRAY<INT64>   OPTIONS (description = '各グループの View 数'),
+  suffixes        ARRAY<STRING>  OPTIONS (description = '認識した suffix 一覧。suffix を認識できなかった View は View 名が入る。locations / view_names と同じ並びで、添字で対応する'),
+  locations       ARRAY<STRING>  OPTIONS (description = '各 View が居る BigQuery のリージョン。suffixes と同じ並びで、locations[i] が suffixes[i] の View のリージョン。取れなければ空文字。1 行 1 View の形が要るならマトリクスのビュー（3c）を読む'),
+  view_names      ARRAY<STRING>  OPTIONS (description = '各 View の名前。suffixes / locations と同じ並びで、添字で対応する'),
+  unmatched_count INT64          OPTIONS (description = 'suffix を認識できなかった View 数。1 ならこの行が単独表示の View'),
+  diff_html       STRING         OPTIONS (description = '比較 HTML。Templated Record に渡す。note タブの description の段まで焼き込み済みで、シートのメモの目印だけが空いている')
+)
+CLUSTER BY base
+OPTIONS (
+  description = 'suffix 違い View のロジック グループ比較（素のカード。メモを差し込む前）'
+)
+AS
+WITH
+-- suffix 一覧の素。suffix_list が空なら、対象データセットの名前から切り出す。
+-- **書いてあれば置き換える（足すのではない）。** 足したいときは
+-- suffix_extra_list のほうで、こちらは末尾の導出も掛からない。
+-- 除外はここでは効かせない。導出のあとに 1 回だけ効かせることで、
+-- 「4 文字のほうは落として末尾だけ残す」（ghkr を消して kr は残す）が書ける。
+suffix_base AS (
+  SELECT DISTINCT suffix
+  FROM UNNEST(
+    IF(ARRAY_LENGTH(@suffix_list) > 0,
+       @suffix_list,
+       ARRAY(
+         SELECT DISTINCT REGEXP_EXTRACT(schema_name, r'__SUFFIX_PATTERN__')
+         FROM __SRC_SCHEMATA__
+         WHERE REGEXP_CONTAINS(schema_name, r'__SUFFIX_PATTERN__')
+           AND (__SCHEMA_COND__)
+       ))
+  ) AS suffix
+  WHERE suffix IS NOT NULL AND suffix != ''
+),
+-- 導出した suffix 一覧。素のものに、その末尾 n 文字を足す。
+-- データセット名に現れない suffix を拾うため（mart_abjp の中の v_x_jp → 'jp'）。
+-- 中間語（suffix_middle_list）はこの結果と掛け算するので、先に切り出しておく。
+--
+-- **1 つの View 名に 2 つ以上の suffix が当たりうる。** 下の keyed は最長一致で
+-- 選ぶ（ORDER BY LENGTH(s.suffix) DESC）。UDF 側の extractSuffix も最長一致に
+-- してあり、片方だけ変えると行の base 列とカードの中身が食い違う。
+--   v_x_abjp に abjp と jp → abjp（jp では終わらないので実際には当たらない）
+--   v_x_zz_abjp に zz_abjp と abjp → zz_abjp
+-- suffix_extra_list に '_' を含む値（abjp_xyz123456 など）を足すとこの形になる。
+--
+-- suffix_extra_list はここで足す。**末尾の導出のあと**なので、書いた文字列が
+-- そのまま 1 つ増えるだけになる（'global' から 'al' は増えない）。
+suffix_derived AS (
+  SELECT DISTINCT suffix
+  FROM (
+    SELECT suffix FROM suffix_base
+    UNION ALL
+    SELECT SUBSTR(b.suffix, -n) AS suffix
+    FROM suffix_base AS b, UNNEST(@suffix_tail_lengths) AS n
+    WHERE n > 0 AND LENGTH(b.suffix) > n
+  )
+),
+suffixes AS (
+  SELECT DISTINCT suffix
+  FROM (
+    SELECT suffix FROM suffix_derived
+    UNION ALL
+    -- 中間語つき（suffix_middle_list）。base と suffix の間に挟まる語を
+    -- suffix 側に取り込む。**導出済みの一覧との掛け算**なので、末尾で
+    -- 増えた jp / us にも組み合わさる。
+    --
+    -- これで sales_v2_txjp が v2_txjp のほうで切れ（最長一致）、
+    -- sales_txjp と同じ base=sales に並ぶ。**照合の仕組みは変えていない。**
+    -- 一覧に載せさえすれば下の keyed も UDF 側の extractSuffix も
+    -- 最長一致で拾うので、増やすのはここだけで済む。
+    SELECT CONCAT(m, '_', d.suffix) AS suffix
+    FROM suffix_derived AS d, UNNEST(@suffix_middle_list) AS m
+    WHERE m IS NOT NULL AND m != ''
+    UNION ALL
+    SELECT x AS suffix
+    FROM UNNEST(@suffix_extra_list) AS x
+    WHERE x IS NOT NULL AND x != ''
+  )
+  -- 除外はここ 1 か所だけ。書いた値と消える値が 1 対 1 で対応する。
+  WHERE suffix NOT IN UNNEST(@suffix_exclude_list)
+),
+-- UDF に渡す設定。suffixList だけ実行時に決まるので、analyze_options に足す。
+opts AS (
+  SELECT CONCAT(
+    '{"suffixList":',
+    TO_JSON_STRING(ARRAY(SELECT suffix FROM suffixes ORDER BY suffix)),
+    -- 描画側が「基準を載せきれなかった」と書けるように、上限も渡す。
+    -- 行を打ち切るのは下の refs だが、打ち切られたことを知っているのは
+    -- SQL 側だけなので、カードに書かせるには渡すしかない。
+    ',"maxRefRows":', CAST(@max_ref_rows AS STRING),
+    ',',
+    SUBSTR(TRIM(@analyze_options), 2)
+  ) AS options_json
+),
+
+-- 対象 View。リージョン単位の INFORMATION_SCHEMA を使うので、
+-- データセットごとの UNION ALL は要らない。
+--
+-- TABLES.ddl ではなく VIEWS.view_definition を使う。
+-- TABLES.ddl は BigQuery が組み立てた CREATE VIEW 文で、OPTIONS に
+-- description や作成タイムスタンプが自動で入る。View ごとに値が違うので、
+-- そのまま比較すると全部が別グループに割れる。
+-- view_definition はクエリ本体だけなので、ヘッダも OPTIONS も付いてこない。
+-- View 自身の名前も入らないため、パラメータには参照先の差だけが残る。
+src AS (
+  SELECT table_name AS view_name, view_definition AS ddl, source_region
+  FROM __SRC_VIEWS__
+  WHERE (__VIEW_DATASET_COND__) AND (__VIEW_NAME_COND__)
+),
+keyed AS (
+  -- suffix 一覧との ENDS_WITH で base を切る。区切りは '_' 固定
+  -- （UDF 側の抽出も '_' 前提なので、片方だけ変えると食い違う）。
+  -- 複数一致したら長いほうを採る。
+  -- LEFT JOIN なので suffix の付かない View も 1 行残る。
+  SELECT
+    src.view_name,
+    src.ddl,
+    src.source_region,
+    -- 切り出した suffix そのもの。認識できなければ NULL。
+    -- **base を組み立てるのと同じ 1 行から取る。** 別の場所で切り直すと
+    -- 最長一致や中間語の扱いが食い違い、base と suffix が対応しなくなる。
+    s.suffix,
+    -- suffix を認識できない View は自分の名前を base にする。
+    -- 束ねる相手がいないので 1 View / 1 グループとして単独で表示される。
+    COALESCE(
+      SUBSTR(src.view_name, 1, LENGTH(src.view_name) - LENGTH(s.suffix) - 1),
+      src.view_name
+    ) AS base
+  FROM src
+  LEFT JOIN suffixes AS s
+    ON ENDS_WITH(src.view_name, '_' || s.suffix)
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY src.view_name ORDER BY LENGTH(s.suffix) DESC
+  ) = 1
+),
+-- カラム定義。INFORMATION_SCHEMA.COLUMNS は View の出力列を持っている。
+-- 説明だけは COLUMN_FIELD_PATHS にあるので、最上位の列（field_path = 列名）に
+-- 絞って突き合わせる。
+--
+-- 条件文（__VIEW_*_COND__）は table_schema / table_name を修飾なしで見るので、
+-- JOIN してから当てると曖昧になる。それぞれ単独の CTE で絞ってから繋ぐ。
+cols_raw AS (
+  SELECT table_schema, table_name, column_name, ordinal_position, data_type, is_nullable
+  FROM __SRC_COLUMNS__
+  WHERE (__VIEW_DATASET_COND__) AND (__VIEW_NAME_COND__)
+),
+-- COLUMN_FIELD_PATHS は STRUCT の中まで 1 行ずつ持っている。
+--   amount_breakdown           ARRAY<STRUCT<currency STRING, gross NUMERIC>>
+--   amount_breakdown.currency  STRING
+--   amount_breakdown.gross     NUMERIC
+-- ネストした項目もそれぞれ description を持てるので、論理名もここから取れる。
+col_paths AS (
+  SELECT table_schema, table_name, column_name, field_path, data_type, description
+  FROM __SRC_FIELD_PATHS__
+  WHERE (__VIEW_DATASET_COND__) AND (__VIEW_NAME_COND__)
+),
+-- 最上位とネストを 1 本に束ねる。
+--
+-- **最上位は COLUMNS を軸にする（LEFT JOIN）。** COLUMN_FIELD_PATHS が
+-- 権限などで引けない環境でも、型と NULL 制約だけは出るようにするため。
+-- 軸を逆にすると、あちらが空のときカラム定義が丸ごと消える。
+--
+-- ネストの行は型と説明だけ。ordinal_position も is_nullable も COLUMNS に
+-- しか無いので、親のものを持ってくると嘘になる（描画側も出さない）。
+-- 並べ替えのために ordinal_position だけは親のものを持たせてある
+-- （親のすぐ下に来てほしいので、親と同じ値でよい）。
+--
+-- **JOIN は 1 回。** 最上位とネストを UNION ALL で分けて書くと、
+-- COLUMNS も COLUMN_FIELD_PATHS も 2 回ずつ読むことになる（BigQuery は
+-- WITH を実体化せず、参照のたびに展開する）。結合条件に
+-- 「最上位か、ネストも要るなら全部」を入れれば 1 回で足りる。
+-- include_nested_fields = FALSE のときは最上位の 1 行だけが残る。
+col_entries AS (
+  SELECT
+    r.table_name       AS view_name,
+    COALESCE(p.field_path, r.column_name) AS field_path,
+    -- 最上位は COLUMNS の型をそのまま使う（COLUMN_FIELD_PATHS が無くても出る）。
+    IF(p.field_path IS NULL OR p.field_path = r.column_name,
+       r.data_type, p.data_type) AS data_type,
+    r.ordinal_position AS ordinal_position,
+    -- ネストの行に親の NULL 制約を持ってくると嘘になる
+    IF(p.field_path IS NULL OR p.field_path = r.column_name,
+       r.is_nullable, CAST(NULL AS STRING)) AS is_nullable,
+    COALESCE(p.description, '') AS description
+  FROM cols_raw AS r
+  LEFT JOIN col_paths AS p
+    ON  p.table_schema = r.table_schema
+    AND p.table_name   = r.table_name
+    AND p.column_name  = r.column_name
+    AND (p.field_path = r.column_name OR @include_nested_fields)
+),
+cols AS (
+  SELECT
+    view_name,
+    ARRAY_AGG(
+      STRUCT(
+        field_path       AS n,
+        data_type        AS t,
+        ordinal_position AS o,
+        is_nullable      AS u,
+        description      AS d
+      )
+      -- 並びは描画側が決める（ネストは親の型の中での宣言順に並べ替える）。
+      -- ここでは同じ入力から同じ並びが出ることだけを保証する。
+      ORDER BY ordinal_position, field_path
+    ) AS cols
+  FROM col_entries
+  GROUP BY view_name
+),
+-- base ごとに束ねる。View 名で引ける形にするのは描画側（JS）の仕事。
+base_cols AS (
+  SELECT
+    k.base,
+    TO_JSON_STRING(ARRAY_AGG(STRUCT(c.view_name AS v, c.cols AS cols))) AS columns_json
+  FROM keyed AS k
+  JOIN cols AS c ON c.view_name = k.view_name
+  GROUP BY k.base
+),
+-- View 自身の description（Markdown）。note タブの先頭に出す。
+--
+-- description は TABLE_OPTIONS にしか無い（VIEWS にも TABLES にも列が無い）。
+-- option_value は JSON 文字列の体裁（"説明文"）で入っているので、剥がして
+-- 中身を取り出す。剥がせない形で入っていたら生のまま使う（落とすよりよい）。
+view_opts AS (
+  SELECT
+    table_name AS view_name,
+    COALESCE(SAFE.STRING(SAFE.PARSE_JSON(option_value)), option_value) AS desc_md
+  FROM __SRC_TABLE_OPTS__
+  WHERE option_name = 'description'
+    AND (__VIEW_DATASET_COND__) AND (__VIEW_NAME_COND__)
+),
+-- 同じ説明を持つ View をまとめる。base の中で説明が割れているかどうかが
+-- ここで分かる（同じロジックの View なのに説明が違えば、それ自体が情報）。
+--
+-- **LEFT JOIN。** description が付いていない View も 1 組として残す。
+-- 「片方だけ書いてある」も差なので、黙って消すと note タブでは全 View に
+-- 説明が付いているように見えてしまう。
+-- 別名は desc_md にしない。view_opts に同じ名前の列があるので、GROUP BY で
+-- 「FROM 側の列か SELECT の別名か」が決まらず ambiguous で落ちる。
+desc_by_base AS (
+  SELECT
+    k.base,
+    TRIM(COALESCE(d.desc_md, '')) AS desc_text,
+    ARRAY_AGG(k.view_name ORDER BY k.view_name) AS view_names
+  FROM keyed AS k
+  LEFT JOIN view_opts AS d ON d.view_name = k.view_name
+  GROUP BY k.base, desc_text
+),
+-- 描画側（note タブの上段）へ渡す形。[{v: [View 名...], h: HTML}]。
+--
+-- **Markdown を HTML にするのはここ。** JS UDF から別の UDF は呼べないので、
+-- viewlgc_page には変換済みのものを渡す。文面ごとに畳んだあとで呼ぶので、
+-- 呼ぶ回数は View 数ではなく「文面の種類数」で済む。
+-- 空の組に呼ぶと「未登録」の枠が返るので、そこは空文字のまま渡す
+-- （その組をどう見せるかは描画側の判断）。
+base_descs AS (
+  SELECT
+    base,
+    TO_JSON_STRING(ARRAY_AGG(
+      STRUCT(
+        view_names AS v,
+        IF(desc_text = '', '', `__UDF_MARKDOWN__`(desc_text)) AS h
+      )
+      ORDER BY view_names[OFFSET(0)]
+    )) AS descs_json
+  FROM desc_by_base
+  GROUP BY base
+),
+-- View に付いた labels（key:value）。note タブの先頭に出す。
+--
+-- **option_value は JSON ではない。** description と同じ TABLE_OPTIONS だが、
+-- labels のほうは
+--   [STRUCT("domain", "sales"), STRUCT("tier", "gold")]
+-- という SQL リテラル風の文字列で入っており、PARSE_JSON では読めない。
+-- 引用符で囲まれた文字列を出てくる順に拾い、key・value の順で 2 つずつ組に
+-- する。ラベルに使える文字は英小文字・数字・`_`・`-` と国際文字だけで
+-- 引用符は入らないので、この拾い方で欠けたり混ざったりしない。
+--
+-- 並びはキー名順。SQL 側と描画側の両方で並べる（片方だけだと、実行のたびに
+-- 並びが変わって「値は同じなのに別の組」に見えることがある）。
+view_labels AS (
+  SELECT
+    view_name,
+    ARRAY(
+      SELECT AS STRUCT toks[OFFSET(i)] AS k, toks[OFFSET(i + 1)] AS v
+      FROM UNNEST(GENERATE_ARRAY(0, ARRAY_LENGTH(toks) - 2, 2)) AS i
+      ORDER BY toks[OFFSET(i)]
+    ) AS labels
+  FROM (
+    SELECT
+      table_name AS view_name,
+      REGEXP_EXTRACT_ALL(option_value, r'"([^"]*)"') AS toks
+    FROM __SRC_TABLE_OPTS__
+    WHERE option_name = 'labels'
+      AND (__VIEW_DATASET_COND__) AND (__VIEW_NAME_COND__)
+  )
+),
+-- 同じラベルを持つ View をまとめる。**LEFT JOIN。** ラベルの付いていない
+-- View も 1 組として残す ― 「8 本には付いていて 1 本だけ無い」も差なので、
+-- 黙って落とすと全 View に付いているように見えてしまう。
+-- 別名は labels にしない（view_labels に同じ名前の列があり、GROUP BY で
+-- 「FROM 側の列か SELECT の別名か」が決まらず ambiguous で落ちる）。
+labels_by_base AS (
+  SELECT
+    k.base,
+    -- 突き合わない View（ラベルなし）は空の並びとして扱う。ARRAY 型の
+    -- COALESCE は空配列の型が決まらないので、JSON にしてから寄せる。
+    IF(l.view_name IS NULL, '[]', TO_JSON_STRING(l.labels)) AS labels_text,
+    ARRAY_AGG(k.view_name ORDER BY k.view_name) AS view_names
+  FROM keyed AS k
+  LEFT JOIN view_labels AS l ON l.view_name = k.view_name
+  GROUP BY k.base, labels_text
+),
+-- 描画側へ渡す形。[{v: [View 名...], l: [{k, v}...]}]。
+-- labels_text は既に JSON なので、そのまま埋めて二重にエンコードしない
+-- （STRUCT に入れて TO_JSON_STRING すると文字列として再エスケープされる）。
+base_labels AS (
+  SELECT
+    base,
+    CONCAT('[', STRING_AGG(
+      CONCAT('{"v":', TO_JSON_STRING(view_names), ',"l":', labels_text, '}'),
+      ',' ORDER BY view_names[OFFSET(0)]
+    ), ']') AS labels_json
+  FROM labels_by_base
+  GROUP BY base
+),
+-- 解析は base ごとに 1 回だけ。結果の JSON をこの段で持っておき、
+-- メタデータは JSON から取り出し、HTML は描画の UDF に渡す。
+-- JS UDF から別の UDF は呼べないので、この 2 段で合成する。
+--
+-- opts は CROSS JOIN で持ってくる。スカラー副問い合わせ（SELECT … FROM opts）を
+-- 使う箇所ごとに書くと、**その数だけ opts が評価されうる**（BigQuery は
+-- WITH を実体化せず、参照のたびに展開する）。opts は suffixes 経由で
+-- INFORMATION_SCHEMA.SCHEMATA を読むので、同じ metadata 読みが何度も走る。
+-- ここで 1 度だけ結び付け、下流は列として持ち回る。
+analyzed AS (
+  SELECT
+    base,
+    o.options_json AS options_json,
+    `__UDF_ANALYZE__`(
+      ARRAY_AGG(STRUCT(view_name, ddl) ORDER BY view_name),
+      -- suffixes から組み立てた設定（全行で同じ値）
+      o.options_json
+    ) AS analysis,
+    -- SQL タブ用の素のテキスト。解析結果には積んでいない（描画に要らない
+    -- ものを UDF 間の JSON で運ぶと 20 倍の大きさになる）ので、ここで
+    -- 別に束ねて描画側へ渡す。カラム定義（columns_json）と同じ形。
+    TO_JSON_STRING(ARRAY_AGG(STRUCT(view_name AS v, ddl AS s) ORDER BY view_name))
+      AS sql_json
+  FROM keyed
+  CROSS JOIN opts AS o
+  GROUP BY base, o.options_json
+),
+-- base ごとの「どの View がどのリージョンに居るか」。
+-- note が suffix をリージョンごとにまとめるのに使う。形は labels_json と同じで
+--   [{"r": "asia-northeast1", "v": ["v_x_abjp", ...]}, ...]
+-- 並びはリージョン名の昇順。実行のたびに順が変わると、同じ内容でも昨日と違う
+-- ものが出たように読める。
+-- base ごとの View 一覧。**3 本の配列を同じ ORDER BY で畳むので、添字で対応する。**
+--   suffixes[i] / locations[i] / view_names[i] が同じ View を指す
+--
+-- 並びは suffixes の昇順。UDF が返す $.suffixes と同じ材料・同じ並べ方に
+-- してある（あちらは out.suffixes.sort()）。**片方だけ変えないこと。**
+-- 食い違っていないかは 5-9 が突き合わせる。
+--
+-- suffix を認識できなかった View は View 名を置く。UDF の __run が
+-- out.suffixes に積むときと同じ代替で、これが無いと ARRAY_AGG が NULL 要素で
+-- 落ちる（BigQuery の配列は NULL を持てない）。**行ごと落とす手は採れない。**
+-- 落とすと添字がずれ、他の 2 本と対応しなくなる。
+base_views AS (
+  SELECT
+    base,
+    ARRAY_AGG(suffix        ORDER BY suffix, view_name) AS suffixes,
+    ARRAY_AGG(location      ORDER BY suffix, view_name) AS locations,
+    ARRAY_AGG(view_name     ORDER BY suffix, view_name) AS view_names
+  FROM (
+    SELECT
+      base,
+      view_name,
+      COALESCE(suffix, view_name) AS suffix,
+      -- リージョンが取れない読み元でも配列が落ちないようにする。空文字は
+      -- 描画側（regionByView）も「リージョン不明」として扱う。
+      IFNULL(source_region, '') AS location
+    FROM keyed
+  )
+  GROUP BY base
+),
+-- 描画側（note タブのリージョン表・SQL タブのリージョン見出し）へ渡す JSON。
+-- **材料は上の配列そのもの。** keyed から取り直すと、列に出るものと
+-- カードに出るものが別経路になる。
+--   [{"r": リージョン, "v": [View 名, ...]}, ...]
+-- 並びはリージョン名の昇順。実行のたびに順が変わると、同じ内容でも昨日と違う
+-- ものが出たように読める。
+--
+-- WHERE o = ov で添字をそろえる。**ここが配列の対応を使う唯一の場所**なので、
+-- 対応が崩れていれば note と SQL タブの見出しがずれて画面に出る。
+base_regions AS (
+  SELECT
+    base,
+    CONCAT('[', STRING_AGG(
+      CONCAT('{"r":', TO_JSON_STRING(location), ',"v":', TO_JSON_STRING(view_names), '}'),
+      ',' ORDER BY location
+    ), ']') AS regions_json
+  FROM (
+    SELECT bv.base, l AS location, ARRAY_AGG(v ORDER BY v) AS view_names
+    FROM base_views AS bv,
+      UNNEST(bv.locations)  AS l WITH OFFSET AS o,
+      UNNEST(bv.view_names) AS v WITH OFFSET AS ov
+    WHERE o = ov AND l != ''
+    GROUP BY bv.base, l
+  )
+  GROUP BY base
+),
+
+-- **1 行 = 1 base × 1 基準。** どの基準を見るかはレポートのコントロール
+-- （ref_label）で選ぶ。
+--
+-- 全基準を 1 枚のカードに載せていた時期があり、そのとき比較ペインは
+-- G×(G−1) 枚 ―― **グループ数の二乗**だった。リージョンをまたいで View を
+-- 集めると G が伸び、UDF のメモリを使い切って生成ごと落ちた
+-- （Resources exceeded during execution: UDF out of memory）。
+--
+-- 二乗の係数 G は「どのグループも基準にできる」ことから来ている。比較そのもの
+-- は基準 1 つにつき G−1 枚で線形なので、基準を行に分けると 1 行が線形に戻る。
+-- BigQuery に置く総量は変わらないが、**1 行が小さくなることと、UDF が 1 回に
+-- 組み立てる量が小さくなること**が効く。
+--
+-- ref_index（0 起点）と ref_label（基準グループの見出し）は、この用途の
+-- ために残してあった列。レポートのコントロールは ref_label を使う。
+refs AS (
+  SELECT
+    a.base,
+    a.analysis,
+    a.sql_json,
+    a.options_json,
+    -- 取れなかった base でも描画側が落ちないよう、空の並びを渡す
+    COALESCE(bc.columns_json, '[]') AS columns_json,
+    -- View に description が無い base もある。描画側が段ごと出さないので、
+    -- 空の並びを渡しておけばよい。
+    COALESCE(bd.descs_json, '[]') AS descs_json,
+    -- ラベルを 1 つも使っていない環境もある。描画側は空なら何も出さない。
+    COALESCE(bl.labels_json, '[]') AS labels_json,
+    -- View がどのリージョンに居るか。取れなくても描画側は落ちない。
+    COALESCE(br.regions_json, '[]') AS regions_json,
+    -- 列に出す 3 本の配列。**添字で対応する**（base_views で同じ順に畳んだもの）。
+    -- analyzed は keyed から作るので、ここが空になる base は無い。
+    bv.suffixes   AS suffixes,
+    bv.locations  AS locations,
+    bv.view_names AS view_names,
+    g.off AS ref_index,
+    g.lbl AS ref_label
+  FROM analyzed AS a
+  LEFT JOIN base_cols AS bc ON bc.base = a.base
+  LEFT JOIN base_descs AS bd ON bd.base = a.base
+  LEFT JOIN base_labels AS bl ON bl.base = a.base
+  LEFT JOIN base_regions AS br ON br.base = a.base
+  LEFT JOIN base_views AS bv ON bv.base = a.base
+  -- **基準ごとに 1 行。** グループが 0 件の base（解析できなかった等）でも
+  -- 行が消えないよう、そのときは NULL の 1 行を立てる。CROSS JOIN で
+  -- 空の配列を展開すると base ごと落ちてしまい、**カードが黙って消える。**
+  CROSS JOIN UNNEST(
+    IF(ARRAY_LENGTH(JSON_VALUE_ARRAY(a.analysis, '$.groupLabels')) = 0,
+       [CAST(NULL AS STRING)],
+       JSON_VALUE_ARRAY(a.analysis, '$.groupLabels'))
+  ) AS lbl WITH OFFSET AS off
+  -- 上限を超えたぶんは行にしない。打ち切ったことは描画側が
+  -- maxRefRows を見てカードに書く。
+  CROSS JOIN UNNEST([STRUCT(off AS off, lbl AS lbl)]) AS g
+  WHERE g.off < @max_ref_rows
+)
+SELECT
+  CURRENT_DATE('__TZ__') AS snapshot_date,
+  base,
+  ref_index,
+  ref_label,
+  -- 基準グループの View 数。groupSizes は groupLabels と同じ並び（解析側が
+  -- 同じループで両方に積む）なので、ref_index でそのまま引ける。
+  -- グループは**メンバの多い順**に並んでいるので ref_index=0 が最多になる。
+  -- 打ち切りや解析できなかった base では配列が短いことがあるので、
+  -- 添字が外れたら NULL にする（SAFE_OFFSET）。
+  (
+    SELECT CAST(x AS INT64)
+    FROM UNNEST([JSON_VALUE_ARRAY(analysis, '$.groupSizes')[SAFE_OFFSET(ref_index)]]) AS x
+  ) AS ref_view_count,
+  CAST(JSON_VALUE(analysis, '$.viewCount')  AS INT64) AS view_count,
+  CAST(JSON_VALUE(analysis, '$.groupCount') AS INT64) AS group_count,
+  CAST(JSON_VALUE(analysis, '$.groupCount') AS INT64) > 1 AS has_multiple,
+  JSON_VALUE_ARRAY(analysis, '$.groupLabels') AS group_labels,
+  ARRAY(
+    SELECT CAST(x AS INT64)
+    FROM UNNEST(JSON_VALUE_ARRAY(analysis, '$.groupSizes')) AS x
+  ) AS group_sizes,
+  -- View 1 本につき 1 要素の**対応する 3 本の配列**（base_views で同じ順に畳む）。
+  --   suffixes[i] / locations[i] / view_names[i] が同じ View を指す
+  -- 行の grain は base × 基準なので、リージョンを 1 つの値の列にはできない
+  -- （1 つの base が複数リージョンに跨る）。**配列なら suffix と同じ高さで
+  -- 持てる**ので、JSON に畳まずに済む。割った 1 行 1 View の形が要るときは
+  -- マトリクスのビュー（3c）を読む。
+  --
+  -- suffixes は UDF が返す $.suffixes ではなく keyed から作る。**他の 2 本と
+  -- 添字をそろえるため**で、材料も並べ方も UDF と同じにしてある
+  -- （食い違っていないかは 5-9 が突き合わせる）。
+  suffixes,
+  locations,
+  view_names,
+  CAST(JSON_VALUE(analysis, '$.unmatchedCount') AS INT64) AS unmatched_count,
+  --
+  -- 描画は 3 本の UDF に分かれている。render がロジック差分のカード、erd が
+  -- 参照関係の図を作り、page がその 2 つを受け取ってカラム定義の表と
+  -- View ごとの素の SQL を足し、外側タブで 1 枚に束ねる。
+  -- JS UDF から別の UDF は呼べないので、つなぐのは SQL の仕事。
+  --
+  -- 分けてあるのは、インラインのコード ブロブが 1 個 32 KB までのため
+  -- （図の解析にはトークナイザが要り、それだけで最小化後 9 KB ある）。
+  `__UDF_PAGE__`(
+    analysis,
+    `__UDF_RENDER__`(analysis, options_json, CAST(ref_index AS FLOAT64)),
+    `__UDF_ERD__`(analysis, options_json),
+    columns_json,
+    sql_json,
+    descs_json,
+    labels_json,
+    regions_json,
+    options_json
+  ) AS diff_html
+FROM refs
+""";
+EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+  '生成の SQL に未展開のプレースホルダが残っています。';
+EXECUTE IMMEDIATE rendered_sql
+USING suffix_list AS suffix_list,
+      suffix_extra_list AS suffix_extra_list,
+      suffix_middle_list AS suffix_middle_list,
+      suffix_tail_lengths AS suffix_tail_lengths,
+      suffix_exclude_list AS suffix_exclude_list,
+      include_nested_fields AS include_nested_fields,
+      analyze_options AS analyze_options,
+      max_ref_rows AS max_ref_rows;
+
+
+-- ---------------------------------------------------------------------
+-- 3. メモを差し込むビュー（スケジュールドクエリに登録する本体・その 2）
+--
+--    素のカード（__T_DIFF_SRC__）に base ごとのメモを繋ぐ。**シートを直した
+--    内容がその場で出るのはこちら。** その場で確かめたいときだけこれを読む。
+--
+--    レポートも確認（5 系）も、次のセクションが焼き込む __T_DIFF__ のほうを
+--    読む。ビューは読むたびに
+--      ・スプレッドシートの外部テーブル（Drive）を読み
+--      ・JS UDF で Markdown を HTML にし
+--      ・数 MB の diff_html に REPLACE をかける
+--    ので、そのまま読ませると遅い。**メモを繋ぐ書き方はここ 1 か所だけ**に
+--    しておき、焼き込みは SELECT * で写すだけにする。二重に書くと片方だけ
+--    直したときに食い違う。
+--
+--    note タブは二段構え。上段が View 自身の description、下段がシートのメモ。
+--    **ここが作るのは下段だけ。** 上段は生成のとき（セクション 2）に焼き込んで
+--    ある。更新のされ方が違うので、作る場所も分けてある。
+--      description  View に付いた正式な説明。デプロイでしか変わらない
+--      シート       運用中の補足。書き換えたらこのビューにはその場で出る
+--
+--    毎回作り直す（ビューの作り直しは安い）。初回だけにすると、
+--    このファイルを直したときに古い定義が残る。
+-- ---------------------------------------------------------------------
+SET sql_template = """
+CREATE OR REPLACE VIEW `__V_DIFF__` AS
+WITH notes AS (
+  -- base ごとに 1 行に絞る。シートは人が手で足すので、同じ base の行が
+  -- 増えることがある。落とすのではなく、いちばん新しいものを採る。
+  SELECT
+    TRIM(base) AS base,
+    note_md,
+    SAFE_CAST(updated_at AS TIMESTAMP) AS updated_at,
+    updated_by
+  FROM `__T_BASE_NOTE__`
+  WHERE TRIM(COALESCE(base, '')) != ''
+    -- 消さずに下書きへ戻せるようにする。書き方は揺れるので広めに読む。
+    AND NOT COALESCE(LOWER(TRIM(is_hidden)) IN ('true', '1', 'yes'), FALSE)
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY TRIM(base) ORDER BY SAFE_CAST(updated_at AS TIMESTAMP) DESC
+  ) = 1
+),
+joined AS (
+  SELECT
+    d.*,
+    -- メモ。未登録なら note_html は「未登録」の枠を返す（NULL にすると
+    -- レポート側で「値なし」になり、未登録なのか取得に失敗したのか読めない）。
+    n.base IS NOT NULL            AS has_note,
+    n.note_md                     AS note_md,
+    n.updated_at                  AS note_updated_at,
+    n.updated_by                  AS note_updated_by
+  FROM `__T_DIFF_SRC__` AS d
+  LEFT JOIN notes AS n ON n.base = d.base
+),
+-- Markdown を HTML にするのは 1 回だけ。カードに差し込む側と、単独で置きたい
+-- とき用の note_html で同じものを使う。
+--
+-- 繋ぐのはシートのメモだけ。**View 自身の description はここには入らない。**
+-- あちらはデプロイでしか変わらないので、カードを作るとき（セクション 2）に
+-- 焼き込んである（note タブの上段。割れていればタブになる）。
+rendered AS (
+  SELECT
+    j.*,
+    `__UDF_MARKDOWN__`(j.note_md) AS note_html
+  FROM joined AS j
+)
+--
+-- **ref_index / ref_label は落とさない。** 1 行 = 1 base × 1 基準なので、
+-- この 2 列が無いと**どの行がどの基準なのか分からなくなる**。レポートの
+-- 「基準」コントロールはこの ref_label を使う。
+-- （基準がカードの中のタブだった頃は常に 0 と先頭ラベルの残骸だったので
+-- ここで落としていた。行に分けた時点で意味が戻っている。）
+SELECT
+  * EXCEPT (diff_html),
+  -- 作り置きしたカードのメモ タブに、いま読んだメモを差し込む。目印は
+  -- chrome.js の NOTE_MARK と同じ文字列（node check_sql.mjs が突き合わせる）。
+  REPLACE(diff_html, '<!--VG_NOTE-->', note_html) AS diff_html
+FROM rendered
+""";
+EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+  'CREATE VIEW の SQL に未展開のプレースホルダが残っています。';
+EXECUTE IMMEDIATE rendered_sql;
+
+
+-- ---------------------------------------------------------------------
+-- 3b. 焼き込み（スケジュールドクエリに登録する本体・その 3）
+--
+--     ビューをそのままテーブルに写す。**レポートが読むのはこれ。**
+--
+--     写すだけなので、メモの繋ぎ方はビューの定義 1 か所にしかない。ここに
+--     同じ SQL を書くと、片方だけ直したときに食い違う。
+--
+--     **シートを直したその場で反映したいときは、このセクションだけを流し直す。**
+--     解析も描画もやり直さない（読むのは __T_DIFF_SRC__ とシートだけ）。
+--     待てるなら翌日の日次実行でも同じ結果になる。
+-- ---------------------------------------------------------------------
+SET sql_template = """
+CREATE OR REPLACE TABLE `__T_DIFF__`
+CLUSTER BY base
+OPTIONS (
+  description = 'suffix 違い View のロジック グループ比較（メモ差し込み済み。レポートはこれを読む）'
+)
+AS
+SELECT * FROM `__V_DIFF__`
+""";
+EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+  '焼き込みの SQL に未展開のプレースホルダが残っています。';
+EXECUTE IMMEDIATE rendered_sql;
+
+
+-- ---------------------------------------------------------------------
+-- 3c. base × suffix のマトリクス用ビュー
+--
+--     「どの base に、どのリージョンの、どの suffix が揃っているか」を
+--     Looker Studio のピボットで見るための行。**1 行 = 1 View。**
+--
+--     カードのテーブル（__T_DIFF__）は 1 行 = base × 基準なので、View ごとの
+--     情報は配列（suffixes / locations / view_names）に畳まれている。
+--     **対応は添字という形でしか存在しない。** レポート側から見えるのは
+--     独立した繰り返しフィールドが 2 本あるだけで、「同じ添字で組になって
+--     いる」と伝える手段が無いため、列を 2 段（location > suffix）には
+--     できない。**対応はレポートに渡る前に解いておくしかない。**
+--     基準の重複も同じで、ここで両方を済ませて割る。
+--
+--     **3 本の配列を添字でそろえて割る**（WITH OFFSET と o = ol = ov）。
+--     セクション 2 の base_views が同じ ORDER BY で畳んでいるので、
+--     同じ添字が同じ View を指す。
+--
+--     ビューにしてある理由:
+--       ・読むのは __T_DIFF_SRC__ の小さい列だけ（diff_html には触らない）。
+--         列指向なので、数 MB のカードは走査されない
+--       ・3 のビューと違って Drive も JS UDF も REPLACE も通らないので速い
+--       ・焼き込むと、スケジュールドクエリに 3c を足し忘れたときに
+--         **古いマトリクスが黙って残る**。ビューなら毎日のセクション 2 に
+--         自動で追従する
+--
+--     基準（ref_index）ごとに行が増えても中身は同じなので、先頭だけ読む。
+--     ref_index = 0 の行は、グループが 0 件の base にも必ず 1 行ある
+--     （セクション 2 の CROSS JOIN UNNEST が NULL の 1 行を立てるため）。
+-- ---------------------------------------------------------------------
+SET sql_template = """
+CREATE OR REPLACE VIEW `__V_MATRIX__`
+OPTIONS (
+  description = 'base × suffix のマトリクス（1 行 = 1 View。location と suffix を別々の列に持つ）'
+)
+AS
+WITH bases AS (
+  SELECT
+    snapshot_date, base, suffixes, locations, view_names, group_labels, group_sizes,
+    view_count, group_count, has_multiple, unmatched_count
+  FROM `__T_DIFF_SRC__`
+  WHERE ref_index = 0
+),
+-- 配列 3 本を 1 View 1 行へ。**添字をそろえるのがこの CTE の仕事。**
+-- 対応が崩れていれば行数が View 数と合わなくなるので、5-8 が気づく。
+cells AS (
+  SELECT
+    b.* EXCEPT (suffixes, locations, view_names),
+    s AS label,
+    l AS location,
+    v AS view_name
+  FROM bases AS b,
+    UNNEST(b.suffixes)   AS s WITH OFFSET AS o,
+    UNNEST(b.locations)  AS l WITH OFFSET AS ol,
+    UNNEST(b.view_names) AS v WITH OFFSET AS ov
+  WHERE o = ol AND o = ov
+),
+-- その View がどのロジック グループに入るか。group_labels は
+-- 'abjp, abuk, abus' のように**この label を** ', ' で並べたもの
+-- （chrome.js の label() と同じ区切り・同じ代替）。突き合わせはそのまま効く。
+-- グループは**メンバの多い順**なので、group_no = 1 が最多グループ。
+grouped AS (
+  SELECT
+    c.*,
+    (SELECT MIN(gi) + 1
+     FROM UNNEST(c.group_labels) AS gl WITH OFFSET AS gi
+     WHERE c.label IN UNNEST(SPLIT(gl, ', '))) AS group_no
+  FROM cells AS c
+)
+SELECT
+  snapshot_date,
+  base,
+  -- ピボットの列はこの 2 つを 2 段に置く（location が上、suffix が下）。
+  location,
+  -- label は suffix そのもの。認識できなかった View だけ View 名が入って
+  -- いる（base_views の COALESCE）ので、そこは 1 列にまとめる。そういう
+  -- View は base が View 名そのもの＝ base ごと単独なので、まとめても
+  -- 他と混ざらない。base + '_' + suffix が View 名なので、label と View 名が
+  -- 一致するのは「suffix が取れなかった」ときだけ。
+  IF(label = view_name, '(suffix なし)', label) AS suffix,
+  view_name,
+  -- セルに置く値。同じ base で番号が割れていれば、そこがロジック差。
+  group_no,
+  IF(group_no IS NULL, NULL, group_labels[SAFE_OFFSET(group_no - 1)]) AS group_label,
+  IF(group_no IS NULL, NULL, group_sizes[SAFE_OFFSET(group_no - 1)])  AS group_size,
+  -- base ごとの値。行の絞り込み（差分のある base だけ見る）に使う。
+  view_count,
+  group_count,
+  has_multiple,
+  unmatched_count
+FROM grouped
+""";
+EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+  'マトリクスのビューの SQL に未展開のプレースホルダが残っています。';
+EXECUTE IMMEDIATE rendered_sql;
+
+
+-- ---------------------------------------------------------------------
+-- 4. テンプレートに貼る CSS（1 回取れば十分。template_style.html と同じ）
+--
+--    これだけはコメントのまま。毎回 8 KB の CSS を返しても邪魔なので、
+--    必要なときに下の 4 行を外して実行する。
+-- ---------------------------------------------------------------------
+-- SET sql_template = """SELECT `__UDF_CSS__`(@analyze_options)""";
+-- EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+-- ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS 'CSS の SQL に未展開のプレースホルダが残っています。';
+-- EXECUTE IMMEDIATE rendered_sql USING analyze_options AS analyze_options;
+
+
+-- ---------------------------------------------------------------------
+-- 5. 確認（ここから下は実行される）
+--
+--    読むのは __T_DIFF__（3b が焼き込んだテーブル）。**ビューは読まない。**
+--    ビューはレポートを開くたびに
+--      ・スプレッドシートの外部テーブル（Drive）を読み
+--      ・JS UDF で Markdown を HTML にし
+--      ・数 MB の diff_html に REPLACE をかける
+--    ので、確認クエリ 1 本ごとにそれを丸ごとやり直すことになる。5-2 のように
+--    base と group_count しか見ないものでも、そこまで走ってから捨てていた。
+--    上から順に流していれば 3b が直前で焼き込んでいるので、テーブルを読んでも
+--    中身は同じ。
+--
+--    **シートを直した内容を確かめたいときは、3b だけを流し直してからここへ来る。**
+--    3b は解析も描画もやり直さない（読むのは __T_DIFF_SRC__ とシートだけ）ので、
+--    メモの繋ぎ直しはそれ 1 本で済む。
+--
+--    それぞれ 1 文ずつ結果が出る。BigQuery の結果タブは番号しか出ないので、
+--    どのクエリの結果かが分かるよう先頭に check_name を付けてある。上から順に
+--      5-1 生成結果の中身
+--      5-2 ロジックが割れている base（＝要確認）
+--      5-3 suffix を認識できなかった View
+--      5-3b 名前が重複する View（複数のデータセットに同じ名前がある）
+--      5-4 実際に使う suffix の一覧
+--      5-5 データセット別の対象 View 数
+--      5-5b View 名の条件で落ちた View
+--      5-6 条件から外れたデータセット
+--      5-7 メモの登録状況（**コメントのまま。必要なときだけ外す**）
+--
+--    5-7 だけ外してあるのは、あれがスプレッドシートの外部テーブル（Drive）を
+--    読む唯一の確認だから。時間がかかることがあり、しかもメモを直したときに
+--    しか見ない。混ぜておくと「確認が遅い」の原因が分かりにくくなる。
+-- ---------------------------------------------------------------------
+
+-- 5-1 生成結果の中身
+SET sql_template = """
+SELECT
+  '5-1 生成結果の中身'                AS check_name,
+  base                              AS base_view_name,
+  view_count                        AS views_in_base,
+  group_count                       AS logic_group_count,
+  group_labels                      AS logic_groups_by_suffix,
+  unmatched_count                   AS suffix_unrecognized_views,
+  -- 1 レコードの大きさ。基準ごとのタブを全部載せているので、グループが多い
+  -- base ほど大きくなる（比較の枚数は group_count x (group_count - 1)）。
+  -- 極端に大きい base が出てきたら、描画側の予算で打ち切られていないか見る。
+  LENGTH(diff_html)                 AS diff_html_length_chars
+FROM `__T_DIFF__` AS v
+ORDER BY base_view_name
+""";
+EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+  '5-1 の SQL に未展開のプレースホルダが残っています。';
+EXECUTE IMMEDIATE rendered_sql;
+
+-- 5-2 ロジックが割れている base（＝要確認のもの）
+SET sql_template = """
+SELECT
+  '5-2 ロジックが割れている base'      AS check_name,
+  base                              AS base_view_name,
+  view_count                        AS views_in_base,
+  group_count                       AS logic_group_count,
+  group_labels                      AS logic_groups_by_suffix
+FROM `__T_DIFF__`
+WHERE has_multiple
+ORDER BY logic_group_count DESC, base_view_name
+""";
+EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+  '5-2 の SQL に未展開のプレースホルダが残っています。';
+EXECUTE IMMEDIATE rendered_sql;
+
+-- 5-3 suffix を認識できなかった View（単独で 1 行ずつ並ぶ）
+SET sql_template = """
+SELECT
+  '5-3 suffix を認識できなかった View' AS check_name,
+  base                              AS unrecognized_view_name,
+  LENGTH(diff_html)                 AS diff_html_length_chars
+FROM `__T_DIFF__`
+WHERE unmatched_count > 0
+ORDER BY unrecognized_view_name
+""";
+EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+  '5-3 の SQL に未展開のプレースホルダが残っています。';
+EXECUTE IMMEDIATE rendered_sql;
+
+-- 5-3b 名前が重複する View（複数のデータセットに同じ名前がある）
+--      **この作りは View 名がリージョン内で一意である前提。** base の切り出しは
+--      PARTITION BY view_name で 1 本だけ残すので、重複していたらどれか 1 本
+--      だけを採る（カラム定義も table_name で畳むので混ざる）。
+--
+--      4 文字 suffix（_abjp / _cdjp）なら名前にデータセットの区別が入るので
+--      衝突しないが、suffix_tail_lengths で 2 文字（_jp）を足すと
+--      mart_abjp.v_sales_jp と mart_cdjp.v_sales_jp が同じ名前になり得る。
+--
+--      **同名 View は作らない運用なら 0 件のはずで、これは見張り。**
+--      1 本だけ採る挙動はその前提のうえで許容している（0 件でない状態が
+--      続くなら、データセットまで含めた識別に作りを変える必要がある）。
+SET sql_template = """
+SELECT
+  '5-3b 名前が重複する View'           AS check_name,
+  table_name                        AS view_name,
+  COUNT(*)                          AS dataset_count,
+  STRING_AGG(table_schema, ', ' ORDER BY table_schema) AS dataset_names
+FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.VIEWS`
+WHERE (__VIEW_DATASET_COND__) AND (__VIEW_NAME_COND__)
+GROUP BY check_name, view_name
+HAVING COUNT(*) > 1
+ORDER BY dataset_count DESC, view_name
+""";
+EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+  '5-3b の SQL に未展開のプレースホルダが残っています。';
+EXECUTE IMMEDIATE rendered_sql;
+
+-- 5-4 実際に使う suffix の一覧
+--     「jp が suffix になっているか」「強制的に足した値が入っているか」は
+--     ここで確かめる。除外した値も excluded = TRUE で出す（消えた理由が
+--     分かるように）。
+--
+--     **セクション 2 の suffix_base / suffixes と同じ順で組み立てる。**
+--     以前はデータセット名から取り直すだけだったので、suffix_list を書くと
+--     「画面に出る一覧」と「実際に使われる一覧」が食い違っていた。
+--     一覧を自分で決めたときこそ確かめたいので、そこが見えないのは困る。
+--     片方を直したらもう片方も直すこと（node check_sql.mjs が突き合わせる）。
+SET sql_template = """
+WITH
+src AS (
+  SELECT
+    REGEXP_EXTRACT(schema_name, r'__SUFFIX_PATTERN__') AS suffix,
+    schema_name
+  FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.SCHEMATA`
+  WHERE REGEXP_CONTAINS(schema_name, r'__SUFFIX_PATTERN__') AND (__SCHEMA_COND__)
+),
+-- 土台。suffix_list を書いてあればそちらだけ（データセット名は見ない）。
+chosen AS (
+  SELECT
+    x                        AS suffix,
+    'suffix_list に明示'      AS suffix_origin,
+    '(データセット名からは取らない)' AS detail
+  FROM UNNEST(@suffix_list) AS x
+  WHERE x IS NOT NULL AND x != ''
+  UNION ALL
+  SELECT
+    suffix                                             AS suffix,
+    'データセット名から'                                 AS suffix_origin,
+    STRING_AGG(schema_name, ', ' ORDER BY schema_name) AS detail
+  FROM src
+  WHERE ARRAY_LENGTH(@suffix_list) = 0
+  GROUP BY suffix
+),
+-- 導出まで（素 ＋ 末尾 n 文字）。中間語はこれと掛け算する。
+-- **本体の suffix_derived / suffixes と同じ順番で組み立てること。**
+derived AS (
+  SELECT suffix, suffix_origin, detail FROM chosen
+  UNION ALL
+  SELECT
+    SUBSTR(c.suffix, -n)                             AS suffix,
+    FORMAT('末尾 %d 文字', n)                          AS suffix_origin,
+    STRING_AGG(DISTINCT c.suffix, ', ' ORDER BY c.suffix) AS detail
+  FROM chosen AS c, UNNEST(@suffix_tail_lengths) AS n
+  WHERE n > 0 AND LENGTH(c.suffix) > n
+  GROUP BY suffix, suffix_origin
+),
+listed AS (
+  SELECT suffix, suffix_origin, detail FROM derived
+  UNION ALL
+  -- 中間語つき。導出済みの一覧との掛け算なので、1 語書くと suffix の数だけ増える。
+  SELECT
+    CONCAT(m, '_', d.suffix)                    AS suffix,
+    'suffix_middle_list との組'                  AS suffix_origin,
+    CONCAT(m, ' × ', d.suffix)                  AS detail
+  FROM (SELECT DISTINCT suffix FROM derived) AS d, UNNEST(@suffix_middle_list) AS m
+  WHERE m IS NOT NULL AND m != ''
+  UNION ALL
+  -- 強制的に足したもの。末尾の導出は掛からないので、書いた文字列がそのまま
+  SELECT x, 'suffix_extra_list に明示', '(末尾の導出はしない)'
+  FROM UNNEST(@suffix_extra_list) AS x
+  WHERE x IS NOT NULL AND x != ''
+)
+SELECT
+  '5-4 実際に使う suffix'                  AS check_name,
+  suffix                                  AS effective_suffix,
+  suffix_origin                           AS suffix_origin,
+  detail                                  AS derived_from,
+  suffix IN UNNEST(@suffix_exclude_list)  AS excluded
+FROM listed
+ORDER BY excluded, effective_suffix, suffix_origin
+""";
+EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+  '5-4 の SQL に未展開のプレースホルダが残っています。';
+EXECUTE IMMEDIATE rendered_sql
+USING suffix_list AS suffix_list,
+      suffix_extra_list AS suffix_extra_list,
+      suffix_middle_list AS suffix_middle_list,
+      suffix_tail_lengths AS suffix_tail_lengths,
+      suffix_exclude_list AS suffix_exclude_list;
+
+-- 5-5 データセット別の対象 View 数
+SET sql_template = """
+SELECT
+  '5-5 データセット別の対象 View 数'   AS check_name,
+  table_schema                      AS dataset_name,
+  COUNT(*)                          AS target_view_count
+FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.VIEWS`
+WHERE (__VIEW_DATASET_COND__) AND (__VIEW_NAME_COND__)
+GROUP BY check_name, dataset_name
+ORDER BY dataset_name
+""";
+EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+  '5-5 の SQL に未展開のプレースホルダが残っています。';
+EXECUTE IMMEDIATE rendered_sql;
+
+-- 5-5b View 名の条件で落ちた View（対象のつもりのものが落ちていないか）
+--      analysis_include_object_patterns / analysis_exclude_object_patterns が
+--      空なら 0 件。
+SET sql_template = """
+SELECT
+  '5-5b View 名の条件で落ちた View'    AS check_name,
+  table_schema                      AS dataset_name,
+  table_name                        AS excluded_view_name
+FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.VIEWS`
+WHERE (__VIEW_DATASET_COND__) AND NOT (__VIEW_NAME_COND__)
+ORDER BY dataset_name, excluded_view_name
+""";
+EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+  '5-5b の SQL に未展開のプレースホルダが残っています。';
+EXECUTE IMMEDIATE rendered_sql;
+
+-- 5-6 条件から外れたデータセット（対象のつもりのものが落ちていないか）
+SET sql_template = """
+SELECT
+  '5-6 条件から外れたデータセット'     AS check_name,
+  schema_name                       AS excluded_dataset_name
+FROM `__TARGET_PROJECT__.region-__JOB_REGION__.INFORMATION_SCHEMA.SCHEMATA`
+WHERE NOT (__SCHEMA_COND__)
+ORDER BY excluded_dataset_name
+""";
+EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+  '5-6 の SQL に未展開のプレースホルダが残っています。';
+EXECUTE IMMEDIATE rendered_sql;
+
+-- 5-7 メモの登録状況
+--     **これだけコメントのまま。** 必要なときに下の 4 文（SET から
+--     EXECUTE IMMEDIATE まで）のコメントを外して実行する。
+--
+--     ここだけスプレッドシートの外部テーブル（__T_BASE_NOTE__ = Drive）を
+--     読むので、シートの機嫌や大きさで時間がかかることがある。ほかの 5 系は
+--     BigQuery のテーブルと INFORMATION_SCHEMA しか読まないので、これを
+--     混ぜておくと「確認が遅い」の原因がここだと分かりにくい。
+--     メモを直したときにだけ見れば足りる種類の確認でもある。
+--
+--     note_sheet_url が未設定なら全部 FALSE になる（＝テーブルが空）。
+--     シートの base を書き間違えるとどの行にも当たらないので、
+--     「シートにあるのにテーブルに出ない base」を最後に別立てで出す。
+--
+--     読むのは __T_DIFF__ なので、シートを直した直後に見るなら
+--     3b を流し直してからにする（3b がメモを焼き込む）。
+-- SET sql_template = """
+-- SELECT
+--   '5-7 メモの登録状況'                 AS check_name,
+--   base                              AS base_view_name,
+--   has_note                          AS note_registered,
+--   note_updated_at                   AS note_updated_at,
+--   note_updated_by                   AS note_updated_by,
+--   LENGTH(note_md)                   AS note_length_chars
+-- FROM `__T_DIFF__`
+-- UNION ALL
+-- SELECT
+--   '5-7 メモの登録状況（当たらない base）', TRIM(n.base), FALSE,
+--   CAST(NULL AS TIMESTAMP), CAST(NULL AS STRING), CAST(NULL AS INT64)
+-- FROM `__T_BASE_NOTE__` AS n
+-- WHERE TRIM(COALESCE(n.base, '')) != ''
+--   AND TRIM(n.base) NOT IN (SELECT base FROM `__T_DIFF__`)
+-- ORDER BY note_registered DESC, base_view_name
+-- """;
+-- EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+-- ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+--   '5-7 の SQL に未展開のプレースホルダが残っています。';
+-- EXECUTE IMMEDIATE rendered_sql;
+
+-- 5-8 マトリクス（3c）の形。ピボットを作る前に、ここで grain を確かめる。
+--
+--     見るのは 3 つ。
+--       ・cells が views と同じ数か。多ければ基準の重複（WHERE ref_index = 0 が
+--         効いていない）か、**配列を添字でそろえ忘れて総当たりになっている**。
+--         少なければ配列の長さが 3 本でそろっていない
+--       ・同じ location × suffix が 2 つ無いか（あればセルが重なる）
+--       ・グループに当たらなかった View が 0 か（group_no が NULL。
+--         列の suffixes と UDF の見出しが食い違うと起きる。内訳は 5-9）
+SET sql_template = """
+SELECT
+  '5-8 マトリクスの形'                  AS check_name,
+  (SELECT COUNT(*) FROM `__V_MATRIX__`)                        AS cells,
+  (SELECT SUM(view_count) FROM `__T_DIFF_SRC__` WHERE ref_index = 0) AS views,
+  (SELECT COUNT(DISTINCT location) FROM `__V_MATRIX__`)        AS locations,
+  (SELECT COUNT(DISTINCT suffix) FROM `__V_MATRIX__`)          AS suffixes,
+  (SELECT COUNT(*) FROM (
+     SELECT base, location, suffix FROM `__V_MATRIX__`
+     GROUP BY base, location, suffix HAVING COUNT(*) > 1))     AS duplicated_cells,
+  (SELECT COUNT(*) FROM `__V_MATRIX__` WHERE group_no IS NULL) AS cells_without_group
+""";
+EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+  '5-8 の SQL に未展開のプレースホルダが残っています。';
+EXECUTE IMMEDIATE rendered_sql;
+
+-- 5-9 suffix の切り出しが SQL と UDF で一致しているか
+--
+--     **suffixes の列は SQL（keyed）が作り、カードの見出しは UDF
+--     （extractSuffix）が作る。** どちらも「一覧との最長一致」で同じ結果に
+--     なるように書いてあるが、**食い違ってもエラーは出ない。**
+--     列とカードで別の suffix が出るだけで、画面からは正しく見える。
+--
+--     group_labels は UDF が返した見出し（この列の値を ', ' で並べたもの）
+--     なので、割れば UDF 側の suffix 一覧になる。列の suffixes と集合として
+--     突き合わせれば、取り直さずに確かめられる。
+--
+--     **0 件が正常。** 出たら base の切り出しが両者で違っているということで、
+--     suffix_list / suffix_middle_list / suffix_tail_lengths の渡し方を疑う。
+--     マトリクス（3c）はこの一致を前提に group_no を引いているので、
+--     ここが 0 件でないとマトリクスのセルも空く。
+--
+--     解析できなかった base（group_labels が空）は対象外。UDF 側に
+--     比べるものが無いので、出しても切り分けに使えない。
+SET sql_template = """
+SELECT
+  '5-9 suffix の切り出しの食い違い'      AS check_name,
+  base                                AS base_view_name,
+  ARRAY_TO_STRING(only_in_column, ', ') AS only_in_column,
+  ARRAY_TO_STRING(only_in_card, ', ')   AS only_in_card
+FROM (
+  SELECT
+    base,
+    ARRAY(
+      SELECT s FROM UNNEST(suffixes) AS s
+      WHERE s NOT IN (
+        SELECT x FROM UNNEST(group_labels) AS gl, UNNEST(SPLIT(gl, ', ')) AS x)
+    ) AS only_in_column,
+    ARRAY(
+      SELECT DISTINCT x
+      FROM UNNEST(group_labels) AS gl, UNNEST(SPLIT(gl, ', ')) AS x
+      WHERE x NOT IN UNNEST(suffixes)
+    ) AS only_in_card
+  FROM `__T_DIFF__`
+  WHERE ref_index = 0 AND ARRAY_LENGTH(group_labels) > 0
+)
+WHERE ARRAY_LENGTH(only_in_column) > 0 OR ARRAY_LENGTH(only_in_card) > 0
+ORDER BY base_view_name
+""";
+EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__') AS
+  '5-9 の SQL に未展開のプレースホルダが残っています。';
+EXECUTE IMMEDIATE rendered_sql;
+END;
