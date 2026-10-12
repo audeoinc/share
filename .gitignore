@@ -11,3 +11,7 @@ pa/.claude/
 
 # Installed dependencies are reproducible from the lockfile.
 node_modules/
+
+# Python の自動生成キャッシュ
+__pycache__/
+*.pyc
