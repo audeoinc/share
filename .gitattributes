@@ -1,0 +1,21 @@
+# 改行コードはすべて LF に統一する。
+#
+# Windows と Linux の両方からこのリポジトリを触っているため、設定が無いと
+# 同じ内容のファイルが改行だけ違う差分として現れる。`text=auto` で git が
+# テキスト/バイナリを内容から判定し、`eol=lf` でコミット時もチェックアウト時も
+# LF にそろえる。PowerShell (.ps1) と cmd.exe (.cmd) はどちらも LF を解釈できる
+# ので、スクリプトも除外していない。
+* text=auto eol=lf
+
+# 内容判定を誤らせたくないバイナリは明示する（`binary` = `-text -diff`）。
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.zip  binary
+*.vsix binary
+*.pptx binary
+*.docx binary
+*.xlsx binary
