@@ -1,3 +1,11 @@
 # AI アシスタント・デスクトップアプリの作業用ファイル(各自のもの。共有しない)
 .claude/
 pa/.claude/
+
+# `npm run build:everything` stages a full copy of lineage/ here before zipping it.
+# The release ZIP beside it IS committed; the staging directory is a duplicate of
+# the tree and must not be.
+/release/lineage_v*/
+
+# Installed dependencies are reproducible from the lockfile.
+node_modules/

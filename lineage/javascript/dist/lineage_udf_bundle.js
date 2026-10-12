@@ -2385,7 +2385,15 @@ class SelectParser {
    * @returns {boolean}
    */
   #isAliasToken(token) {
-    return this.#isIdentifierToken(token);
+    /*
+     * 明示 alias（`expr AS name`）は AS があるぶん構造との区別が付くため、
+     * 暗黙 alias と同じ「非予約 Keyword も列名として使える」基準を適用する。
+     * BigQuery では `offset` / `value` / `key` などは予約語ではなく、
+     * `SELECT x AS offset` は正当な SQL。ここを IDENTIFIER 限定にしていたため
+     * "invalid explicit alias" で解析ごと失敗していた。
+     * 真の予約語（NULL / END など）は #isColumnNameToken 側で除外される。
+     */
+    return this.#isColumnNameToken(token);
   }
 
   /**
@@ -2878,12 +2886,24 @@ class ExpressionParser {
       normalized_token: "."
     };
 
-    return AstFactory.createFunctionCall(
+    const node = AstFactory.createFunctionCall(
       [nameToken],
       [baseNode],
       dotToken,
       fieldToken
     );
+
+    /*
+     * 後置フィールド名を残す。式の値としては不透明な STRUCT のフィールド選択なので
+     * lineage は持たないが（v1.5.0-049）、base がテーブル別名＝行値のときだけは
+     * 「その行のどの列か」を決める情報になる。
+     *   ARRAY_AGG(t ORDER BY x LIMIT 1)[OFFSET(0)].session_id -> t.session_id
+     * ColumnResolver がこの名前を使って行参照を列参照へ絞り込む。
+     */
+    node.field_access_name = fieldToken.normalized_token;
+    node.field_access_name_raw = fieldToken.token;
+
+    return node;
   }
 
   #parsePrimaryExpression() {
@@ -4227,6 +4247,27 @@ class ColumnResolver {
       return;
     }
 
+    /*
+     * 後置フィールドアクセス（`base.field`）の下を走査するときは、フィールド名を
+     * context に載せて降りる。base にテーブル別名（＝行値）が現れた場合だけ、
+     * その別名を修飾子・フィールド名を列名とする「修飾あり参照」として解決するため。
+     *   ARRAY_AGG(t ORDER BY x LIMIT 1)[OFFSET(0)].session_id -> t.session_id
+     * 別名に一致しない普通の列（上例の x）は従来どおり解決されるので、
+     * この文脈を持ち回っても影響しない。
+     */
+    if (node.node_type === NodeType.FUNCTION_CALL_EXPRESSION &&
+        node.field_access_name) {
+      const fieldContext = {
+        ...context,
+        pending_field_access_name: node.field_access_name
+      };
+
+      this.#collectFromAst(
+        node.arguments, fieldContext, scope, sourceResolution, result
+      );
+      return;
+    }
+
     if (node.node_type === "IDENTIFIER_EXPRESSION") {
       /*
        * BigQueryの日時関数ではDAY / MONTH / YEARなどが、文字列ではなく
@@ -4342,7 +4383,75 @@ class ColumnResolver {
     });
   }
 
+  /**
+   * 修飾なし識別子がテーブル別名（＝行値）を指しているかを見て、行参照として解決する。
+   *
+   * GoogleSQL では `SELECT t FROM tbl AS t` の `t` は行全体の STRUCT で、
+   * `ARRAY_AGG(t ORDER BY x LIMIT 1)[OFFSET(0)].field`（グループ内の代表行を取る
+   * 定番イディオム）で使われる。列として解決しようとすると当然見つからず、
+   * 物理表なら PHYSICAL_COLUMN_NOT_FOUND(ERROR)、CTE なら未解決の警告になり、
+   * さらに本来の依存（その行の列）が系統から丸ごと落ちていた。
+   *
+   * 後置フィールドが分かっているときは `別名.フィールド` の修飾あり参照へ落とす
+   * （＝列単位で正確に解決できる）。分からないときは行そのものへの参照として
+   * ソースに紐付け、下流で全列へ展開させる。
+   *
+   * 列としての解決を先に試したうえでの最後の砦なので、同名の列があればそちらが勝つ。
+   */
+  #resolveRowReference(node, context, scope, sourceResolution, columnName) {
+    const source = this.#findSource(sourceResolution, scope.scope_id, columnName);
+
+    if (!source) {
+      return null;
+    }
+
+    /*
+     * 行値になり得るのは「表」を表すソースだけ。UNNEST の別名は要素の値であって
+     * 行ではなく、TABLE_FUNCTION も同様に行集合の別名として扱わない。
+     * ここを絞らないと `FROM d.t AS t, UNNEST(Col) AS Col` の `Col` を行参照と
+     * 誤認し、本来の配列列としての系統を失う（test_v1_5_0_065）。
+     */
+    if (source.source_type !== "PHYSICAL_TABLE" &&
+        source.source_type !== "CTE" &&
+        source.source_type !== "SUBQUERY") {
+      return null;
+    }
+
+    /*
+     * 後置フィールドが無い形は扱わない（下の return null）。ある場合は
+     * `t.field` と書かれたのと同じ意味なので、GoogleSQL の解決順どおり
+     * テーブル別名を優先してよい。
+     */
+    if (context.pending_field_access_name) {
+      return this.#resolveQualifiedReference(
+        node,
+        context,
+        scope,
+        sourceResolution,
+        [columnName],
+        context.pending_field_access_name,
+        null
+      );
+    }
+
+    /*
+     * 後置フィールドが分からない行値（`SELECT t`、`ARRAY_AGG(t) AS xs` など）は対象外。
+     * 「その行の全列」に相当する参照を式の途中に差し込むと、SELECT 項目の
+     * ワイルドカードを前提にしている下流を壊す（実際にクラッシュした）。
+     * 絞り込める形だけを扱い、それ以外は従来どおりの解決に委ねる。
+     */
+    return null;
+  }
+
   #resolveUnqualifiedReference(node, context, scope, sourceResolution, columnName) {
+    const rowReference = this.#resolveRowReference(
+      node, context, scope, sourceResolution, columnName
+    );
+
+    if (rowReference) {
+      return rowReference;
+    }
+
     const outputAlias = this.#findVisibleOutputAlias(
       scope.scope_id,
       columnName,
@@ -7826,9 +7935,40 @@ class QueryParser {
     const innerTokens = this.#stripWrappingParentheses(this.tokens);
 
     if (innerTokens) {
+      /*
+       * disableSetOperations は「この Token 列を、いま分割中のセット演算の 1 branch として
+       * 解析している」という意味であり、同じ深さでの再分割を防ぐためのもの。括弧は
+       * GoogleSQL の query_expr を新しく開くので、括弧の内側では改めてセット演算を
+       * 許可しなければならない（`(A UNION ALL B) EXCEPT DISTINCT C` の左辺など）。
+       * ここで引き継いでしまうと内側の UNION/INTERSECT/EXCEPT が分割されず、
+       * FROM Clause の途中に演算子が残って
+       * "FromParser: JOIN was expected, but found ..." になる。
+       */
       return new QueryParser(this.#normalizeTokenDepth(innerTokens), {
         isSubquery: this.isSubquery,
-        disableSetOperations: this.disableSetOperations
+        disableSetOperations: false
+      }).parse();
+    }
+
+    /*
+     * DDL の前置き（CREATE ... AS / EXPORT DATA ... AS）を落として、本体のクエリだけを
+     * 解析する。ClauseParser は深さ0の SELECT を拾えるので `CREATE TABLE t AS SELECT ...`
+     * は前置きが残っていても通るが、`CREATE TABLE t AS WITH c AS (...) SELECT ...` は
+     * 通らない。#parseCommonTableExpressions が「先頭トークンが WITH」のときしか CTE を
+     * 解析しないため、CREATE で始まると CTE が読まれず、深さ0の SELECT だけが拾われて
+     * CTE 名が未知のソースになる。エラーにならず COMPLETED_WITH_WARNINGS で
+     * 系統だけが静かに欠落するので、たちが悪い。
+     *
+     * 対象テーブル名は解析メタデータ（view_project/dataset/name）で与えられるため、
+     * 前置きは lineage に寄与しない。落として問題ない。
+     */
+    const statementPrefixTokens = this.#stripStatementPrefix(this.tokens);
+
+    if (statementPrefixTokens) {
+      /* AS の後ろは新しい query_expr。理由は #stripWrappingParentheses と同じ。 */
+      return new QueryParser(this.#normalizeTokenDepth(statementPrefixTokens), {
+        isSubquery: this.isSubquery,
+        disableSetOperations: false
       }).parse();
     }
 
@@ -7843,13 +7983,48 @@ class QueryParser {
     const statementBodyTokens = this.#stripStatementBodyParentheses(this.tokens);
 
     if (statementBodyTokens) {
+      /* 括弧の内側は新しい query_expr。理由は #stripWrappingParentheses と同じ。 */
       return new QueryParser(this.#normalizeTokenDepth(statementBodyTokens), {
         isSubquery: this.isSubquery,
-        disableSetOperations: this.disableSetOperations
+        disableSetOperations: false
       }).parse();
     }
 
     const cteResult = this.#parseCommonTableExpressions(contentTokens);
+
+    /*
+     * WITH 句の後ろのメインQueryが丸ごと括弧に包まれている形。
+     *
+     *   WITH cte AS (SELECT ...) (SELECT ... FROM cte)
+     *
+     * GoogleSQL の query_expr は `[WITH ...] { select | ( query_expr ) | set_op }`
+     * なので、CTE の後ろに括弧付きクエリを置くのは正しい構文。しかし ClauseParser は
+     * 深さ0の SELECT を探すため、この形では SELECT が深さ1に入り
+     * 「トップレベルの SELECT Clause が見つかりません」になっていた。
+     * 括弧内をメインQueryとして再解析し、この階層で解析済みの CTE を前に連結する
+     * （外側 CTE のほうが先に定義されるため、内側 CTE から参照できる順序を保つ）。
+     */
+    if (cteResult.main_start_index > 0) {
+      const mainQueryTokens = contentTokens.slice(cteResult.main_start_index);
+      const innerMainTokens = this.#stripWrappingParentheses(mainQueryTokens);
+
+      if (innerMainTokens) {
+        /* 括弧の内側は新しい query_expr。理由は #stripWrappingParentheses と同じ。 */
+        const mainQuery = new QueryParser(this.#normalizeTokenDepth(innerMainTokens), {
+          isSubquery: this.isSubquery,
+          disableSetOperations: false
+        }).parse();
+
+        mainQuery.recursive = cteResult.recursive || Boolean(mainQuery.recursive);
+        mainQuery.common_table_expressions = [
+          ...cteResult.ctes,
+          ...(mainQuery.common_table_expressions || [])
+        ];
+        mainQuery.start_token_seq = contentTokens[0].token_seq;
+        mainQuery.end_token_seq = this.#findLastMeaningfulToken(contentTokens).token_seq;
+        return mainQuery;
+      }
+    }
 
     if (!this.disableSetOperations) {
       const mainTokens = contentTokens.slice(cteResult.main_start_index);
@@ -7861,9 +8036,22 @@ class QueryParser {
           disableSetOperations: true
         }).parse();
 
-        firstQuery.recursive = cteResult.recursive;
-        firstQuery.common_table_expressions = cteResult.ctes;
-        firstQuery.set_operations = [];
+        /*
+         * branch 0 が括弧付きで、それ自身がセット演算や WITH を持つ場合
+         * （`(A UNION ALL B) EXCEPT DISTINCT C` など）、firstQuery は既に
+         * set_operations / common_table_expressions を持っている。上書きすると
+         * 内側の branch や CTE が丸ごと失われて lineage が欠落するため、
+         * この階層のものを前に足す形で保存する。リネージ上、セット演算の出力は
+         * 全 branch の和なので、入れ子を平坦化しても結果は変わらない。
+         */
+        firstQuery.recursive = cteResult.recursive || Boolean(firstQuery.recursive);
+        firstQuery.common_table_expressions = [
+          ...cteResult.ctes,
+          ...(firstQuery.common_table_expressions || [])
+        ];
+        firstQuery.set_operations = Array.isArray(firstQuery.set_operations)
+          ? firstQuery.set_operations
+          : [];
 
         for (let branchIndex = 1; branchIndex < setOperation.branches.length; branchIndex++) {
           const operation = setOperation.operations[branchIndex - 1];
@@ -8357,6 +8545,66 @@ class QueryParser {
     }
 
     return inner;
+  }
+
+  /**
+   * DDL の前置きを落として、本体のクエリ Token を返す。落とせない場合は null。
+   *
+   * 条件：先頭の非コメント Token が CREATE か EXPORT で、深さ0の 'AS' があり、その直後
+   * （コメント除く）が SELECT / WITH / '(' で始まること。
+   *
+   * 深さ0の最初の 'AS' を境界にするので、前置きの中身がどれだけ増えても影響を受けない。
+   * 列スキーマ `(id INT64, ...)`、`PARTITION BY DATE(dt)`、`CLUSTER BY id`、
+   * `OPTIONS(description='...')` はいずれも括弧の中か AS より前に現れるため、
+   * 03 側の正規表現のように形ごとに列挙する必要がない。
+   *
+   * 先頭が CREATE / EXPORT のときだけ動くのが要点で、これが無いと
+   * `WITH t AS (SELECT ...) SELECT ...` の CTE の 'AS' を境界と誤認して CTE ごと
+   * 捨ててしまう。SELECT / WITH / '(' で始まる通常のクエリには一切触れない。
+   */
+  #stripStatementPrefix(tokens) {
+    const meaningful = [];
+
+    for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex++) {
+      if (tokens[tokenIndex].token_type !== "COMMENT") {
+        meaningful.push(tokenIndex);
+      }
+    }
+
+    if (meaningful.length < 3) {
+      return null;
+    }
+
+    const firstToken = tokens[meaningful[0]];
+
+    if (firstToken.normalized_token !== "CREATE" && firstToken.normalized_token !== "EXPORT") {
+      return null;
+    }
+
+    let asPosition = -1;
+
+    for (let position = 1; position < meaningful.length; position++) {
+      const token = tokens[meaningful[position]];
+
+      if (token.normalized_token === "AS" && token.paren_depth === 0) {
+        asPosition = position;
+        break;
+      }
+    }
+
+    if (asPosition < 0 || asPosition + 1 >= meaningful.length) {
+      return null;
+    }
+
+    const bodyToken = tokens[meaningful[asPosition + 1]];
+    const isQueryStart = bodyToken.token === "(" ||
+      ["SELECT", "WITH"].includes(bodyToken.normalized_token);
+
+    if (!isQueryStart) {
+      return null;
+    }
+
+    return tokens.slice(meaningful[asPosition + 1]);
   }
 
   /**
@@ -10099,6 +10347,41 @@ class PhysicalColumnResolver {
 
       if (structResolved) {
         return structResolved;
+      }
+    }
+
+    /*
+     * 別名を付けない UNNEST の要素フィールドを、ドット付きで参照した形。
+     *
+     *   SELECT value.string_value FROM UNNEST(event_params) WHERE key = '...'
+     *
+     * GA4 系でごく普通に書かれる。ColumnResolver は 2 部構成の識別子を
+     * 「修飾子.列名」と読むため先頭の `value` をソース別名とみなし、一致する
+     * ソースが無いので UNRESOLVED_SOURCE にする。単一部の `key` は修飾なし
+     * 参照として直上の UNNEST フォールバックで解決するので、ドット付きだけが
+     * 取り残されて誤った LINEAGE_PARTIALLY_RESOLVED になっていた。
+     * 別名付き（`ep.value.string_value`）は ColumnResolver が別名を解決できるため
+     * ここには来ない。
+     *
+     * スコープ内の UNNEST が 1 つだけのときに限り、修飾子ごと要素内のフィールド
+     * パスとみなして UNNEST 解決へ委譲する（#resolveCorrelatedUnnestReference は
+     * reference_name の全体をフィールドパスとして扱うので、修飾子は自然に含まれる）。
+     * 複数あると `value` がどの要素のものか決められないため、従来どおり
+     * UNRESOLVED_SOURCE のままにする。物理のネスト STRUCT（geo.region）は直前の
+     * #resolveStructFieldPathReference が先に解決するので、優先順位は変わらない。
+     */
+    if (reference.qualifier &&
+        reference.resolution_status === "UNRESOLVED_SOURCE") {
+      const scopeSources = this.sourcesByScopeId.get(reference.scope_id) || [];
+      const unnestSources = scopeSources.filter(
+        (source) => source.source_type === "UNNEST"
+      );
+
+      if (unnestSources.length === 1) {
+        return this.#resolveCorrelatedUnnestReference(
+          { ...reference, source_id: unnestSources[0].source_id },
+          context
+        );
       }
     }
 
@@ -13949,6 +14232,37 @@ function discoverPhysicalSourcesForBigQuery(sqlText) {
   };
 }
 
+/*
+ * 識別子の中の数字列をフィンガープリント上だけ「#」に畳む際の最小桁数。
+ *
+ * 一時Table名に埋め込まれた実行IDや連番（tmp_123456 / tmp_01234567890123456789）は
+ * トークナイザから見れば1個のIDENTIFIERなので、リテラル正規化では畳まれず、実行の
+ * たびに別オブジェクトとして登録されてしまう。一方で短い数字列は「別物の識別子」で
+ * あることが多く、畳むと誤って同一視する。
+ *
+ * 桁数は実測で決めた。判定基準は桁数そのものではなく「その値が使い捨てか」で、
+ * 使い捨ての実行IDは各値が1日しか現れず、本物の識別子は毎日現れる
+ * （`sql/maintenance/10_pending_analysis_workload.sql` レポート8、job履歴8日分）：
+ *   20桁 5,118種類 / 1日限り100% / 平均1.00日  使い捨て
+ *   19桁 2,378種類 / 1日限り100% / 平均1.00日  使い捨て
+ *   18桁 1,076種類 / 1日限り100% / 平均1.00日  使い捨て
+ *    9桁     7種類 / 1日限り  0% / 平均8.00日  毎日出る＝安定した識別子
+ *    8桁     6種類 / 1日限り100% / 平均1.00日  使い捨て
+ *    6桁 3,026種類 / 1日限り100% / 平均1.00日  使い捨て
+ *    2桁    61種類 / 1日限り  0% / 平均6.82日  安定
+ *    1桁    10種類 / 1日限り  0% / 平均7.30日  安定
+ * 6桁以上はすべて使い捨て側に寄るので6を下限とする。唯一の例外が9桁（7種類だけ
+ * 毎日出る）で、これは巻き込まれる。ただし畳んだグループのソース集合の相違
+ * （12_ephemeral_sql_similarity.sql レポート1の lossy）はしきい値6でも8でも58件で
+ * 同じ＝6まで下げてもエッジの取りこぼしは増えない、という実測がある。
+ *
+ * 影響範囲はephemeral（一時／ローテーション出力）のオブジェクト同一性だけ。03は
+ * 永続destinationを宛先名でPARTITIONしており、フィンガープリントは
+ * ELSE側（ephemeral）のキーにしか使っていない。畳んだ結果の代表1件は実際のSQL本文で
+ * 解析されるので、lineage自体が粗くなるわけではない。
+ */
+const FINGERPRINT_MIN_IDENTIFIER_DIGIT_RUN = 6;
+
 /**
  * SQLの構造フィンガープリント（正準化文字列）を返す。
  *
@@ -13959,6 +14273,10 @@ function discoverPhysicalSourcesForBigQuery(sqlText) {
  * 演算子・記号は保持するため、構造（参照Table/列や結合・句の形）が異なるSQLは
  * 別のフィンガープリントになる。DATE '...' のような型付きリテラルは後続の
  * STRING が「?」になるため DATE ? へ畳まれる。
+ *
+ * さらにIDENTIFIER / BACKTICK_IDENTIFIER に限り、FINGERPRINT_MIN_IDENTIFIER_DIGIT_RUN
+ * 桁以上の数字列を「#」へ畳む。回転する一時Table名（実行ID・連番の埋め込み）の
+ * 生成SQLを1件にまとめるため。短い数字列は別物の識別子でありうるので畳まない。
  *
  * 呼び出し側（03パイプライン）はこの文字列を TO_HEX(SHA256(...)) でハッシュ化し、
  * statement_type = 'SELECT' のジョブをフィンガープリント単位でまとめ、最新の
@@ -13995,6 +14313,24 @@ function fingerprintSqlForBigQuery(sqlText) {
       const normalized = token.normalized_token != null
         ? token.normalized_token
         : token.token;
+
+      /*
+       * 日付サフィックス等の長い数字列は識別子の中にあるのでNUMBERにならない。
+       * 識別子トークンに限って畳む（KEYWORDや演算子には触れない）。正規表現は
+       * ここで生成する。モジュール定数にするとlastIndexを共有するため。
+       */
+      if (
+        token.token_type === "IDENTIFIER" ||
+        token.token_type === "BACKTICK_IDENTIFIER"
+      ) {
+        parts.push(
+          normalized.replace(
+            new RegExp("[0-9]{" + FINGERPRINT_MIN_IDENTIFIER_DIGIT_RUN + ",}", "g"),
+            "#"
+          )
+        );
+        continue;
+      }
 
       parts.push(normalized);
     }

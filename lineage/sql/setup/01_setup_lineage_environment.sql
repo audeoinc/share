@@ -102,6 +102,10 @@ DECLARE bootstrap_default_project_id STRING;
 DECLARE bootstrap_udf_function_name STRING;
 DECLARE bootstrap_udf_fingerprint_function_name STRING;
 DECLARE bootstrap_udf_render_function_name STRING;
+-- Looker Studio 向けの HTML 生成 UDF（本体は下の生成ブロックが SET する JS）。
+-- 他の UDF と同じ udf prefix/suffix・同じ bootstrap_udf_dataset に作る。
+DECLARE bootstrap_udf_usage_sql_html_function_name STRING;
+DECLARE bootstrap_udf_usage_sql_css_function_name STRING;
 -- Target dataset(s) used only by the UDF smoke test below (to build a
 -- representative physical-column identity). The pipeline's own scan scope is set
 -- in 03_run_daily_lineage_pipeline.sql.
@@ -109,6 +113,15 @@ DECLARE bootstrap_target_datasets ARRAY<STRING> DEFAULT ['dataset'];
 -- Smoke-test parser options (mirror 03's parser_strict_mode / compact_export).
 DECLARE bootstrap_parser_strict_mode BOOL DEFAULT FALSE;
 DECLARE bootstrap_compact_export BOOL DEFAULT TRUE;
+
+-- Views-only re-deploy. Section 4 recreates the repository TABLES with
+-- CREATE OR REPLACE, which DESTROYS their contents -- so once a repository is live
+-- this script must not be re-run just to pick up a view change. Set TRUE to skip
+-- everything destructive or slow (the table DDL in section 4, the renderer / UDF
+-- deploy in 4b and 5, and the smoke tests in 6) and only recreate the views in
+-- section 4a. The naming knobs above still apply, so the views are rebuilt over
+-- exactly the tables this deployment uses. Leave FALSE for a first-time setup.
+DECLARE recreate_views_only BOOL DEFAULT FALSE;
 
 -- ----------------------------------------------------------------------------
 -- [C] DERIVED / INTERNAL -- computed from [A] or @@location; DO NOT edit
@@ -131,6 +144,9 @@ DECLARE table_diagnostic STRING;
 DECLARE table_job_registry STRING;
 DECLARE table_column_usage STRING;
 DECLARE view_column_usage_impact STRING;
+DECLARE view_object_dependency STRING;
+-- HTML 生成 UDF の本体 JS。build_usage_html_udf.js が生成ブロックで SET する。
+DECLARE usage_html_udf_js STRING;
 
 DECLARE repository_dataset_full_name STRING;
 -- Token extracted from the project id (see bootstrap_project_token_pattern).
@@ -203,12 +219,20 @@ SET bootstrap_udf_fingerprint_function_name =
   bootstrap_udf_name_prefix || 'lnge_' || 'fingerprint_sql' || bootstrap_udf_name_suffix;
 SET bootstrap_udf_render_function_name =
   bootstrap_udf_name_prefix || 'lnge_' || 'render_dynamic_sql' || bootstrap_udf_name_suffix;
+SET bootstrap_udf_usage_sql_html_function_name =
+  bootstrap_udf_name_prefix || 'lnge_' || 'usage_sql_html' || bootstrap_udf_name_suffix;
+SET bootstrap_udf_usage_sql_css_function_name =
+  bootstrap_udf_name_prefix || 'lnge_' || 'usage_sql_css' || bootstrap_udf_name_suffix;
 ASSERT REGEXP_CONTAINS(bootstrap_udf_function_name, r'^[A-Za-z0-9_]+$')
 AS 'Invalid udf function name (letters/digits/_ only; no hyphen in udf prefix/suffix).';
 ASSERT REGEXP_CONTAINS(bootstrap_udf_fingerprint_function_name, r'^[A-Za-z0-9_]+$')
 AS 'Invalid udf fingerprint function name (letters/digits/_ only; no hyphen).';
 ASSERT REGEXP_CONTAINS(bootstrap_udf_render_function_name, r'^[A-Za-z0-9_]+$')
 AS 'Invalid udf render function name (letters/digits/_ only; no hyphen).';
+ASSERT REGEXP_CONTAINS(bootstrap_udf_usage_sql_html_function_name, r'^[A-Za-z0-9_]+$')
+AS 'Invalid udf usage_sql_html function name (letters/digits/_ only; no hyphen).';
+ASSERT REGEXP_CONTAINS(bootstrap_udf_usage_sql_css_function_name, r'^[A-Za-z0-9_]+$')
+AS 'Invalid udf usage_sql_css function name (letters/digits/_ only; no hyphen).';
 
 -- Physical table names: prefix + marker + canonical base + suffix.
 -- The 'm_' / 't_' marker literal is inline; edit it to reclassify a table.
@@ -237,6 +261,11 @@ SET table_column_usage =
 SET view_column_usage_impact =
   bootstrap_table_name_prefix || 'lnge_' || 'vw_' || 't_' || 'column_usage_impact'
     || bootstrap_table_name_suffix;
+-- Object (table/view) level dependency view, aggregated from the same transaction
+-- table as the impact view, so its marker is 't_' -> lnge_vw_t_object_dependency.
+SET view_object_dependency =
+  bootstrap_table_name_prefix || 'lnge_' || 'vw_' || 't_' || 'object_dependency'
+    || bootstrap_table_name_suffix;
 
 ASSERT REGEXP_CONTAINS(table_definition_registry, r'^[A-Za-z0-9_-]+$')
 AS 'Invalid table_definition_registry name.';
@@ -252,6 +281,8 @@ ASSERT REGEXP_CONTAINS(table_column_usage, r'^[A-Za-z0-9_-]+$')
 AS 'Invalid table_column_usage name.';
 ASSERT REGEXP_CONTAINS(view_column_usage_impact, r'^[A-Za-z0-9_-]+$')
 AS 'Invalid view_column_usage_impact name.';
+ASSERT REGEXP_CONTAINS(view_object_dependency, r'^[A-Za-z0-9_-]+$')
+AS 'Invalid view_object_dependency name.';
 
 SET repository_dataset_full_name = FORMAT(
   '%s.%s',
@@ -303,7 +334,11 @@ AS 'bootstrap_target_datasets must contain at least one dataset.';
 
 -- ============================================================================
 -- 4. Repository tables
+--
+-- CREATE OR REPLACE TABLE: every statement here DROPS AND RECREATES its table, so
+-- the whole section is skipped when recreate_views_only is TRUE.
 -- ============================================================================
+IF NOT recreate_views_only THEN
 EXECUTE IMMEDIATE FORMAT(
   '''
   CREATE OR REPLACE TABLE `%s.%s`
@@ -566,6 +601,526 @@ EXECUTE IMMEDIATE FORMAT(
   table_column_usage
 );
 
+END IF;  -- NOT recreate_views_only (section 4: repository tables)
+
+-- ============================================================================
+-- 4a-0. HTML 生成 UDF -- ビューが参照するため、ビューより先に作る。
+--
+-- CREATE OR REPLACE FUNCTION は非破壊なので recreate_views_only の実行でも作る
+-- （ビューがこの関数に依存しているため、views-only でスキップしてはならない）。
+-- ============================================================================
+-- BEGIN GENERATED: usage SQL HTML UDF (build_usage_html_udf.js)
+-- このブロックは自動生成です。直接編集せず、src/html/usage_sql_html.js を直して
+-- `node scripts/build_usage_html_udf.js` で作り直すこと。
+--
+-- 使用箇所つき SQL を HTML にして返す UDF。Looker Studio の Templated Record に
+-- HTML カラムとして渡す用途。GCS も外部ライブラリも使わない自己完結の関数なので、
+-- エンジン バンドル (lineage_udf_bundle.js) とは無関係で再デプロイも不要。
+--
+-- 他の UDF（analyze_json / fingerprint_sql / render_dynamic_sql）と同じ扱いで、
+-- 同じ udf prefix/suffix・同じ bootstrap_udf_dataset に作られる。
+--
+-- <udf_prefix>lnge_usage_sql_html<udf_suffix>(sql_text, highlights, options_json)
+--   sql_text     対象オブジェクトの SQL 本文
+--   highlights   'line:column:length' の配列。重複と重なりは関数側で畳む
+--   options_json 表示オプション。NULL / '{}' で既定
+--     mode         'embed'(既定) <style> 同梱で自己完結 / 'class' markup のみ
+--                  (CSS は LNGE_USAGE_SQL_CSS() をテンプレートに貼る。最小) /
+--                  'inline' すべてインライン CSS
+--     contextLines 該当行の前後 N 行だけ描画（既定は指定なし＝全文）
+--     maxLines     描画する最大行数（既定 5000）
+--     fontSize / lineHeight / colors.* / syntax.*
+--
+-- <udf_prefix>lnge_usage_sql_css<udf_suffix>(options_json)
+--   mode='class' のときテンプレートに貼る CSS。色を変えたら同じ options_json を
+--   渡して作り直すこと（markup と CSS は同じコードから作られるので食い違わない）。
+-- 変数はスクリプト先頭の [C] で DECLARE 済み（BigQuery は DECLARE を
+-- 最初の文より前に置く必要があるため、ここでは SET だけを行う）。
+SET usage_html_udf_js = r'''
+/**
+ * 使用箇所つき SQL を HTML へ描画するレンダラ。
+ *
+ * Looker Studio のコミュニティ ビジュアライゼーション "Templated Record" に
+ * HTML 文字列のカラムを渡して描画させるためのもの。Templated Record は
+ * ギャラリー掲載品で公開元がホストしているため、GCS バケットを公開する必要がない
+ * （自作ビジュアライゼーションは公開バケットが必須で、それが禁止の環境では使えない）。
+ *
+ * 描画するもの:
+ *   - 行番号つきの SQL 全文
+ *   - 該当行の行ハイライト
+ *   - 該当箇所（複数可）の文字ハイライト
+ *   - SQL の簡易構文ハイライト
+ *
+ * ハイライト位置は "line:column:length" の文字列で受け取る。line / column は
+ * リポジトリの line_number / column_number と同じ 1 始まりで、column は
+ * 行頭インデントを含む文字位置（タブは 1 文字）。したがってタブを空白へ展開しては
+ * ならない（位置がずれる）。表示側は white-space:pre-wrap で見た目を保つ。
+ *
+ * このモジュールは BigQuery の JS UDF 本体として埋め込まれる（scripts/
+ * build_usage_html_udf.js が 01 の生成ブロックへ差し込む）。BigQuery の
+ * インライン コード ブロブは 32KB が上限なので、追加時はサイズに注意すること。
+ */
+
+/* 予約語。色分けの対象。網羅ではなく、読みやすさに効くものを選んでいる。 */
+const SQL_KEYWORDS = new Set(
+  ("SELECT FROM WHERE JOIN INNER LEFT RIGHT FULL OUTER CROSS ON USING " +
+   "AND OR NOT IN IS NULL LIKE BETWEEN EXISTS ANY ALL SOME " +
+   "GROUP BY HAVING QUALIFY ORDER ASC DESC LIMIT OFFSET " +
+   "UNION INTERSECT EXCEPT DISTINCT AS CASE WHEN THEN ELSE END " +
+   "WITH RECURSIVE OVER PARTITION WINDOW UNNEST STRUCT ARRAY " +
+   "CREATE OR REPLACE TABLE VIEW FUNCTION TEMP TEMPORARY IF " +
+   "INSERT INTO VALUES UPDATE SET DELETE MERGE MATCHED " +
+   "CAST SAFE_CAST INTERVAL EXTRACT TRUE FALSE " +
+   "INT64 FLOAT64 NUMERIC STRING BYTES BOOL DATE DATETIME TIME TIMESTAMP JSON"
+  ).split(/\s+/)
+);
+
+const DEFAULTS = {
+  mode: "embed",
+  contextLines: null,
+  maxLines: 5000,
+  fontSize: 12,
+  lineHeight: 1.45,
+  font: "'Roboto Mono','SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace",
+  text: "#24292F",
+  num: "#8C959F",
+  numBg: "#F6F8FA",
+  border: "#D8DEE4",
+  hitBg: "#FFF8C5",
+  hitBar: "#D4A72C",
+  markBg: "#FFE58F",
+  gapBg: "#F6F8FA",
+  gapText: "#6E7781",
+  keyword: "#CF222E",
+  literal: "#098658",
+  comment: "#6E7781"
+};
+
+const PREFIX = "lnge-sq";
+
+function resolveOptions(optionsJson) {
+  const options = Object.assign({}, DEFAULTS);
+
+  if (optionsJson === null || optionsJson === undefined || optionsJson === "") {
+    return options;
+  }
+
+  let parsed;
+
+  try {
+    parsed = JSON.parse(optionsJson);
+  } catch (error) {
+    /* 壊れた JSON で描画ごと落とさない。既定で描いたほうが運用上ましなので。 */
+    return options;
+  }
+
+  if (!parsed || typeof parsed !== "object") {
+    return options;
+  }
+
+  for (const key of Object.keys(DEFAULTS)) {
+    if (parsed[key] !== undefined && parsed[key] !== null) {
+      options[key] = parsed[key];
+    }
+  }
+
+  if (parsed.colors && typeof parsed.colors === "object") {
+    for (const key of ["hitBg", "hitBar", "markBg", "num", "numBg", "text", "border"]) {
+      if (parsed.colors[key]) options[key] = parsed.colors[key];
+    }
+  }
+
+  if (parsed.syntax && typeof parsed.syntax === "object") {
+    for (const key of ["keyword", "literal", "comment"]) {
+      if (parsed.syntax[key]) options[key] = parsed.syntax[key];
+    }
+  }
+
+  if (options.mode !== "class" && options.mode !== "inline" && options.mode !== "embed") {
+    options.mode = DEFAULTS.mode;
+  }
+
+  return options;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+/**
+ * "line:column:length" を解析し、行番号ごとの範囲一覧へ畳む。
+ *
+ * 同じ箇所が経路違いで何度も渡ってくる（影響グラフは経路ごとに 1 行なので、
+ * 同一の使用箇所が複数回現れる）ため、ここで重複排除と重なりの結合まで行う。
+ * 範囲は [start, end) の 0 始まり列オフセットへ正規化する。
+ */
+function parseHighlights(highlights) {
+  const byLine = new Map();
+
+  if (!Array.isArray(highlights)) {
+    return byLine;
+  }
+
+  for (const entry of highlights) {
+    if (entry === null || entry === undefined) continue;
+
+    const parts = String(entry).split(":");
+    if (parts.length < 2) continue;
+
+    const line = Number(parts[0]);
+    const column = Number(parts[1]);
+    const length = parts.length > 2 ? Number(parts[2]) : 0;
+
+    if (!Number.isFinite(line) || !Number.isFinite(column)) continue;
+    if (line < 1 || column < 1) continue;
+
+    const start = column - 1;
+    const end = start + (Number.isFinite(length) && length > 0 ? length : 1);
+
+    if (!byLine.has(line)) byLine.set(line, []);
+    byLine.get(line).push([start, end]);
+  }
+
+  for (const [line, ranges] of byLine) {
+    ranges.sort((a, b) => (a[0] - b[0]) || (a[1] - b[1]));
+
+    const merged = [];
+
+    for (const range of ranges) {
+      const last = merged[merged.length - 1];
+      if (last && range[0] <= last[1]) {
+        last[1] = Math.max(last[1], range[1]);
+      } else {
+        merged.push([range[0], range[1]]);
+      }
+    }
+
+    byLine.set(line, merged);
+  }
+
+  return byLine;
+}
+
+/** 1 行を、ハイライト範囲で { text, hit } のセグメントへ切り分ける。 */
+function segmentLine(line, ranges) {
+  if (!ranges || ranges.length === 0) {
+    return [{ text: line, hit: false }];
+  }
+
+  const segments = [];
+  let cursor = 0;
+
+  for (const [start, end] of ranges) {
+    const from = Math.max(0, Math.min(start, line.length));
+    const to = Math.max(from, Math.min(end, line.length));
+
+    if (from > cursor) segments.push({ text: line.slice(cursor, from), hit: false });
+    if (to > from) segments.push({ text: line.slice(from, to), hit: true });
+
+    cursor = Math.max(cursor, to);
+  }
+
+  if (cursor < line.length) segments.push({ text: line.slice(cursor), hit: false });
+
+  return segments;
+}
+
+/**
+ * SQL の簡易構文ハイライト。予約語 / 文字列・数値リテラル / 行コメントのみ。
+ *
+ * ハイライト セグメントごとに独立して呼ぶため、語がセグメント境界で分断された場合は
+ * 色が付かない。位置ハイライトを優先する意図的な割り切り。
+ */
+function highlightSql(source, options, styles) {
+  const length = source.length;
+  const isSpace = (c) => c === " " || c === "\t";
+  const isDigit = (c) => c >= "0" && c <= "9";
+  const isWordStart = (c) => /[A-Za-z_]/.test(c);
+  const isWord = (c) => /[A-Za-z0-9_]/.test(c);
+
+  let index = 0;
+  let out = "";
+
+  while (index < length) {
+    const character = source[index];
+
+    if (isSpace(character)) {
+      let end = index + 1;
+      while (end < length && isSpace(source[end])) end++;
+      out += escapeHtml(source.slice(index, end));
+      index = end;
+      continue;
+    }
+
+    if (character === "-" && source[index + 1] === "-") {
+      out += styles.comment(source.slice(index));
+      break;
+    }
+
+    if (character === "'" || character === '"') {
+      const quote = character;
+      let end = index + 1;
+      while (end < length) {
+        if (source[end] === "\\") { end += 2; continue; }
+        if (source[end] === quote) {
+          if (source[end + 1] === quote) { end += 2; continue; }
+          end++;
+          break;
+        }
+        end++;
+      }
+      out += styles.literal(source.slice(index, end));
+      index = end;
+      continue;
+    }
+
+    if (isDigit(character)) {
+      let end = index + 1;
+      while (end < length && (isDigit(source[end]) || source[end] === ".")) end++;
+      out += styles.literal(source.slice(index, end));
+      index = end;
+      continue;
+    }
+
+    if (isWordStart(character)) {
+      let end = index + 1;
+      while (end < length && isWord(source[end])) end++;
+      const word = source.slice(index, end);
+      out += SQL_KEYWORDS.has(word.toUpperCase()) ? styles.keyword(word) : escapeHtml(word);
+      index = end;
+      continue;
+    }
+
+    out += escapeHtml(character);
+    index++;
+  }
+
+  return out;
+}
+
+/** mode に応じて、class 属性かインライン style 属性のどちらかを返す。 */
+function makeAttrs(options) {
+  const inline = options.mode === "inline";
+
+  const cls = (name) => (inline ? "" : ` class="${PREFIX}-${name}"`);
+  const sty = (declaration) => (inline ? ` style="${declaration}"` : "");
+
+  return {
+    root: cls("root") + sty(
+      `font-family:${options.font};font-size:${options.fontSize}px;` +
+      `line-height:${options.lineHeight};color:${options.text};`
+    ),
+    table: cls("table") + sty(
+      `border-collapse:collapse;width:100%;table-layout:fixed;` +
+      `border:1px solid ${options.border};`
+    ),
+    /* 非ハイライト行は装飾しないので属性を出さない（markup を無駄に太らせない）。 */
+    row: "",
+    rowHit: cls("row-hit") + sty(`background:${options.hitBg};`),
+    num: cls("num") + sty(
+      `width:52px;padding:0 8px;text-align:right;vertical-align:top;` +
+      `color:${options.num};background:${options.numBg};` +
+      `border-right:1px solid ${options.border};` +
+      `user-select:none;white-space:nowrap;`
+    ),
+    numHit: cls("num-hit") + sty(
+      `width:52px;padding:0 8px;text-align:right;vertical-align:top;` +
+      `color:${options.text};background:${options.hitBg};font-weight:600;` +
+      `border-right:1px solid ${options.border};` +
+      `border-left:3px solid ${options.hitBar};` +
+      `user-select:none;white-space:nowrap;`
+    ),
+    code: cls("code") + sty(
+      `padding:0 10px;white-space:pre-wrap;overflow-wrap:anywhere;vertical-align:top;`
+    ),
+    mark: cls("mark") + sty(
+      `background:${options.markBg};border-radius:2px;padding:0 1px;`
+    ),
+    gap: cls("gap") + sty(
+      `padding:2px 10px;color:${options.gapText};background:${options.gapBg};` +
+      `border-top:1px solid ${options.border};border-bottom:1px solid ${options.border};`
+    ),
+    keyword: (text) => `<span${cls("kw")}${sty(`color:${options.keyword};`)}>${escapeHtml(text)}</span>`,
+    literal: (text) => `<span${cls("li")}${sty(`color:${options.literal};`)}>${escapeHtml(text)}</span>`,
+    comment: (text) => `<span${cls("cm")}${sty(`color:${options.comment};font-style:italic;`)}>${escapeHtml(text)}</span>`
+  };
+}
+
+/** class / embed モードでテンプレートに貼る CSS。inline モードでは使わない。 */
+function buildUsageSqlCss(optionsJson) {
+  const o = resolveOptions(optionsJson);
+  const p = "." + PREFIX;
+
+  return [
+    `${p}-root{font-family:${o.font};font-size:${o.fontSize}px;line-height:${o.lineHeight};color:${o.text};}`,
+    `${p}-table{border-collapse:collapse;width:100%;table-layout:fixed;border:1px solid ${o.border};}`,
+    `${p}-row-hit{background:${o.hitBg};}`,
+    `${p}-num{width:52px;padding:0 8px;text-align:right;vertical-align:top;color:${o.num};background:${o.numBg};border-right:1px solid ${o.border};user-select:none;white-space:nowrap;}`,
+    `${p}-num-hit{width:52px;padding:0 8px;text-align:right;vertical-align:top;color:${o.text};background:${o.hitBg};font-weight:600;border-right:1px solid ${o.border};border-left:3px solid ${o.hitBar};user-select:none;white-space:nowrap;}`,
+    `${p}-code{padding:0 10px;white-space:pre-wrap;overflow-wrap:anywhere;vertical-align:top;}`,
+    `${p}-mark{background:${o.markBg};border-radius:2px;padding:0 1px;}`,
+    `${p}-gap{padding:2px 10px;color:${o.gapText};background:${o.gapBg};border-top:1px solid ${o.border};border-bottom:1px solid ${o.border};}`,
+    `${p}-kw{color:${o.keyword};}`,
+    `${p}-li{color:${o.literal};}`,
+    `${p}-cm{color:${o.comment};font-style:italic;}`
+  ].join("\n");
+}
+
+/**
+ * SQL 全文（または該当行の周辺）を、行番号つき・ハイライトつきの HTML にして返す。
+ *
+ * @param {string} sqlText 対象オブジェクトの SQL 本文
+ * @param {Array<string>} highlights "line:column:length" の配列
+ * @param {string} optionsJson 表示オプション JSON（null / '{}' で既定）
+ * @returns {string} HTML。sqlText が空なら空文字
+ */
+function renderUsageSqlHtml(sqlText, highlights, optionsJson) {
+  if (sqlText === null || sqlText === undefined || sqlText === "") {
+    return "";
+  }
+
+  const options = resolveOptions(optionsJson);
+  const attrs = makeAttrs(options);
+  const byLine = parseHighlights(highlights);
+  const lines = String(sqlText).split("\n");
+
+  /*
+   * 表示する行を決める。contextLines 未指定なら全行。指定時はハイライト行の前後
+   * N 行だけを残し、飛ばした区間には「… N 行省略 …」の行を挟む。
+   */
+  let visible = null;
+
+  const contextOption = options.contextLines;
+
+  /*
+   * Number(null) は 0（有限）なので、null を数値として判定してはならない。
+   * 未指定を「前後 0 行」と誤読すると全文が省略されてしまう。
+   */
+  const hasContext =
+    contextOption !== null &&
+    contextOption !== undefined &&
+    contextOption !== "" &&
+    Number.isFinite(Number(contextOption)) &&
+    Number(contextOption) >= 0;
+
+  if (hasContext && byLine.size > 0) {
+    const context = Number(options.contextLines);
+    visible = new Set();
+
+    for (const line of byLine.keys()) {
+      for (let n = line - context; n <= line + context; n++) {
+        if (n >= 1 && n <= lines.length) visible.add(n);
+      }
+    }
+  }
+
+  const rows = [];
+  let rendered = 0;
+  let skipped = 0;
+  let truncated = false;
+
+  const flushGap = () => {
+    if (skipped > 0) {
+      rows.push(`<tr><td${attrs.gap} colspan="2">… ${skipped} 行省略 …</td></tr>`);
+      skipped = 0;
+    }
+  };
+
+  for (let index = 0; index < lines.length; index++) {
+    const lineNumber = index + 1;
+
+    if (visible && !visible.has(lineNumber)) {
+      skipped++;
+      continue;
+    }
+
+    if (rendered >= options.maxLines) {
+      truncated = true;
+      break;
+    }
+
+    flushGap();
+
+    const ranges = byLine.get(lineNumber);
+    const isHit = Boolean(ranges && ranges.length);
+    const segments = segmentLine(lines[index], ranges);
+
+    let code = "";
+
+    for (const segment of segments) {
+      const inner = highlightSql(segment.text, options, attrs);
+      code += segment.hit ? `<span${attrs.mark}>${inner}</span>` : inner;
+    }
+
+    if (code === "") code = "&nbsp;";
+
+    rows.push(
+      `<tr${isHit ? attrs.rowHit : attrs.row}>` +
+      `<td${isHit ? attrs.numHit : attrs.num}>${lineNumber}</td>` +
+      `<td${attrs.code}>${code}</td>` +
+      `</tr>`
+    );
+
+    rendered++;
+  }
+
+  flushGap();
+
+  if (truncated) {
+    rows.push(
+      `<tr><td${attrs.gap} colspan="2">` +
+      `… 以降 ${lines.length - rendered} 行は maxLines (${options.maxLines}) により省略 …` +
+      `</td></tr>`
+    );
+  }
+
+  const body = `<div${attrs.root}><table${attrs.table}>${rows.join("")}</table></div>`;
+
+  if (options.mode === "embed") {
+    return `<style>${buildUsageSqlCss(optionsJson)}</style>${body}`;
+  }
+
+  return body;
+}
+''';
+
+EXECUTE IMMEDIATE FORMAT(
+  'CREATE OR REPLACE FUNCTION `%s.%s.%s`('
+  || 'sql_text STRING, highlights ARRAY<STRING>, options_json STRING'
+  || ') RETURNS STRING LANGUAGE js AS r"""%s',
+  bootstrap_udf_project_id,
+  bootstrap_udf_dataset,
+  bootstrap_udf_usage_sql_html_function_name,
+  usage_html_udf_js || '\nreturn renderUsageSqlHtml(sql_text, highlights, options_json);\n"""'
+);
+
+EXECUTE IMMEDIATE FORMAT(
+  'CREATE OR REPLACE FUNCTION `%s.%s.%s`(options_json STRING)'
+  || ' RETURNS STRING LANGUAGE js AS r"""%s',
+  bootstrap_udf_project_id,
+  bootstrap_udf_dataset,
+  bootstrap_udf_usage_sql_css_function_name,
+  usage_html_udf_js || '\nreturn buildUsageSqlCss(options_json);\n"""'
+);
+-- END GENERATED: usage SQL HTML UDF
+
+-- ============================================================================
+-- 4a. Repository views -- always recreated (CREATE OR REPLACE VIEW is safe)
+-- ============================================================================
+
+-- Both views below are also copied into ordinary STATIC TABLES by 03 STEP 4b
+-- (lnge_vw_t_column_usage_impact -> lnge_t_column_usage_impact,
+--  lnge_vw_t_object_dependency  -> lnge_t_object_dependency), so a BI tool reads a
+-- clustered table instead of re-running the aggregation per request. Plain tables,
+-- not BigQuery materialized views -- neither definition is expressible as one. The
+-- views stay the single definition -- STEP 4b builds the tables with SELECT * over
+-- them -- so a change here reaches the tables on the next 03 run with nothing to
+-- keep in step by hand. Set build_static_report_tables = FALSE in 03 to keep reports
+-- on the views.
+
 -- Column-usage x impact depth view. Joins the usage index to the impact graph so
 -- a report can pick an ORIGIN column and see every downstream usage site with a
 -- DEPTH (relative to that origin: 1 = direct reference, impact_rank + 1 deeper)
@@ -579,9 +1134,64 @@ EXECUTE IMMEDIATE FORMAT(
   '''
   CREATE OR REPLACE VIEW `%s.%s`
   OPTIONS (
-    description = 'Column usage joined to impact: for a chosen origin column, every downstream usage site with a depth (1 = direct reference; impact_rank + 1 deeper) and the value-flow path.'
+    description = 'Column usage joined to impact: for a chosen origin column, every downstream usage site with a depth (1 = direct reference; impact_rank + 1 deeper) and the value-flow path. Locating a reference: line_number, then word_number (1-based index of the whitespace-delimited word holding it -- unaffected by indentation) or column_number (1-based CHARACTER position in the original line, indentation included, a tab counting as one). line_text has its leading indentation stripped; line_indent_width is how much was removed, so the character position within it is column_number - line_indent_width. usage_definition_text is the full SQL of the object containing the reference, returned only while the registry still holds the analyzed definition (usage_definition_is_current).'
   )
   AS
+  -- Per-usage location and definition lookup, computed once and reused by both
+  -- depth branches below. Splitting it out keeps the word/column arithmetic in one
+  -- place instead of repeating it per branch.
+  --
+  -- The registry join is on the usage object's KEY (project/dataset/name/type),
+  -- which is the registry's own MERGE key -- exactly one row per object, so no
+  -- fan-out. Joining on definition_hash alone would multiply rows whenever two
+  -- objects happen to share identical SQL, since the hash is of the text.
+  WITH usage_words AS (
+    SELECT
+      u.*,
+      d.definition_hash AS registry_definition_hash,
+      d.definition_text AS registry_definition_text,
+      -- word_number: which whitespace-delimited word of the line the reference sits
+      -- in. column_number counts every character including the indentation, which is
+      -- awkward to verify by eye; counting words is how a person actually finds the
+      -- spot. Words before the reference are counted, then 1 is added when the
+      -- reference starts a new word (nothing before it on the line, or the character
+      -- before it is whitespace). When it does NOT -- `a.col`, `f(col)` -- the
+      -- reference is part of the word already counted, so no increment: `col` in
+      -- `SELECT a.col` is word 2, the word `a.col`.
+      CASE
+        WHEN u.line_text IS NULL OR u.column_number IS NULL THEN NULL
+        ELSE
+          ARRAY_LENGTH(
+            REGEXP_EXTRACT_ALL(SUBSTR(u.line_text, 1, u.column_number - 1), r'\\S+')
+          )
+          + IF(
+              SUBSTR(u.line_text, 1, u.column_number - 1) = ''
+              OR REGEXP_CONTAINS(SUBSTR(u.line_text, 1, u.column_number - 1), r'\\s$'),
+              1,
+              0
+            )
+      END AS word_number
+    FROM `%s.%s` AS u
+    LEFT JOIN `%s.%s` AS d
+      ON  LOWER(d.object_project) = LOWER(u.object_project)
+      AND LOWER(d.object_dataset) = LOWER(u.object_dataset)
+      AND LOWER(d.object_name)    = LOWER(u.object_name)
+      AND d.object_type           = u.object_type
+  ),
+  usage_located AS (
+    SELECT
+      w.*,
+      -- The word itself, so word_number can be confirmed without opening the SQL.
+      -- Guarded rather than relying on a NULL offset behaving as a NULL element.
+      IF(
+        w.word_number IS NULL,
+        NULL,
+        REGEXP_EXTRACT_ALL(w.line_text, r'\\S+')[SAFE_OFFSET(w.word_number - 1)]
+      ) AS word_text
+    FROM usage_words AS w
+  ),
+  -- 2 つの depth ブランチ。最終 SELECT でハイライト集約と HTML 生成を足す。
+  impact_rows AS (
   -- depth = 1: the usage references the origin column directly.
   SELECT
     u.source_project      AS origin_project,
@@ -608,11 +1218,24 @@ EXECUTE IMMEDIATE FORMAT(
     u.usage_type,
     u.reference_name,
     u.line_number,
+    u.word_number,
+    u.word_text,
+    -- Position in the ORIGINAL line, indentation included, so it stays valid
+    -- against the object's stored definition text.
     u.column_number,
-    u.line_text,
+    LTRIM(u.line_text) AS line_text,
+    LENGTH(u.line_text) - LENGTH(LTRIM(u.line_text)) AS line_indent_width,
     u.resolution_status,
+    -- Returned only when the registry still holds the very definition that was
+    -- analyzed: after a redefinition its text is a DIFFERENT SQL whose line numbers
+    -- would not line up, so NULL beats something plausible but wrong.
+    CASE
+      WHEN u.registry_definition_hash = u.definition_hash
+        THEN u.registry_definition_text
+    END AS usage_definition_text,
+    (u.registry_definition_hash = u.definition_hash) AS usage_definition_is_current,
     CAST(NULL AS ARRAY<STRING>) AS dependency_path
-  FROM `%s.%s` AS u
+  FROM usage_located AS u
   UNION ALL
   -- depth = impact_rank + 1: the usage references a column impacted by the origin.
   SELECT
@@ -637,22 +1260,326 @@ EXECUTE IMMEDIATE FORMAT(
     u.usage_type,
     u.reference_name,
     u.line_number,
+    u.word_number,
+    u.word_text,
     u.column_number,
-    u.line_text,
+    LTRIM(u.line_text) AS line_text,
+    LENGTH(u.line_text) - LENGTH(LTRIM(u.line_text)) AS line_indent_width,
     u.resolution_status,
+    CASE
+      WHEN u.registry_definition_hash = u.definition_hash
+        THEN u.registry_definition_text
+    END AS usage_definition_text,
+    (u.registry_definition_hash = u.definition_hash) AS usage_definition_is_current,
     i.dependency_path
   FROM `%s.%s` AS i
-  JOIN `%s.%s` AS u
+  JOIN usage_located AS u
     ON  LOWER(u.source_project) = LOWER(i.impacted_project)
     AND LOWER(u.source_dataset) = LOWER(i.impacted_dataset)
     AND LOWER(u.source_object)  = LOWER(i.impacted_object)
     AND LOWER(u.source_column)  = LOWER(i.impacted_column)
+  )
+  SELECT
+    r.*,
+    -- 使用箇所つき SQL の HTML。Looker Studio の Templated Record に渡して描画する。
+    --
+    -- ハイライト位置は「同じ起点カラム × 同じオブジェクト × 同じ定義」の行を
+    -- 分析関数でまとめて集める。分析関数は WHERE の後に評価されるので、レポートが
+    -- 起点カラムで絞り込めば、その起点に関係する箇所だけが集まる。1 レコードを表示する
+    -- Templated Record では、その 1 件の SQL 上に関連箇所が全部ハイライトされる。
+    --
+    -- 経路違いで同じ箇所が何度も入るが、重複と重なりの結合は UDF 側で行う。
+    -- line_number / column_number が無い行は空文字にしておき、UDF が読み飛ばす。
+    `%s.%s.%s`(
+      r.usage_definition_text,
+      ARRAY_AGG(
+        CASE
+          WHEN r.line_number IS NOT NULL AND r.column_number IS NOT NULL
+            THEN FORMAT(
+              '%%d:%%d:%%d',
+              r.line_number,
+              r.column_number,
+              GREATEST(LENGTH(COALESCE(r.reference_name, '')), 1)
+            )
+          ELSE ''
+        END
+      ) OVER (
+        PARTITION BY
+          r.origin_project, r.origin_dataset, r.origin_object,
+          r.origin_object_type, r.origin_column,
+          r.usage_object_project, r.usage_object_dataset,
+          r.usage_object_name, r.usage_object_type,
+          r.usage_definition_hash
+      ),
+      NULL
+    ) AS usage_definition_html
+  FROM impact_rows AS r
   ''',
+  -- Argument order follows the %s placeholders in text order: CREATE VIEW target,
+  -- usage table, definition registry, impact table, HTML UDF.
+  -- HTML UDF は他の UDF と同じく bootstrap_udf_dataset 側にあるため 3 部構成。
   repository_dataset_full_name, view_column_usage_impact,
   repository_dataset_full_name, table_column_usage,
+  repository_dataset_full_name, table_definition_registry,
   repository_dataset_full_name, table_impact,
-  repository_dataset_full_name, table_column_usage
+  bootstrap_udf_project_id, bootstrap_udf_dataset,
+  bootstrap_udf_usage_sql_html_function_name
 );
+
+-- Object (table/view) level dependency view. Rolls the column-level impact graph
+-- up to one row per (origin object -> impacted object) pair, keeping the
+-- TRANSITIVE reach: impact_rank is the shortest hop count between the two
+-- objects (1 = direct reference), so a report can draw the whole downstream tree
+-- of an object without touching columns. Like depth in
+-- lnge_vw_t_column_usage_impact, the rank is RELATIVE TO THE ORIGIN and not a
+-- property of the impacted object: lnge_t_impact seeds its recursion from every
+-- edge, so every node is also an origin, and the same impacted object appears
+-- once per origin at its own distance (with A -> B -> C, C is rank 2 under origin
+-- A and rank 1 under origin B). That is why the origin is part of the key rather
+-- than a single rank stored per object. The column detail is kept as an
+-- ARRAY<STRUCT> (column_dependencies) plus, because Looker Studio cannot consume
+-- ARRAY columns, a flattened STRING rendering of the same content
+-- (column_dependencies_text / origin_columns_text / impacted_columns_text /
+-- shortest_object_path_text).
+--
+-- Scope: rows are restricted to what the 03 pipeline actually analyzed. Objects
+-- whose registry row is EPHEMERAL (the synthetic fp_<hash> identities used to
+-- collapse temp/rotating destinations), INACTIVE, or whose analysis did not end
+-- in COMPLETED / COMPLETED_WITH_WARNINGS are dropped from BOTH endpoints. A path
+-- that merely PASSES THROUGH an excluded object survives: lnge_t_impact stores
+-- one row per origin/impacted pair with the intermediate nodes only inside
+-- dependency_path, so the end-to-end reach is preserved at its true rank.
+-- Upstream objects that are referenced but never analyzed themselves (raw source
+-- tables) have no registry row; they are kept and flagged with
+-- origin_is_analysis_target = FALSE, since dropping them would remove every edge
+-- that enters the analyzed area from outside.
+--
+-- Impact is fully replaced by each 03 STEP 4 run, so there is no snapshot filter;
+-- snapshot_at is carried through only so a report can show the data's age.
+EXECUTE IMMEDIATE FORMAT(
+  '''
+  CREATE OR REPLACE VIEW `%s.%s`
+  OPTIONS (
+    description = 'Object-level (table/view) transitive dependency graph, aggregated from the column-level impact paths. One row per origin object -> impacted object pair; impact_rank is the shortest hop count (1 = direct reference). impact_rank is RELATIVE TO THE CHOSEN ORIGIN, like depth in lnge_vw_t_column_usage_impact: the same impacted object appears at a different rank under a different origin (with A -> B -> C, C is rank 2 under origin A and rank 1 under origin B), so always pick an origin before reading it. Column detail is carried both as an ARRAY<STRUCT> (column_dependencies) and as flattened STRING columns for Looker Studio, which cannot read ARRAY columns. Ephemeral, inactive and non-COMPLETED objects are excluded from both endpoints, so only the objects the pipeline actually analyzed appear; paths passing through an excluded object are still reported end to end. Objects that are referenced but never analyzed (raw sources) are kept with origin_is_analysis_target = FALSE.'
+  )
+  AS
+  -- One row per object key, so the two LEFT JOINs below cannot fan out even if the
+  -- registry ever held the same name under two object_types. object_type is NOT a
+  -- join key for the same reason: the impact row carries the type the analyzer saw
+  -- for that reference, which need not match the registry's.
+  WITH registry AS (
+    SELECT
+      LOWER(object_project) AS object_project,
+      LOWER(object_dataset) AS object_dataset,
+      LOWER(object_name)    AS object_name,
+      ANY_VALUE(generation_type) AS generation_type,
+      LOGICAL_OR(COALESCE(is_ephemeral, FALSE)) AS is_ephemeral,
+      LOGICAL_OR(COALESCE(is_active, FALSE))    AS is_active,
+      LOGICAL_OR(analysis_status IN ('COMPLETED', 'COMPLETED_WITH_WARNINGS'))
+        AS is_analyzed
+    FROM `%s.%s`
+    GROUP BY 1, 2, 3
+  ),
+  -- Impact rows narrowed to the analyzed scope. An endpoint with no registry row
+  -- is an upstream source that was never an analysis target: kept, and marked as
+  -- such. An endpoint WITH a registry row must be a live, successfully analyzed,
+  -- non-ephemeral object.
+  scoped_impact AS (
+    SELECT
+      i.snapshot_at,
+      i.origin_project,
+      i.origin_dataset,
+      i.origin_object,
+      i.origin_object_type,
+      i.origin_column,
+      i.impacted_project,
+      i.impacted_dataset,
+      i.impacted_object,
+      i.impacted_object_type,
+      i.impacted_column,
+      i.impact_rank,
+      i.path_hash,
+      i.dependency_path,
+      i.is_cycle,
+      i.resolution_status,
+      ro.generation_type AS origin_generation_type,
+      ri.generation_type AS impacted_generation_type,
+      (ro.object_name IS NOT NULL) AS origin_is_analysis_target,
+      (ri.object_name IS NOT NULL) AS impacted_is_analysis_target
+    FROM `%s.%s` AS i
+    LEFT JOIN registry AS ro
+      ON  ro.object_project = LOWER(i.origin_project)
+      AND ro.object_dataset = LOWER(i.origin_dataset)
+      AND ro.object_name    = LOWER(i.origin_object)
+    LEFT JOIN registry AS ri
+      ON  ri.object_project = LOWER(i.impacted_project)
+      AND ri.object_dataset = LOWER(i.impacted_dataset)
+      AND ri.object_name    = LOWER(i.impacted_object)
+    WHERE COALESCE(ro.is_ephemeral, FALSE) = FALSE
+      AND COALESCE(ri.is_ephemeral, FALSE) = FALSE
+      AND (ro.object_name IS NULL OR (ro.is_active AND ro.is_analyzed))
+      AND (ri.object_name IS NULL OR (ri.is_active AND ri.is_analyzed))
+  ),
+  -- Collapse the paths to column grain first. lnge_t_impact holds one row per
+  -- distinct PATH, so the same (origin column -> impacted column) pair appears once
+  -- per route; aggregating here is what keeps the ARRAY below free of duplicates.
+  -- A NULL column (a star reference) is rendered as '*' so it groups and displays.
+  column_pairs AS (
+    SELECT
+      origin_project,
+      origin_dataset,
+      origin_object,
+      origin_object_type,
+      origin_generation_type,
+      origin_is_analysis_target,
+      impacted_project,
+      impacted_dataset,
+      impacted_object,
+      impacted_object_type,
+      impacted_generation_type,
+      impacted_is_analysis_target,
+      COALESCE(origin_column, '*')   AS origin_column,
+      COALESCE(impacted_column, '*') AS impacted_column,
+      MIN(impact_rank)               AS column_impact_rank,
+      COUNT(DISTINCT path_hash)      AS column_path_count,
+      LOGICAL_OR(is_cycle)           AS column_has_cycle_path,
+      LOGICAL_AND(resolution_status = 'RESOLVED') AS column_is_fully_resolved,
+      STRING_AGG(DISTINCT resolution_status, ', ' ORDER BY resolution_status)
+        AS column_resolution_statuses,
+      MAX(snapshot_at) AS snapshot_at,
+      -- Shortest route for this column pair. Wrapped in a STRUCT because an ARRAY
+      -- cannot hold an ARRAY directly; the field is read back below.
+      ARRAY_AGG(
+        STRUCT(dependency_path AS path)
+        ORDER BY impact_rank, path_hash
+        LIMIT 1
+      )[OFFSET(0)].path AS shortest_column_path
+    FROM scoped_impact
+    GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14
+  ),
+  -- Roll up to object grain.
+  object_pairs AS (
+    SELECT
+      origin_project,
+      origin_dataset,
+      origin_object,
+      origin_object_type,
+      origin_generation_type,
+      origin_is_analysis_target,
+      impacted_project,
+      impacted_dataset,
+      impacted_object,
+      impacted_object_type,
+      impacted_generation_type,
+      impacted_is_analysis_target,
+      MAX(snapshot_at)          AS snapshot_at,
+      MIN(column_impact_rank)   AS impact_rank,
+      MAX(column_impact_rank)   AS max_impact_rank,
+      SUM(column_path_count)    AS path_count,
+      COUNT(*)                  AS column_pair_count,
+      COUNT(DISTINCT origin_column)   AS origin_column_count,
+      COUNT(DISTINCT impacted_column) AS impacted_column_count,
+      LOGICAL_OR(column_has_cycle_path)     AS has_cycle_path,
+      LOGICAL_AND(column_is_fully_resolved) AS is_fully_resolved,
+      ARRAY_AGG(
+        STRUCT(
+          origin_column,
+          impacted_column,
+          column_impact_rank         AS impact_rank,
+          column_path_count          AS path_count,
+          column_resolution_statuses AS resolution_statuses
+        )
+        ORDER BY origin_column, impacted_column
+      ) AS column_dependencies,
+      -- Flattened renderings: Looker Studio cannot read ARRAY columns, so the same
+      -- content is offered as text. One line per column pair; wrap the field in a
+      -- <pre> (or a Templated Record) to keep the line breaks.
+      STRING_AGG(
+        FORMAT('%%s -> %%s (rank %%d)', origin_column, impacted_column, column_impact_rank),
+        '\\n' ORDER BY origin_column, impacted_column
+      ) AS column_dependencies_text,
+      STRING_AGG(DISTINCT origin_column, ', ' ORDER BY origin_column)
+        AS origin_columns_text,
+      STRING_AGG(DISTINCT impacted_column, ', ' ORDER BY impacted_column)
+        AS impacted_columns_text,
+      -- The route of the shortest column pair represents the object pair.
+      ARRAY_AGG(
+        STRUCT(shortest_column_path AS path)
+        ORDER BY column_impact_rank, origin_column, impacted_column
+        LIMIT 1
+      )[OFFSET(0)].path AS shortest_column_path
+    FROM column_pairs
+    GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12
+  ),
+  -- dependency_path elements are 'project.dataset.object.column'. Drop the trailing
+  -- column segment to get the object route, then remove consecutive duplicates --
+  -- several columns of the same object in a row collapse to one hop.
+  object_pairs_pathed AS (
+    SELECT
+      p.* EXCEPT (shortest_column_path),
+      ARRAY(
+        SELECT REGEXP_REPLACE(element, r'\\.[^.]*$', '')
+        FROM UNNEST(p.shortest_column_path) AS element WITH OFFSET AS element_offset
+        WHERE element_offset = 0
+           OR REGEXP_REPLACE(element, r'\\.[^.]*$', '')
+              <> REGEXP_REPLACE(
+                   p.shortest_column_path[OFFSET(element_offset - 1)],
+                   r'\\.[^.]*$',
+                   ''
+                 )
+        ORDER BY element_offset
+      ) AS shortest_object_path
+    FROM object_pairs AS p
+  )
+  SELECT
+    q.snapshot_at,
+    q.origin_project,
+    q.origin_dataset,
+    q.origin_object,
+    q.origin_object_type,
+    q.origin_generation_type,
+    q.origin_is_analysis_target,
+    CONCAT(
+      COALESCE(q.origin_project, ''), '.',
+      COALESCE(q.origin_dataset, ''), '.',
+      q.origin_object
+    ) AS origin_full_name,
+    q.impacted_project,
+    q.impacted_dataset,
+    q.impacted_object,
+    q.impacted_object_type,
+    q.impacted_generation_type,
+    q.impacted_is_analysis_target,
+    CONCAT(
+      COALESCE(q.impacted_project, ''), '.',
+      COALESCE(q.impacted_dataset, ''), '.',
+      q.impacted_object
+    ) AS impacted_full_name,
+    q.impact_rank,
+    q.max_impact_rank,
+    (q.impact_rank = 1) AS is_direct,
+    q.path_count,
+    q.column_pair_count,
+    q.origin_column_count,
+    q.impacted_column_count,
+    q.has_cycle_path,
+    q.is_fully_resolved,
+    q.column_dependencies,
+    q.column_dependencies_text,
+    q.origin_columns_text,
+    q.impacted_columns_text,
+    q.shortest_object_path,
+    ARRAY_TO_STRING(q.shortest_object_path, ' -> ') AS shortest_object_path_text
+  FROM object_pairs_pathed AS q
+  ''',
+  -- Argument order follows the %s placeholders in text order: CREATE VIEW target,
+  -- definition registry, impact table.
+  repository_dataset_full_name, view_object_dependency,
+  repository_dataset_full_name, table_definition_registry,
+  repository_dataset_full_name, table_impact
+);
+
+IF NOT recreate_views_only THEN
 
 -- ============================================================================
 -- 4b. Persistent dynamic-SQL renderer
@@ -891,6 +1818,8 @@ INTO fingerprint_smoke_result;
 ASSERT fingerprint_smoke_result
 AS 'Persistent fingerprint UDF smoke test did not behave as expected.';
 
+END IF;  -- NOT recreate_views_only (sections 4b/5/6: renderer, UDF, smoke tests)
+
 -- ============================================================================
 -- 7. Setup summary
 -- ============================================================================
@@ -926,5 +1855,7 @@ SELECT
   bootstrap_target_datasets,
   bootstrap_parser_strict_mode,
   bootstrap_compact_export,
+  -- NULL on a views-only run: the smoke tests live in the section that run skips.
   smoke_test_status,
+  recreate_views_only AS views_only_run,
   CURRENT_TIMESTAMP() AS setup_finished_at;

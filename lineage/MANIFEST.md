@@ -13,6 +13,7 @@ Generated: 2026-07-28
 - `docs/ARCHITECTURE.md`
 - `docs/BUSINESS_REQUIREMENTS.md`
 - `docs/DEVELOPMENT_GUIDE.md`
+- `docs/HANDOFF_BRIEF.md`
 - `docs/LOOKER_STUDIO_DESIGN.md`
 - `docs/OPERATION_GUIDE.md`
 - `docs/PARSER_REGRESSION_EXECUTION_RESULT.md`
@@ -23,6 +24,7 @@ Generated: 2026-07-28
 - `docs/SUPPORTED_SQL.md`
 - `docs/SYSTEM_DESIGN.md`
 - `docs/TROUBLESHOOTING.md`
+- `docs/UDF_DEPLOYMENT_CONSISTENCY.md`
 - `docs/UDF_DESIGN.md`
 - `docs/UDF_BUNDLE_BUILD_PROCESS.md`
 - `docs/adr/ADR-0001-use-javascript-udf.md`
@@ -199,6 +201,10 @@ Generated: 2026-07-28
 - `sql/maintenance/07_run_single_view_analysis.sql`
 - `sql/maintenance/08_view_last_access.sql`
 - `sql/maintenance/09_unanalyzed_object_definitions.sql`
+- `sql/maintenance/10_pending_analysis_workload.sql`
+- `sql/maintenance/11_analysis_batch_diagnostics.sql`
+- `sql/maintenance/12_ephemeral_sql_similarity.sql`
+- `sql/maintenance/13_sql_pattern_drift.sql`
 - `sql/pipeline/03_run_daily_lineage_pipeline.sql`
 - `sql/sample/02_setup_sample_environment.sql`
 - `sql/sample/02a_create_cost_measurement_view.sql`

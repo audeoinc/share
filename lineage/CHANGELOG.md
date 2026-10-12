@@ -1,5 +1,994 @@
 # 1.5.0-032
 
+- `sql/maintenance/10_pending_analysis_workload.sql` gained reports 9 and 10, the
+  row-level forms of the questions reports 5/7 and 1-3 answer as counts. Reports 5 and
+  7 say how many objects are new per day, which is the right shape for "is the arrival
+  rate what I expect"; neither can answer the next question, "what IS this?", and that
+  was being answered by pasting ad-hoc SQL each time.
+  Report 9 lists the objects whose `first_seen_at` falls in the window, with
+  `generation_type`, `is_ephemeral`, `analysis_status`, the SQL length, the source
+  user, `dag_id` / `task_id` pulled out of the source job's labels, and the head of the
+  statement with whitespace collapsed -- so an unexpected arrival is traced to its DAG
+  without joining the job registry, and an ephemeral arrival (object_name `fp_<hash>`)
+  is identifiable at all.
+  Report 10 lists what the next run will analyze: `is_changed = TRUE`, which is the
+  gate STEP 3 itself uses and is sticky until that object's batch succeeds. It carries
+  `changed_at_least_once` (from `previous_definition_hash`) and
+  `current_definition_unanalyzed` (`last_analyzed_hash IS DISTINCT FROM
+  definition_hash`). This is also the only report that covers a CHANGED existing View,
+  since a change does not move `first_seen_at`.
+  New `[B]` options: `new_object_detail_days` (default 2 -- deliberately shorter than
+  `arrival_history_days`, because one row per object over a window that reaches the
+  initial load returns the whole repository), `new_object_sql_preview_chars` (400) and
+  `detail_row_limit` (200, applied to both reports).
+  Both honor `process_generated_tables` the way reports 1-3 do.
+  Two traps avoided in the implementation, recorded in the comments: the preview
+  collapses whitespace with the POSIX class `[[:space:]]+` rather than `\s+`, because
+  the template is a quoted string and a backslash in it is read as an escape sequence;
+  and neither report offers a "changed recently" column, because `updated_at` cannot
+  provide one -- the definition-registry MERGE in 03 has no `WHEN MATCHED` guard, so
+  every matched row is rewritten on every run and `updated_at` moves for all of them.
+  Filtering on it returns the whole registry.
+  SQL only; the bundle is unchanged and there is no offline regression test for a
+  report script (the JS suite cannot execute BigQuery SQL). Parameter consistency was
+  checked mechanically instead: every named parameter passed in each report's `USING`
+  appears in that report's template and vice versa, across all ten reports -- BigQuery
+  rejects an `EXECUTE IMMEDIATE` that is passed a named parameter its SQL does not use.
+  **Not yet run against BigQuery.**
+
+- The release pipeline's generated UDF deployment no longer disagrees with the engine.
+  `scripts/build_everything.js` built the `CREATE OR REPLACE FUNCTION` DDL inline with
+  three parameters (`sql_text`, `physical_columns_json`, `options_json`) and a body
+  calling `LineageEngine.analyzeToJson(...)` -- an entry point that exists nowhere in
+  `javascript/src`. The three other paths agree on the real one: 01 setup,
+  `sql/bigquery/create_persistent_lineage_udf.sql` and 03's two `__UDF__` call sites all
+  use the four-parameter `analyzeLineageForBigQuery`. So `--deploy` would have replaced a
+  working `lnge_analyze_json` with one that fails every analysis ("No matching signature"
+  from 03, which passes four arguments), and the build would still have reported success.
+  Nothing caught it because the drift is between SQL text and JavaScript, which no test
+  compared.
+  The signature now has one home, `scripts/lib/deployment_udf_sql.js`
+  (`UDF_PARAMETER_NAMES`, `UDF_ENTRY_POINT`, `buildPersistentUdfSql`), and
+  `writeDeploymentSql` renders from it. Test `test_v1_5_0_080` holds every reader to it:
+  the bundle's exported function and its arity, the generated DDL, the parameter lists
+  parsed out of the two hand-written SQL deployments, and the argument count at each
+  `__UDF__` call site in 03.
+- `release_config.example.json`: `bigquery_function` was `analyze_lineage`, which both
+  breaks the mandatory `lnge_` naming rule and names a function 03 never calls (03 builds
+  `<prefix>lnge_analyze_json<suffix>`). Now `lnge_analyze_json`. Also dropped
+  `repository_validation_sql`, a key the loader never read.
+- `release_manifest.json` is now written to the source tree as well as the staged
+  release, with the same bytes, so the two copies cannot drift. Previously only the
+  staged copy was written and the repository's copy was maintained by hand -- the
+  recorded `sha256` could go stale after an engine rebuild with nothing to catch it.
+- `deployment.status` in the manifest is now the outcome rather than an intention. The
+  status was set to `DEPLOYED` after the file had already been written, so a successful
+  `--deploy` still shipped `"PENDING"`. The bundle upload and the BigQuery deploy now run
+  before the manifest is written, and the ZIP is created afterwards (then uploaded), so
+  the manifest in the ZIP matches the source tree and records what happened.
+- `CLAUDE.md` section 7 recorded the bundle as `sha256 = ad18b4bc...` / `461888` bytes and
+  `test:release` at 52, while `dist/` and `release_manifest.json` were at
+  `eecd0bc8...` / `478961` / 60. Since CLAUDE.md is loaded at session start, that stale
+  pair was the first thing any reader saw about the deployed UDF. The section now carries
+  only the three values worth keeping current (bundle, test count, measured performance)
+  and points at `CHANGELOG.md` / `docs/HANDOFF_BRIEF.md` for everything narrative, which
+  is what went stale. The pre-migration figures in `docs/SESSION_HANDOFF.md` 0.1 are
+  marked as historical.
+
+- The job registry MERGE no longer re-writes matched rows that are identical. A
+  `WHEN MATCHED AND (...)` guard compares the stored columns and updates only when one
+  of them differs.
+  A finished BigQuery job is immutable and the lookback window deliberately overlaps,
+  so nearly every matched row was being written back unchanged -- about 200k rows per
+  run at an 8-day window, each carrying `query_text` and `definition_text`. The rows
+  that genuinely differ are the few worth the write: a job collected while still
+  RUNNING and since finished (`end_time`), or one whose extraction changed because the
+  engine was upgraded (`definition_hash`, `execution_source`, destination).
+  `definition_hash` stands in for `definition_text`, and with it for `query_text`,
+  which the two derive from -- comparing the text columns themselves would make the
+  MERGE READ them on both sides, which is the cost being avoided. `labels` is an
+  ARRAY<STRUCT> with no equality operator, so it is compared as JSON. `collected_at`
+  and `updated_at` are excluded deliberately: they change every run by construction,
+  and including them would skip nothing. `collected_at` therefore now means "when this
+  row last changed", which nothing reads.
+  The two definition-registry MERGEs are left alone: they carry one row per object
+  rather than per job, and their `last_seen_at` is meant to advance on every run.
+
+- The collection window and the retention window are now separate knobs. One value used
+  to decide both how far back JOBS are read and how long an ephemeral object survives
+  without being seen, and the two want opposite lengths.
+  `job_collection_lookback_days` (default 3) is how far back to READ. Anything older
+  was collected on an earlier run and is already in the registry, so re-reading it only
+  widens the INFORMATION_SCHEMA scan and the MERGE -- measured at roughly 40 seconds of
+  a 4-minute daily run at the old 8-day setting. It is a FLOOR, not the window: the run
+  extends it to cover everything since the newest job already collected, because a
+  fixed short window would silently lose the jobs from any gap in the schedule and
+  nothing downstream could recover them -- they would never enter the registry.
+  `object_retention_days` (default 40) is how long an object stays alive, and it
+  answers which schedules stay represented. 8 covers daily and weekly; 40 covers
+  monthly, with 31 days between runs plus room for a month-end schedule that slips --
+  which is why it is not 30. At the old 8, a monthly statement had no lineage in the
+  repository for three weeks of every four and was re-analyzed every month.
+  The retention window now also bounds the MERGE input
+  (`latest_generated_table_definitions`), which read the WHOLE job registry. The
+  registry keeps everything ever collected, so every run was re-registering every
+  fingerprint ever seen -- re-activating objects the age-out then deactivated again,
+  over a set that only grows. Harmless, because the age-out clears is_changed before
+  STEP 3 looks, but paid every run.
+
+- Confirmed from the job side what the fingerprint change bought: NEW FINGERPRINTS PER
+  DAY FELL FROM 1,200-1,350 TO BETWEEN 3 AND 22. Around 2,600 distinct statements run
+  every day and almost none of them are new, which is what a scheduler running the same
+  models is supposed to look like.
+  The first two days of the window read 1,702 and 1,053 because everything is new when
+  there is nothing to compare against, and the 76-121 of the next three days are weekly
+  jobs appearing in the window for the first time. From the fourth day on the rate is
+  single digits.
+  This also explains the 4-minute daily run: STEP 3 analyzes a handful of objects, so
+  essentially all of it is fixed cost -- collecting JOBS, rebuilding impact, refreshing
+  the static report tables.
+
+- Investigation closed: the ephemeral objects that LOOK foldable must not be folded.
+  Measured on a repository rebuilt the day before, half of the 2,880 ephemeral objects
+  (1,439) are identical to another once every digit is removed, and every pair
+  diverges at the same place -- character 16, the first line of the statement. So the
+  opportunity is real in the arithmetic.
+  Inspected, the differing number is a single digit inside a CTE NAME -- `lvl_1`
+  against `lvl_2`. Different levels of a hierarchy read different data, so folding
+  them would delete one side's lineage. They have to be kept apart.
+  That is also the 6-digit floor working as designed. The recurrence census had found
+  1-digit values appearing on seven days out of eight and called them names rather than
+  parameters; this is what those names are. Folding from one digit up would have merged
+  hierarchy levels.
+  The remaining duplication is not duplication, and the daily arrivals are legitimate
+  work: 11:22 for a seed and 4 minutes for a daily run stand as the floor.
+  Worth recording as a pattern, since this is the third time it has come up: a count of
+  what WOULD collapse is a count of candidates, not of things to do. Only someone who
+  knows what the values mean can close that gap, which is why these reports measure the
+  opportunity and say in as many words that they do not propose taking it.
+
+- Added `sql/maintenance/13_sql_pattern_drift.sql`, which answers "a scheduler runs the
+  same model every day, so why does the pipeline keep registering new objects?".
+  An ephemeral object's identity is its fingerprint, so a new fingerprint every day
+  means the generated SQL changes every day in a way the fingerprint does not
+  normalize. The report's handle is the DESTINATION: a model's destination table is
+  stable even when its SQL is not (dbt writes `<model>__dbt_tmp`), so same destination
+  plus many fingerprints identifies the drifting model BY NAME, which is what makes
+  the finding actionable against the dbt project.
+  Report 1 ranks destinations by distinct fingerprints against distinct days --
+  fingerprints near days is a new version every run, a small count is just edits.
+  Report 2 lists one destination's versions with first and last seen. Report 3 takes
+  its two newest versions, finds the first character at which they diverge, and prints
+  a window from each around that point, so the differing token is visible without
+  reading kilobytes of SQL. The search is linear and capped by `difference_max_scan`.
+  Also corrects `12_ephemeral_sql_similarity.sql`, whose `detail_min_digit_run` still
+  defaulted to 10 after the engine moved to 6.
+
+- `04_validate_lineage_environment.sql` checks the objects the repository actually has
+  now. Its required-table list had not followed the repository: `lnge_t_column_usage`
+  and the two report views were missing from it, so a repository could pass validation
+  and then fail in STEP 3 or render an empty report.
+  The section is now three lists, split by who creates each object and therefore by
+  what its absence means. Tables and views created by 01 are a FAIL -- 03's own
+  preflight refuses to start without the same tables. The two static report tables and
+  the unanalyzed snapshot are built by a RUN, so their absence is a WARN: on a freshly
+  set up repository they are legitimately not there yet, and failing on them would
+  train the operator to ignore the output.
+  Section 5 gained the four companion UDFs (`fingerprint_sql`, `render_dynamic_sql`,
+  `usage_sql_html`, `usage_sql_css`). Only the analysis UDF was checked, though a
+  missing fingerprint or render function stops 03 outright and a missing HTML function
+  breaks the report views -- all three much easier to read here than at the point of
+  failure.
+  Object names are now assembled from `bootstrap_table_name_prefix`/`suffix` instead
+  of being hard-coded, so a deployment that renames its tables is validated against
+  the names it actually has rather than always failing.
+
+- Measured, and closed, the last compression idea. Report 6 of
+  `12_ephemeral_sql_similarity.sql`, run against the registry AFTER the digit-aware
+  fingerprint, returns 0 removable objects for the deployed rule -- confirming it is
+  fully applied -- and 0 more for the literal-count rule. Parameter lists of differing
+  length, the remaining hypothesis for why near-identical statements stay apart, do
+  not occur in this corpus.
+  The 1,049 objects that rules 3 and 4 would still collapse come from folding 1 and
+  2-digit runs, and the recurrence census already showed those values appearing on
+  seven or eight distinct days each: they name things rather than identify runs, so
+  folding them would merge `table_v1` with `table_v2`.
+  The analysis UDF's 135 seconds is therefore a floor, and 11:22 is the practical
+  lower bound for this seed. What remains is operational (a shorter lookback, less
+  frequent static table builds) or another minute of statement-count work.
+  And 11:22 is the SEED. A re-run with nothing changed takes 4 minutes, which is what
+  a daily run actually costs: the seven-minute difference was analyzing every
+  ephemeral object once, exactly as the design intends -- a successful analysis clears
+  is_changed, so subsequent runs pay only for new fingerprints. What is left at 4
+  minutes is almost all fixed cost: collecting 8 days of JOBS, and rebuilding impact
+  and the static report tables.
+
+- MEASURED OUTCOME of the STEP 3 work: the same seed that could not finish in two and
+  a half hours now takes 11 minutes 22 seconds. Same repository, rebuilt from 01, same
+  8-day window: 200,000-byte per-dataset batches (abandoned at 44 batches) ->
+  1,200,000 / 1,200 with the digit-aware fingerprint, grouped batches and hoisted
+  rendering (16 minutes, 11 batches) -> 3,000,000 / 3,000 with five fewer statements
+  per batch (11:22, ~5 batches).
+  What the numbers say about where the time is: 514 statements accounted for 407
+  seconds inside a 960-second run, so more than half the clock was the gap BETWEEN
+  statements -- about 1.1 seconds each, paid whether a statement does anything or not.
+  The single largest piece of real work is the analysis UDF at 137 seconds, and that
+  is a floor: it is proportional to the SQL analyzed, so a bigger batch does not
+  shrink it. Everything else is 0.1-0.7 seconds a statement, where the count is the
+  cost.
+
+- `incremental_lookback_days` now defaults to 8 instead of 3, with the reason written
+  where the knob is: this window is not only how far back JOBS are collected, it is
+  the EPHEMERAL RETENTION WINDOW. An ephemeral object stays alive while its
+  fingerprint keeps reappearing inside it; when it stops, the object is deactivated
+  and its dependency rows are deleted.
+  At 3, a WEEKLY statement ages out between runs and is re-analyzed and re-published
+  every week -- and for most of each week its lineage is simply absent from the
+  repository. At 8 it is never out of window: analyzed once, present always.
+  The extra window is cheap in the way that matters. The fingerprint UDF -- the only
+  per-SQL work -- runs once per job_id ever, guarded by `sql_fingerprint IS NULL`, and
+  the job registry MERGE is keyed on (job_project, job_id), so re-collecting a day
+  already held re-MERGEs rows without re-fingerprinting them. What grows is a handful
+  of set-based statements over a wider partition range. STEP 3, at ~60 statements per
+  batch, does not grow at all: it is driven by is_changed, and the longer window
+  removes the weekly re-analysis churn.
+  The alternative -- keeping ephemeral objects forever instead of aging them out --
+  was considered and rejected: it would add ~1,250 objects a day permanently (measured
+  arrival rate), which leaves STEP 3 unchanged but makes STEP 4's impact rebuild and
+  the static report tables grow without bound.
+
+- 03 no longer creates repository tables. The two `CREATE TABLE IF NOT EXISTS`
+  statements -- the column-usage index and the job registry -- are replaced by a
+  PREFLIGHT that checks every repository table the run writes to and stops with the
+  missing names.
+  The self-healing was the wrong trade. A table missing at that point means something
+  DELETED it, and recreating it silently turns a question worth answering into a run
+  that finishes against an empty table and publishes a repository that looks complete
+  and is not. The run is cheap to repeat; the confidence is not.
+  One metadata query covers the registry, direct dependency, impact, diagnostic, job
+  registry and column-usage tables, and a `RAISE USING MESSAGE` names which are absent
+  and what to check -- deliberately a RAISE rather than an ASSERT, because ASSERT's
+  description must be a literal and could not carry the names. Views count as present
+  (INFORMATION_SCHEMA.TABLES lists them); STEP 4b's static tables are excluded because
+  this run builds them.
+  Creating the repository is now 01's job alone, which also removes the hazard of two
+  files holding the same schema and drifting apart. Three statements leave the run as
+  a side effect.
+
+- STEP 3 renders its per-batch SQL ONCE instead of once per batch, cutting ten
+  statements per analysis batch and one per discovery batch.
+  Every template in the two loops is a constant: the batch reaches the SQL through
+  temp tables and query parameters, never through the text, so the loop was rebuilding
+  identical strings every iteration. The rebuild is not free -- rendering is
+  `SELECT lnge_render_dynamic_sql(...)`, a BigQuery query job of its own.
+  Measured on a real run: the discovery pass took 17 minutes for ~44 batches at ~7
+  statements each, i.e. ~3 SECONDS PER STATEMENT, almost all of it job startup rather
+  than work. At that rate the analysis loop's statement COUNT is the runtime, and ten
+  of its ~42 were pure string assembly. Per-batch normal-path statements drop from
+  ~42 to ~32.
+  The templates inside the two EXCEPTION handlers are deliberately left in place: they
+  run only when a batch fails, so they cost nothing on the normal path.
+  The rendered SQL is held in named variables (`batch_sql_dependency_insert`,
+  `batch_sql_registry_completed`, ...) declared at STEP 3 scope so the loop body and
+  its handlers can both read them.
+
+- A batch may now span datasets (`analysis_batch_group_datasets`, default TRUE), so a
+  dataset holding one changed View no longer costs a whole iteration.
+  The loop body runs about 60 BigQuery statements per batch -- the UDF call plus the
+  publish into direct_dependency / impact / diagnostics / column usage and the
+  registry updates -- and each is a job whose startup cost does not depend on how many
+  objects the batch holds. With a per-dataset batch key, a region with 58 datasets
+  spent ~3,500 statements on work that fits in one batch. Measured symptom: STEP 3
+  grinding through "normal" datasets long after the ephemeral ones were done, with
+  almost no Views in them.
+  Grouping was impossible when the loop ran one UDF call per dataset for memory; the
+  byte and object budgets took that job over, leaving the dataset as nothing but a
+  grouping key -- the body used it only to select the batch's rows and to print
+  progress. The key is now a `batch_group` column, '' when batches may span datasets
+  and the dataset name when they may not, carried through `changed_object_batches` and
+  `all_changed_with_discovery` so the discovery pre-pass and the analysis loop still
+  agree on batch membership. Ordering inside a group is by dataset first, so a batch
+  spans as few datasets as the budget allows.
+  Set it FALSE if a mixed batch pushes the UDF's metadata payload over the heap: a
+  batch spanning datasets references more distinct source tables than either would
+  alone, and the budgets bound SQL text, not metadata. The resource-error handler
+  already survives that; a per-dataset batch just makes the failure smaller.
+
+- An object that comes back from `is_active = FALSE` is now re-analyzed. Both registry
+  MERGEs add `OR target.is_active = FALSE` to the `is_changed` expression.
+  Symptom (found while answering "does a weekly statement get re-analyzed?"): a
+  generated statement on a WEEKLY schedule ages out after
+  `incremental_lookback_days` (default 3) -- is_active = FALSE, is_changed = FALSE --
+  and STEP 3's orphan cleanup deletes its dependency and diagnostic rows. When it runs
+  again the next week, the MERGE matches the same `fp_<fingerprint>` row, the hash is
+  identical, so `is_changed` stayed FALSE: the object was re-activated and NEVER
+  re-analyzed. It sat in the repository active and edgeless until its SQL happened to
+  change -- silently missing lineage rather than visibly unanalyzed.
+  The condition is exactly right as "was inactive", not "is ephemeral": the cleanup
+  deletes the rows of every inactive definition, so a dropped-and-recreated View or
+  persistent table had the same hole.
+  Cost: a returning object pays one analysis, which is what it owes -- its edges have
+  to be rebuilt. Nothing changes for an object that never went inactive.
+
+- STEP 3 gains `analysis_max_batches_per_run` (default 0 = no limit), which bounds a
+  run's WALL CLOCK rather than its batch size.
+  The existing budgets decide how big a batch is, not how many there are, so a first
+  run after a long JOBS lookback can carry hundreds of them -- and an environment that
+  will not tolerate a multi-hour statement needs the work split across invocations,
+  not made smaller. Seeding a repository from a 14-day lookback is exactly that case.
+  What is left over is not touched: `is_changed` is cleared only by a successful
+  analysis of an object's own batch, so the deferred objects stay pending and the next
+  run continues from where this one stopped. Running 03 repeatedly drains the backlog
+  in equal bites. Nothing is marked failed and no diagnostic is written -- a deferred
+  batch is work not yet started, not an error, which is the difference between this
+  and the resource-error skip.
+  The cap is applied to the batch list BOTH loops read, because capping either loop on
+  its own would let the discovery pre-pass and the analysis loop disagree about which
+  batches the run covers. Batches are taken in (dataset, batch_no) order so repeated
+  runs advance in a stable order.
+  Visible in two places: the `ANALYSIS_BATCHES` notice gains `batches_available` and
+  `batches_deferred_to_next_run`, and the run summary gains
+  `batches_deferred_to_next_run` next to the existing
+  `remaining_changed_object_count`, which is the progress bar across runs.
+
+- The fingerprint's digit floor drops from 10 to 6, folding the per-run ids that were
+  registering a new ephemeral object on every execution.
+  Evidence: over eight days of job history, every distinct 6, 8, 18, 19 and 20-digit
+  run inside an identifier appeared on exactly ONE day (3,026 distinct 6-digit values,
+  100% one-day), while the 1, 2 and 9-digit runs appeared on 7-8 days each. 6 is where
+  values stop being reused.
+  What that evidence does NOT establish, and the reason this is a judgement call: a
+  job that processes a different product code every day also gives each code exactly
+  one day, so "seen once" cannot by itself license folding. What would license it is
+  POSITION -- digits inside a FROM/JOIN target name different tables, and folding
+  those discards real edges, while digits anywhere else leave the sources unchanged.
+  Report 5 of `12_ephemeral_sql_similarity.sql` measures exactly that, deliberately
+  overstating the risk (it counts CTE names as source references).
+  The decision to fold at 6 was taken by the operator with that cost stated: where a
+  source name does carry six or more digits, only the representative's lineage
+  survives. The measured `lossy` count is 58 at thresholds 6 and 8 alike, so within
+  what has been analyzed the merge discards nothing extra.
+  Expected effect: 4,814 ephemeral objects to 2,021, and 13,891,890 to 4,193,092
+  characters of SQL -- 70% less for STEP 3 -- against 10% at the previous floor.
+  test_v1_5_0_079 updated (6, 8, 10 and 20-digit runs fold; 1, 2 and 5-digit runs stay
+  distinct). Bundle rebuilt (sha256 eecd0bc8..., 478961 bytes); test:release 60 /
+  golden 48 PASS. Redeploy the bundle to GCS; no SQL change.
+
+- `12_ephemeral_sql_similarity.sql` gains report 5, which asks whether a digit run
+  sits inside a FROM/JOIN target -- the only property that decides whether folding it
+  can lose lineage, and one that neither run length nor recurrence can answer.
+
+- `10_pending_analysis_workload.sql` gains reports 6, 7 and 8, which measure whether
+  the ephemeral population RECURS or CHURNS -- the question that decides what any
+  optimization is worth, and one the registry alone cannot answer.
+  Report 6 (fingerprint lifetime histogram, from the job registry) came back
+  decisive: over 14 days, 13,488 of 14,736 fingerprints (91.5%) were seen on exactly
+  ONE day, while 185 were seen on eight -- so the history is not too thin to read, and
+  the generated statements really are re-fingerprinted every run. The "today's load is
+  a one-time backlog" reading is dead: clearing it buys one day.
+  Report 7 is the same history day by day with the count of first-ever-seen
+  fingerprints, which is the steady-state arrival rate measured from the jobs rather
+  than from when the pipeline happened to run.
+  Report 8 then separates the two readings the registry census could not: a 6-digit
+  value that is not date-shaped and shares one leading prefix fits a PRODUCT CODE and
+  an INCREMENTING RUN ID equally well, and they differ in exactly one observable --
+  a code is reused across days, a run id is minted once. It reports, per run length,
+  the share of distinct values seen on only one day. If the 6-digit values turn out to
+  be run ids, folding them is not just safe but necessary, and the 70% collapse that
+  threshold 1 promised is back on the table.
+
+- The SQL structural fingerprint now folds DIGIT RUNS OF 10 OR MORE inside IDENTIFIER
+  and BACKTICK_IDENTIFIER tokens to `#`, so generated SQL that differs only in a
+  per-run id embedded in a temp table name collapses to one ephemeral object.
+  Symptom: STEP 3 spent nearly all its time on ephemeral objects -- 4,814 of them,
+  13.9M characters -- for an external scheduler's daily runs of the same statement.
+  Cause: the fingerprint normalizes string and number LITERALS, so a parameter passed
+  as a literal already collapsed. A parameter that lands INSIDE AN IDENTIFIER
+  (`tmp_01234567890123456789`) is part of a single token, which the fingerprint kept
+  intact -- so every run was a separate object.
+  Fix: fold long digit runs inside identifier tokens only. The floor is what makes
+  this safe, and it is measured, not guessed. A census of the digit runs inside
+  identifiers in the real registry (report 4 of
+  `12_ephemeral_sql_similarity.sql`) found:
+    20 digits  2,047 occurrences / 1,783 distinct  -- per-run ids; fold these
+     9 digits    289 occurrences /     7 distinct  -- not rotating; nothing to gain
+     8 digits     30 occurrences /     3 distinct  -- real dates, but negligible
+     6 digits  2,906 occurrences / 1,507 distinct, ZERO date-shaped in EITHER form
+                (century or two-digit year, where a random 6-digit number would pass
+                the second about 4% of the time) and all sharing one 2-digit prefix
+                -- a code scheme, which must NOT be merged
+  A floor of 10 folds the first group and only the first group.
+  An earlier draft of this change used a floor of 6, chosen from report 1 alone
+  because thresholds 4 and 6 collapsed identically. That reasoning was wrong: the
+  identical result showed only that the active runs are 6-7 digits, not that they are
+  dates. The census showed they are not. The 6-digit floor was never deployed.
+  Scope: ephemeral object identity only. 03 partitions persistent destinations by
+  destination NAME and uses the fingerprint only in the ephemeral branch, and the one
+  surviving representative is still analyzed from its real SQL text, so no lineage
+  becomes coarser.
+  Operational note: for ephemeral objects `definition_hash` IS the fingerprint, so
+  the first run after deploying the new bundle re-registers them once. The old
+  fingerprint objects then age out through the existing ephemeral age-out UPDATE.
+  Covered by test_v1_5_0_079. Bundle rebuilt (sha256 25afe1d0..., 478399 bytes);
+  test:release 60 / golden 48 PASS. Redeploy the bundle to GCS; no SQL change.
+
+- `12_ephemeral_sql_similarity.sql` gains report 4, a census of the digit runs that
+  appear inside identifier-shaped tokens, by run length, with the counts that tell a
+  date from a code: `date_century` ((19|20)YY + month + optional day),
+  `date_yy_mmdd` (a two-digit year, which a random 6-digit number passes only ~4% of
+  the time), `distinct_year_prefix`, the value range, and comma-joined samples of both
+  the runs and the identifiers they came from. This is what a length threshold cannot
+  answer, and what report 1's numbers alone led to a wrong conclusion about.
+  `digit_run_thresholds` now defaults to 1 / 2 / 4 / 6 / 8 / 10 / 12 and
+  `detail_min_digit_run` to 10, matching the engine.
+
+- `12_ephemeral_sql_similarity.sql` report 1 now reports ONE ROW PER DIGIT-RUN
+  THRESHOLD (`digit_run_thresholds`, default 1 / 2 / 4 / 6 / 8) instead of a single
+  row that folded every digit. The threshold is the actual design decision: folding
+  from one digit up also merges things that are genuinely different (`table_v1` and
+  `table_v2` are two tables, where `events_20260101` and `events_20260102` are two
+  days of one), and a date suffix is 6-8 digits, so a floor of 6 keeps the first pair
+  apart. One run now shows what the cautious rule costs instead of assuming it.
+  Reports 2 and 3 take `detail_min_digit_run` (default 6) so the groups they list are
+  the ones the chosen row of report 1 counted.
+  The query is assembled per threshold -- one `g_<n>` CTE and one UNION ALL branch
+  each -- so every digit pattern stays a literal in the generated SQL; a
+  column-valued regex would be the obvious alternative and is not worth the risk. The
+  shared work (normalizing, joining to the source sets) stays in one `joined` CTE.
+  Also: the CTE named `groups` was a GoogleSQL reserved keyword (the window-frame unit
+  in ROWS | RANGE | GROUPS) and made report 3 fail with "Expected keyword SELECT but
+  got keyword GROUPS", surfacing as "Invalid EXECUTE IMMEDIATE". Renamed, and report
+  3's final SELECT now joins with an explicit ON through a `picked` CTE instead of
+  USING + QUALIFY.
+
+  FIRST MEASUREMENT (min_digit_run = 1): 4,814 active ephemeral objects collapse to
+  1,420 groups -- 3,394 removable (70%), and 13,891,890 -> 2,655,350 characters of
+  SQL (81% less), which is the figure that predicts STEP 3's runtime. Of the
+  removable objects only 63 are lossy (their group members resolve to different
+  source sets), 561 are lossless and 2,770 are unknown because no member of their
+  group has ever been analyzed -- itself a measure of the ephemeral backlog the OOM
+  skips left behind.
+
+- Added `sql/maintenance/12_ephemeral_sql_similarity.sql`, a read-only report that
+  measures how many EPHEMERAL objects are "the same SQL with different parameters"
+  and whether collapsing them would lose lineage.
+  Context: ephemeral objects are already deduplicated by `sql_fingerprint`, which
+  normalizes string and number LITERALS, comments, whitespace, case and backticks --
+  so a parameterized query re-run daily should already be ONE object. When hundreds
+  survive anyway (measured: 928 ephemeral objects, 2.3M chars, in a single batch
+  bucket) the parameter is not reaching the SQL as a literal. The leading candidate is
+  a digit-bearing identifier (`events_20260101`), which the tokenizer sees as one
+  IDENTIFIER token and the fingerprint keeps intact.
+  The report groups the registry by a key that re-does the fingerprint's own
+  normalizations on raw text and then folds digit runs, which isolates exactly the
+  EXTRA collapse a digit-aware fingerprint would buy -- the registry is already
+  fingerprint-distinct, so `COUNT(*)` is a free baseline. Report 1 quantifies it
+  (`objects_removable`, split into `lossless_` / `lossy_` / `unknown_removable`),
+  report 2 lists the groups with `distinct_source_sets` from
+  `lnge_t_direct_dependency` (1 = merging is lossless, >1 = merging would discard
+  edges, 0 = never analyzed, so no evidence), and report 3 opens the biggest groups
+  up member by member so what differs is visible rather than inferred.
+  Measurement only -- nothing in the engine or the pipeline changes. Extending
+  `fingerprintSqlForBigQuery` would re-identify every ephemeral object once (for
+  ephemeral objects the fingerprint IS the `definition_hash`), so the decision waits
+  on these numbers.
+
+- A UDF resource error in STEP 3 no longer aborts the run. The analysis UDF query
+  covers a whole batch, so "UDF out of memory" there has no per-object granularity and
+  used to kill the script, discarding every batch that had not run yet -- a run could
+  clear 31 batches of 20 objects and then throw the rest away. The batch body now has
+  an EXCEPTION handler that records the batch's objects as
+  `analysis_status = 'FAILED_UDF_RESOURCE_ERROR'` with an `UDF_RESOURCE_ERROR`
+  diagnostic row each, and continues with the next batch. The run COMPLETES with some
+  objects unanalyzed instead of stopping partway, which is the state an operator can
+  act on.
+  Nothing is hidden: those objects keep a non-COMPLETED status, so
+  `lnge_t_unanalyzed_definition` lists them (`coverage_reason =
+  ANALYSIS_FAILED_UDF_RESOURCE_ERROR`), the object-dependency view excludes them, a
+  `SKIPPED_BATCH_UDF_RESOURCE_ERROR` row is emitted as each batch is abandoned, and
+  the run summary carries `resource_skipped_batch_count` /
+  `resource_skipped_object_count`.
+  Scoped deliberately narrowly: only errors whose message matches
+  `analysis_resource_error_patterns` (default: out of memory / resources exceeded /
+  exceeded resources) are absorbed. Anything else is re-raised as the handler's FIRST
+  action, so a bug in the publish logic still stops the run rather than being filed as
+  a skipped batch. BigQuery exposes no error code to an EXCEPTION section, only
+  `@@error.message`, so substring matching is the only available test -- the list is a
+  DECLARE so it can be widened. `analysis_skip_on_udf_resource_error = FALSE` restores
+  the original abort.
+  Skipped objects get `is_changed = FALSE`, so a later run does not pay the same
+  failure again; retrying is deliberate (lower the batch budgets, then set
+  `is_changed = TRUE` -- the flag is sticky, so STEP 1/2 will not clear it first).
+  Implementation note: the handler's scratch variables (`batch_error_message`,
+  `current_batch_dataset` / `_no` / `_object_count`) are declared one scope UP, because
+  BigQuery does not expose a block's own DECLAREs -- nor, safely, the enclosing FOR
+  loop's variable -- to that block's EXCEPTION section. This is the same reason
+  `publish_err_message` already lived a level up.
+  Also: `11_analysis_batch_diagnostics.sql` report 2 gains `lineage_statements_only`
+  (default TRUE), so unrelated access-denied / invalid-query failures from other jobs
+  in a shared project are not mistaken for a 03 problem.
+
+- Added `sql/maintenance/11_analysis_batch_diagnostics.sql`, which reads
+  INFORMATION_SCHEMA.JOBS to recover STEP 3's batch diagnostics after a failed run
+  without scrolling a script's per-statement result list in the console. Report 1
+  lists the `ANALYSIS_BATCH_PAYLOAD` statements newest first, parsing the dataset and
+  batch number straight out of each statement's SQL text (03 inlines them with
+  FORMAT), so the failing batch is identified without opening anything -- the job_id
+  is what to open for the byte counts. Report 2 lists the failed statements in the
+  same window with their error, so a STEP 3 "UDF out of memory" can be read against
+  `batch_udf_results` and paired with report 1's last row. Read-only and touches no
+  repository table; `jobs_project_id` can be pinned when 03 runs in another project.
+  Noted in the header: INFORMATION_SCHEMA.JOBS retains job metadata for months but
+  query RESULTS expire in about a day, after which report 1 still names the batch but
+  its numbers are gone.
+
+- Report each analysis batch's PHYSICAL-METADATA volume before the UDF runs, as an
+  `ANALYSIS_BATCH_PAYLOAD` row. Batching by SQL volume did not stop "UDF out of
+  memory": at 20 objects per batch a run cleared 31 batches and then died on the 32nd,
+  so neither measure already reported predicts the failure -- object count does not,
+  and SQL text length does not either (a 2 KB query can pull in a wide table's entire
+  schema). The remaining candidate is the `physical_columns_json` payload, which the
+  discovery pre-pass does NOT send: it runs the same objects through the same UDF in
+  the same batches and passes, and passing `'[]'` there is the only material
+  difference. `batch_object_metadata` already computes
+  `physical_metadata_json_bytes` per object, so the size was being measured and
+  discarded. It is now emitted as its own statement immediately before the UDF query:
+  when that query aborts the script, this row is the last thing in the results and
+  names the batch, its total and maximum payload bytes, and its largest object.
+  Diagnostic only -- no batching or analysis behavior changes. (Also ruled out along
+  the way: wildcard sources are NOT the explanation. `wildcard_ranked` /
+  `shard_rank = 1` already collapses a `events_*` style reference to one
+  representative shard, so date-sharded tables do not multiply the payload.)
+
+- Fixed "UDF out of memory" in STEP 3 when generated tables are analyzed. STEP 3
+  already loops over datasets so one UDF call never sees the whole region, but a
+  dataset is not a bound: every temporary / rotating-destination generated table
+  collapses into the single synthetic dataset named by
+  `ephemeral_object_dataset_label`, so they all arrive as ONE loop iteration however
+  many there are. Measured on a real region: 928 of 937 changed objects and 2.30 MB
+  of 2.37 MB total SQL were in that one bucket -- 97% of the work in one UDF call,
+  40x the next heaviest dataset. Views alone analyzed fine, which is why
+  `process_generated_tables = FALSE` was a workaround.
+  The loop unit is now (dataset, batch_no) instead of dataset. A new
+  `changed_object_batches` session table assigns each changed object a batch number
+  from the cumulative SQL length BEFORE it, capped by the new
+  `analysis_batch_max_sql_bytes` (default 200000) with `analysis_batch_max_objects`
+  (default 200) as a secondary cap for many-tiny-objects; both loops -- the discovery
+  pre-pass and the analysis loop -- read the same `analysis_batches` units, so they
+  see identical batches. Cutting on the exclusive prefix means an object larger than
+  the whole budget takes a batch to itself instead of dragging its neighbours over;
+  both GREATEST terms rise monotonically along the ordering, so a batch is always a
+  contiguous run (numbers may skip, hence iterating DISTINCT values). A batch can
+  overshoot the byte budget by up to its last object's size.
+  The budget is on SQL VOLUME, not object count, because the row-count chunking tried
+  earlier (and removed) still blew the heap when a few oversized objects landed in one
+  chunk. Defaults are conservative: the only batch size proven to work in this
+  environment is the 4-object / 57 KB Views case, so they are set well below anything
+  observed to fail and are meant to be tuned from the first successful run.
+  Also reported: an `ANALYSIS_BATCHES` row gives the budgets, the batch count, the
+  changed-object count, total SQL bytes and the largest batch's bytes, so the split is
+  visible and the knob to turn is obvious. Per-batch publish keeps the same
+  delete-by-object semantics, so a failure rolls back that batch only.
+  `changed_definitions_to_analyze` is now a plain read of the session table rather
+  than a per-iteration registry query. SQL only; the bundle is unchanged.
+  Diagnosed with `sql/maintenance/10_pending_analysis_workload.sql`.
+
+- Added `sql/maintenance/10_pending_analysis_workload.sql`, a read-only report of how
+  much work the next 03 STEP 3 run would hand to the analysis UDF, grouped the way
+  STEP 3 actually batches it. STEP 3 avoids UDF out-of-memory by looping over
+  datasets -- one UDF invocation per dataset -- so what predicts an OOM is not the
+  total changed-object count but the largest PER-DATASET SQL volume, which is one
+  call's V8 heap. Report 1 is exactly that unit (one row per dataset, ordered by
+  total SQL size, with a flag for the synthetic `ephemeral_generated_sql` bucket that
+  every temporary / rotating-destination generated table collapses into, and so gets
+  no protection from the dataset loop); report 2 splits a heavy dataset by object kind
+  and generation_type; report 3 gives the run total to read the others as shares.
+  The filter mirrors STEP 3's own changed-object probe, including the
+  `process_generated_tables` gate, so the numbers are what the next run would see.
+  Follows the maintenance-script conventions (`[A]`/`[B]`/`[C]` DECLARE blocks,
+  project auto-detection, `{project_token}` substitution, prefix/suffix name
+  assembly, backtick-quoted qualified references through EXECUTE IMMEDIATE).
+
+- Added STATIC TABLES for the two report views, rebuilt by a new 03 STEP 4b:
+  `lnge_vw_t_column_usage_impact` -> `lnge_t_column_usage_impact` and
+  `lnge_vw_t_object_dependency` -> `lnge_t_object_dependency` (the view name with `vw_`
+  dropped). Both views re-aggregate the whole impact graph on every read, and a BI tool's
+  filters land on computed columns (`origin_full_name`), so nothing prunes by cluster key;
+  the tables are clustered on the origin and are BI-Engine eligible. BigQuery's
+  MATERIALIZED VIEW cannot express either definition -- `ARRAY_AGG(... ORDER BY ...)`,
+  `STRING_AGG(DISTINCT ...)`, LEFT JOIN, analytic functions and correlated ARRAY
+  subqueries are all unsupported -- so these are plain `CREATE OR REPLACE TABLE ... AS
+  SELECT *` snapshots. The views stay the single definition: editing one in 01 changes the
+  table's schema on the next run with nothing to keep in step by hand. Each row carries
+  `updated_at`.
+  Rebuilt on the same condition as the impact rebuild (`has_analysis_work OR
+  orphan_direct_dep_deleted > 0`) so the static tables are exactly as fresh as what they are
+  built from, plus one escape hatch: they are also built when they do not exist yet, since
+  the first run after deploying the views usually changes nothing and reports would
+  otherwise have no table to read. Skipped under `preview_only`. A failure is reported as
+  a `REFRESH_STATIC_REPORT_TABLES` / `FAILED` row rather than taking the pipeline down --
+  these are derived data, and the likely cause is a deployment whose 01 predates the views.
+  One behavior difference, in the column view only: `usage_definition_html` collects its
+  highlight positions with an analytic `ARRAY_AGG OVER (PARTITION BY origin column, usage
+  object, usage definition)`. Analytic functions run after WHERE, so against the VIEW a
+  report's extra filters also narrow the highlights; in the static table the
+  aggregation is fixed at build time over the full partition. The partition key already
+  pins the origin column and the object, so the ordinary "pick an origin, show its SQL"
+  case is identical -- only a report that filters further and expects the highlights to
+  follow needs to keep reading the view.
+  New 03 toggles: `build_static_report_tables` (default TRUE) and
+  `static_tables_include_usage_sql` (default TRUE). The latter drops
+  `usage_definition_text` / `usage_definition_html` from the static table: both
+  repeat the object's ENTIRE SQL on every row of that object (one row per origin column x
+  usage site x path), so they can dominate the table's size and the bytes billed for any
+  query that selects them.
+
+- Added `lnge_vw_t_object_dependency`, an object-level (table/view) transitive dependency
+  view created by 01 alongside `lnge_vw_t_column_usage_impact`. One row per
+  (origin object -> impacted object) pair -- not per path, so `COUNT(*)` is the number of
+  downstream objects -- carrying `impact_rank` as the SHORTEST hop count (1 = direct
+  reference), `max_impact_rank`, `path_count` and per-object column counts. The rank is
+  relative to the origin, exactly like `depth` in `lnge_vw_t_column_usage_impact`:
+  `lnge_t_impact` seeds its recursion from every edge, so every node is also an origin and
+  the same impacted object appears once per origin at its own distance. Read it with an
+  origin selected. The column
+  detail is aggregated into the row twice: as `column_dependencies`
+  (`ARRAY<STRUCT<origin_column, impacted_column, impact_rank, path_count,
+  resolution_statuses>>`) and, because Looker Studio cannot read ARRAY fields, as the
+  flattened `column_dependencies_text` / `origin_columns_text` / `impacted_columns_text`.
+  The route is exposed the same way, as `shortest_object_path` plus
+  `shortest_object_path_text`: the shortest column path with its trailing column segment
+  dropped and consecutive repeats of the same object collapsed to one hop.
+  Built from `lnge_t_impact` (already one row per distinct path) rather than from
+  `lnge_vw_t_column_usage_impact`, so edges whose reference never resolved to a physical
+  column are not lost and the usage join cannot multiply the aggregates. The rollup is
+  two-stage -- column-pair grain first, then object grain -- because `ARRAY_AGG(DISTINCT
+  <struct>)` is not allowed; the first stage is what keeps the array duplicate-free.
+  Scope: ephemeral (`fp_<hash>`), inactive, and non-COMPLETED objects are dropped from
+  BOTH endpoints, so only what the 03 DECLAREs actually analyzed appears. A path that
+  merely passes THROUGH an excluded object survives at its true rank, since impact keeps
+  intermediate nodes only inside `dependency_path`. Upstream objects that are referenced
+  but never analyzed (raw sources) have no registry row and are kept, flagged
+  `origin_is_analysis_target = FALSE` -- dropping them would remove every edge entering
+  the analyzed area from outside. The registry join is pre-aggregated to one row per
+  object key and does not use `object_type`, so it cannot fan out even when the type the
+  analyzer saw differs from the registry's. SQL only; no engine change, so the bundle and
+  the GCS deployment are untouched. Redeploy with `recreate_views_only = TRUE`.
+  Column reference for report builders: `docs/VIEW_OBJECT_DEPENDENCY.md`.
+
+- Fixed a table alias used as a *row value* -- `ARRAY_AGG(t ORDER BY x LIMIT 1)[OFFSET(0)].col`,
+  the standard "representative row per group" idiom -- being resolved as a column named
+  `t` (engine). Over a CTE that produced LINEAGE_PARTIALLY_RESOLVED; over a physical table
+  it produced PHYSICAL_COLUMN_NOT_FOUND, an ERROR. Worse than either diagnostic: the
+  dependency on the row's actual column was dropped entirely, so `session_id` traced only
+  to the ORDER BY key and changing the source column would not have shown this object as
+  impacted -- a false negative in impact analysis.
+  The parser now keeps the postfix field name on the field-access node, and ColumnResolver
+  uses it: an unqualified identifier that matches a table-like source alias in scope, and
+  cannot be resolved as a column, is re-resolved as `alias.field` -- exactly the qualified
+  reference the SQL means -- so the lineage lands on that one column. Restricted to
+  PHYSICAL_TABLE / CTE / SUBQUERY sources: an UNNEST alias names an element value rather
+  than a row, and treating it as one broke `FROM d.t AS t, UNNEST(Col) AS Col`
+  (caught by test_v1_5_0_065 during development).
+  A row value with no field access (`ARRAY_AGG(t) AS xs`) stays out of scope. Emitting a
+  reference standing for "every column of the row" mid-expression crashed the downstream
+  wildcard handling, which assumes a SELECT-item position; test_v1_5_0_078 pins that this
+  shape does not take the engine down. Test: test_v1_5_0_078.
+
+- Fixed `SELECT x AS offset` failing to parse with "SelectParser: invalid explicit alias".
+  `offset`, `value`, `key` and similar are not reserved in BigQuery and are valid column
+  names. The implicit-alias path already accepted non-reserved keywords (v1.5.0-058) but
+  the explicit `AS` path still required IDENTIFIER / BACKTICK_IDENTIFIER, so the whole
+  object failed to analyze. `#isAliasToken` now uses the same `#isColumnNameToken` rule --
+  safer here than for implicit aliases, since the explicit `AS` removes the ambiguity with
+  surrounding syntax. Truly reserved words (`AS NULL`, `AS ROWS`) are still rejected, and
+  `CAST(x AS STRING)` is unaffected because that `AS` sits at a deeper paren depth.
+  Covered by test_v1_5_0_078. Bundle rebuilt (sha256 6ad84903..., 475682 bytes);
+  test:release 58 / golden 48 PASS. Engine change -- the GCS bundle must be re-uploaded.
+
+- Fixed a dotted reference to an element field of an *unaliased* `UNNEST` resolving to
+  UNRESOLVED_SOURCE, which surfaced as a false
+  `LINEAGE_PARTIALLY_RESOLVED ... (EXPRESSION_SUBQUERY) [UNRESOLVED_SOURCE]` on the GA4
+  idiom `COALESCE((SELECT value.string_value FROM UNNEST(event_params) WHERE key='utm_campaign'), ...)`.
+  The expression subquery was incidental: the same SQL fails identically with the UNNEST
+  in the FROM clause. The real condition is an unaliased UNNEST plus a dotted reference.
+  ColumnResolver reads a two-part identifier as qualifier.column, so `value.string_value`
+  makes `value` a source alias; an unaliased UNNEST answers to no alias, hence
+  UNRESOLVED_SOURCE. A single-part `key` was fine because the existing single-UNNEST
+  fallback only covers unqualified references, and an aliased `ep.value.string_value` was
+  fine because the alias resolves -- which is why only this shape was left behind.
+  PhysicalColumnResolver now routes a qualified UNRESOLVED_SOURCE reference to the UNNEST
+  in scope when there is exactly one, taking the qualifier as the first segment of the
+  field path within the element (`#resolveCorrelatedUnnestReference` already treats the
+  whole reference_name as that path, so nothing else had to change). It runs after
+  `#resolveStructFieldPathReference`, so a physical nested STRUCT such as `geo.region`
+  keeps priority. With two UNNEST sources in scope the reference stays unresolved rather
+  than being attributed to an arbitrary one. Test: test_v1_5_0_077. Bundle rebuilt
+  (sha256 7d438ab3..., 470584 bytes); test:release 57 / golden 48 PASS. Engine change --
+  the GCS bundle must be re-uploaded.
+
+- Fixed `CREATE ... AS WITH cte AS (...) SELECT ...` losing its lineage silently (engine).
+  `#parseCommonTableExpressions` only parses CTEs when the first token is `WITH`, so a
+  statement starting with `CREATE` never had its CTEs read: ClauseParser still found the
+  depth-0 SELECT, the CTE name resolved to nothing, and the object came back
+  COMPLETED_WITH_WARNINGS with no dependencies -- data quietly missing rather than a
+  failure anyone would notice. `CREATE ... AS SELECT ...` (no CTE) always worked, which
+  is why the gap went unseen.
+  Added `#stripStatementPrefix`: when the first token is `CREATE` or `EXPORT`, parsing
+  restarts after the first depth-0 `AS` whose body begins with SELECT / WITH / `(`.
+  Anchoring on the depth-0 `AS` means the prefix's contents do not matter -- a column
+  schema, `PARTITION BY`, `CLUSTER BY` and `OPTIONS(...)` all sit inside parentheses or
+  before the `AS` -- so unlike a regex there is no shape to enumerate. Restricting it to
+  CREATE / EXPORT is what keeps `WITH t AS (...) SELECT ...` intact: without that guard
+  the CTE's own `AS` would be mistaken for the boundary and the CTE discarded.
+  Test: test_v1_5_0_076. Bundle rebuilt (sha256 242dcc8b..., 468617 bytes);
+  test:release 56 / golden 48 PASS. Engine change -- the GCS bundle must be re-uploaded.
+
+- Generalized the CTAS strip in `03_run_daily_lineage_pipeline.sql`, and documented why it
+  must stay. It is easy to read the engine fix above as making the strip redundant; it
+  does not. `definition_text` is the input to `sql_fingerprint`, and the fingerprint
+  normalizes literals but not table identifiers -- so leaving the `CREATE ... AS` prefix
+  in place gives a rotating destination (`tmp_20260101`, `tmp_20260102`, ...) a different
+  fingerprint each run, defeating the ephemeral collapsing and growing the registry
+  without bound. A comment now says so at the call site.
+  The old pattern enumerated prefix shapes and matched only a bare name optionally
+  followed by `OPTIONS(...)`, so `PARTITION BY` / `CLUSTER BY`, a column schema, and
+  `CREATE TEMP TABLE` fell through and were fingerprinted with their destination name
+  still in the text. The pattern now takes the first ` AS ` whose body starts with
+  SELECT / WITH / `(` and writes that body back through a capture group (RE2 has no
+  lookahead). Verified across all those shapes, including that two rotating destinations
+  reduce to identical bodies. Objects whose text changes as a result re-analyze once,
+  since definition_hash is the hash of definition_text.
+
+- Fixed the HTML UDFs added above being named and placed unlike every other UDF in the
+  deployment. They were assembled from `bootstrap_table_name_prefix/suffix` and created
+  in the repository dataset -- so an environment that sets a different prefix for tables
+  than for routines got two functions carrying the table naming, sitting next to the
+  tables instead of next to `lnge_analyze_json` / `lnge_fingerprint_sql` /
+  `lnge_render_dynamic_sql`. They now follow the routine convention exactly:
+  `bootstrap_udf_name_prefix || 'lnge_' || base || bootstrap_udf_name_suffix`
+  (no marker segment, matching the other three), declared beside the other
+  `bootstrap_udf_*_function_name` variables, validated by the same
+  letters/digits/underscore ASSERTs, and created in `bootstrap_udf_project_id` /
+  `bootstrap_udf_dataset`. The names are `lnge_usage_sql_html` and
+  `lnge_usage_sql_css`. The view's call site is now a three-part reference, since the
+  function no longer lives in the view's own dataset. Documented in
+  `docs/VIEW_COLUMN_USAGE_IMPACT.md` section 6. SQL and tooling only; the engine bundle
+  is unchanged. Not yet validated against BigQuery.
+
+- Added `usage_definition_html` to the column-usage impact view: the same SQL as
+  `usage_definition_text`, rendered with line numbers, the referenced line tinted, every
+  referenced span marked, and light SQL syntax colouring -- for Looker Studio's
+  Templated Record community visualization, which draws one record from an HTML column.
+  Templated Record is a gallery-hosted visualization, so unlike a self-built one it needs
+  no publicly readable GCS bucket.
+  The renderer lives in `javascript/src/html/usage_sql_html.js` and is embedded by
+  `scripts/build_usage_html_udf.js` into a generated block in 01 as two self-contained
+  BigQuery JS UDFs, `lnge_fn_usage_sql_html` and `lnge_fn_usage_sql_css`. It is NOT part
+  of the engine bundle: the lineage UDF and its GCS deploy are untouched, and the bundle
+  hash is unchanged. 15 KB of JS, checked against BigQuery's 32 KB inline code blob limit
+  at build time (`npm run verify:usage-html-udf`, wired into `npm test`, fails the build
+  if 01's block has drifted from the source).
+  Highlights are aggregated per (origin column, usage object, definition) with an
+  analytic ARRAY_AGG, so **every** location in that object relevant to the selected
+  origin is marked, not just the one row -- which is what a one-record visualization
+  needs. Analytic functions run after WHERE, so a report filtering by origin narrows the
+  set first. Paths duplicate the same location, and overlapping ranges are possible; both
+  are collapsed inside the UDF rather than in SQL (`ARRAY_AGG(DISTINCT)` is not available
+  as an analytic function).
+  Positions are passed as `line:column:length` strings, using the stored column_number,
+  which counts indentation characters -- so tabs must not be expanded on render or the
+  offsets shift. Three modes: `embed` (default, self-contained `<style>`), `class`
+  (smallest, CSS from the companion UDF) and `inline`. `contextLines` narrows the render
+  to a window; the default is the whole SQL. Test: test_v1_5_0_075, which also pins that
+  the classes the markup emits all exist in the CSS the companion UDF returns.
+  Documented for report builders in `docs/VIEW_COLUMN_USAGE_IMPACT.md` section 6.
+  SQL and tooling only; the engine bundle is unchanged. Not yet validated against
+  BigQuery.
+
+- Added `word_number` and `word_text` to the column-usage impact view, and documented
+  what `column_number` actually counts. `column_number` comes from the lexer's
+  `column_no`, which advances one per character and resets at a newline: it includes the
+  leading indentation and counts a tab as ONE column, not a tab stop. That is exact but
+  awkward to verify by eye, since nobody counts indent characters when finding a spot in
+  SQL. `word_number` is the 1-based index of the whitespace-delimited word the reference
+  sits in, so it is unaffected by indentation, and `word_text` is that word, so the
+  number can be confirmed without opening the SQL. A reference that does not start its
+  word -- `col` in `a.col`, or inside `f(col)` -- reports the word that contains it
+  (`a.col`, `f(col)`), which is what a person reading the line looks for. Computed in the
+  view from `line_text` + `column_number`, so it applies to rows already collected with
+  no bundle redeploy and no re-analysis; a true lexical token index would have to come
+  from the engine and would only appear for objects analyzed after the upgrade. The view
+  body now computes the per-usage location and the registry lookup once in a CTE that
+  both depth branches read, instead of repeating the expressions per branch (which also
+  drops the duplicated usage/registry joins: 8 FORMAT placeholders instead of 12).
+  SQL-only; the engine bundle is unchanged. Not yet validated against BigQuery.
+
+- Added `usage_definition_text` (and `usage_definition_is_current`) to the column-usage
+  impact view, so a usage row carries the SQL the reference lives in and
+  `line_number` / `line_text` can be read in context without a second query. Both
+  branches LEFT JOIN the definition registry on the usage object's key
+  (project/dataset/name/type -- the registry's MERGE key, so exactly one row per object
+  and no fan-out). The text is returned only when the registry still holds the very
+  definition that was analyzed (`d.definition_hash = u.definition_hash`): once an object
+  is redefined the registry's current text is a DIFFERENT SQL whose line numbers do not
+  line up, so the view returns NULL rather than something plausible but wrong.
+  `usage_definition_is_current` distinguishes the cases -- TRUE matched, FALSE the object
+  was redefined since analysis, NULL no registry row at all. Because this is a view,
+  BigQuery prunes the column when a query does not select it, so reports that only need
+  the metadata pay nothing for it. SQL-only; the engine bundle is unchanged. Not yet
+  validated against BigQuery.
+
+- Stripped the leading indentation from `line_text` in the column-usage impact view
+  (`lnge_vw_t_column_usage_impact`, created by 01). Generated and formatted SQL is often
+  indented several levels, and the padding pushed the interesting part of the line out of
+  view in report tools. Both branches of the view (depth = 1 and depth = impact_rank + 1)
+  now select `LTRIM(u.line_text)` and add `line_indent_width`
+  (`LENGTH(line_text) - LENGTH(LTRIM(line_text))`), so nothing is lost: the position
+  within the trimmed text is `column_number - line_indent_width`, and the original line
+  can be reconstructed. `column_number` itself is left as recorded -- it is the position
+  in the original source line and stays valid against the object's stored definition
+  text. Done in the view rather than in the engine's usage extraction so it applies to
+  rows already collected, with no bundle redeploy and no re-analysis. The view
+  description states both conventions.
+
+- Added `recreate_views_only BOOL DEFAULT FALSE` to `01_setup_lineage_environment.sql`.
+  Section 4 creates the repository tables with `CREATE OR REPLACE TABLE`, which destroys
+  their contents, so a live deployment could not re-run 01 to pick up a view change --
+  there was no safe path to redeploy a view at all. With the toggle TRUE the run skips
+  the table DDL (section 4), the renderer and UDF deploy (4b, 5) and the smoke tests (6),
+  and recreates only the views, now split out as section 4a. The naming knobs still
+  apply, so the views are rebuilt over exactly the tables that deployment uses, and the
+  view DDL stays in one place instead of being duplicated into a separate maintenance
+  script. The setup summary reports `views_only_run` and leaves `smoke_test_status` NULL
+  on such a run. SQL-only; the engine bundle is unchanged. Not yet validated against
+  BigQuery.
+
+- Made `{project_token}` reach `source_project_filters` in
+  `03_run_daily_lineage_pipeline.sql`. Putting the placeholder in an entry's
+  `project_id` failed with "Invalid source project_id in source_project_filters":
+  the substitution block covered `repository_dataset`, `udf_dataset` and the
+  table/UDF prefixes & suffixes, but not this one, so the literal `{project_token}`
+  survived to STEP 1's project-id ASSERT, where `{` and `}` are not legal characters.
+  It was skipped because `source_project_filters` is a STRUCT array and needs a
+  rebuild rather than a plain REPLACE; it is now rebuilt in place, substituting
+  `project_id` and both dataset pattern arrays. The Scheduled Query / DAG service
+  account arrays get the same treatment, since those emails embed the project id
+  (`<project>@appspot.gserviceaccount.com`) and a placeholder that works for some [A]
+  inputs but silently not others is worse than none. The project-id ASSERT now names
+  an unsubstituted placeholder as the likely cause and points at
+  `project_token_pattern` (which yields an empty token when it does not match), and
+  the preview's PREVIEW_SETTINGS section reports the detected project id and the
+  extracted token so a mis-set pattern is visible before the run. SQL-only; the engine
+  bundle is unchanged. Not yet validated against BigQuery.
+
+- Added a dry run to `03_run_daily_lineage_pipeline.sql`: `preview_only BOOL DEFAULT
+  FALSE` in [B]. With it TRUE the script resolves the analysis scope from [A], reports
+  what the run WOULD cover, and stops before anything is written -- no MERGE, no UPDATE,
+  and not even the self-healing `CREATE TABLE IF NOT EXISTS` for the column-usage table.
+  Four sections come back: PREVIEW_SETTINGS (the [A] values actually in effect),
+  PREVIEW_ANALYSIS_DATASETS (each target dataset with its View count, zero-count datasets
+  kept so "matched the dataset filter but holds no View" is visible),
+  PREVIEW_SOURCE_DATASETS (ACCESSIBLE vs SKIPPED_NO_ACCESS with the reason, from the
+  access pre-check) and PREVIEW_TARGET_VIEWS (the View list after every filter).
+  This lives inside 03 rather than in a separate pre-flight script on purpose: the
+  operator edits one [A], and the preview prints the values 03 itself resolved, so there
+  is no second copy of the settings and no second implementation of the filters that
+  could disagree with the real run. The report sits at the point in STEP 1 where target
+  datasets, source datasets and the filtered View list are all settled and nothing has
+  been written yet; the rest of STEP 1, STEP 2, and STEP 3 through the pipeline summary
+  are gated off. `non_completed_udf_results` is still created, because the FINAL
+  OPERATIONAL RESULT select sits outside the script's block and would otherwise fail on a
+  missing table -- in preview it just returns no rows. Generated tables are deliberately
+  not listed: enumerating them needs STEP 2's INFORMATION_SCHEMA.JOBS scan, which a
+  preview should not pay for, and the closing notice says so (plus a hint when
+  `analysis_include_generation_types` excludes VIEW_DEFINITION and an empty View list is
+  therefore expected). Documented in OPERATION_GUIDE section 7. SQL-only; the engine
+  bundle is unchanged. Not yet validated against BigQuery.
+
+- Closed the remaining Access Denied hole in the source-dataset pre-check: a source
+  *project* whose region-wide INFORMATION_SCHEMA.SCHEMATA listing is denied aborted the
+  run while resolving `source_datasets`, before the per-dataset probe added above could
+  run at all. That per-project `EXECUTE IMMEDIATE` is now wrapped in
+  `BEGIN ... EXCEPTION WHEN ERROR THEN ... END`, so an unreachable project is skipped
+  like an unreadable dataset and recorded in `inaccessible_source_datasets` with a NULL
+  dataset_id (the shared temp table moved ahead of the resolution loop to hold both
+  kinds). The handler honors the same toggle: with
+  `skip_inaccessible_source_datasets = FALSE` it re-raises the original error unchanged
+  (bare `RAISE`), so strict mode is genuinely strict. The "no source datasets" ASSERT now
+  points at a skipped project as a possible cause. Both this guard and the per-dataset
+  probe rely on the reference being dynamic -- the denial is a runtime error of the
+  EXECUTE IMMEDIATE statement inside the block, which is what an exception handler can
+  catch. SQL-only; the engine bundle is unchanged. Not yet validated against BigQuery.
+
+- Stopped one unreadable source dataset from killing the whole run in
+  `03_run_daily_lineage_pipeline.sql` ("Access Denied" on the
+  INFORMATION_SCHEMA.TABLES union). `source_project_filters` resolves source datasets
+  from INFORMATION_SCHEMA.SCHEMATA, but appearing in SCHEMATA does not mean the job
+  account can read that dataset's INFORMATION_SCHEMA; because every metadata scan is
+  one large UNION ALL over those datasets, a single unreadable one fails the entire
+  statement, and the only remedy was to name it by hand in
+  `source_project_filters[].dataset_exclude_patterns`. STEP 1 now runs an access
+  pre-check right after `source_datasets` is resolved, gated by the new
+  `skip_inaccessible_source_datasets BOOL DEFAULT TRUE` in [B]: each resolved dataset is
+  probed once, unreadable ones are deleted from `source_datasets`, and the skipped list
+  is emitted as a SKIPPED_INACCESSIBLE_SOURCE_DATASETS result so a narrowed scan is
+  never silent. Because every union (TABLES / TABLE_OPTIONS in STEP 1, COLUMNS /
+  COLUMN_FIELD_PATHS / TABLES in STEP 3) derives from `source_datasets`, pruning once
+  protects all of them; the probe reads all four views in a single job
+  (`(SELECT 1 FROM ... LIMIT 1) UNION ALL ...`) so a dataset with partial access is
+  dropped here instead of surviving STEP 1 and killing STEP 3's COLUMNS scan. One
+  INFORMATION_SCHEMA job per source dataset per run, no bytes billed; set the toggle
+  FALSE for the previous all-or-nothing behavior. An ASSERT still fails the run if every
+  dataset turns out unreadable. Skipping a dataset is not silently lossy in the analysis:
+  its tables are absent from the metadata, so a referencing object resolves as "source no
+  longer present" (WARNING, still publishable) rather than FAILED. SQL-only; the engine
+  bundle is unchanged. Not yet validated against BigQuery.
+
+- Added `analysis_include_generation_types` to `03_run_daily_lineage_pipeline.sql`, a
+  definition-source whitelist so a run can analyze one kind of definition -- most
+  usefully `['DAG']` for DAG job SQL only. Until now the analysis scope had two axes
+  (`analysis_include/exclude_dataset_patterns`, `analysis_include/exclude_object_patterns`)
+  plus the `process_generated_tables` toggle, which can exclude generated tables but not
+  select among them; the registry already records `generation_type`
+  (`VIEW_DEFINITION` / `SCHEDULED_QUERY` / `DAG`, from STEP 2's `execution_source`
+  classification) but nothing filtered on it, so "DAG only" was reachable only by
+  pointing `scheduled_query_service_accounts` at a dummy account. The new
+  `ARRAY<STRING>` in [A] defaults to `[]`, which keeps every kind and is byte-for-byte
+  the previous behavior. [C] normalizes it once (trim / uppercase) into
+  `analysis_generation_types` and ASSERTs every entry is one of the three known values,
+  so a typo fails the run instead of silently reducing it to zero analysis targets.
+  Like the other two axes the gate is applied at collection, keeping "registry ==
+  analysis targets": STEP 1 drops all of `current_view_definitions` when
+  VIEW_DEFINITION is not selected (the same path as excluding every View by name, so
+  the "not found" rule deactivates stale rows rather than leaving them active), and
+  STEP 2 gates `classified_jobs` on the same CASE that becomes `generation_type`
+  (spelled out rather than referencing the `execution_source` alias, which is not
+  visible to its own WHERE). This narrows what is analyzed, not what is scanned:
+  STEP 1 still lists VIEWS and STEP 2 still scans JOBS -- `process_generated_tables`
+  remains the way to skip the JOBS scan. SQL-only; the engine bundle is unchanged.
+  Not yet validated against BigQuery.
+
+- Fixed a parenthesized set-operation branch that itself contains a set operation --
+  `(SELECT id FROM aaa INTERSECT DISTINCT SELECT id FROM bbb) EXCEPT DISTINCT (SELECT id FROM ccc)`
+  -- failing with "FromParser: JOIN was expected, but found \"INTERSECT\"" (engine).
+  Not operator-specific: the same shape with `UNION ALL` failed identically, while
+  `(A) UNION ALL (B)` (single-SELECT branches) worked. Two coupled defects. (1)
+  `disableSetOperations` means "this token run is one branch of the set operation being
+  split", guarding against re-splitting at the same depth, but
+  `#stripWrappingParentheses` passed it straight into the parentheses. Parentheses open a
+  fresh GoogleSQL `query_expr`, where a set operation is legal again, so the inner
+  INTERSECT/UNION was never split and the operator stayed inside the FROM clause, where
+  FromParser expected a JOIN. All three unwrapping paths (whole-query, `CREATE ... AS
+  (...)`, and the CTE-body path added above) now pass `disableSetOperations: false`.
+  (2) The split then assigned `firstQuery.set_operations = []` and
+  `firstQuery.common_table_expressions = cteResult.ctes` unconditionally; once (1) was
+  fixed, branch 0 can carry its own set operations and CTEs, and those assignments erased
+  them along with every nested branch's lineage. Branch 0's `set_operations` are now kept
+  and this level's CTEs are prepended (outer first). Flattening the nesting is sound for
+  lineage: a set operation's output draws on every branch regardless of grouping. All
+  branches (aaa, bbb, ccc) now resolve, in the analysis pass and in 03's throwing
+  source-discovery pass alike. `SELECT * EXCEPT(col)` is still not a set operation
+  (the modifier guard is unchanged). Test: test_v1_5_0_074. Bundle rebuilt
+  (sha256 d7992396..., 465176 bytes); test:release 54 / golden 48 PASS.
+
+- Fixed `WITH cte AS (...) (SELECT ...)` -- a CTE list followed by a *parenthesized*
+  main query -- throwing "QueryParser: トップレベルのSELECT Clauseが見つかりません"
+  (engine). GoogleSQL's `query_expr` is `[WITH ...] { select | ( query_expr ) | set_op }`,
+  so the parentheses after the CTE list are valid syntax, but ClauseParser only looks for
+  a depth-0 SELECT and the SELECT sits at depth 1 here. Neither existing unwrapper
+  applied: `#stripWrappingParentheses` requires the *query* to start with `(`, and
+  `#stripStatementBodyParentheses` only fires right after a depth-0 `AS`. QueryParser now
+  checks, after CTE parsing, whether the main-query tokens (from `main_start_index`) are
+  wholly wrapped in parentheses; if so it re-parses the inner query and prepends this
+  level's CTEs (outer CTEs first, so an inner `WITH` can still reference them). A
+  parenthesized body that is itself a set operation or carries its own `WITH` resolves
+  too; `WITH ... (SELECT ...) UNION ALL (SELECT ...)` still takes the set-operation path
+  because the closing parenthesis is not the last token. Known limitation (unchanged):
+  trailing clauses after the parenthesized body (`WITH a AS (...) (SELECT ...) ORDER BY 1`)
+  are still unsupported, as they are for the non-CTE form. Test: test_v1_5_0_073. Bundle
+  rebuilt (sha256 f448d53..., 463531 bytes); test:release 53 / golden 48 PASS.
+
 - Fixed untyped STRUCT field aliases `STRUCT(expr AS name, ...)` throwing
   "ExpressionParser: expected \")\", but found \"AS\"" in non-recoverable positions
   (engine). The function-call argument loop never consumed a struct field's
@@ -272,7 +1261,7 @@
   `last_analyzed_hash` = `definition_hash`), each tagged with a `coverage_reason`
   (`REGISTERED_NOT_YET_ANALYZED` / `ANALYSIS_<status>` /
   `DEFINITION_CHANGED_NOT_REANALYZED`) and deduped by `definition_hash`, plus a
-  `refreshed_at`. It is built straight from the registry (whose `definition_text` /
+  `updated_at`. It is built straight from the registry (whose `definition_text` /
   `definition_hash` / `analysis_status` are already synchronized by STEP 1-2), so
   it adds no INFORMATION_SCHEMA re-scan and never piles up across runs (full
   refresh). The table's qualified name is assembled directly (backtick-quoted; it

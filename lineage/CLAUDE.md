@@ -4,6 +4,10 @@
 方針・コマンド・規約に従って作業してください。会話の記憶は引き継がれないため、
 「これまでの経緯」は本ファイル・`CHANGELOG.md`・`docs/SESSION_HANDOFF.md` から把握します。
 
+> **引き継ぎ時はまず `docs/HANDOFF_BRIEF.md` を読むこと。** 現在地・デプロイ手順・
+> 主要パラメータ・設計判断の根拠・未了事項・BigQuery の落とし穴が 1 ファイルにまとまって
+> います。別環境や別のアシスタントで作業を続ける場合はそこから始めてください。
+
 ## 1. プロジェクト概要
 
 BigQuery のカラムレベル・リネージ（列単位の依存関係）解析システム。現行バージョン
@@ -36,7 +40,7 @@ JavaScript エンジンと、それを日次で回す BigQuery パイプライ�
 cd javascript
 node scripts/build_udf.js       # src → dist/lineage_udf_bundle.js を再生成
 node scripts/verify_bundle.js   # バンドルの API とスモーク解析を検証
-npm run test:release            # リリース回帰（41 本、test_v1_5_0_061 … 014）
+npm run test:release            # リリース回帰（61 本、test_v1_5_0_080 … 014）
 node test/test_v1_5_0_003.js    # ゴールデン回帰（48 ケース）
 npm test                        # build + verify:bundle + test:release を一括
 ```
@@ -51,17 +55,20 @@ npm test                        # build + verify:bundle + test:release を一括
 1 変更 = 「実装 + 番号付き回帰テスト + CHANGELOG 追記」をワンセットにする。
 
 - 回帰テストは `javascript/test/test_v1_5_0_0XX.js` を新規作成し、`package.json` の
-  `test:release` チェーンの先頭に追加する（番号は連番、現行最新は 061）。
+  `test:release` チェーンの先頭に追加する（番号は連番、現行最新は 080）。
 - `CHANGELOG.md` の現行バージョン見出し直下に、症状・原因・修正・対象テストを追記。
 - 詳細な変更手順・単位は `docs/DEVELOPMENT_GUIDE.md` に従う。
 
 ## 5. リポジトリ運用
 
-本リポジトリ直下が成果物ツリー（deliverable）そのものであり、`main` で一元管理する。
-以前は作業ツリー `lineage_v1.5.0-031`（source of truth）と成果物ツリー
-`lineage_v1.5.0-032`（deliverable）を二本並行で同一内容に保つ運用だったが、単一
-リポジトリへ統合済みのため二本ツリー同期は不要。変更は作業ブランチへ直接コミットし、
-`main` へ取り込む。
+このツリー直下が成果物（deliverable）そのものであり、単一リポジトリで一元管理する。
+以前は作業ツリー（source of truth）と成果物ツリー（deliverable）を二本並行で同一内容に
+保つ運用だったが、統合済みのため二本ツリー同期は不要。変更は作業ブランチへ直接コミットし、
+既定ブランチへ取り込む。
+
+**リポジトリ名・ブランチ名・ホスティング先はドキュメントに書かない**（この一式は別
+プロジェクトへ移して使うため、環境固有の名前が残ると移行先で混乱する）。ブランチ運用・
+PR 先は移行先リポジトリの規約に合わせる。
 
 ## 6. コーディング規約・環境固有の注意
 
@@ -86,7 +93,9 @@ npm test                        # build + verify:bundle + test:release を一括
     `<可変prefix> + 'lnge_' + marker + base + <可変suffix>`。marker はテーブル
     `m_`（master）/`t_`（transaction）、ビュー `vw_` + `t_`/`m_`。base に "lineage" は
     入れない（prefix に集約済み）。例：`lnge_m_definition_registry` /
-    `lnge_t_impact` / `lnge_t_column_usage` / `lnge_vw_t_column_usage_impact`。
+    `lnge_t_impact` / `lnge_t_column_usage` / `lnge_vw_t_column_usage_impact` /
+    `lnge_vw_t_object_dependency`（static テーブルは `vw_` を落とした
+    `lnge_t_column_usage_impact` / `lnge_t_object_dependency`）。
     UDF は `lnge_analyze_json` / `lnge_fingerprint_sql` / `lnge_render_dynamic_sql`。
     データセット名（`lineage_repository` 等）・GCS バンドル・ファイル名・JS API 名は
     対象外。新規オブジェクトも同規則に従う。
@@ -135,7 +144,14 @@ npm test                        # build + verify:bundle + test:release を一括
   `analysis_*`（解析ゲート）を、`analysis_include/exclude_dataset_patterns`
   （dataset スコープ＝View 走査範囲＋生成テーブルの dataset ゲート）と
   `analysis_include/exclude_object_patterns`（object 名フィルタ、収集時に適用）の
-  2系統だけに整理。両フィルタは **収集段（STEP1 View／STEP2 生成テーブル）で適用**し、
+  2系統だけに整理。さらに**定義ソース種別の 3 つめの軸**として
+  `analysis_include_generation_types`（`VIEW_DEFINITION` / `SCHEDULED_QUERY` / `DAG`
+  のホワイトリスト、既定 `[]`＝全種別）を追加。例 `['DAG']` で DAG のジョブ SQL だけを
+  解析対象にする。値は [C] で正規化（trim/大文字化）し、既知の3値以外は ASSERT で弾く
+  （タイプミスで解析対象が黙って 0 件になるのを防ぐ）。これも収集段で適用するため、
+  外した種別は登録も変更追跡もされない。ただし**コスト削減の手段ではない**
+  （STEP1 は VIEWS を、STEP2 は JOBS を従来どおり走査する。JOBS 走査自体を止めるのは
+  `process_generated_tables`）。両フィルタは **収集段（STEP1 View／STEP2 生成テーブル）で適用**し、
   通ったものだけがレジストリに載る＝そのまま解析対象。除外された object は登録も
   変更追跡もされず、設定変更で新たに除外された既存 object は orphan cleanup が
   deactivate。よって解析段（changed_datasets probe・per-dataset materialization）
@@ -206,11 +222,76 @@ npm test                        # build + verify:bundle + test:release を一括
   テーブル作成直後に併せて作成**（`lnge_t_column_usage`／`lnge_t_impact` の後）。
   既存デプロイでビューだけ追加/更新したい場合は 01 の該当 `CREATE OR REPLACE VIEW`
   ブロックを単独実行すればよい（データを持たないので無害）。
+  **オブジェクト単位の依存（lnge_vw_t_object_dependency）**：テーブル/ビュー粒度の
+  推移的依存ビュー。`lnge_t_impact` を (起点object → 影響先object) に集約（1ペア=1行、
+  `impact_rank` は最短ホップ）。**rank は usage_impact の depth と同様に起点相対**
+  （impact は全 edge を再帰の起点にするので全ノードが origin になり得る。同じ影響先でも
+  起点が変われば rank が変わる）。カラム内訳は `ARRAY<STRUCT>` と、Looker Studio が配列を
+  読めないため文字列版を併設（`*_text`）。`ARRAY_AGG(DISTINCT <struct>)` が使えないので
+  「カラムペア粒度 → オブジェクト粒度」の2段集約にしてある（1段目が重複排除）。
+  端点が EPHEMERAL/非アクティブ/未 COMPLETED なら除外するが、**経由するだけの経路は残る**
+  （impact は中間ノードを `dependency_path` にしか持たないため）。解析対象外の上流
+  （生ソース表）は残し `origin_is_analysis_target=FALSE` で識別。registry は
+  (project,dataset,name) で1行に集約してから join（`object_type` は join キーにしない）。
+  **レポート用ビューの static 化（03 STEP 4b）**：2つのレポートビューは読むたびに全集計が
+  走り、BI 側のフィルタが計算列（`origin_full_name` 等）に当たるためクラスタプルーニングも
+  効かない。03 STEP 4b が `SELECT *` でテーブルへスナップショットする
+  （`lnge_vw_t_column_usage_impact`→`lnge_t_column_usage_impact`、
+  `lnge_vw_t_object_dependency`→`lnge_t_object_dependency`、`updated_at` を付与、
+  起点でクラスタ）。**定義の正本はビュー**なので 01 を直せば次回実行でスキーマも追従。
+  **BigQuery の MATERIALIZED VIEW は使っていない**（使えない）：`ARRAY_AGG(... ORDER BY ...)` /
+  `STRING_AGG(DISTINCT ...)` / LEFT JOIN / 分析関数 / 相関 ARRAY サブクエリを受け付けないため、
+  `CREATE OR REPLACE TABLE ... AS SELECT *` の普通のテーブル。
+  再構築条件は STEP 4 と同じ（`has_analysis_work OR orphan_direct_dep_deleted > 0`）＋
+  「テーブルが未作成なら作る」。`preview_only` では実行しない。失敗しても
+  `REFRESH_STATIC_REPORT_TABLES / FAILED` 行を出すだけでパイプラインは止めない（派生データのため）。
+  **注意**：`usage_definition_html` のハイライトは分析関数で集めるので、ビュー経由なら
+  レポート側の追加フィルタに追従するが、static テーブルでは作成時に確定する
+  （パーティションキーに起点カラムと対象オブジェクトが入っているので通常用途では同結果）。
+  `usage_definition_text`/`_html` は SQL 全文を行ごとに繰り返すため、
+  `static_tables_include_usage_sql = FALSE` で static テーブルから外せる。
   **診断の generation_type**：`lnge_t_diagnostic` に `generation_type`（nullable）を
   追加。View 定義か Job SQL かを registry と join せず判別可（'VIEW_DEFINITION'＝View、
   'SCHEDULED_QUERY'/'DAG' 等＝生成テーブル Job）。値は元々診断ステージングを流れており
   永続化しただけ。書込みは 03 STEP 3 の3系統（UDF診断・非publishableマーカー・
   pre-analysis失敗）と 06 単体経路。
+  **STEP 3 のバッチ分割（UDF OOM 対策の最終形）**：データセット単位ループだけでは
+  不十分だった。**ephemeral な生成テーブルは全部が 1 つの合成データセット
+  （`ephemeral_object_dataset_label`）に入る**ため、何個あっても 1 反復＝1 UDF 呼び出しに
+  なる。実測では変更 937 個中 928 個・SQL 2.37MB 中 2.30MB がこのバケットに集中していた
+  （97%、次に重いデータセットの 40 倍）。View だけなら通るので
+  `process_generated_tables=FALSE` が回避策になっていた。
+  **ループ単位を (dataset, batch_no) に変更**。`changed_object_batches` が各オブジェクトに
+  「自分より前の SQL 累積長」から batch_no を割り当て、`analysis_batch_max_sql_bytes`
+  （既定 1200000）で切る。`analysis_batch_max_objects`（既定 1200）は「極小多数」用の
+  二次上限。discovery 先行パスと解析ループは同じ `analysis_batches` を読むので**両者の
+  バッチは必ず一致**する。**排他的プレフィックスで切る**ので、予算超えの単体オブジェクトは
+  単独バッチになる（隣を巻き込まない）。GREATEST の両項が単調増加なのでバッチは連続区間、
+  番号は飛ぶことがある（DISTINCT を回す理由）。バッチはバイト予算を「最後の 1 オブジェクト分」
+  だけ超えうる。**基準は行数ではなくバイト量**（§4.19/4.20 の行数チャンクは大オブジェクトの
+  偏りで OOM が続き撤去された）。`ANALYSIS_BATCHES` 行で予算・バッチ数・総バイト・最大バッチ
+  バイトを報告する。publish は従来どおり delete-by-object なので、失敗時のロールバックは
+  そのバッチ分だけ。診断は `sql/maintenance/10_pending_analysis_workload.sql`。
+  **UDF リソースエラーで実行を止めない（STEP 3）**：解析 UDF クエリはバッチ単位なので
+  OOM にオブジェクト粒度が無く、従来はスクリプト全体が落ちて**未実行のバッチが全部捨てられて
+  いた**（20 個/バッチで 31 バッチ通過後に落ちた実測あり）。バッチ本体に EXCEPTION ハンドラを
+  付け、該当バッチを `analysis_status='FAILED_UDF_RESOURCE_ERROR'`＋`UDF_RESOURCE_ERROR`
+  診断で記録し、**次のバッチへ進む**。実行は完走し、一部が未解析として残る。
+  隠蔽しない：`lnge_t_unanalyzed_definition` に出る（`coverage_reason =
+  ANALYSIS_FAILED_UDF_RESOURCE_ERROR`）、object_dependency ビューからは除外、
+  `SKIPPED_BATCH_UDF_RESOURCE_ERROR` 行を即時出力、run summary に
+  `resource_skipped_batch_count`/`_object_count`。
+  **吸収するのはリソースエラーだけ**（`analysis_resource_error_patterns` の部分一致）。
+  それ以外はハンドラの**最初の動作**として `RAISE` で再送出するので、publish のバグは
+  従来どおり実行を止める。BigQuery は EXCEPTION 節にエラーコードを渡さず
+  `@@error.message` しか無いため文字列一致が唯一の手段（DECLARE なので追加可）。
+  `analysis_skip_on_udf_resource_error=FALSE` で旧挙動。
+  スキップ対象は `is_changed=FALSE` にするので次回以降は再試行しない（再試行は意図的に
+  `is_changed=TRUE` を立てる。スティッキーなので STEP 1/2 で消えない）。
+  **実装上の注意**：ハンドラの作業変数（`batch_error_message`/`current_batch_*`）は
+  **1 つ外のスコープで宣言**する。BigQuery はブロック自身の DECLARE を、そのブロックの
+  EXCEPTION 節に見せない（`publish_err_message` が既に 1 段上にあるのと同じ理由）。
+  FOR ループ変数も同節では使わず、ループ先頭で外側変数へ写してから使う。
   **absent 判定の鮮度（STEP 3）**：publish 可否分類 `batch_object_source_flags` の存在
   判定は、STEP 1 スナップショット `current_target_tables` ではなく、STEP 3 で列メタと
   同時・同一参照データセット範囲で採る `current_referenced_tables`（フレッシュな TABLES
@@ -220,26 +301,12 @@ npm test                        # build + verify:bundle + test:release を一括
 
 ## 7. 現在地
 
-- バンドル: `sha256 = ad18b4bc5a015e9d831900d5ca6edfde4043b3c5ccb9fc71a6940e0e24ad00cf`、`461888` bytes
-- `test:release` 52 本 PASS / ゴールデン 48 ケース PASS
-- 直近の修正: 03 STEP 3 を**データセット単位のループ**へ変更し、UDF チャンク分割を撤去。
-  リージョン全体を1パスで解析すると V8 ヒープ蓄積で "UDF out of memory" になり、行数チャンクでも
-  大オブジェクトが偏ると OOM が続いた。実運用で「1データセットずつなら通る」ことを確認済みのため、
-  STEP 3 の 変更検知→探索→解析→direct-dependency publish を
-  `FOR ds_row IN (SELECT ds FROM UNNEST(target_datasets) ...) DO ... END FOR` で囲い、
-  各反復で `LOWER(object_dataset)=LOWER(@current_dataset)` に絞る。探索・解析とも単一クエリに復帰
-  （`*_udf_chunk_*`・`udf_chunk`・2つの `WHILE` を削除）。ループ外に残すもの＝target_datasets 解決／
-  グローバルメタデータ（STEP 1 で全 target dataset 分ロード、跨ぎ参照を保持）／orphan cleanup／
-  STEP 4 Impact 再構築（データセット跨ぎのため最後に1回）。カウンタは反復加算、run summary はループ後1回。
-  さらに**変更なし時の高速化**：列メタデータ（COLUMNS/COLUMN_FIELD_PATHS 全収集＝最重）を STEP 1 から
-  STEP 3 の has-changes gate 内へ移動。`changed_datasets`（変更ある有効 object を持つ Dataset）を軽い
-  レジストリ probe で先に求め、空なら列メタ収集も解析ループも丸ごとスキップ、非空ならその Dataset だけ
-  ループ。STEP 4 は `has_analysis_work OR orphan_direct_dep_deleted>0`（direct-dep orphan 削除の
-  `@@row_count`）でのみ再構築。STEP 1/2 と orphan cleanup は毎回実行（変更検知・無効化処理）。
-  加えて**列メタの参照データセット絞り込み（案D）**：has-changes gate 内に discovery 先行パスを新設。
-  `changed_datasets` を回して UDF を `source_discovery_only` で1データセットずつ実行し、全 discovery 行を
-  `all_changed_with_discovery` に蓄積、参照ソースの dataset 名を `referenced_source_datasets` に収集。
-  列メタ union は「参照された & アクセス可能な」ソース dataset のみに限定（未参照時は型付き空表で fallback）。
-  安全な過剰包含＝参照分を減らさないので解決結果は不変、未参照 dataset のみスキップ。解析ループは UDF 探索を
-  再実行せず `all_changed_with_discovery` から当該 dataset 分を読むだけ（isolation 不変・object 単位検証は従来通り）。
-  SQLのみ・バンドル不変・**BigQuery 未検証**。詳細は `CHANGELOG.md` 冒頭。
+- バンドル: `sha256 = eecd0bc82f1d2ca01db8b4f727ee0c35510057afefe086a6f9ef33b92d655ba4`、`478961` bytes
+  （`release_manifest.json` と一致。この2値は `build:everything` が manifest を書き直すので、
+  手で直すのは本ファイルと `docs/` 側だけ）
+- `test:release` 61 本 PASS / ゴールデン 48 ケース PASS
+- 実測性能: 初期ロード 11 分 22 秒 / 日次 4 分。日次の新規 ephemeral 指紋 3〜22 件/日
+- **直近の変更の内容はここに書かない**（古くなるので）。`CHANGELOG.md` の冒頭と
+  `docs/HANDOFF_BRIEF.md` を見ること。本節は上の3項目（バンドル・テスト本数・実測性能）
+  だけを現行値として保つ
+- **BigQuery 実機検証は未完了の変更がある**。`docs/HANDOFF_BRIEF.md` の未了事項を参照

@@ -83,6 +83,9 @@ DECLARE analysis_exclude_dataset_patterns ARRAY<STRING> DEFAULT [];
 -- Analysis object filter (which object names to collect & analyze)
 DECLARE analysis_include_object_patterns ARRAY<STRING> DEFAULT [];
 DECLARE analysis_exclude_object_patterns ARRAY<STRING> DEFAULT [];
+-- Analysis definition-source filter (which kinds of definition to collect & analyze).
+-- Empty = every kind (current behavior). E.g. ['DAG'] analyzes only DAG job SQL.
+DECLARE analysis_include_generation_types ARRAY<STRING> DEFAULT [];
 -- STEP 2 service accounts (generated tables)
 DECLARE scheduled_query_service_accounts ARRAY<STRING> DEFAULT [
   'project_id@appspot.gserviceaccount.com'
@@ -95,8 +98,9 @@ DECLARE dag_service_accounts ARRAY<STRING> DEFAULT [
 --   project_token_pattern
 --     Project-token substitution. A token extracted from the auto-detected project
 --     id by this regex (REGEXP_EXTRACT; group 1 if present) replaces every literal
---     '{project_token}' placeholder in the dataset names and the table/UDF prefixes
---     & suffixes. E.g. project id 'mycompany-prod-123' with r'-([^-]+)-' -> 'prod',
+--     '{project_token}' placeholder in the dataset names, the table/UDF prefixes &
+--     suffixes, the source_project_filters entries (project_id and both dataset
+--     pattern arrays), and the Scheduled Query / DAG service account arrays. E.g. project id 'mycompany-prod-123' with r'-([^-]+)-' -> 'prod',
 --     so table_name_prefix='{project_token}_' becomes 'prod_'. Keep in step with
 --     01. The default takes the first hyphen-delimited segment; an unmatched
 --     pattern yields '' and any leftover '{project_token}' fails the name ASSERTs.
@@ -168,6 +172,27 @@ DECLARE dag_service_accounts ARRAY<STRING> DEFAULT [
 --     write patterns as raw strings in any case.
 --       include e.g. only sales views: [r'^v_sales']
 --       exclude e.g. staging/temp:     [r'^stg_', r'_tmp$']
+--   analysis_include_generation_types
+--     Definition-source whitelist, applied at collection like the two filters above,
+--     so the registry again holds exactly the analysis targets. Allowed values (the
+--     generation_type stored in the definition registry; case-insensitive here):
+--       'VIEW_DEFINITION'  Views collected from INFORMATION_SCHEMA.VIEWS (STEP 1)
+--       'SCHEDULED_QUERY'  generated tables from Scheduled Query jobs   (STEP 2)
+--       'DAG'              generated tables from DAG / Airflow jobs     (STEP 2)
+--     An empty array (the default) keeps every kind and is exactly the previous
+--     behavior. Any other value fails an ASSERT in [C], so a typo cannot silently
+--     analyze nothing. Examples:
+--       only DAG job SQL:            ['DAG']
+--       generated tables, no Views:  ['DAG', 'SCHEDULED_QUERY']
+--     A kind left out is not collected, hence not change-tracked, and objects already
+--     in the registry take exactly the same path as one newly excluded by the
+--     name/dataset filters: Views are deactivated by STEP 1's "not found" rule on the
+--     next run, while generated TABLEs stop being change-tracked and are aged out by
+--     the existing cleanup (a persistent one whose destination still exists stays
+--     registered but idle). Re-adding the kind re-collects and re-analyzes them.
+--     Note this only narrows WHAT is analyzed --
+--     STEP 1 still lists Views and STEP 2 still scans JOBS, so it is not a cost
+--     control (use process_generated_tables to skip the JOBS scan entirely).
 --   scheduled_query_service_accounts / dag_service_accounts
 --     STEP 2 service accounts (consumed only when process_generated_tables = TRUE).
 --     Previously read from the lineage_execution_account_config table; declared
@@ -204,14 +229,220 @@ DECLARE udf_render_function_name STRING;
 DECLARE parser_strict_mode BOOL DEFAULT FALSE;
 DECLARE configured_max_impact_rank INT64 DEFAULT 100;
 
+-- STEP 3 analysis batch size. STEP 3 already loops over datasets so one UDF call
+-- never sees the whole region, but a dataset is not a reliable bound: every
+-- temporary / rotating-destination generated table collapses into the single
+-- synthetic dataset named by ephemeral_object_dataset_label, so hundreds of objects
+-- can land in one iteration and exhaust the UDF's V8 heap ("UDF out of memory").
+-- Each dataset is therefore cut into batches, and one UDF call handles one batch.
+--
+-- The primary bound is SQL VOLUME, not object count: an earlier row-count chunking
+-- attempt was removed because a few oversized objects in one chunk still blew the
+-- heap. analysis_batch_max_objects is a secondary cap for the opposite case (very
+-- many tiny objects, where per-object overhead rather than text dominates).
+-- Batches are cut on the cumulative length BEFORE each object, so an object larger
+-- than the budget gets a batch to itself rather than being merged into one.
+-- The budget is approximate in one direction: a batch can overshoot by up to the
+-- size of its last object.
+--
+-- These set the BATCH COUNT, and the batch count is the runtime: a batch costs ~32
+-- statements of roughly 3 seconds each, nearly all of it BigQuery job startup rather
+-- than work, so halving the number of batches halves STEP 3. They were far lower when
+-- a UDF out-of-memory took the whole run down; it now costs only the failing batch,
+-- which is recorded and retryable, so they can be set for throughput.
+-- Raise them together: a batch breaks on GREATEST(DIV(bytes, max_bytes),
+-- DIV(index, max_objects)), so lifting one alone leaves the other binding. At the
+-- measured ~2,900 characters per ephemeral object, 3,000,000 bytes is about 1,030
+-- objects, so the object cap is the looser of the two at these values.
+--
+-- Where the values came from: a measured run spent 137 seconds inside the analysis
+-- UDF and roughly seven minutes on the ~35 statements per batch that surround it,
+-- almost all of that waiting for jobs to start. The UDF total does not change with
+-- the batch size -- it is proportional to the SQL analyzed -- but everything around
+-- it is paid per batch, so halving the batch count halves it. The ceiling is the
+-- UDF's memory, not its runtime: at 1,200,000 bytes a call took 12.5 seconds, and
+-- nothing says where the heap gives out, so raise these in steps and watch for
+-- SKIPPED_BATCH_UDF_RESOURCE_ERROR.
+-- Lower them if STEP 3 reports out of memory. Only the first run after a large JOBS
+-- collection has batches worth counting -- a successful analysis clears is_changed,
+-- so a steady-state daily run is normally one small batch per dataset.
+-- sql/maintenance/10_pending_analysis_workload.sql reports the volume per dataset,
+-- which is what these should be set against.
+DECLARE analysis_batch_max_sql_bytes INT64 DEFAULT 3000000;
+DECLARE analysis_batch_max_objects INT64 DEFAULT 3000;
+
+-- How many batches ONE RUN may analyze. 0 (default) means all of them.
+--
+-- This bounds a run's WALL CLOCK, which the batch budgets above do not: they decide
+-- how big a batch is, not how many there are. A first run after a long JOBS lookback
+-- can have hundreds, and an environment that will not tolerate a multi-hour statement
+-- needs the work split across invocations rather than made smaller.
+--
+-- What is left over is simply not touched: is_changed stays TRUE on those objects
+-- (it is cleared only by a successful analysis of their own batch), so the NEXT run
+-- picks them up where this one stopped. Running 03 repeatedly therefore drains the
+-- backlog in equal bites, and the run summary's remaining_changed_object_count is the
+-- progress bar. Nothing is marked failed and no diagnostic is written: a deferred
+-- batch is not an error, it is work not yet started.
+--
+-- The cap applies to the batch list BOTH loops read, so the discovery pre-pass and
+-- the analysis loop stay in step. Batches are taken in (dataset, batch_no) order, so
+-- repeated runs make progress in a stable order instead of re-picking at random.
+--
+-- Leave it at 0 for a normal daily run, where the whole backlog is one or two
+-- batches anyway. Set it when seeding a repository from a long lookback.
+DECLARE analysis_max_batches_per_run INT64 DEFAULT 0;
+
+-- Whether one batch may span datasets. TRUE (default) batches purely by the budgets
+-- above; FALSE keeps the older behavior of never mixing datasets in a batch.
+--
+-- This is a cost-per-batch knob, not a correctness one. The loop body runs about 60
+-- BigQuery statements per batch -- the UDF call plus the publish into
+-- direct_dependency / impact / diagnostics / column usage and the registry updates --
+-- and every one of those is a job whose startup cost does not depend on how many
+-- objects the batch holds. With a per-dataset batch key, a dataset holding a single
+-- changed View still pays all 60: a region with 58 datasets spends ~3,500 statements
+-- on work that would fit in one batch.
+--
+-- Grouping was not possible when the loop ran one UDF call per dataset for memory.
+-- The byte and object budgets took that job over, so the dataset is now only a
+-- grouping key -- the loop body uses it to select the batch's rows and to print
+-- progress, nothing else.
+--
+-- Set FALSE if a mixed batch pushes the UDF's metadata payload over the heap (a batch
+-- spanning datasets references more distinct source tables than either would alone,
+-- and the budgets bound SQL text, not metadata). The resource-error handler already
+-- survives that, but a dedicated batch per dataset makes the failure smaller.
+DECLARE analysis_batch_group_datasets BOOL DEFAULT TRUE;
+
+-- What to do when a batch's UDF call runs out of memory. The analysis UDF query has
+-- no per-object isolation -- one batch is one query -- so a resource error there used
+-- to abort the whole script, losing every batch that had not run yet.
+--
+-- TRUE (default): record that batch's objects as FAILED_UDF_RESOURCE_ERROR with a
+-- diagnostic row, and carry on with the next batch. The run then COMPLETES with some
+-- objects unanalyzed rather than stopping partway. Those objects are not hidden: they
+-- keep a non-COMPLETED analysis_status, so lnge_t_unanalyzed_definition lists them
+-- (coverage_reason = ANALYSIS_FAILED_UDF_RESOURCE_ERROR), the run summary counts
+-- them, and the object-dependency view leaves them out.
+-- They are marked is_changed = FALSE, so a later run does not retry them and pay the
+-- same failure again. To retry deliberately -- after lowering the batch budgets, or
+-- after the metadata payload shrinks -- set is_changed = TRUE on those registry rows;
+-- the flag is sticky, so STEP 1/2 will not clear it before STEP 3 sees it.
+-- FALSE restores the original behavior: the error propagates and the run stops.
+DECLARE analysis_skip_on_udf_resource_error BOOL DEFAULT TRUE;
+-- Which errors count as "the batch was too big", matched case-insensitively against
+-- the error message as a substring. Deliberately narrow: anything NOT matching is
+-- re-raised, so a genuine bug in the publish logic still stops the run instead of
+-- being recorded as a skipped batch. BigQuery exposes no error code to the EXCEPTION
+-- handler, only @@error.message, so message matching is the only option -- widen this
+-- list if a resource error arrives with wording not covered here.
+DECLARE analysis_resource_error_patterns ARRAY<STRING> DEFAULT [
+  'out of memory',
+  'resources exceeded',
+  'exceeded resources'
+];
+
+-- Source-dataset access pre-check. source_project_filters resolves source datasets
+-- from INFORMATION_SCHEMA.SCHEMATA, but being listed there does not guarantee the job
+-- account can read that dataset's INFORMATION_SCHEMA: a single unreadable dataset makes
+-- the whole UNION fail with "Access Denied", taking the run down. When TRUE (default),
+-- STEP 1 probes each resolved source dataset once, drops the ones it cannot read, and
+-- reports them as SKIPPED_INACCESSIBLE_SOURCE_DATASETS; the metadata scans then union
+-- only readable datasets. Costs one INFORMATION_SCHEMA job per source dataset per run
+-- (no bytes billed). Set FALSE to restore the previous all-or-nothing behavior -- then
+-- exclude unreadable datasets by hand via source_project_filters[].dataset_exclude_patterns.
+-- A skipped dataset's tables are simply absent from the metadata, so objects referencing
+-- them resolve as "source no longer present" (WARNING, still publishable) rather than
+-- failing -- see the STEP 3 source classifier.
+DECLARE skip_inaccessible_source_datasets BOOL DEFAULT TRUE;
+
+-- Dry run. Set TRUE to resolve the analysis scope from the [A] settings, print what
+-- this run WOULD cover, and stop before anything is written: the target (analysis)
+-- datasets, the source datasets with their access status, and the View list that
+-- passed the name / definition-source filters. Nothing is inserted, merged, updated
+-- or created -- not even the self-healing column-usage table -- so a preview run
+-- cannot disturb the repository. Use it to confirm the [A] filters select what you
+-- intended, then set FALSE and run the same script for real: the preview reads the
+-- values 03 itself resolves, so there is no second copy of the settings to drift.
+-- STEP 2 (the JOBS scan) is skipped in preview, so generated tables are not listed --
+-- only Views. Cost is the SCHEMATA / VIEWS listing plus one probe per source dataset.
+DECLARE preview_only BOOL DEFAULT FALSE;
+
+-- Static report tables (STEP 4b). The two report views created by 01 --
+-- lnge_vw_t_column_usage_impact and lnge_vw_t_object_dependency -- re-aggregate the
+-- whole impact graph on every read, which a BI tool cannot cache and cannot prune by
+-- cluster key (its filters hit computed columns like origin_full_name). When TRUE
+-- (default), STEP 4b snapshots each view into a clustered table of the same name with
+-- 'vw_' dropped, so reports read a physical, clustered, BI-Engine-eligible table.
+-- The views stay the single definition; these tables are only a static copy, rebuilt inside
+-- the STEP 4 gate so they are refreshed exactly when impact is. Each row carries
+-- updated_at. Set FALSE to keep reports on the views.
+DECLARE build_static_report_tables BOOL DEFAULT TRUE;
+-- Whether the static column-usage table keeps the two full-SQL columns,
+-- usage_definition_text and usage_definition_html. Both repeat the ENTIRE SQL of the
+-- object on EVERY row of that object (one row per origin column x usage site x path),
+-- so they can dominate the table's size and, under on-demand pricing, the bytes billed
+-- for any query that selects them. Keep TRUE while a report renders the highlighted SQL
+-- (the Templated Record visualization); set FALSE to drop both columns from the
+-- static copy and read them from the view when they are actually needed.
+DECLARE static_tables_include_usage_sql BOOL DEFAULT TRUE;
+-- Set by STEP 4b: whether both static report tables already exist. Lets the
+-- first run after the views are deployed build them even when nothing else changed.
+DECLARE static_report_tables_present BOOL DEFAULT FALSE;
+
 -- Set FALSE to skip STEP 2 (Scheduled Query / DAG generated-table collection
 -- from INFORMATION_SCHEMA.JOBS) and process only Views. STEP 1/3/4 still run.
 DECLARE process_generated_tables BOOL DEFAULT TRUE;
 
 -- Lookback window over INFORMATION_SCHEMA.JOBS. The initial window is used on
 -- the first run (empty job registry); the incremental window is used thereafter.
+--
+-- THE INCREMENTAL WINDOW IS ALSO THE EPHEMERAL RETENTION WINDOW. An ephemeral object
+-- is kept alive by its fingerprint reappearing in JOBS inside this window; when it
+-- stops appearing it is deactivated and its dependency rows are deleted. So this one
+-- number answers "which schedules stay represented in the repository":
+--   3  -- daily statements only. A WEEKLY statement ages out between runs, and is
+--         re-analyzed (and re-published) every week when it returns.
+--   8  -- daily and weekly (the default). A weekly statement is never out of window,
+--         so it is analyzed once and never again, and its lineage is always present.
+--   32 -- also monthly, at roughly four times the active ephemeral population.
+-- Longer is not free, but the cost is NOT per-SQL: the fingerprint UDF runs once per
+-- job_id ever (the backfill UPDATE is guarded by sql_fingerprint IS NULL), and
+-- re-collecting a day already in the registry only re-MERGEs its rows. What grows
+-- with the window is a handful of set-based statements over a bigger partition range.
+-- STEP 3, which costs ~60 statements per batch, does not grow at all -- it is driven
+-- by is_changed, and a longer window REMOVES the weekly re-analysis churn.
 DECLARE initial_lookback_days INT64 DEFAULT 60;
-DECLARE incremental_lookback_days INT64 DEFAULT 3;
+
+-- How far back to COLLECT jobs on an incremental run. Small on purpose: a job older
+-- than the last run was already collected and is already in the registry, so
+-- re-reading it only costs a wider INFORMATION_SCHEMA scan and a larger MERGE.
+--
+-- This is a FLOOR, not the window. The window actually used is extended to cover
+-- everything since the newest job already collected, so a pipeline that did not run
+-- for a week collects the week -- a fixed small window would silently lose the jobs
+-- from the gap, and nothing downstream could recover them because they would never
+-- enter the registry at all.
+DECLARE job_collection_lookback_days INT64 DEFAULT 3;
+
+-- How long an EPHEMERAL object stays alive without being seen again. This is the
+-- retention window, and it answers one question: WHICH SCHEDULES STAY REPRESENTED IN
+-- THE REPOSITORY.
+--   8   daily and weekly statements
+--   40  also monthly -- 31 days between runs plus room for a month-end schedule that
+--       slips a few days, which is why this is not 30
+-- An ephemeral object is kept alive by its fingerprint reappearing in the job registry
+-- inside this window; when it stops appearing the object is deactivated and its
+-- dependency rows are deleted. A statement that runs monthly and a window of 8 days
+-- means its lineage is absent for three weeks of every four, and it is re-analyzed
+-- every month when it returns.
+--
+-- The cost of a longer window is the size of the ACTIVE population, which STEP 4's
+-- impact rebuild and the static report tables scale with -- not the cost of collection,
+-- which job_collection_lookback_days governs. The two were one knob until now, which
+-- forced a choice between scanning too much and forgetting too soon.
+DECLARE object_retention_days INT64 DEFAULT 40;
 
 -- statement_type values collected from JOBS; jobs of other types are ignored.
 -- The remaining JOBS filters (job_type = 'QUERY', state = 'DONE',
@@ -255,6 +486,8 @@ DECLARE udf_project_id STRING DEFAULT NULL;
 -- scanning INFORMATION_SCHEMA.SCHEMATA (see the resolution block below).
 DECLARE target_datasets ARRAY<STRING>;
 DECLARE target_datasets_lower ARRAY<STRING>;
+-- analysis_include_generation_types, trimmed and uppercased (validated below).
+DECLARE analysis_generation_types ARRAY<STRING>;
 DECLARE view_defs_union_sql STRING;
 
 -- Repository physical table names: prefix + marker + canonical base + suffix,
@@ -276,6 +509,13 @@ DECLARE table_unanalyzed_definition STRING;
 -- so it is addressed by a directly-built qualified name (column_usage_fqn below).
 DECLARE table_column_usage STRING;
 DECLARE column_usage_fqn STRING;
+-- Report views created by 01, and the tables STEP 4b snapshots them into. Outside
+-- lnge_render_dynamic_sql's fixed placeholder set, so STEP 4b builds their qualified
+-- names directly from repository_project_id / repository_dataset.
+DECLARE view_column_usage_impact STRING;
+DECLARE view_object_dependency STRING;
+DECLARE table_column_usage_impact STRING;
+DECLARE table_object_dependency STRING;
 
 DECLARE repo_tables STRUCT<
   def_registry STRING,
@@ -284,6 +524,10 @@ DECLARE repo_tables STRUCT<
   diagnostic STRING,
   job_registry STRING
 >;
+
+-- Repository objects this run requires but does not create. Filled by the preflight
+-- below; a non-empty value stops the run before any work is done.
+DECLARE missing_repository_objects ARRAY<STRING>;
 
 -- Dynamic SQL work variables.
 -- Identifier replacement is centralized in lnge_render_dynamic_sql().
@@ -310,6 +554,8 @@ DECLARE columns_union_sql STRING;
 DECLARE field_paths_union_sql STRING;
 DECLARE tables_union_sql STRING;
 DECLARE source_dataset_count INT64;
+-- Scratch for the per-dataset source access probe (skip_inaccessible_source_datasets).
+DECLARE source_access_probe INT64;
 -- Token extracted from the project id (see project_token_pattern).
 DECLARE project_token STRING;
 
@@ -340,6 +586,40 @@ SET table_name_suffix =
   REPLACE(table_name_suffix, '{project_token}', project_token);
 SET udf_name_prefix = REPLACE(udf_name_prefix, '{project_token}', project_token);
 SET udf_name_suffix = REPLACE(udf_name_suffix, '{project_token}', project_token);
+
+-- source_project_filters is a STRUCT array, so its substitution is a rebuild rather
+-- than a plain REPLACE -- which is why the placeholder used to miss it entirely. The
+-- project id is a natural place for the token (physical sources usually live in a
+-- sibling project of the same environment), and a '{project_token}' left there
+-- survived all the way to STEP 1's "Invalid source project_id" ASSERT, because '{'
+-- and '}' are not legal project-id characters. The dataset patterns are substituted
+-- too, so an environment-named source dataset can be matched the same way.
+SET source_project_filters = ARRAY(
+  SELECT AS STRUCT
+    REPLACE(project_id, '{project_token}', project_token) AS project_id,
+    ARRAY(
+      SELECT REPLACE(pattern, '{project_token}', project_token)
+      FROM UNNEST(COALESCE(dataset_include_patterns, CAST([] AS ARRAY<STRING>))) AS pattern
+    ) AS dataset_include_patterns,
+    ARRAY(
+      SELECT REPLACE(pattern, '{project_token}', project_token)
+      FROM UNNEST(COALESCE(dataset_exclude_patterns, CAST([] AS ARRAY<STRING>))) AS pattern
+    ) AS dataset_exclude_patterns
+  FROM UNNEST(source_project_filters)
+);
+
+-- Service account emails embed the project id in practice
+-- ('<project>@appspot.gserviceaccount.com', '<name>@<project>.iam.gserviceaccount.com'),
+-- so the placeholder reaches them as well. Leaving these out would make the token
+-- work for some [A] inputs and silently not for others.
+SET scheduled_query_service_accounts = ARRAY(
+  SELECT REPLACE(account, '{project_token}', project_token)
+  FROM UNNEST(scheduled_query_service_accounts) AS account
+);
+SET dag_service_accounts = ARRAY(
+  SELECT REPLACE(account, '{project_token}', project_token)
+  FROM UNNEST(dag_service_accounts) AS account
+);
 
 -- Guard: an unsubstituted '{project_token}' (or any invalid character) in a dataset
 -- name is surfaced here instead of failing later at DDL time. (Prefix/suffix feed
@@ -378,6 +658,18 @@ SET table_unanalyzed_definition =
     || table_name_suffix;
 SET table_column_usage =
   table_name_prefix || 'lnge_' || 't_' || 'column_usage' || table_name_suffix;
+-- Report views (must match 01) and their static tables. The table keeps
+-- the view's name with 'vw_' dropped, so the pair is obvious at a glance.
+SET view_column_usage_impact =
+  table_name_prefix || 'lnge_' || 'vw_' || 't_' || 'column_usage_impact'
+    || table_name_suffix;
+SET view_object_dependency =
+  table_name_prefix || 'lnge_' || 'vw_' || 't_' || 'object_dependency'
+    || table_name_suffix;
+SET table_column_usage_impact =
+  table_name_prefix || 'lnge_' || 't_' || 'column_usage_impact' || table_name_suffix;
+SET table_object_dependency =
+  table_name_prefix || 'lnge_' || 't_' || 'object_dependency' || table_name_suffix;
 
 ASSERT REGEXP_CONTAINS(table_definition_registry, r'^[A-Za-z0-9_-]+$')
 AS 'Invalid table_definition_registry name.';
@@ -393,6 +685,14 @@ ASSERT REGEXP_CONTAINS(table_unanalyzed_definition, r'^[A-Za-z0-9_-]+$')
 AS 'Invalid table_unanalyzed_definition name.';
 ASSERT REGEXP_CONTAINS(table_column_usage, r'^[A-Za-z0-9_-]+$')
 AS 'Invalid table_column_usage name.';
+ASSERT REGEXP_CONTAINS(view_column_usage_impact, r'^[A-Za-z0-9_-]+$')
+AS 'Invalid view_column_usage_impact name.';
+ASSERT REGEXP_CONTAINS(view_object_dependency, r'^[A-Za-z0-9_-]+$')
+AS 'Invalid view_object_dependency name.';
+ASSERT REGEXP_CONTAINS(table_column_usage_impact, r'^[A-Za-z0-9_-]+$')
+AS 'Invalid table_column_usage_impact name.';
+ASSERT REGEXP_CONTAINS(table_object_dependency, r'^[A-Za-z0-9_-]+$')
+AS 'Invalid table_object_dependency name.';
 
 SET repo_tables = STRUCT(
   table_definition_registry AS def_registry,
@@ -432,45 +732,101 @@ AS 'Invalid target_project_id.';
 ASSERT REGEXP_CONTAINS(job_region, r'^[A-Za-z0-9-]+$')
 AS 'Invalid job_region.';
 
+-- Normalize the definition-source whitelist once (trimmed / uppercased) so the
+-- collection gates in STEP 1 and STEP 2 can compare against stored generation_type
+-- values directly, and reject anything outside the known set: an unrecognized value
+-- would otherwise match nothing and silently reduce the run to zero analysis targets.
+SET analysis_generation_types = ARRAY(
+  SELECT UPPER(TRIM(entry))
+  FROM UNNEST(analysis_include_generation_types) AS entry
+  WHERE TRIM(entry) != ''
+);
+ASSERT NOT EXISTS (
+  SELECT 1
+  FROM UNNEST(analysis_generation_types) AS entry
+  WHERE entry NOT IN ('VIEW_DEFINITION', 'SCHEDULED_QUERY', 'DAG')
+)
+AS 'analysis_include_generation_types accepts only VIEW_DEFINITION, SCHEDULED_QUERY and DAG.';
+
+ASSERT analysis_batch_max_sql_bytes >= 1
+AS 'analysis_batch_max_sql_bytes must be >= 1.';
+ASSERT analysis_batch_max_objects >= 1
+AS 'analysis_batch_max_objects must be >= 1.';
+ASSERT analysis_max_batches_per_run >= 0
+AS 'analysis_max_batches_per_run must be >= 0 (0 = no limit).';
+ASSERT initial_lookback_days >= 1
+AS 'initial_lookback_days must be >= 1.';
+ASSERT job_collection_lookback_days >= 1
+AS 'job_collection_lookback_days must be >= 1.';
+ASSERT object_retention_days >= 1
+AS 'object_retention_days must be >= 1.';
+-- Retaining for less time than a run collects is self-defeating: objects would be
+-- registered and aged out inside the same run. The run resolves the first-run case
+-- with GREATEST, so this only guards a deliberate misconfiguration of the two
+-- incremental knobs.
+ASSERT object_retention_days >= job_collection_lookback_days
+AS 'object_retention_days must be >= job_collection_lookback_days (otherwise objects are aged out as fast as they are collected).';
+
 -- Column usage index table qualified name (not a lnge_render_dynamic_sql placeholder).
--- Built once and reused by STEP 3's publish. CREATE TABLE IF NOT EXISTS keeps a
--- deployment whose 01 setup predates this table self-healing (no-op once 01 has
--- created it); the authoritative schema lives in 01 -- keep the two in step.
+-- Built once and reused by STEP 3's publish.
 SET column_usage_fqn = FORMAT(
   '%s.%s.%s', repository_project_id, repository_dataset, table_column_usage
 );
+
+-- --------------------------------------------------------------------------
+-- PREFLIGHT: every repository table this run writes to must already exist.
+--
+-- 03 used to CREATE TABLE IF NOT EXISTS the column-usage index and the job registry,
+-- so that a repository predating them would heal itself. That is the wrong trade: a
+-- table missing at this point means something DELETED it, and recreating it silently
+-- turns a question worth answering ("why did it go?") into a run that finishes
+-- against an empty table and publishes a repository nobody should trust. The run is
+-- cheap to repeat; the confidence is not.
+--
+-- So this checks all of them in one metadata query and stops with the missing names.
+-- Creating them remains 01's job alone, which also removes the hazard of two files
+-- holding the same schema and drifting apart.
+--
+-- A VIEW counts as present: INFORMATION_SCHEMA.TABLES lists views too, and the two
+-- report views are legitimately views. STEP 4b's static tables are NOT listed here --
+-- they are built by this run, so their absence is normal on a first run.
+-- --------------------------------------------------------------------------
 EXECUTE IMMEDIATE FORMAT(
   """
-  CREATE TABLE IF NOT EXISTS `%s`
-  (
-    source_project STRING,
-    source_dataset STRING,
-    source_object STRING NOT NULL,
-    source_object_type STRING NOT NULL,
-    source_column STRING NOT NULL,
-    source_field_path STRING,
-    object_project STRING NOT NULL,
-    object_dataset STRING NOT NULL,
-    object_name STRING NOT NULL,
-    object_type STRING NOT NULL,
-    generation_type STRING NOT NULL,
-    definition_hash STRING NOT NULL,
-    usage_type STRING NOT NULL,
-    reference_name STRING,
-    line_number INT64,
-    column_number INT64,
-    line_text STRING,
-    resolution_status STRING,
-    usage_key STRING NOT NULL,
-    analyzed_at TIMESTAMP NOT NULL
-  )
-  CLUSTER BY source_project, source_dataset, source_object, source_column
-  OPTIONS (
-    description = 'Per-reference column usage index (all clauses) for impact review'
+  SELECT ARRAY_AGG(required_name ORDER BY required_name)
+  FROM UNNEST([%s]) AS required_name
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM `%s.%s.INFORMATION_SCHEMA.TABLES` AS repository_object
+    WHERE repository_object.table_name = required_name
   )
   """,
-  column_usage_fqn
-);
+  (
+    SELECT STRING_AGG(FORMAT('%T', name), ', ')
+    FROM UNNEST([
+      repo_tables.def_registry,
+      repo_tables.direct_dep,
+      repo_tables.impact,
+      repo_tables.diagnostic,
+      repo_tables.job_registry,
+      table_column_usage
+    ]) AS name
+  ),
+  repository_project_id,
+  repository_dataset
+) INTO missing_repository_objects;
+
+-- ARRAY_AGG over no rows returns NULL, so "nothing missing" is NULL, not an empty
+-- array. Both are checked rather than COALESCEd with an untyped [].
+IF missing_repository_objects IS NOT NULL
+   AND ARRAY_LENGTH(missing_repository_objects) > 0 THEN
+  RAISE USING MESSAGE = FORMAT(
+    'Repository objects are missing from `%s.%s`: %s. 03 does not create them -- run 01 to set the repository up, and if it was already set up, find out what removed them before re-running: a run against a recreated empty table publishes partial lineage that looks complete.',
+    repository_project_id,
+    repository_dataset,
+    ARRAY_TO_STRING(missing_repository_objects, ', ')
+  );
+END IF;
 
 -- Resolve target_datasets by scanning the target project's datasets in
 -- job_region and applying the analysis dataset include/exclude patterns. Dataset
@@ -583,15 +939,23 @@ BEGIN
     view_defs_union_sql
   );
 
-  -- Keep only Views that pass the analysis object-name gate, so the registry holds
-  -- exactly the analysis targets (the dataset scope is already applied by the
-  -- target-dataset resolution above). A View is kept when it matches the include
-  -- gate (empty include = all) AND no exclude pattern; object_name is already
-  -- lowercased. A View filtered out here -- or newly excluded by a config change --
-  -- is deactivated by the STEP 1 "not found" rule below (it is no longer present in
-  -- current_view_definitions), so excluded objects are not change-tracked.
+  -- Keep only Views that pass the analysis object-name gate and the definition-source
+  -- gate, so the registry holds exactly the analysis targets (the dataset scope is
+  -- already applied by the target-dataset resolution above). A View is kept when it
+  -- matches the include gate (empty include = all) AND no exclude pattern, and when
+  -- VIEW_DEFINITION is in analysis_generation_types (empty = every kind); object_name
+  -- is already lowercased. A View filtered out here -- or newly excluded by a config
+  -- change -- is deactivated by the STEP 1 "not found" rule below (it is no longer
+  -- present in current_view_definitions), so excluded objects are not change-tracked.
+  -- Dropping every row when Views are not a selected kind is deliberate: it takes the
+  -- same path as excluding them all by name, which keeps the registry consistent with
+  -- the configuration instead of leaving stale active View rows behind.
   DELETE FROM current_view_definitions AS v
   WHERE (
+    ARRAY_LENGTH(analysis_generation_types) > 0
+    AND 'VIEW_DEFINITION' NOT IN UNNEST(analysis_generation_types)
+  )
+  OR (
     ARRAY_LENGTH(analysis_include_object_patterns) > 0
     AND NOT EXISTS (
       SELECT 1
@@ -631,7 +995,7 @@ BEGIN
   )
   DO
     ASSERT REGEXP_CONTAINS(src.project_id, r'^[A-Za-z0-9._:-]+$')
-    AS 'Invalid source project_id in source_project_filters.';
+    AS 'Invalid source project_id in source_project_filters (check for an unsubstituted {project_token}: it is replaced from the auto-detected project id via project_token_pattern, which yields an empty string when the pattern does not match).';
   END FOR;
 
   CREATE OR REPLACE TEMP TABLE source_datasets (
@@ -639,11 +1003,27 @@ BEGIN
     dataset_id STRING
   );
 
+  -- Everything that could not be read is collected here (a whole project when its
+  -- SCHEMATA listing is denied, individual datasets from the probe below) and
+  -- reported once the source set is final. dataset_id is NULL for a whole project.
+  CREATE OR REPLACE TEMP TABLE inaccessible_source_datasets (
+    project_id STRING,
+    dataset_id STRING,
+    error_message STRING
+  );
+
   FOR src IN (
     SELECT project_id, dataset_include_patterns, dataset_exclude_patterns
     FROM UNNEST(source_project_filters)
   )
   DO
+    -- A source project whose region-wide SCHEMATA listing is denied would abort the
+    -- whole run here, before the per-dataset probe below ever gets a chance. Catch
+    -- it so an unreachable project is skipped like an unreadable dataset. The
+    -- reference is dynamic (EXECUTE IMMEDIATE), so the denial is a runtime error of
+    -- this statement and the handler sees it. When the operator asked for the strict
+    -- behavior, re-raise unchanged.
+    BEGIN
     EXECUTE IMMEDIATE FORMAT(
       'INSERT INTO source_datasets (project_id, dataset_id) '
       -- Preserve the real dataset-id case: it is used to build the
@@ -666,11 +1046,183 @@ BEGIN
     USING
       COALESCE(src.dataset_include_patterns, CAST([] AS ARRAY<STRING>)) AS inc,
       COALESCE(src.dataset_exclude_patterns, CAST([] AS ARRAY<STRING>)) AS exc;
+    EXCEPTION WHEN ERROR THEN
+      IF NOT skip_inaccessible_source_datasets THEN
+        RAISE;
+      END IF;
+      INSERT INTO inaccessible_source_datasets (project_id, dataset_id, error_message)
+      VALUES (src.project_id, NULL, @@error.message);
+    END;
   END FOR;
 
   SET source_dataset_count = (SELECT COUNT(*) FROM source_datasets);
   ASSERT source_dataset_count > 0
-  AS 'No source datasets were found in the configured projects and region.';
+  AS 'No source datasets were found in the configured projects and region (if a project was skipped as unreachable, the job account is missing metadata access on it).';
+
+  -- --------------------------------------------------------------------------
+  -- Source-dataset access pre-check.
+  --
+  -- SCHEMATA listing a dataset does not mean its INFORMATION_SCHEMA is readable
+  -- (dataset-level metadata access can be missing even when the dataset is
+  -- visible). Because every metadata scan below is one big UNION ALL over these
+  -- datasets, a single unreadable one fails the entire statement with
+  -- "Access Denied", so the run dies on a dataset it does not even need.
+  --
+  -- Probe each dataset once and keep only those that answer. One job per dataset,
+  -- and all four views the pipeline reads are checked in that single job, so a
+  -- dataset with partial access is dropped here rather than surviving STEP 1's
+  -- TABLES scan and killing STEP 3's COLUMNS scan instead. INFORMATION_SCHEMA
+  -- queries bill no bytes; the cost is the job count.
+  --
+  -- The dropped datasets are reported, not swallowed: their tables are then absent
+  -- from the metadata, so an object referencing one resolves as "source no longer
+  -- present" (WARNING, still publishable) instead of FAILED.
+  -- --------------------------------------------------------------------------
+  IF skip_inaccessible_source_datasets THEN
+    FOR probe_ds IN (
+      SELECT DISTINCT project_id, dataset_id
+      FROM source_datasets
+      ORDER BY project_id, dataset_id
+    )
+    DO
+      BEGIN
+        -- LIMIT 1 per view: the ACL is checked when the reference is resolved, so
+        -- one row is enough to prove readability without counting every column of a
+        -- wide dataset. An empty but readable dataset returns 0 and passes.
+        EXECUTE IMMEDIATE FORMAT(
+          'SELECT COUNT(*) FROM ('
+          || '(SELECT 1 FROM `%s.%s.INFORMATION_SCHEMA.TABLES` LIMIT 1) '
+          || 'UNION ALL (SELECT 1 FROM `%s.%s.INFORMATION_SCHEMA.TABLE_OPTIONS` LIMIT 1) '
+          || 'UNION ALL (SELECT 1 FROM `%s.%s.INFORMATION_SCHEMA.COLUMNS` LIMIT 1) '
+          || 'UNION ALL (SELECT 1 FROM `%s.%s.INFORMATION_SCHEMA.COLUMN_FIELD_PATHS` LIMIT 1))',
+          probe_ds.project_id, probe_ds.dataset_id,
+          probe_ds.project_id, probe_ds.dataset_id,
+          probe_ds.project_id, probe_ds.dataset_id,
+          probe_ds.project_id, probe_ds.dataset_id
+        )
+        INTO source_access_probe;
+      EXCEPTION WHEN ERROR THEN
+        INSERT INTO inaccessible_source_datasets (project_id, dataset_id, error_message)
+        VALUES (probe_ds.project_id, probe_ds.dataset_id, @@error.message);
+      END;
+    END FOR;
+
+    DELETE FROM source_datasets AS sd
+    WHERE EXISTS (
+      SELECT 1
+      FROM inaccessible_source_datasets AS blocked
+      WHERE blocked.project_id = sd.project_id
+        AND blocked.dataset_id = sd.dataset_id
+    );
+
+    SET source_dataset_count = (SELECT COUNT(*) FROM source_datasets);
+    ASSERT source_dataset_count > 0
+    AS 'Every resolved source dataset was unreadable -- check source_project_filters and the job account metadata permissions (see SKIPPED_INACCESSIBLE_SOURCE_DATASETS).';
+
+    -- Surfaced in the console's "All results" so a silently narrowed scan is visible.
+    SELECT
+      'SKIPPED_INACCESSIBLE_SOURCE_DATASETS' AS notice,
+      project_id,
+      dataset_id,
+      error_message
+    FROM inaccessible_source_datasets
+    ORDER BY project_id, dataset_id;
+  END IF;
+
+  -- ==========================================================================
+  -- PREVIEW (preview_only = TRUE): report the resolved scope and stop.
+  --
+  -- Everything the preview needs is already settled at this point -- target
+  -- datasets from [C], source datasets from the resolution and access probe
+  -- above, and the View list after the name / definition-source filters -- and
+  -- nothing has been written yet. Reporting here rather than in a separate
+  -- script means the operator sees the values 03 itself will use, with one copy
+  -- of the [A] settings and no second implementation of the filters to drift.
+  -- ==========================================================================
+  IF preview_only THEN
+    SELECT
+      'PREVIEW_SETTINGS' AS section,
+      target_project_id AS target_project,
+      job_region,
+      -- Shown because '{project_token}' substitution is the easiest [A] setting to
+      -- get wrong: an unmatched project_token_pattern yields an empty token silently.
+      default_project_id AS detected_project_id,
+      project_token,
+      ARRAY_TO_STRING(analysis_include_dataset_patterns, ', ') AS analysis_include_dataset_patterns,
+      ARRAY_TO_STRING(analysis_exclude_dataset_patterns, ', ') AS analysis_exclude_dataset_patterns,
+      ARRAY_TO_STRING(analysis_include_object_patterns, ', ') AS analysis_include_object_patterns,
+      ARRAY_TO_STRING(analysis_exclude_object_patterns, ', ') AS analysis_exclude_object_patterns,
+      IF(ARRAY_LENGTH(analysis_generation_types) = 0,
+         '(empty = every kind)',
+         ARRAY_TO_STRING(analysis_generation_types, ', ')) AS analysis_include_generation_types,
+      process_generated_tables,
+      skip_inaccessible_source_datasets,
+      (SELECT STRING_AGG(project_id, ', ' ORDER BY project_id)
+       FROM UNNEST(source_project_filters)) AS source_projects;
+
+    -- Analysis (target) datasets, with how many Views each contributes. A
+    -- dataset listed with 0 matched the dataset filter but has no View passing
+    -- the object-name / definition-source filters -- worth seeing, so it is not
+    -- dropped from the list.
+    SELECT
+      'PREVIEW_ANALYSIS_DATASETS' AS section,
+      ds AS analysis_dataset,
+      (
+        SELECT COUNT(*)
+        FROM current_view_definitions AS v
+        WHERE v.object_dataset = LOWER(ds)
+      ) AS view_count
+    FROM UNNEST(target_datasets) AS ds
+    ORDER BY analysis_dataset;
+
+    -- Source datasets: what the physical-column metadata will be read from,
+    -- plus anything dropped by the access probe (skip_inaccessible_source_datasets).
+    SELECT
+      'PREVIEW_SOURCE_DATASETS' AS section,
+      project_id,
+      dataset_id,
+      'ACCESSIBLE' AS access_status,
+      CAST(NULL AS STRING) AS error_message
+    FROM source_datasets
+    UNION ALL
+    SELECT
+      'PREVIEW_SOURCE_DATASETS' AS section,
+      project_id,
+      COALESCE(dataset_id, '(entire project)') AS dataset_id,
+      'SKIPPED_NO_ACCESS' AS access_status,
+      error_message
+    FROM inaccessible_source_datasets
+    ORDER BY access_status, project_id, dataset_id;
+
+    -- The Views this run would analyze, after every [A] filter.
+    SELECT
+      'PREVIEW_TARGET_VIEWS' AS section,
+      object_project,
+      object_dataset,
+      object_name,
+      definition_hash,
+      LENGTH(definition_text) AS definition_length
+    FROM current_view_definitions
+    ORDER BY object_project, object_dataset, object_name;
+
+    SELECT
+      'PREVIEW_ONLY' AS notice,
+      'Nothing was written. Review the sections above, then set preview_only = FALSE and run this script again.'
+        AS next_step,
+      (SELECT COUNT(*) FROM current_view_definitions) AS target_view_count,
+      ARRAY_LENGTH(target_datasets) AS analysis_dataset_count,
+      (SELECT COUNT(*) FROM source_datasets) AS source_dataset_count,
+      (SELECT COUNT(*) FROM inaccessible_source_datasets) AS skipped_source_count,
+      'Generated tables (Scheduled Query / DAG) are NOT listed: STEP 2 scans INFORMATION_SCHEMA.JOBS and is skipped in preview.'
+        AS scope_note,
+      IF(ARRAY_LENGTH(analysis_generation_types) > 0
+           AND 'VIEW_DEFINITION' NOT IN UNNEST(analysis_generation_types),
+         'analysis_include_generation_types excludes VIEW_DEFINITION, so an empty View list is expected here.',
+         CAST(NULL AS STRING)) AS generation_type_note;
+  END IF;
+
+  -- Everything below writes to the repository, so it is skipped in preview.
+  IF NOT preview_only THEN
 
   -- TABLES per source dataset (dataset-scoped, so only dataset-level metadata
   -- access is needed; the region-qualified form requires broader permissions).
@@ -732,6 +1284,15 @@ BEGIN
           target.is_changed = (
             target.is_changed
             OR target.definition_hash IS DISTINCT FROM source.definition_hash
+            -- A row coming back from is_active = FALSE has NO dependency or
+            -- diagnostic rows left: STEP 3 deletes the repository rows of every
+            -- inactive definition. Re-activating it without re-analyzing would leave
+            -- it active and edgeless until its SQL happens to change -- silently
+            -- missing lineage rather than visibly unanalyzed. This matters most for
+            -- ephemeral objects on a WEEKLY schedule: they age out after
+            -- object_retention_days, come back on the next run with an identical
+            -- fingerprint, and would never be analyzed again.
+            OR target.is_active = FALSE
           ),
           target.is_active = TRUE,
           target.analysis_status = CASE
@@ -833,20 +1394,28 @@ BEGIN
     CURRENT_TIMESTAMP() AS step_finished_at,
     (SELECT COUNT(*) FROM current_view_definitions)
       AS current_view_count;
+
+  END IF;  -- NOT preview_only
 END;
 
 -- ============================================================================
 -- STEP 2: Synchronize Scheduled Query / DAG generated-table definitions
 -- Skipped entirely when process_generated_tables is FALSE (Views-only run).
 -- ============================================================================
-IF process_generated_tables THEN
+IF process_generated_tables AND NOT preview_only THEN
   -- Progress marker: labels this step in the console's "All results" list.
   SELECT '===== STEP 2: synchronize Scheduled Query / DAG definitions ====='
     AS processing_step;
 BEGIN
   DECLARE step_started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP();
+  -- Resolved below from the parameters: how far back to COLLECT, and how long an
+  -- object stays alive without being seen. They are separate windows.
   DECLARE lookback_days INT64;
+  DECLARE retention_days INT64;
   DECLARE job_registry_row_count INT64;
+  -- The newest job already collected. The collection window is extended to cover
+  -- everything since then, so a gap in the schedule does not lose the jobs in it.
+  DECLARE latest_collected_job_time TIMESTAMP;
 
   -- Service accounts and lookback windows are declared in the top-level
   -- parameter block; STEP 2 only validates them here.
@@ -856,44 +1425,9 @@ BEGIN
   ASSERT ARRAY_LENGTH(dag_service_accounts) > 0
   AS 'dag_service_accounts must not be empty (see the STEP 2 parameter block).';
 
-  SET sql_template = """
-    CREATE TABLE IF NOT EXISTS
-      `__T_JOB_REGISTRY__`
-    (
-      job_project STRING NOT NULL,
-      job_id STRING NOT NULL,
-      creation_time TIMESTAMP NOT NULL,
-      start_time TIMESTAMP,
-      end_time TIMESTAMP,
-      execution_source STRING NOT NULL,
-      source_detection_method STRING NOT NULL,
-      user_email STRING,
-      labels ARRAY<STRUCT<key STRING, value STRING>>,
-      statement_type STRING,
-      query_text STRING,
-      definition_text STRING,
-      definition_hash STRING NOT NULL,
-      sql_fingerprint STRING,
-      destination_project STRING NOT NULL,
-      destination_dataset STRING NOT NULL,
-      destination_table STRING NOT NULL,
-      collected_at TIMESTAMP NOT NULL,
-      updated_at TIMESTAMP NOT NULL
-    )
-    PARTITION BY DATE(creation_time)
-    CLUSTER BY
-      destination_project,
-      destination_dataset,
-      destination_table,
-      execution_source
-  """;
-
-  EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-
-  ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-  AS 'Unresolved placeholder in lineage_job_registry CREATE SQL.';
-
-  EXECUTE IMMEDIATE rendered_sql;
+  -- The job registry is NOT created here. It is 01's, and the preflight at the top of
+  -- this file has already established that it exists -- see the note there on why a
+  -- missing repository table must stop the run rather than be recreated under it.
 
   SET sql_template = """
     SELECT COUNT(*)
@@ -907,11 +1441,41 @@ BEGIN
 
   EXECUTE IMMEDIATE rendered_sql INTO job_registry_row_count;
 
-  SET lookback_days = IF(
-    job_registry_row_count = 0,
-    initial_lookback_days,
-    incremental_lookback_days
-  );
+  IF job_registry_row_count = 0 THEN
+    -- First run: collect the whole initial window, and keep everything it brings in --
+    -- retaining less than was just collected would deactivate most of the seed before
+    -- STEP 3 ever looked at it.
+    SET lookback_days = initial_lookback_days;
+    SET retention_days = GREATEST(initial_lookback_days, object_retention_days);
+  ELSE
+    SET sql_template = """
+      SELECT MAX(creation_time)
+      FROM `__T_JOB_REGISTRY__`
+    """;
+
+    EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+
+    ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
+    AS 'Unresolved placeholder in job registry high-water mark SQL.';
+
+    EXECUTE IMMEDIATE rendered_sql INTO latest_collected_job_time;
+
+    -- The floor, extended to cover the gap since the newest collected job. The extra
+    -- day is slack: jobs are collected by creation_time, and a run that starts before
+    -- a job finishes would otherwise leave it just outside the next window too.
+    SET lookback_days = GREATEST(
+      job_collection_lookback_days,
+      COALESCE(
+        CAST(
+          CEIL(
+            TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), latest_collected_job_time, HOUR) / 24
+          ) AS INT64
+        ) + 1,
+        job_collection_lookback_days
+      )
+    );
+    SET retention_days = object_retention_days;
+  END IF;
 
   SET sql_template = """
     CREATE OR REPLACE TEMP TABLE raw_generated_table_jobs AS
@@ -1077,6 +1641,20 @@ BEGIN
       -- here: kept when it matches each include gate (empty include = all) AND no
       -- exclude pattern. A job filtered out never enters the job / definition
       -- registry, so excluded objects are not change-tracked.
+      -- The definition-source gate uses the same classification that becomes
+      -- generation_type below, so ['DAG'] collects DAG job SQL only and
+      -- ['SCHEDULED_QUERY'] only Scheduled Queries (empty = every kind). It is
+      -- spelled out rather than referencing the execution_source alias because a
+      -- SELECT alias is not visible to this WHERE clause.
+      AND (
+        ARRAY_LENGTH(analysis_generation_types) = 0
+        OR (
+          CASE
+            WHEN is_scheduled_query THEN 'SCHEDULED_QUERY'
+            WHEN is_dag THEN 'DAG'
+          END
+        ) IN UNNEST(analysis_generation_types)
+      )
       AND (
         ARRAY_LENGTH(analysis_include_object_patterns) = 0
         OR EXISTS (
@@ -1107,14 +1685,31 @@ BEGIN
   normalized_definitions AS (
     SELECT
       *,
+      /*
+       * CTAS の前置き（CREATE ... AS）を落として本体のクエリだけを残す。
+       *
+       * これは解析のためではない -- エンジンは v1.5.0-076 以降、前置きが付いたままでも
+       * 本体を解析できる（#stripStatementPrefix）。ここで落とすのは definition_text が
+       * sql_fingerprint の入力だからで、フィンガープリントはリテラルを ? に正規化する
+       * 一方でテーブル識別子は残す。前置きを残すと、宛先名が毎回変わる一時テーブル
+       * （tmp_20260101, tmp_20260102, ...）が別々の指紋になり、ephemeral の集約が
+       * 効かなくなってレジストリが膨らむ。**この REGEXP_REPLACE は消さないこと。**
+       *
+       * 旧版は前置きの形を列挙していたため、`PARTITION BY` / `CLUSTER BY` 付きや
+       * 列スキーマ付き、`CREATE TEMP TABLE` を取りこぼし、それらは宛先名を含んだまま
+       * 指紋化されていた。ここでは深さの追跡はできないので、代わりに「最初に現れる
+       * ` AS ` のうち直後が SELECT / WITH / '(' のもの」を境界にし、その本体を
+       * キャプチャして書き戻す（RE2 には先読みが無いためこの形になる）。
+       * OPTIONS の文字列リテラルに ' AS SELECT' が入っていると早く切れるが、
+       * 現実的には起こらない。
+       */
       CASE
         WHEN statement_type = 'CREATE_TABLE_AS_SELECT'
           THEN REGEXP_REPLACE(
             query_text,
-            r'(?is)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+'
-            r'(?:IF\s+NOT\s+EXISTS\s+)?(?:`[^`]+`|[^\s]+)'
-            r'(?:\s+OPTIONS\s*\([^;]*?\))?\s+AS\s+',
-            ''
+            r'(?is)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?'
+            r'(?:TEMP\s+|TEMPORARY\s+)?TABLE\b.*?\sAS\s+(SELECT|WITH|\()',
+            r'\1'
           )
         ELSE query_text
       END AS definition_text
@@ -1149,7 +1744,37 @@ BEGIN
       USING recent_generated_table_jobs AS source
       ON target.job_project = source.job_project
       AND target.job_id = source.job_id
-      WHEN MATCHED THEN
+      -- Only write a matched row when something actually differs.
+      --
+      -- A finished BigQuery job is immutable, and the lookback window deliberately
+      -- overlaps, so nearly every matched row is identical to what is already stored:
+      -- at an 8-day window that is ~200k rows re-written per run, each carrying
+      -- query_text and definition_text, for no change at all. The rows that DO differ
+      -- are the few worth writing -- a job collected while still RUNNING and since
+      -- finished (end_time), or a row whose extraction changed because the engine was
+      -- upgraded (definition_hash, execution_source, destination).
+      --
+      -- definition_hash stands in for definition_text, and with it for query_text,
+      -- which the two are derived from: comparing the text columns themselves would
+      -- make the MERGE READ them on both sides, which is the cost this avoids.
+      -- labels is an ARRAY<STRUCT> and has no equality operator, so it is compared as
+      -- JSON. collected_at / updated_at are excluded on purpose -- they change on every
+      -- run by construction, and comparing them would skip nothing. The effect is that
+      -- collected_at now means "when this row last CHANGED", which nothing reads.
+      WHEN MATCHED AND (
+        target.creation_time IS DISTINCT FROM source.creation_time
+        OR target.start_time IS DISTINCT FROM source.start_time
+        OR target.end_time IS DISTINCT FROM source.end_time
+        OR target.execution_source IS DISTINCT FROM source.execution_source
+        OR target.source_detection_method IS DISTINCT FROM source.source_detection_method
+        OR target.user_email IS DISTINCT FROM source.user_email
+        OR TO_JSON_STRING(target.labels) IS DISTINCT FROM TO_JSON_STRING(source.labels)
+        OR target.statement_type IS DISTINCT FROM source.statement_type
+        OR target.definition_hash IS DISTINCT FROM source.definition_hash
+        OR target.destination_project IS DISTINCT FROM source.destination_project
+        OR target.destination_dataset IS DISTINCT FROM source.destination_dataset
+        OR target.destination_table IS DISTINCT FROM source.destination_table
+      ) THEN
         UPDATE SET
           target.creation_time = source.creation_time,
           target.start_time = source.start_time,
@@ -1273,6 +1898,15 @@ BEGIN
       -- the MERGE below COALESCEs so a miss never erases a stored value).
       LEFT JOIN job_script_variables AS svars
         ON svars.job_id = jobs.job_id
+      -- Only the retention window. The registry keeps every job ever collected, so
+      -- without this the MERGE below would re-register every fingerprint ever seen on
+      -- every run -- re-activating objects the age-out then deactivates again, and
+      -- doing it over a set that only grows. The age-out uses the same window, so this
+      -- is the same population seen from the other side.
+      WHERE jobs.creation_time >= TIMESTAMP_SUB(
+        CURRENT_TIMESTAMP(),
+        INTERVAL @retention_days DAY
+      )
     )
     SELECT
       IF(destination_is_persistent, destination_project, @target_project)
@@ -1321,7 +1955,8 @@ BEGIN
   EXECUTE IMMEDIATE rendered_sql
   USING
     target_project_id AS target_project,
-    ephemeral_object_dataset_label AS ephemeral_dataset;
+    ephemeral_object_dataset_label AS ephemeral_dataset,
+    retention_days AS retention_days;
 
   SET sql_template = """
       MERGE
@@ -1356,6 +1991,15 @@ BEGIN
           target.is_changed = (
             target.is_changed
             OR target.definition_hash IS DISTINCT FROM source.definition_hash
+            -- A row coming back from is_active = FALSE has NO dependency or
+            -- diagnostic rows left: STEP 3 deletes the repository rows of every
+            -- inactive definition. Re-activating it without re-analyzing would leave
+            -- it active and edgeless until its SQL happens to change -- silently
+            -- missing lineage rather than visibly unanalyzed. This matters most for
+            -- ephemeral objects on a WEEKLY schedule: they age out after
+            -- object_retention_days, come back on the next run with an identical
+            -- fingerprint, and would never be analyzed again.
+            OR target.is_active = FALSE
           ),
           target.is_active = TRUE,
           target.analysis_status = CASE
@@ -1472,10 +2116,15 @@ BEGIN
   USING target_project_id AS target_project_id;
 
   -- Age out ephemeral (fingerprint-identified) objects whose fingerprint has not
-  -- appeared in JOBS within the lookback window. The synthetic identity is stable
-  -- per fingerprint, so a recurring job keeps refreshing the same row (no
-  -- churn); this only deactivates fingerprints that have stopped running. The
-  -- lookback matches the JOBS collection window used above.
+  -- appeared in the job registry within the RETENTION window. The synthetic identity
+  -- is stable per fingerprint, so a recurring job keeps refreshing the same row (no
+  -- churn); this only deactivates fingerprints that have stopped running.
+  --
+  -- The window is object_retention_days, NOT the collection window: the check reads
+  -- the registry, which already holds everything collected on earlier runs, so how far
+  -- back THIS run scanned INFORMATION_SCHEMA has nothing to do with how long an object
+  -- should be kept. Tying the two together is what used to force a monthly statement
+  -- out of the repository three weeks out of four.
   SET sql_template = """
     UPDATE
       `__T_DEF_REGISTRY__` AS registry
@@ -1492,7 +2141,7 @@ BEGIN
         WHERE jobs.sql_fingerprint = registry.sql_fingerprint
           AND jobs.creation_time >= TIMESTAMP_SUB(
             CURRENT_TIMESTAMP(),
-            INTERVAL @lookback_days DAY
+            INTERVAL @retention_days DAY
           )
       );
   """;
@@ -1503,13 +2152,18 @@ BEGIN
   AS 'Unresolved placeholder in ephemeral fingerprint age-out UPDATE SQL.';
 
   EXECUTE IMMEDIATE rendered_sql
-  USING lookback_days AS lookback_days;
+  USING retention_days AS retention_days;
 
   SELECT
     'SYNC_GENERATED_TABLE_REGISTRY' AS step_name,
     step_started_at,
     CURRENT_TIMESTAMP() AS step_finished_at,
-    lookback_days,
+    -- Two windows, reported separately: how far back this run SCANNED, and how long an
+    -- object survives without being seen. collection_lookback_days larger than
+    -- job_collection_lookback_days means the run extended it to cover a gap.
+    lookback_days AS collection_lookback_days,
+    retention_days AS object_retention_days,
+    latest_collected_job_time AS previous_newest_job,
     (SELECT COUNT(*) FROM recent_generated_table_jobs)
       AS recent_target_job_count;
 END;
@@ -1536,6 +2190,15 @@ CREATE TEMP TABLE non_completed_udf_results (
   error_nodes_json JSON,
   analysis_result_json STRING
 );
+
+-- ============================================================================
+-- Everything from STEP 3 to the pipeline summary reads and writes the
+-- repository, so a preview run stops here. non_completed_udf_results is created
+-- above this gate on purpose: the FINAL OPERATIONAL RESULT select sits outside
+-- this block and would fail on a missing table -- in preview it simply returns
+-- no rows. STEP 2 is gated at its own IF, and STEP 1 stopped after reporting.
+-- ============================================================================
+IF NOT preview_only THEN
 
 -- ============================================================================
 -- STEP 3: Analyze changed definitions
@@ -1566,9 +2229,40 @@ BEGIN
   DECLARE strict_mode BOOL DEFAULT parser_strict_mode;
   DECLARE analyzed_object_count INT64 DEFAULT 0;
   DECLARE failed_object_count INT64 DEFAULT 0;
-  -- Datasets that have at least one analyzable changed object this run. Empty on
-  -- an unchanged run, which skips the metadata scan and the whole analysis loop.
-  DECLARE changed_datasets ARRAY<STRING>;
+  -- Batches abandoned to a UDF resource error, and the objects in them (see
+  -- analysis_skip_on_udf_resource_error). Reported by the run summary.
+  DECLARE resource_skipped_batch_count INT64 DEFAULT 0;
+  DECLARE resource_skipped_object_count INT64 DEFAULT 0;
+  -- The batch-level EXCEPTION handler's scratch. These live HERE, outside the block
+  -- they serve, because BigQuery does not expose a block's own DECLAREs to that
+  -- block's EXCEPTION section -- the same reason publish_err_message is declared one
+  -- level up from the handler that reads it. current_batch_* mirror the FOR loop
+  -- variable for the same reason.
+  DECLARE batch_error_message STRING;
+  DECLARE current_batch_dataset STRING;
+  DECLARE current_batch_no INT64;
+  DECLARE current_batch_object_count INT64;
+  -- How many (dataset, batch) units the analysis loop will run. 0 on an unchanged
+  -- run, which skips the metadata scan and the whole analysis loop. The units
+  -- themselves live in the analysis_batches temp table built below.
+  DECLARE analysis_batch_total INT64 DEFAULT 0;
+  DECLARE discovery_sql STRING;
+  -- The per-batch SQL, rendered once before the loop (see the hoist below). Declared
+  -- here, at STEP 3 scope, so the loop body and its EXCEPTION handlers can read them.
+  DECLARE pre_batch_sql_view_snapshot STRING;
+  DECLARE batch_sql_udf_analysis STRING;
+  DECLARE batch_sql_dependency_backup STRING;
+  DECLARE batch_sql_diagnostic_backup STRING;
+  DECLARE batch_sql_dependency_delete STRING;
+  DECLARE batch_sql_dependency_insert STRING;
+  DECLARE batch_sql_diagnostic_delete STRING;
+  DECLARE batch_sql_diagnostic_insert STRING;
+  DECLARE batch_sql_registry_completed STRING;
+  DECLARE batch_sql_registry_failed STRING;
+  -- Batches this run COULD have taken, before analysis_max_batches_per_run is
+  -- applied, and the number left for the next run. Reported, not acted on.
+  DECLARE analysis_batch_available_total INT64 DEFAULT 0;
+  DECLARE analysis_batch_deferred_total INT64 DEFAULT 0;
 
   -- --------------------------------------------------------------------------
   -- Remove repository rows whose target definition is no longer active.
@@ -1642,45 +2336,179 @@ BEGIN
   );
 
   -- --------------------------------------------------------------------------
-  -- Which datasets have analyzable changed objects this run. The registry already
-  -- holds only analysis targets (the analysis object/dataset filters are applied at
-  -- collection in STEP 1/2), so this just needs active, changed, defined objects of
-  -- the analyzed types -- no filter re-application. process_generated_tables still
-  -- gates whether generated TABLEs are analyzed. Empty => nothing changed =>
-  -- everything expensive below (the metadata scan and the analysis loop) is skipped.
+  -- The analysable changed set, cut into the units the analysis loop runs.
+  --
+  -- The registry already holds only analysis targets (the analysis object/dataset
+  -- filters are applied at collection in STEP 1/2), so this just needs active,
+  -- changed, defined objects of the analyzed types -- no filter re-application.
+  -- process_generated_tables still gates whether generated TABLEs are analyzed.
+  -- Empty => nothing changed => everything expensive below (the metadata scan and
+  -- the analysis loop) is skipped.
+  --
+  -- Each object also gets a (batch_group, batch_no), which is the loop unit, so one
+  -- UDF call handles a bounded amount of SQL. A dataset alone is not a bound in
+  -- either direction: every ephemeral generated table collapses into one synthetic
+  -- dataset (ephemeral_object_dataset_label), which would arrive as a single
+  -- iteration of arbitrary size, while a dataset holding one changed View would pay
+  -- for a whole iteration of its own. batch_group is '' when
+  -- analysis_batch_group_datasets lets batches span datasets (the default, so the
+  -- budgets alone decide), and the dataset name when it does not. See
+  -- analysis_batch_max_sql_bytes.
+  --
+  -- The cut is on bytes_before -- the cumulative SQL length BEFORE each object --
+  -- rather than on the inclusive total, so an object bigger than the whole budget
+  -- takes a batch of its own instead of dragging its neighbours over the limit. Both
+  -- terms of the GREATEST rise monotonically along the ordering, so a batch is
+  -- always a contiguous run; batch numbers may therefore skip values, which is why
+  -- the loop reads the DISTINCT values rather than counting from zero.
+  --
+  -- definition_text is carried here so the per-batch materialisation below is a
+  -- plain read of this session table, with no second trip to the registry.
   -- --------------------------------------------------------------------------
   SET sql_template = """
-    SELECT ARRAY_AGG(DISTINCT object_dataset)
-    FROM
-      `__T_DEF_REGISTRY__`
-    WHERE is_active = TRUE
-      AND is_changed = TRUE
-      AND definition_text IS NOT NULL
-      AND object_type IN ('VIEW', 'TABLE')
-      AND (@include_tables OR object_type = 'VIEW')
+    CREATE OR REPLACE TEMP TABLE changed_object_batches AS
+    WITH changed AS (
+      SELECT
+        object_project,
+        object_dataset,
+        object_name,
+        object_type,
+        generation_type,
+        definition_text,
+        definition_hash,
+        script_variables,
+        LENGTH(definition_text) AS sql_length
+      FROM
+        `__T_DEF_REGISTRY__`
+      WHERE is_active = TRUE
+        AND is_changed = TRUE
+        AND definition_text IS NOT NULL
+        AND object_type IN ('VIEW', 'TABLE')
+        AND (@include_tables OR object_type = 'VIEW')
+    ),
+    grouped AS (
+      SELECT
+        changed.*,
+        -- The batch key. '' puts every object in one group, so batches are cut by the
+        -- budgets alone and a dataset with one changed View shares a batch instead of
+        -- paying for its own. The dataset name restores the per-dataset behavior.
+        IF(@group_datasets, '', object_dataset) AS batch_group
+      FROM changed
+    ),
+    positioned AS (
+      SELECT
+        grouped.*,
+        SUM(sql_length) OVER (
+          PARTITION BY batch_group
+          ORDER BY object_dataset, object_name, object_type, definition_hash
+          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) - sql_length AS bytes_before,
+        ROW_NUMBER() OVER (
+          PARTITION BY batch_group
+          ORDER BY object_dataset, object_name, object_type, definition_hash
+        ) - 1 AS index_in_group
+      FROM grouped
+    )
+    SELECT
+      batch_group,
+      object_project,
+      object_dataset,
+      object_name,
+      object_type,
+      generation_type,
+      definition_text,
+      definition_hash,
+      script_variables,
+      sql_length,
+      GREATEST(
+        DIV(bytes_before, @max_sql_bytes),
+        DIV(index_in_group, @max_objects)
+      ) AS batch_no
+    FROM positioned
   """;
 
   EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
 
   ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-  AS 'Unresolved placeholder in changed-datasets probe SQL.';
+  AS 'Unresolved placeholder in changed-object batching SQL.';
 
   EXECUTE IMMEDIATE rendered_sql
-  INTO changed_datasets
   USING
-    process_generated_tables AS include_tables;
+    process_generated_tables AS include_tables,
+    analysis_batch_max_sql_bytes AS max_sql_bytes,
+    analysis_batch_max_objects AS max_objects,
+    analysis_batch_group_datasets AS group_datasets;
 
-  SET changed_datasets = COALESCE(changed_datasets, CAST([] AS ARRAY<STRING>));
-  SET has_analysis_work = ARRAY_LENGTH(changed_datasets) > 0;
+  -- The loop units. Ordered reads of this table drive both the discovery pre-pass
+  -- and the analysis loop, so the two see identical batches.
+  --
+  -- analysis_max_batches_per_run is applied HERE, to the shared list, for that reason:
+  -- capping either loop on its own would let them disagree about which batches this
+  -- run covers. Batches are taken in (dataset, batch_no) order so repeated runs
+  -- advance in a stable order, and what is left simply keeps is_changed = TRUE for
+  -- the next run.
+  CREATE OR REPLACE TEMP TABLE analysis_batches AS
+  SELECT batch_group, batch_no
+  FROM (
+    SELECT
+      batch_group,
+      batch_no,
+      ROW_NUMBER() OVER (ORDER BY batch_group, batch_no) AS batch_rank
+    FROM (
+      SELECT DISTINCT batch_group, batch_no
+      FROM changed_object_batches
+    )
+  )
+  WHERE analysis_max_batches_per_run <= 0
+    OR batch_rank <= analysis_max_batches_per_run;
+
+  SET analysis_batch_available_total = (
+    SELECT COUNT(*) FROM (
+      SELECT DISTINCT batch_group, batch_no FROM changed_object_batches
+    )
+  );
+  SET analysis_batch_total = (SELECT COUNT(*) FROM analysis_batches);
+  SET analysis_batch_deferred_total =
+    analysis_batch_available_total - analysis_batch_total;
+  SET has_analysis_work = analysis_batch_total > 0;
+
+  -- Surfaced in "All results" so the batching is visible: many batches is where an
+  -- out-of-memory would have happened, and the byte budget is the knob to turn.
+  -- batches_to_run far below datasets_to_analyze means batches are spanning datasets
+  -- (analysis_batch_group_datasets), which is where the per-batch statement cost
+  -- stops being paid per dataset.
+  IF has_analysis_work THEN
+    SELECT
+      'ANALYSIS_BATCHES' AS notice,
+      analysis_batch_max_sql_bytes AS max_sql_bytes_per_batch,
+      analysis_batch_max_objects AS max_objects_per_batch,
+      analysis_batch_total AS batches_to_run,
+      -- Equal to batches_to_run unless analysis_max_batches_per_run capped this run.
+      analysis_batch_available_total AS batches_available,
+      analysis_batch_deferred_total AS batches_deferred_to_next_run,
+      (SELECT COUNT(DISTINCT object_dataset) FROM changed_object_batches)
+        AS datasets_to_analyze,
+      (SELECT COUNT(*) FROM changed_object_batches) AS changed_objects,
+      (SELECT SUM(sql_length) FROM changed_object_batches) AS total_sql_bytes,
+      (
+        SELECT MAX(batch_bytes)
+        FROM (
+          SELECT SUM(sql_length) AS batch_bytes
+          FROM changed_object_batches
+          GROUP BY object_dataset, batch_no
+        )
+      ) AS largest_batch_bytes;
+  END IF;
 
   IF has_analysis_work THEN
 
   -- ------------------------------------------------------------------------
   -- D -- discovery pre-pass. Run source discovery once for every changed object
-  -- (per dataset, for memory), accumulate the results, and collect the referenced
-  -- source dataset names -- so the column-metadata scan below covers only the
-  -- datasets the changed objects actually reference, not every source dataset.
-  -- The analysis loop reuses these accumulated discovery rows (no second UDF pass).
+  -- (one UDF call per batch, for memory), accumulate the results, and collect the
+  -- referenced source dataset names -- so the column-metadata scan below covers only
+  -- the datasets the changed objects actually reference, not every source dataset.
+  -- The analysis loop reuses these accumulated discovery rows (no second UDF pass),
+  -- and reads them back by the same (dataset, batch_no) unit.
   -- ------------------------------------------------------------------------
   CREATE OR REPLACE TEMP TABLE all_changed_with_discovery (
     object_project STRING,
@@ -1691,50 +2519,14 @@ BEGIN
     definition_text STRING,
     definition_hash STRING,
     script_variables ARRAY<STRING>,
-    source_discovery_json STRING
+    source_discovery_json STRING,
+    batch_group STRING,
+    batch_no INT64
   );
   CREATE OR REPLACE TEMP TABLE referenced_source_datasets (dataset_name STRING);
 
-  FOR ds_row IN (
-    SELECT ds FROM UNNEST(changed_datasets) AS ds ORDER BY ds
-  ) DO
-
-  EXECUTE IMMEDIATE FORMAT(
-    "SELECT '----- STEP 3.discovery | dataset: %s -----' AS processing_step",
-    ds_row.ds
-  );
-
-  -- Materialize the changed-definition set for the current dataset only.
-  SET sql_template = """
-    CREATE OR REPLACE TEMP TABLE changed_definitions_to_analyze AS
-    SELECT
-      object_project,
-      object_dataset,
-      object_name,
-      object_type,
-      generation_type,
-      definition_text,
-      definition_hash,
-      script_variables
-    FROM
-      `__T_DEF_REGISTRY__`
-    WHERE is_active = TRUE
-      AND is_changed = TRUE
-      AND definition_text IS NOT NULL
-      AND object_type IN ('VIEW', 'TABLE')
-      AND (@include_tables OR object_type = 'VIEW')
-      AND LOWER(object_dataset) = LOWER(@current_dataset)
-  """;
-
-  EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-  ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-  AS 'Unresolved placeholder in changed-definitions materialization SQL.';
-  EXECUTE IMMEDIATE rendered_sql
-  USING
-    process_generated_tables AS include_tables,
-    ds_row.ds AS current_dataset;
-
-  -- Source discovery: single UDF query over this dataset's changed set.
+  -- Rendered once, not per batch: the template is constant and the render is a query
+  -- job of its own. Same reason as the analysis loop's templates below.
   SET sql_template = """
     CREATE OR REPLACE TEMP TABLE changed_definitions_with_discovery AS
     SELECT
@@ -1755,10 +2547,45 @@ BEGIN
     FROM
       changed_definitions_to_analyze
   """;
-  EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-  ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
+  EXECUTE IMMEDIATE render_call_sql INTO discovery_sql USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(discovery_sql, r'__[A-Z0-9_]+__')
   AS 'Unresolved placeholder in batch source-discovery SQL.';
-  EXECUTE IMMEDIATE rendered_sql
+
+  FOR ds_row IN (
+    SELECT
+      batch_group AS grp,
+      batch_no,
+      -- Printed by the progress marker. A grouped batch has no single dataset.
+      IF(batch_group = '', '(grouped)', batch_group) AS ds
+    FROM analysis_batches
+    ORDER BY batch_group, batch_no
+  ) DO
+
+  EXECUTE IMMEDIATE FORMAT(
+    "SELECT '----- STEP 3.discovery | dataset: %s | batch: %d -----' AS processing_step",
+    ds_row.ds,
+    ds_row.batch_no
+  );
+
+  -- This batch's changed definitions. A plain read of the session table built above
+  -- (which already applied the registry filters and assigned batch_no), so the
+  -- registry is not queried per batch.
+  CREATE OR REPLACE TEMP TABLE changed_definitions_to_analyze AS
+  SELECT
+    object_project,
+    object_dataset,
+    object_name,
+    object_type,
+    generation_type,
+    definition_text,
+    definition_hash,
+    script_variables
+  FROM changed_object_batches
+  WHERE batch_group = ds_row.grp
+    AND batch_no = ds_row.batch_no;
+
+  -- Source discovery: single UDF query over this dataset's changed set.
+  EXECUTE IMMEDIATE discovery_sql
   USING
     TO_JSON_STRING(STRUCT(TRUE AS source_discovery_only)) AS options_json;
 
@@ -1767,12 +2594,12 @@ BEGIN
   INSERT INTO all_changed_with_discovery (
     object_project, object_dataset, object_name, object_type,
     generation_type, definition_text, definition_hash, script_variables,
-    source_discovery_json
+    source_discovery_json, batch_group, batch_no
   )
   SELECT
     object_project, object_dataset, object_name, object_type,
     generation_type, definition_text, definition_hash, script_variables,
-    source_discovery_json
+    source_discovery_json, ds_row.grp, ds_row.batch_no
   FROM changed_definitions_with_discovery;
 
   INSERT INTO referenced_source_datasets (dataset_name)
@@ -1931,24 +2758,20 @@ BEGIN
   -- flat to bound the diff; every statement through the inner analysis block runs
   -- per dataset.
   -- --------------------------------------------------------------------------
-  FOR ds_row IN (
-    SELECT ds FROM UNNEST(changed_datasets) AS ds ORDER BY ds
-  ) DO
-
-  -- Progress marker. BigQuery prepends the lnge_render_dynamic_sql TEMP FUNCTION DDL
-  -- to the query text of every child job that calls it, so the console's "All
-  -- results" list would otherwise show only "create temp function
-  -- lnge_render_dynamic_sql(" for each statement. This marker runs a dynamic SELECT
-  -- with the dataset name baked into the executed text (via FORMAT, not a bound
-  -- variable), so each iteration surfaces which dataset STEP 3 is processing.
-  EXECUTE IMMEDIATE FORMAT(
-    "SELECT '===== STEP 3 | dataset: %s =====' AS processing_step",
-    ds_row.ds
-  );
-
-  -- Snapshot the active VIEW registry once so the per-object staging query can
-  -- classify source object types without referencing the (configurable-named)
-  -- repository table directly inside a static statement.
+  -- --------------------------------------------------------------------------
+  -- Render the per-batch SQL ONCE, here, instead of once per batch.
+  --
+  -- Every one of these templates is a constant: the batch reaches them through temp
+  -- tables and query parameters, never through the SQL text, so rendering them inside
+  -- the loop produced the identical string every time. The render is not free -- it is
+  -- `SELECT lnge_render_dynamic_sql(...)`, a BigQuery query job of its own -- so at ten
+  -- templates it was ten jobs per batch spent rebuilding strings that had not changed.
+  -- Measured on this deployment, a statement costs ~3s of job startup regardless of
+  -- what it does, and a batch runs ~48 of them; this removes ten.
+  --
+  -- The two templates inside the EXCEPTION handlers are deliberately left where they
+  -- are: they run only when a batch fails, so they cost nothing on the normal path.
+  -- --------------------------------------------------------------------------
   SET sql_template = """
     CREATE OR REPLACE TEMP TABLE active_view_definitions AS
     SELECT
@@ -1963,13 +2786,251 @@ BEGIN
     WHERE is_active = TRUE
       AND object_type = 'VIEW'
   """;
-
-  EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-
-  ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
+  EXECUTE IMMEDIATE render_call_sql INTO pre_batch_sql_view_snapshot USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(pre_batch_sql_view_snapshot, r'__[A-Z0-9_]+__')
   AS 'Unresolved placeholder in active_view_definitions snapshot SQL.';
 
-  EXECUTE IMMEDIATE rendered_sql;
+  SET sql_template = """
+      CREATE OR REPLACE TEMP TABLE batch_udf_results AS
+      SELECT
+        x.object_project,
+        x.object_dataset,
+        x.object_name,
+        x.object_type,
+        x.generation_type,
+        x.definition_hash,
+        x.analysis_id,
+        x.analyzed_at,
+        x.exported_json,
+        COALESCE(
+          JSON_VALUE(x.exported_json, '$.analysis.analysis_status'),
+          'UNKNOWN'
+        ) AS udf_analysis_status,
+        JSON_VALUE(x.exported_json, '$.analysis.message') AS udf_analysis_message
+      FROM (
+        SELECT
+          p.object_project,
+          p.object_dataset,
+          p.object_name,
+          p.object_type,
+          p.generation_type,
+          p.definition_hash,
+          p.analysis_id,
+          @analyzed_at AS analyzed_at,
+          `__UDF__`(
+            p.definition_text,
+            p.physical_columns_json,
+            TO_JSON_STRING(STRUCT(
+              @strict_mode AS strict_mode,
+              TRUE AS compact_export,
+              -- Parent-script DECLARE variable names (NULL/empty for non-script
+              -- objects). Lets the engine treat an unqualified script-variable
+              -- reference as an opaque value instead of a missing column.
+              p.script_variables AS script_variables
+            )),
+            TO_JSON_STRING(STRUCT(
+              p.analysis_id AS analysis_id,
+              p.object_project AS view_project,
+              p.object_dataset AS view_dataset,
+              p.object_name AS view_name,
+              @analyzed_at_iso AS analyzed_at
+            ))
+          ) AS exported_json
+        FROM batch_analysis_input AS p
+        WHERE p.is_analyzable
+      ) AS x
+    """;
+  EXECUTE IMMEDIATE render_call_sql INTO batch_sql_udf_analysis USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(batch_sql_udf_analysis, r'__[A-Z0-9_]+__')
+  AS 'Unresolved placeholder in batch UDF analysis SQL.';
+
+  SET sql_template = """
+      CREATE OR REPLACE TEMP TABLE batch_previous_direct_dependency AS
+      SELECT dependency.*
+      FROM `__T_DIRECT_DEP__` AS dependency
+      WHERE EXISTS (
+        SELECT 1
+        FROM batch_completed_objects AS obj
+        WHERE LOWER(dependency.target_project) = LOWER(obj.object_project)
+          AND LOWER(dependency.target_dataset) = LOWER(obj.object_dataset)
+          AND LOWER(dependency.target_object) = LOWER(obj.object_name)
+          AND dependency.target_object_type = obj.object_type
+          AND dependency.generation_type = obj.generation_type
+      )
+    """;
+  EXECUTE IMMEDIATE render_call_sql INTO batch_sql_dependency_backup USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(batch_sql_dependency_backup, r'__[A-Z0-9_]+__')
+  AS 'Unresolved placeholder in batch dependency backup SQL.';
+
+  SET sql_template = """
+      CREATE OR REPLACE TEMP TABLE batch_previous_lineage_diagnostic AS
+      SELECT diagnostic.*
+      FROM `__T_DIAGNOSTIC__` AS diagnostic
+      WHERE EXISTS (
+        SELECT 1
+        FROM batch_analyzed_objects AS obj
+        WHERE LOWER(diagnostic.object_project) = LOWER(obj.object_project)
+          AND LOWER(diagnostic.object_dataset) = LOWER(obj.object_dataset)
+          AND LOWER(diagnostic.object_name) = LOWER(obj.object_name)
+          AND diagnostic.object_type = obj.object_type
+      )
+    """;
+  EXECUTE IMMEDIATE render_call_sql INTO batch_sql_diagnostic_backup USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(batch_sql_diagnostic_backup, r'__[A-Z0-9_]+__')
+  AS 'Unresolved placeholder in batch diagnostic backup SQL.';
+
+  SET sql_template = """
+        DELETE FROM `__T_DIRECT_DEP__` AS dependency
+        WHERE EXISTS (
+          SELECT 1
+          FROM batch_completed_objects AS obj
+          WHERE LOWER(dependency.target_project) = LOWER(obj.object_project)
+            AND LOWER(dependency.target_dataset) = LOWER(obj.object_dataset)
+            AND LOWER(dependency.target_object) = LOWER(obj.object_name)
+            AND dependency.target_object_type = obj.object_type
+            AND dependency.generation_type = obj.generation_type
+        )
+      """;
+  EXECUTE IMMEDIATE render_call_sql INTO batch_sql_dependency_delete USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(batch_sql_dependency_delete, r'__[A-Z0-9_]+__')
+  AS 'Unresolved placeholder in batch dependency DELETE SQL.';
+
+  SET sql_template = """
+        INSERT INTO `__T_DIRECT_DEP__` (
+          definition_hash, source_project, source_dataset, source_object,
+          source_object_type, source_column, target_project, target_dataset,
+          target_object, target_object_type, target_column, generation_type,
+          dependency_type, expression, usage_type, resolution_status,
+          resolution_reason, edge_key, analyzed_at
+        )
+        SELECT
+          definition_hash, source_project, source_dataset, source_object,
+          source_object_type, source_column, target_project, target_dataset,
+          target_object, target_object_type, target_column, generation_type,
+          dependency_type, expression, usage_type, resolution_status,
+          resolution_reason, edge_key, analyzed_at
+        FROM batch_staged_direct_dependency
+      """;
+  EXECUTE IMMEDIATE render_call_sql INTO batch_sql_dependency_insert USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(batch_sql_dependency_insert, r'__[A-Z0-9_]+__')
+  AS 'Unresolved placeholder in batch dependency INSERT SQL.';
+
+  SET sql_template = """
+        DELETE FROM `__T_DIAGNOSTIC__` AS diagnostic
+        WHERE EXISTS (
+          SELECT 1
+          FROM batch_analyzed_objects AS obj
+          WHERE LOWER(diagnostic.object_project) = LOWER(obj.object_project)
+            AND LOWER(diagnostic.object_dataset) = LOWER(obj.object_dataset)
+            AND LOWER(diagnostic.object_name) = LOWER(obj.object_name)
+            AND diagnostic.object_type = obj.object_type
+        )
+      """;
+  EXECUTE IMMEDIATE render_call_sql INTO batch_sql_diagnostic_delete USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(batch_sql_diagnostic_delete, r'__[A-Z0-9_]+__')
+  AS 'Unresolved placeholder in batch diagnostic DELETE SQL.';
+
+  SET sql_template = """
+        INSERT INTO `__T_DIAGNOSTIC__` (
+          definition_hash, object_project, object_dataset, object_name,
+          object_type, generation_type, diagnostic_code, engine_stage, severity,
+          output_column, expression, message, diagnostic_json, analyzed_at
+        )
+        SELECT
+          definition_hash, object_project, object_dataset, object_name,
+          object_type, generation_type, diagnostic_code, engine_stage, severity,
+          output_column, expression, message, diagnostic_json, analyzed_at
+        FROM batch_staged_lineage_diagnostic
+        UNION ALL
+        SELECT
+          definition_hash, object_project, object_dataset, object_name,
+          object_type, generation_type, diagnostic_code, engine_stage, severity,
+          output_column, expression, message, diagnostic_json, analyzed_at
+        FROM batch_nonpublishable_diagnostic
+        UNION ALL
+        SELECT
+          definition_hash, object_project, object_dataset, object_name,
+          object_type, generation_type, diagnostic_code, engine_stage, severity,
+          output_column, expression, message, diagnostic_json, analyzed_at
+        FROM batch_preanalysis_diagnostic
+      """;
+  EXECUTE IMMEDIATE render_call_sql INTO batch_sql_diagnostic_insert USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(batch_sql_diagnostic_insert, r'__[A-Z0-9_]+__')
+  AS 'Unresolved placeholder in batch diagnostic INSERT SQL.';
+
+  SET sql_template = """
+        UPDATE `__T_DEF_REGISTRY__` AS reg
+        SET
+          is_changed = FALSE,
+          analysis_status = 'COMPLETED',
+          last_analyzed_hash = obj.definition_hash,
+          last_analyzed_at = @analyzed_at,
+          updated_at = @analyzed_at
+        FROM batch_completed_objects AS obj
+        WHERE LOWER(reg.object_project) = LOWER(obj.object_project)
+          AND LOWER(reg.object_dataset) = LOWER(obj.object_dataset)
+          AND LOWER(reg.object_name) = LOWER(obj.object_name)
+          AND reg.object_type = obj.object_type
+          AND reg.generation_type = obj.generation_type
+          AND reg.definition_hash = obj.definition_hash
+      """;
+  EXECUTE IMMEDIATE render_call_sql INTO batch_sql_registry_completed USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(batch_sql_registry_completed, r'__[A-Z0-9_]+__')
+  AS 'Unresolved placeholder in batch registry COMPLETED UPDATE SQL.';
+
+  SET sql_template = """
+        UPDATE `__T_DEF_REGISTRY__` AS reg
+        SET
+          is_changed = TRUE,
+          analysis_status = 'FAILED',
+          last_analyzed_at = @analyzed_at,
+          updated_at = @analyzed_at
+        FROM (
+          SELECT
+            object_project, object_dataset, object_name,
+            object_type, generation_type, definition_hash
+          FROM batch_udf_failed_objects
+          UNION DISTINCT
+          SELECT
+            object_project, object_dataset, object_name,
+            object_type, generation_type, definition_hash
+          FROM batch_preanalysis_failures
+        ) AS obj
+        WHERE LOWER(reg.object_project) = LOWER(obj.object_project)
+          AND LOWER(reg.object_dataset) = LOWER(obj.object_dataset)
+          AND LOWER(reg.object_name) = LOWER(obj.object_name)
+          AND reg.object_type = obj.object_type
+          AND reg.generation_type = obj.generation_type
+          AND reg.definition_hash = obj.definition_hash
+      """;
+  EXECUTE IMMEDIATE render_call_sql INTO batch_sql_registry_failed USING sql_template AS sql_template;
+  ASSERT NOT REGEXP_CONTAINS(batch_sql_registry_failed, r'__[A-Z0-9_]+__')
+  AS 'Unresolved placeholder in batch registry FAILED UPDATE SQL.';
+
+  -- Snapshot the active VIEW registry so the per-object staging query can classify
+  -- source object types without referencing the (configurable-named) repository table
+  -- directly inside a static statement. Run ONCE, not per batch: which Views are
+  -- active is decided in STEP 1/2 and nothing the analysis loop publishes changes it.
+  EXECUTE IMMEDIATE pre_batch_sql_view_snapshot;
+
+  FOR ds_row IN (
+    SELECT
+      batch_group AS grp,
+      batch_no,
+      -- Printed by the progress marker. A grouped batch has no single dataset.
+      IF(batch_group = '', '(grouped)', batch_group) AS ds
+    FROM analysis_batches
+    ORDER BY batch_group, batch_no
+  ) DO
+
+  -- Which batch this iteration is on. These feed the EXCEPTION handlers (which
+  -- cannot see the loop variable) and the ANALYSIS_BATCH_PAYLOAD notice below, which
+  -- doubles as this batch's progress marker: it already carries the dataset and batch
+  -- number, so a separate marker statement would be a BigQuery job spent printing
+  -- what the next one prints anyway.
+  SET current_batch_dataset = ds_row.ds;
+  SET current_batch_no = ds_row.batch_no;
+
 
   -- --------------------------------------------------------------------------
   -- Reuse the source discovery already computed by the pre-pass. The pre-pass ran
@@ -1996,7 +3057,8 @@ BEGIN
     script_variables,
     source_discovery_json
   FROM all_changed_with_discovery
-  WHERE LOWER(object_dataset) = LOWER(ds_row.ds);
+  WHERE batch_group = ds_row.grp
+    AND batch_no = ds_row.batch_no;
 
   -- ==========================================================================
   -- Batch analysis and publish (full set-based STEP 3).
@@ -2306,6 +3368,44 @@ BEGIN
       );
 
     -- ------------------------------------------------------------------------
+    -- 2. Report this batch's PHYSICAL-METADATA volume, before the UDF runs.
+    --
+    -- Deliberately its own statement, emitted BEFORE the UDF query: if that query
+    -- dies with "UDF out of memory" the script aborts, and this row is then the last
+    -- thing in the results -- naming the batch, its payload size, and its largest
+    -- object. That is the one number that is invisible otherwise, and neither of the
+    -- two measures already reported predicts it: SQL text length does not (a 2 KB
+    -- query can pull in a wide table's whole schema), and object count does not (a
+    -- batch of 20 can fail where 31 batches of 20 passed).
+    --
+    -- Why suspect this payload at all: the discovery pre-pass runs the SAME objects
+    -- through the SAME UDF in the same batches and passes, and the only material
+    -- difference is that it passes '[]' here instead of physical_columns_json.
+    -- ------------------------------------------------------------------------
+    EXECUTE IMMEDIATE FORMAT(
+      """
+      SELECT
+        'ANALYSIS_BATCH_PAYLOAD' AS notice,
+        '%s' AS dataset,
+        %d AS batch_no,
+        COUNT(*) AS objects,
+        SUM(physical_metadata_json_bytes) AS total_metadata_bytes,
+        MAX(physical_metadata_json_bytes) AS max_metadata_bytes,
+        CAST(ROUND(AVG(physical_metadata_json_bytes)) AS INT64)
+          AS avg_metadata_bytes,
+        ARRAY_AGG(
+          object_name ORDER BY physical_metadata_json_bytes DESC LIMIT 1
+        )[SAFE_OFFSET(0)] AS largest_object,
+        ARRAY_AGG(
+          object_type ORDER BY physical_metadata_json_bytes DESC LIMIT 1
+        )[SAFE_OFFSET(0)] AS largest_object_type
+      FROM batch_object_metadata
+      """,
+      ds_row.ds,
+      ds_row.batch_no
+    );
+
+    -- ------------------------------------------------------------------------
     -- 2. Assemble the analysis input for every changed object. Each row carries
     -- a stable analysis_id (materialized here so it is identical in the result
     -- column and the UDF context), the scoped metadata, and a pre-analysis
@@ -2354,78 +3454,18 @@ BEGIN
        AND m.definition_hash = c.definition_hash
     ) AS t;
 
-    -- ------------------------------------------------------------------------
-    -- Progress marker: analysis sub-step for the current dataset.
-    EXECUTE IMMEDIATE FORMAT(
-      "SELECT '----- STEP 3.analysis | dataset: %s -----' AS processing_step",
-      ds_row.ds
-    );
-
     -- 3. Run the persistent lineage UDF over every analyzable object in the
-    -- current dataset in a single query. Per-dataset scoping (the enclosing
-    -- loop) bounds how many objects share one per-slot UDF context, which keeps
-    -- the JavaScript UDF under the memory ceiling that a region-wide single pass
-    -- would blow ("Resource exceeded during query execution: UDF out of
-    -- memory"). The result JSON lives in a table column (no 1 MiB script-
-    -- variable limit).
+    -- current BATCH in a single query. The enclosing loop bounds how many objects
+    -- share one per-slot UDF context, which keeps the JavaScript UDF under the
+    -- memory ceiling that a region-wide single pass would blow ("Resource
+    -- exceeded during query execution: UDF out of memory"). The bound is the
+    -- batch, not the dataset: a dataset is not a bound on its own, because every
+    -- ephemeral generated table collapses into one synthetic dataset -- see
+    -- analysis_batch_max_sql_bytes. The result JSON lives in a table column (no
+    -- 1 MiB script-variable limit).
     -- ------------------------------------------------------------------------
-    SET sql_template = """
-      CREATE OR REPLACE TEMP TABLE batch_udf_results AS
-      SELECT
-        x.object_project,
-        x.object_dataset,
-        x.object_name,
-        x.object_type,
-        x.generation_type,
-        x.definition_hash,
-        x.analysis_id,
-        x.analyzed_at,
-        x.exported_json,
-        COALESCE(
-          JSON_VALUE(x.exported_json, '$.analysis.analysis_status'),
-          'UNKNOWN'
-        ) AS udf_analysis_status,
-        JSON_VALUE(x.exported_json, '$.analysis.message') AS udf_analysis_message
-      FROM (
-        SELECT
-          p.object_project,
-          p.object_dataset,
-          p.object_name,
-          p.object_type,
-          p.generation_type,
-          p.definition_hash,
-          p.analysis_id,
-          @analyzed_at AS analyzed_at,
-          `__UDF__`(
-            p.definition_text,
-            p.physical_columns_json,
-            TO_JSON_STRING(STRUCT(
-              @strict_mode AS strict_mode,
-              TRUE AS compact_export,
-              -- Parent-script DECLARE variable names (NULL/empty for non-script
-              -- objects). Lets the engine treat an unqualified script-variable
-              -- reference as an opaque value instead of a missing column.
-              p.script_variables AS script_variables
-            )),
-            TO_JSON_STRING(STRUCT(
-              p.analysis_id AS analysis_id,
-              p.object_project AS view_project,
-              p.object_dataset AS view_dataset,
-              p.object_name AS view_name,
-              @analyzed_at_iso AS analyzed_at
-            ))
-          ) AS exported_json
-        FROM batch_analysis_input AS p
-        WHERE p.is_analyzable
-      ) AS x
-    """;
 
-    EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-
-    ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-    AS 'Unresolved placeholder in batch UDF analysis SQL.';
-
-    EXECUTE IMMEDIATE rendered_sql
+    EXECUTE IMMEDIATE batch_sql_udf_analysis
     USING
       strict_mode AS strict_mode,
       batch_analyzed_at AS analyzed_at,
@@ -3082,42 +4122,9 @@ BEGIN
     -- overwrite, so the EXCEPTION handler can restore them if any publish
     -- statement fails (batch equivalent of the loop's per-object backups).
     -- ------------------------------------------------------------------------
-    SET sql_template = """
-      CREATE OR REPLACE TEMP TABLE batch_previous_direct_dependency AS
-      SELECT dependency.*
-      FROM `__T_DIRECT_DEP__` AS dependency
-      WHERE EXISTS (
-        SELECT 1
-        FROM batch_completed_objects AS obj
-        WHERE LOWER(dependency.target_project) = LOWER(obj.object_project)
-          AND LOWER(dependency.target_dataset) = LOWER(obj.object_dataset)
-          AND LOWER(dependency.target_object) = LOWER(obj.object_name)
-          AND dependency.target_object_type = obj.object_type
-          AND dependency.generation_type = obj.generation_type
-      )
-    """;
-    EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-    ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-    AS 'Unresolved placeholder in batch dependency backup SQL.';
-    EXECUTE IMMEDIATE rendered_sql;
+    EXECUTE IMMEDIATE batch_sql_dependency_backup;
 
-    SET sql_template = """
-      CREATE OR REPLACE TEMP TABLE batch_previous_lineage_diagnostic AS
-      SELECT diagnostic.*
-      FROM `__T_DIAGNOSTIC__` AS diagnostic
-      WHERE EXISTS (
-        SELECT 1
-        FROM batch_analyzed_objects AS obj
-        WHERE LOWER(diagnostic.object_project) = LOWER(obj.object_project)
-          AND LOWER(diagnostic.object_dataset) = LOWER(obj.object_dataset)
-          AND LOWER(diagnostic.object_name) = LOWER(obj.object_name)
-          AND diagnostic.object_type = obj.object_type
-      )
-    """;
-    EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-    ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-    AS 'Unresolved placeholder in batch diagnostic backup SQL.';
-    EXECUTE IMMEDIATE rendered_sql;
+    EXECUTE IMMEDIATE batch_sql_diagnostic_backup;
 
     -- Column usage backup (real table, addressed by column_usage_fqn -- not a
     -- render placeholder). Keyed by the referencing object, matching the publish
@@ -3147,43 +4154,9 @@ BEGIN
     -- ------------------------------------------------------------------------
     BEGIN
       -- 7a. Replace direct dependencies for COMPLETED objects.
-      SET sql_template = """
-        DELETE FROM `__T_DIRECT_DEP__` AS dependency
-        WHERE EXISTS (
-          SELECT 1
-          FROM batch_completed_objects AS obj
-          WHERE LOWER(dependency.target_project) = LOWER(obj.object_project)
-            AND LOWER(dependency.target_dataset) = LOWER(obj.object_dataset)
-            AND LOWER(dependency.target_object) = LOWER(obj.object_name)
-            AND dependency.target_object_type = obj.object_type
-            AND dependency.generation_type = obj.generation_type
-        )
-      """;
-      EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-      ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-      AS 'Unresolved placeholder in batch dependency DELETE SQL.';
-      EXECUTE IMMEDIATE rendered_sql;
+      EXECUTE IMMEDIATE batch_sql_dependency_delete;
 
-      SET sql_template = """
-        INSERT INTO `__T_DIRECT_DEP__` (
-          definition_hash, source_project, source_dataset, source_object,
-          source_object_type, source_column, target_project, target_dataset,
-          target_object, target_object_type, target_column, generation_type,
-          dependency_type, expression, usage_type, resolution_status,
-          resolution_reason, edge_key, analyzed_at
-        )
-        SELECT
-          definition_hash, source_project, source_dataset, source_object,
-          source_object_type, source_column, target_project, target_dataset,
-          target_object, target_object_type, target_column, generation_type,
-          dependency_type, expression, usage_type, resolution_status,
-          resolution_reason, edge_key, analyzed_at
-        FROM batch_staged_direct_dependency
-      """;
-      EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-      ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-      AS 'Unresolved placeholder in batch dependency INSERT SQL.';
-      EXECUTE IMMEDIATE rendered_sql;
+      EXECUTE IMMEDIATE batch_sql_dependency_insert;
 
       -- 7a-2. Replace column usage rows for COMPLETED objects (keyed by the
       -- referencing object). Real table addressed by column_usage_fqn.
@@ -3225,105 +4198,17 @@ BEGIN
       -- 7b. Replace diagnostics for all analyzed objects, then insert the UDF
       -- diagnostics, the non-publishable markers, and (appended) the
       -- pre-analysis failure diagnostics.
-      SET sql_template = """
-        DELETE FROM `__T_DIAGNOSTIC__` AS diagnostic
-        WHERE EXISTS (
-          SELECT 1
-          FROM batch_analyzed_objects AS obj
-          WHERE LOWER(diagnostic.object_project) = LOWER(obj.object_project)
-            AND LOWER(diagnostic.object_dataset) = LOWER(obj.object_dataset)
-            AND LOWER(diagnostic.object_name) = LOWER(obj.object_name)
-            AND diagnostic.object_type = obj.object_type
-        )
-      """;
-      EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-      ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-      AS 'Unresolved placeholder in batch diagnostic DELETE SQL.';
-      EXECUTE IMMEDIATE rendered_sql;
+      EXECUTE IMMEDIATE batch_sql_diagnostic_delete;
 
-      SET sql_template = """
-        INSERT INTO `__T_DIAGNOSTIC__` (
-          definition_hash, object_project, object_dataset, object_name,
-          object_type, generation_type, diagnostic_code, engine_stage, severity,
-          output_column, expression, message, diagnostic_json, analyzed_at
-        )
-        SELECT
-          definition_hash, object_project, object_dataset, object_name,
-          object_type, generation_type, diagnostic_code, engine_stage, severity,
-          output_column, expression, message, diagnostic_json, analyzed_at
-        FROM batch_staged_lineage_diagnostic
-        UNION ALL
-        SELECT
-          definition_hash, object_project, object_dataset, object_name,
-          object_type, generation_type, diagnostic_code, engine_stage, severity,
-          output_column, expression, message, diagnostic_json, analyzed_at
-        FROM batch_nonpublishable_diagnostic
-        UNION ALL
-        SELECT
-          definition_hash, object_project, object_dataset, object_name,
-          object_type, generation_type, diagnostic_code, engine_stage, severity,
-          output_column, expression, message, diagnostic_json, analyzed_at
-        FROM batch_preanalysis_diagnostic
-      """;
-      EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-      ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-      AS 'Unresolved placeholder in batch diagnostic INSERT SQL.';
-      EXECUTE IMMEDIATE rendered_sql;
+      EXECUTE IMMEDIATE batch_sql_diagnostic_insert;
 
       -- 7c. Registry: COMPLETED objects.
-      SET sql_template = """
-        UPDATE `__T_DEF_REGISTRY__` AS reg
-        SET
-          is_changed = FALSE,
-          analysis_status = 'COMPLETED',
-          last_analyzed_hash = obj.definition_hash,
-          last_analyzed_at = @analyzed_at,
-          updated_at = @analyzed_at
-        FROM batch_completed_objects AS obj
-        WHERE LOWER(reg.object_project) = LOWER(obj.object_project)
-          AND LOWER(reg.object_dataset) = LOWER(obj.object_dataset)
-          AND LOWER(reg.object_name) = LOWER(obj.object_name)
-          AND reg.object_type = obj.object_type
-          AND reg.generation_type = obj.generation_type
-          AND reg.definition_hash = obj.definition_hash
-      """;
-      EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-      ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-      AS 'Unresolved placeholder in batch registry COMPLETED UPDATE SQL.';
-      EXECUTE IMMEDIATE rendered_sql
+      EXECUTE IMMEDIATE batch_sql_registry_completed
       USING batch_analyzed_at AS analyzed_at;
 
       -- 7d. Registry: FAILED objects (non-COMPLETED UDF results + pre-analysis
       -- failures).
-      SET sql_template = """
-        UPDATE `__T_DEF_REGISTRY__` AS reg
-        SET
-          is_changed = TRUE,
-          analysis_status = 'FAILED',
-          last_analyzed_at = @analyzed_at,
-          updated_at = @analyzed_at
-        FROM (
-          SELECT
-            object_project, object_dataset, object_name,
-            object_type, generation_type, definition_hash
-          FROM batch_udf_failed_objects
-          UNION DISTINCT
-          SELECT
-            object_project, object_dataset, object_name,
-            object_type, generation_type, definition_hash
-          FROM batch_preanalysis_failures
-        ) AS obj
-        WHERE LOWER(reg.object_project) = LOWER(obj.object_project)
-          AND LOWER(reg.object_dataset) = LOWER(obj.object_dataset)
-          AND LOWER(reg.object_name) = LOWER(obj.object_name)
-          AND reg.object_type = obj.object_type
-          AND reg.generation_type = obj.generation_type
-          AND reg.definition_hash = obj.definition_hash
-      """;
-      EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
-      ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
-      AS 'Unresolved placeholder in batch registry FAILED UPDATE SQL.';
-      EXECUTE IMMEDIATE rendered_sql
+      EXECUTE IMMEDIATE batch_sql_registry_failed
       USING batch_analyzed_at AS analyzed_at;
 
     EXCEPTION WHEN ERROR THEN
@@ -3415,6 +4300,8 @@ BEGIN
     -- operational result set (set-based form of the loop's per-object inserts).
     -- ------------------------------------------------------------------------
     -- Non-COMPLETED UDF results: one row per emitted diagnostic.
+    -- One INSERT, three branches: these used to be three statements, and a statement
+    -- costs a BigQuery job whatever it writes. Same rows, same order, one job.
     INSERT INTO non_completed_udf_results
     SELECT
       LOWER(r.object_project),
@@ -3457,10 +4344,9 @@ BEGIN
         AND fail.object_type = r.object_type
         AND fail.generation_type = r.generation_type
         AND fail.definition_hash = r.definition_hash
-    );
-
+    )
+    UNION ALL
     -- Non-publishable UDF results with no diagnostic row: a single summary row.
-    INSERT INTO non_completed_udf_results
     SELECT
       LOWER(r.object_project),
       LOWER(r.object_dataset),
@@ -3497,10 +4383,9 @@ BEGIN
       AND ARRAY_LENGTH(COALESCE(
         JSON_QUERY_ARRAY(r.exported_json, '$.exported_tables.diagnostics'),
         CAST([] AS ARRAY<STRING>)
-      )) = 0;
-
+      )) = 0
+    UNION ALL
     -- Pre-analysis failures.
-    INSERT INTO non_completed_udf_results
     SELECT
       LOWER(f.object_project),
       LOWER(f.object_dataset),
@@ -3536,6 +4421,131 @@ BEGIN
     ) + (
       SELECT COUNT(*) FROM batch_preanalysis_failures
     );
+
+  EXCEPTION WHEN ERROR THEN
+    -- ------------------------------------------------------------------------
+    -- The batch was too big for the UDF: abandon it and go on to the next one.
+    --
+    -- The analysis UDF query covers a whole batch, so a resource error in it has no
+    -- per-object granularity -- and it used to abort the script, throwing away every
+    -- batch that had not run yet. Recording the batch as failed and continuing turns
+    -- that into "the run finished, these objects are not analyzed", which is the
+    -- state the operator can actually work with.
+    --
+    -- ONLY resource errors. Anything else is re-raised unchanged, so a bug in the
+    -- publish logic still stops the run rather than being quietly filed as a skipped
+    -- batch. BigQuery gives the handler no error code, only @@error.message, so the
+    -- test is a substring match against analysis_resource_error_patterns.
+    --
+    -- The publish block has its own handler that restores the rows it was replacing
+    -- and re-raises; if that re-raised error is a resource error it lands here with
+    -- the repository already back to its pre-publish state, so continuing is safe.
+    -- ------------------------------------------------------------------------
+    -- Re-raise FIRST, before any other statement, so the original error propagates
+    -- unchanged when this is not a resource error.
+    IF NOT analysis_skip_on_udf_resource_error
+       OR NOT EXISTS (
+         SELECT 1
+         FROM UNNEST(analysis_resource_error_patterns) AS pattern
+         WHERE STRPOS(LOWER(@@error.message), LOWER(pattern)) > 0
+       )
+    THEN
+      RAISE;
+    END IF;
+
+    SET batch_error_message = @@error.message;
+
+    -- changed_definitions_with_discovery still holds exactly this batch's objects:
+    -- it is built before the UDF call, so it survives the failure.
+    SET current_batch_object_count = (
+      SELECT COUNT(*) FROM changed_definitions_with_discovery
+    );
+    SET resource_skipped_batch_count = resource_skipped_batch_count + 1;
+    SET resource_skipped_object_count =
+      resource_skipped_object_count + current_batch_object_count;
+
+    -- Registry: mark them failed, and leave is_changed = FALSE so the next run does
+    -- not pay the same failure again. Retrying is a deliberate act (set is_changed
+    -- back to TRUE once the batch budgets or the metadata payload have changed).
+    SET sql_template = """
+      UPDATE `__T_DEF_REGISTRY__` AS reg
+      SET
+        is_changed = FALSE,
+        analysis_status = 'FAILED_UDF_RESOURCE_ERROR',
+        last_analyzed_at = @analyzed_at,
+        updated_at = @analyzed_at
+      FROM changed_definitions_with_discovery AS obj
+      WHERE LOWER(reg.object_project) = LOWER(obj.object_project)
+        AND LOWER(reg.object_dataset) = LOWER(obj.object_dataset)
+        AND LOWER(reg.object_name) = LOWER(obj.object_name)
+        AND reg.object_type = obj.object_type
+        AND reg.generation_type = obj.generation_type
+        AND reg.definition_hash = obj.definition_hash
+    """;
+    EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+    ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
+    AS 'Unresolved placeholder in resource-error registry UPDATE SQL.';
+    EXECUTE IMMEDIATE rendered_sql USING CURRENT_TIMESTAMP() AS analyzed_at;
+
+    -- Diagnostic: one ERROR row per object, so the failure is discoverable from the
+    -- repository and not only from the run's console output.
+    SET sql_template = """
+      INSERT INTO `__T_DIAGNOSTIC__` (
+        definition_hash, object_project, object_dataset, object_name,
+        object_type, generation_type, diagnostic_code, engine_stage, severity,
+        output_column, expression, message, diagnostic_json, analyzed_at
+      )
+      SELECT
+        definition_hash,
+        object_project,
+        object_dataset,
+        object_name,
+        object_type,
+        generation_type,
+        'UDF_RESOURCE_ERROR' AS diagnostic_code,
+        '03_run_daily_lineage_pipeline' AS engine_stage,
+        'ERROR' AS severity,
+        CAST(NULL AS STRING) AS output_column,
+        CAST(NULL AS STRING) AS expression,
+        @error_message AS message,
+        -- diagnostic_json is a JSON column, not STRING: build it with JSON_OBJECT
+        -- (as the other writers do) rather than TO_JSON_STRING, which returns STRING.
+        JSON_OBJECT(
+          'batch_dataset', @skip_dataset,
+          'batch_no', @skip_batch_no,
+          'batch_objects', @skip_objects
+        ) AS diagnostic_json,
+        @analyzed_at AS analyzed_at
+      FROM changed_definitions_with_discovery
+    """;
+    EXECUTE IMMEDIATE render_call_sql INTO rendered_sql USING sql_template AS sql_template;
+    ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
+    AS 'Unresolved placeholder in resource-error diagnostic INSERT SQL.';
+    EXECUTE IMMEDIATE rendered_sql
+    USING
+      batch_error_message AS error_message,
+      current_batch_dataset AS skip_dataset,
+      current_batch_no AS skip_batch_no,
+      current_batch_object_count AS skip_objects,
+      CURRENT_TIMESTAMP() AS analyzed_at;
+
+    -- Surfaced immediately so a skipped batch is visible while the run continues.
+    EXECUTE IMMEDIATE FORMAT(
+      """
+      SELECT
+        'SKIPPED_BATCH_UDF_RESOURCE_ERROR' AS notice,
+        '%s' AS dataset,
+        %d AS batch_no,
+        %d AS objects_skipped,
+        @message AS error_message,
+        'Objects marked FAILED_UDF_RESOURCE_ERROR with is_changed = FALSE; lower analysis_batch_max_sql_bytes / analysis_batch_max_objects and set is_changed = TRUE to retry them.'
+          AS next_step
+      """,
+      current_batch_dataset,
+      current_batch_no,
+      current_batch_object_count
+    )
+    USING batch_error_message AS message;
   END;
 
   END FOR;
@@ -3555,6 +4565,16 @@ BEGIN
       CURRENT_TIMESTAMP() AS run_finished_at,
       @p_analyzed_object_count AS analyzed_object_count,
       @p_failed_object_count AS failed_object_count,
+      -- Batches abandoned to a UDF resource error, and the objects left unanalyzed by
+      -- them. Non-zero means the run COMPLETED but does not cover everything: see
+      -- SKIPPED_BATCH_UDF_RESOURCE_ERROR above, and the
+      -- ANALYSIS_FAILED_UDF_RESOURCE_ERROR rows in the unanalyzed-object snapshot.
+      @p_resource_skipped_batch_count AS resource_skipped_batch_count,
+      @p_resource_skipped_object_count AS resource_skipped_object_count,
+      -- Batches this run did not start because analysis_max_batches_per_run capped
+      -- it. Those objects keep is_changed = TRUE, so the next run continues from
+      -- there -- this is work postponed, not work failed.
+      @p_batches_deferred AS batches_deferred_to_next_run,
       (
         SELECT COUNT(*)
         FROM
@@ -3584,7 +4604,10 @@ BEGIN
   USING
     run_started_at AS p_run_started_at,
     analyzed_object_count AS p_analyzed_object_count,
-    failed_object_count AS p_failed_object_count;
+    failed_object_count AS p_failed_object_count,
+    resource_skipped_batch_count AS p_resource_skipped_batch_count,
+    resource_skipped_object_count AS p_resource_skipped_object_count,
+    analysis_batch_deferred_total AS p_batches_deferred;
 END;
 
 -- ============================================================================
@@ -3771,7 +4794,138 @@ IF has_analysis_work OR orphan_direct_dep_deleted > 0 THEN
   USING snapshot_time AS p_snapshot_time;
 END;
 
+
 END IF;  -- has_analysis_work OR orphan_direct_dep_deleted > 0
+
+-- ============================================================================
+-- STEP 4b: Refresh the static report tables
+-- ============================================================================
+-- Copies the two report views created by 01 into ordinary tables so BI tools
+-- read a clustered table instead of re-running the aggregation on every request:
+--   lnge_vw_t_object_dependency    -> lnge_t_object_dependency
+--   lnge_vw_t_column_usage_impact  -> lnge_t_column_usage_impact
+-- The table name is the view name with 'vw_' dropped, so the pair is obvious.
+--
+-- Why an ordinary table and not a MATERIALIZED VIEW: the views use ARRAY_AGG with
+-- ORDER BY, STRING_AGG(DISTINCT ...), LEFT JOIN, analytic functions and correlated
+-- ARRAY subqueries -- none of which a BigQuery MATERIALIZED VIEW accepts. Nothing
+-- here uses that feature; these are plain CREATE OR REPLACE TABLE ... AS SELECT.
+--
+-- The views remain the single definition; these tables are a static copy built with
+-- SELECT * over them, so changing a view in 01 changes the table's schema on the
+-- next run with nothing to keep in step by hand.
+--
+-- Placement: right after STEP 4, on the same condition as the impact rebuild plus
+-- one escape hatch. Impact and the column-usage index only change when this run did
+-- analysis work or the orphan cleanup removed rows, so rebuilding on that condition
+-- keeps the static tables exactly as fresh as what they are built from and never rebuilds
+-- them for an unchanged daily run. The escape hatch is the first run after the views
+-- are deployed, which usually changes nothing: the static tables are also rebuilt when they
+-- do not exist yet. Skipped entirely under preview_only, which must not create
+-- anything.
+--
+-- ONE BEHAVIOR DIFFERENCE, in lnge_vw_t_column_usage_impact only:
+-- usage_definition_html collects its highlight positions with an analytic
+-- ARRAY_AGG OVER (PARTITION BY origin column, usage object, usage definition).
+-- Analytic functions run after WHERE, so when a report queries the VIEW, any extra
+-- filter it adds (a depth, a single usage_type) also narrows the highlights. In the
+-- static table the aggregation is already fixed at build time, over the full
+-- partition. The partition key already pins the origin column and the object, so
+-- the common "pick an origin, show its SQL" case is identical; only reports that
+-- filter FURTHER and expect the highlights to follow will differ. Those should keep
+-- reading the view.
+--
+-- Failure here is not allowed to take the pipeline down: the static tables are derived
+-- data, and the most likely cause is a deployment whose 01 predates the views. The
+-- error is reported as a row instead.
+IF build_static_report_tables AND NOT preview_only THEN
+  -- Do the static tables already exist? A run that changes nothing does not rebuild them,
+  -- but the FIRST run after the views are deployed usually changes nothing either --
+  -- and then reports would have no table to read. Probing for them costs one
+  -- INFORMATION_SCHEMA lookup (no bytes billed) and removes that hole.
+  EXECUTE IMMEDIATE FORMAT(
+    """
+    SELECT COUNTIF(table_name IN ('%s', '%s')) = 2
+    FROM `%s.%s`.INFORMATION_SCHEMA.TABLES
+    """,
+    table_object_dependency, table_column_usage_impact,
+    repository_project_id, repository_dataset
+  ) INTO static_report_tables_present;
+END IF;
+
+IF build_static_report_tables
+   AND NOT preview_only
+   AND (
+     has_analysis_work
+     OR orphan_direct_dep_deleted > 0
+     OR NOT static_report_tables_present
+   )
+THEN
+  -- Progress marker: labels this step in the console's "All results" list.
+  SELECT '===== STEP 4b: refresh static report tables =====' AS processing_step;
+  BEGIN
+    -- usage_definition_text / usage_definition_html repeat the object's ENTIRE SQL on
+    -- every row of that object. Dropping them keeps the static table small when
+    -- no report renders the SQL itself.
+    DECLARE usage_impact_select_list STRING DEFAULT '*';
+
+    IF NOT static_tables_include_usage_sql THEN
+      SET usage_impact_select_list =
+        '* EXCEPT (usage_definition_text, usage_definition_html)';
+    END IF;
+
+    EXECUTE IMMEDIATE FORMAT(
+      """
+      CREATE OR REPLACE TABLE `%s.%s.%s`
+      CLUSTER BY origin_project, origin_dataset, origin_object
+      OPTIONS (
+        description = 'Static copy of the object-level dependency view, rebuilt by 03 STEP 4b whenever the impact graph is rebuilt. An ordinary table, not a BigQuery materialized view. Same columns as the view plus updated_at. Clustered on the origin object so filtering by origin prunes. The view is the definition; edit it in 01 and this table follows on the next run.'
+      )
+      AS
+      SELECT *, CURRENT_TIMESTAMP() AS updated_at
+      FROM `%s.%s.%s`
+      """,
+      repository_project_id, repository_dataset, table_object_dependency,
+      repository_project_id, repository_dataset, view_object_dependency
+    );
+
+    EXECUTE IMMEDIATE FORMAT(
+      """
+      CREATE OR REPLACE TABLE `%s.%s.%s`
+      CLUSTER BY origin_project, origin_dataset, origin_object, origin_column
+      OPTIONS (
+        description = 'Static copy of the column usage x impact view, rebuilt by 03 STEP 4b whenever the impact graph is rebuilt. An ordinary table, not a BigQuery materialized view. Same columns as the view plus updated_at, unless static_tables_include_usage_sql was FALSE, which drops usage_definition_text and usage_definition_html. Clustered on the origin column so filtering by origin prunes. Highlights inside usage_definition_html are fixed at build time over the full partition; a report that filters further and needs the highlights to follow should read the view instead.'
+      )
+      AS
+      SELECT %s, CURRENT_TIMESTAMP() AS updated_at
+      FROM `%s.%s.%s`
+      """,
+      repository_project_id, repository_dataset, table_column_usage_impact,
+      usage_impact_select_list,
+      repository_project_id, repository_dataset, view_column_usage_impact
+    );
+
+    EXECUTE IMMEDIATE FORMAT(
+      """
+      SELECT
+        'REFRESH_STATIC_REPORT_TABLES' AS step_name,
+        'COMPLETED' AS status,
+        (SELECT COUNT(*) FROM `%s.%s.%s`) AS object_dependency_row_count,
+        (SELECT COUNT(*) FROM `%s.%s.%s`) AS column_usage_impact_row_count
+      """,
+      repository_project_id, repository_dataset, table_object_dependency,
+      repository_project_id, repository_dataset, table_column_usage_impact
+    );
+
+  EXCEPTION WHEN ERROR THEN
+    SELECT
+      'REFRESH_STATIC_REPORT_TABLES' AS step_name,
+      'FAILED' AS status,
+      @@error.message AS error_message,
+      'The report views must exist first: run 01 with recreate_views_only = TRUE. Reports can keep reading the views meanwhile; set build_static_report_tables = FALSE to skip this step.' AS hint;
+  END;
+END IF;
+
 
 -- ============================================================================
 -- STEP 5: Refresh the unanalyzed-object snapshot (report table)
@@ -3856,7 +5010,7 @@ EXECUTE IMMEDIATE FORMAT(
     last_analyzed_at,
     definition_hash,
     definition_text,
-    CURRENT_TIMESTAMP() AS refreshed_at
+    CURRENT_TIMESTAMP() AS updated_at
   FROM not_covered
   QUALIFY ROW_NUMBER() OVER (
     PARTITION BY definition_hash
@@ -3905,6 +5059,9 @@ ASSERT NOT REGEXP_CONTAINS(rendered_sql, r'__[A-Z0-9_]+__')
 AS 'Unresolved placeholder in pipeline summary SQL.';
 
 EXECUTE IMMEDIATE rendered_sql;
+
+END IF;  -- NOT preview_only
+
 END;
 
 

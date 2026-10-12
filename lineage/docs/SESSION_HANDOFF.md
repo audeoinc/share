@@ -14,11 +14,35 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 > 一部に**古い変数名**が残る（下記「命名の変更」を最優先で参照）。
 
 ### 0.1 いまの状態（事実）
-- バージョン: **1.5.0-032**。作業ブランチ: `claude/direct-file-visibility-check-6qztqm`
-  （旧リポジトリ `audeoinc/audeo-share`、ディレクトリ `lineage/`）。
+
+> **更新（2026-08-22・新リポジトリでの再開セッション）**
+> - リポジトリ移行は**完了**。現行はこのツリー直下の `lineage/`。以下 0.1 の
+>   「旧リポジトリ／旧ブランチ」は移行前の記録として読むこと（リポジトリ名・
+>   ブランチ名は環境固有の情報なので記載しない）。
+> - 移行後の健全性確認は実施済み（`npm test` と `node test/test_v1_5_0_003.js` が
+>   記載どおり再現）。
+> - **本セッションで 1 件修正**：`WITH cte AS (...) (SELECT ...)`（CTE の後ろの
+>   メインQueryが括弧で包まれた形）の「トップレベルのSELECT Clauseが見つかりません」。
+>   `query_parser.js` に main-query の括弧剥がしを追加、テスト `test_v1_5_0_073`。
+>   → 現在のバンドル: `sha256 = f448d53c3e3b98aba209d0f0458c54e08a1c6fd20e7f724e21145d811bccacb0`、
+>   `463531` bytes。
+> - **本セッションで 2 件目の修正**：`(A INTERSECT DISTINCT B) EXCEPT DISTINCT C` のように
+>   **括弧付き branch が自身のセット演算を含む**形の
+>   "FromParser: JOIN was expected, but found ..."。括弧を剥がす際に
+>   `disableSetOperations` を引き継いでいたのが原因（演算子の種類には非依存）。
+>   テスト `test_v1_5_0_074`。
+>   → 現在のバンドル: `sha256 = eecd0bc82f1d2ca01db8b4f727ee0c35510057afefe086a6f9ef33b92d655ba4`、
+>   `478961` bytes。`test:release` **60 本 PASS** / ゴールデン 48 ケース PASS
+>   （本数はこの時点の値。現行値は §5「現在地」）。
+>   **エンジン変更のため GCS 再アップロードが必要**。
+> - **本ドキュメントは §4.20 までしか追随していない**。§0.7 を参照。
+
+- バージョン: **1.5.0-032**（移行前のリポジトリ／ブランチでの作業時点の記録。
+  リポジトリ名・ブランチ名は環境固有の情報なので記載しない。ディレクトリは `lineage/`）。
 - バンドル: `javascript/dist/lineage_udf_bundle.js`
-  `sha256 = ad18b4bc5a015e9d831900d5ca6edfde4043b3c5ccb9fc71a6940e0e24ad00cf`、`461888` bytes。
-- テスト: `test:release` 52 本 PASS / ゴールデン（`test_v1_5_0_003`）48 ケース PASS。
+  `sha256 = ad18b4bc5a015e9d831900d5ca6edfde4043b3c5ccb9fc71a6940e0e24ad00cf`、`461888` bytes
+  （**当時の値。現行の値は §5「現在地」を見ること**）。
+- テスト: `test:release` 52 本 PASS / ゴールデン（`test_v1_5_0_003`）48 ケース PASS（当時）。
 - 作業ツリーはクリーン（未コミットなし）。全コミットは上記ブランチに push 済み。
 - **BigQuery 実機での実行検証は未実施**（このセッションはオフライン。ユーザーが実機で
   逐次確認しながら不具合を報告→修正、を繰り返した）。
@@ -86,8 +110,9 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 
 ## 1. このバージョンで確定した方針
 
-- **環境識別子の除去**：全ファイルの実名（旧 `your-project` / `sample_ds` 等）を
-  `project_id` / `dataset` に統一。自社環境を特定させないため。以後もこの匿名化を維持する。
+- **環境識別子の除去**：全ファイルの実名（旧データセット名など。**具体名はこの文書にも
+  書かない**）を `project_id` / `dataset` に統一。自社環境を特定させないため。以後もこの
+  匿名化を維持する。
 - **設定テーブルの廃止**：
   - `lineage_config` テーブルを完全廃止。設定は 03 のパラメータに集約（01 は「初回の
     ブートストラップ準備」に限定され、意味合いが異なるので二重管理を許容）。
@@ -394,6 +419,10 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 
 ## 4.19 UDF out of memory 対策：STEP 3 UDF のチャンク分割（4.18 の続き・SQLのみ）
 
+> **⚠ 撤回済み（現行ソースには存在しない）**：このチャンク分割は後続作業で
+> **完全に撤去**され、**データセット単位のループ**へ置き換えられた。`analysis_udf_chunk_size`
+> などの DECLARE も `udf_chunk` 列も現在の `03_...sql` には無い。詳細は §4.21。
+
 - **4.18 では解消せず**（メタデータ縮小では効かなかった）。実データ診断で原因を確定：
   対象 **2667 件**、最大 SQL **64KB**、中央値 192B、p95 9KB。**単一の巨大 SQL は無く**、
   全件を 1 クエリで UDF 実行する際の**スロット上の V8 ヒープ蓄積（集約ピーク）**が原因。
@@ -410,6 +439,9 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 - **※4.19 だけでは解消せず**：03 には UDF 全件パスが2つあり、探索パス（下記 4.20）が未分割で残っていた。
 
 ## 4.20 UDF out of memory 対策：ソース探索パスのチャンク分割（4.19 の続き・SQLのみ）
+
+> **⚠ 撤回済み（現行ソースには存在しない）**：`discovery_udf_chunk_size` を含め撤去され、
+> ソース探索も**データセット単位のループ**（探索プリパス）になっている。詳細は §4.21。
 
 - **症状の継続**：4.19（STEP 3 チャンク分割）を入れても、対象増加時にまだ "UDF out of memory"。
   `analysis_udf_chunk_size` を下げても効かない。
@@ -430,13 +462,868 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
   `... changed_definitions_with_discovery ... source_discovery_json` なら①、
   `INSERT INTO batch_udf_results` なら②。エンジン不変・**BigQuery 未検証**。
 
-## 5. 現在地（引き継ぎ時点）
+## 4.21 UDF out of memory 対策の最終形：データセット単位ループ（4.18〜4.20 を置換）
 
-- バンドル: `sha256 = 37aec3cd5cb25d8bb4cf8a6975bc6e1c34ba67ee3f352527e05137b8781a2b7b`、`459728` bytes
-- `test:release` 41 本 PASS / ゴールデン 48 ケース PASS
-- 二本ツリー（-031 / -032）同期済み
-- 03 STEP 3：フルバッチ化済み（上記 §4.5 ①②③）。集合ベースに全面置換、ジョブ数は
-  N 非依存。**BigQuery 未検証**（本番前に staging 実行＋旧ループとの出力 diff が必要）。
+- **結論**：固定件数チャンク（§4.19 / §4.20）は**撤回**。現行 03 は STEP 3 全体を
+  **`FOR ds_row IN (SELECT ds FROM UNNEST(changed_datasets) ...) DO ... END FOR`**
+  というデータセット単位のループで回す。`grep -i chunk sql/pipeline/03_...sql` は**0 件**。
+- **撤回理由**：行数チャンクは 1 ジョブあたりの UDF 呼び出し回数は抑えるが、
+  大きいオブジェクトが同じチャンクに固まると**合計メモリは抑えられず** OOM が再発した。
+  実機で「1 データセットずつなら通る」ことが確認できたため、分割軸を行数から
+  **データセット**へ変更した。
+- **現行の構造（`03_run_daily_lineage_pipeline.sql`）**：
+  1. `changed_datasets`（解析対象の変更オブジェクトを持つ dataset）を軽量プローブで取得。
+     空なら STEP 3 の高コスト処理を丸ごとスキップ（`has_analysis_work`）。
+  2. **探索プリパス**（1698〜1792 付近）：`changed_datasets` を 1 つずつ回し、
+     `source_discovery_only` の UDF を単一クエリで実行 → `all_changed_with_discovery` に
+     蓄積しつつ、参照されたソース dataset 名を `referenced_source_datasets` に集める。
+  3. **メタデータ走査の絞り込み**（1823〜1901 付近）：`current_target_columns` /
+     `current_target_column_field_paths` /（TABLES 実在集合）を、**参照された dataset だけ**に
+     絞って STEP 3 内でロードする（従来はリージョン全 dataset を無条件ロード）。
+  4. **解析ループ**（1934〜3541 付近）：再び dataset 単位で回し、各周回は
+     `all_changed_with_discovery` から自 dataset 行を読み直すだけ（**探索 UDF の 2 回目実行は無い**）。
+     周回内部は §4.5 の**フルバッチ（集合ベース）**のまま。
+  5. STEP 4（impact 再構築）は dataset 横断のためループ**外**で 1 回だけ実行。
+- **効果の要点**：dataset 単位に絞ることで UDF の行バッチだけでなく
+  `changed_definitions_with_discovery` / `batch_object_metadata` / `batch_analysis_input` /
+  `batch_udf_results` といった中間テーブルもすべて小さくなる。
+- **§4.18 は現行でも有効**：UDF へ渡す `physical_columns_json` から `data_type` /
+  `is_nullable` を落とす縮小は**残っている**（03 の agg、2263〜2287 付近）。
+  固定テストは `test_v1_5_0_061.js`。
+- **未検証**：この一連の変更も **BigQuery 実機での検証は完了していない**（CHANGELOG の
+  各エントリ末尾に "Not yet validated against BigQuery"）。
+
+## 4.23 定義ソース種別フィルタ `analysis_include_generation_types`（SQLのみ）
+
+- **背景**：解析スコープの軸は §0.5 の 2 系統（dataset / object 名）＋
+  `process_generated_tables`（生成テーブルを解析するかの ON/OFF）だけで、
+  **「DAG のジョブ SQL だけを解析する」指定ができなかった**。レジストリには
+  `generation_type`（`VIEW_DEFINITION` / `SCHEDULED_QUERY` / `DAG`。STEP 2 の
+  `execution_source` 由来）が入っているのに、それで絞る手段が無かった。
+- **追加**：`analysis_include_generation_types ARRAY<STRING> DEFAULT []`（[A]）。
+  空＝全種別（従来と完全に同じ挙動）。`['DAG']` で DAG のみ、
+  `['DAG','SCHEDULED_QUERY']` で View を外す。
+- **検証**：[C] で trim/大文字化して `analysis_generation_types` に正規化し、
+  既知の 3 値以外は ASSERT で即失敗させる（タイプミスで解析対象が黙って 0 件になるのを防ぐ）。
+- **適用位置は収集段**（他の 2 軸と同じ＝レジストリ＝解析対象を維持）：
+  - STEP 1：`VIEW_DEFINITION` が未選択なら `current_view_definitions` を全削除。
+    「全 View を名前で除外した」のと同じ経路になり、既存行は "not found" ルールで
+    deactivate される（active のまま取り残さない）。
+  - STEP 2：`classified_jobs` の WHERE に、`generation_type` になるのと同じ CASE で
+    ゲートを追加（`execution_source` は同一 SELECT の別名なので WHERE からは参照できず、
+    CASE を書き下している）。
+- **注意（コスト削減ではない）**：STEP 1 は VIEWS を、STEP 2 は JOBS を従来どおり走査する。
+  JOBS 走査自体を止めるのは `process_generated_tables`。
+- SQL のみ／エンジン不変。**BigQuery 未検証**。
+
+## 4.24 アクセスできないソースデータセットで落ちる問題（SQLのみ）
+
+- **症状**：03 実行時、`INFORMATION_SCHEMA.TABLES` を UNION する箇所で特定データセットに
+  対し **Access Denied**。UNION ALL 一発なので、1 つ読めないだけで文全体が落ちる。
+- **原因**：`source_project_filters` は SCHEMATA からソースデータセットを解決するが、
+  **SCHEMATA に見えることと、そのデータセットの INFORMATION_SCHEMA が読めることは別**。
+  従来の回避策は `source_project_filters[].dataset_exclude_patterns` に手で列挙するのみ。
+- **対応**：STEP 1 の `source_datasets` 解決直後に**アクセス事前チェック**を追加。
+  新 DECLARE `skip_inaccessible_source_datasets BOOL DEFAULT TRUE`（[B]）。
+  - 各データセットを 1 回プローブし、失敗したものを `source_datasets` から DELETE。
+  - 除外分は `inaccessible_source_datasets` に理由付きで残し、
+    `SKIPPED_INACCESSIBLE_SOURCE_DATASETS` として結果に出す（黙って縮まないように）。
+  - **全 UNION が `source_datasets` 由来**なので、ここで 1 回削るだけで
+    STEP 1 の TABLES/TABLE_OPTIONS も STEP 3 の COLUMNS/COLUMN_FIELD_PATHS/TABLES も守れる。
+  - プローブは 4 ビューを 1 ジョブで確認（`(SELECT 1 FROM ... LIMIT 1) UNION ALL ...`）。
+    部分的にしか権限が無いデータセットが STEP 1 を通過して STEP 3 で落ちるのを防ぐため。
+  - コストはソースデータセット数 × 1 ジョブ／run（バイト課金なし）。FALSE で従来動作。
+  - 全滅した場合は ASSERT で失敗させる。
+- **project 単位の穴も塞いだ**：`source_datasets` を解決する SCHEMATA ループ自体が
+  project 全体の Access Denied で落ちうる（データセット単位のプローブに到達する前）。
+  この `EXECUTE IMMEDIATE` も `BEGIN ... EXCEPTION WHEN ERROR THEN ... END` で包み、
+  到達不能な project は `inaccessible_source_datasets`（dataset_id = NULL）に記録して継続。
+  `skip_inaccessible_source_datasets = FALSE` のときは素の `RAISE` で元のエラーを再送出する。
+- **なぜ捕捉できるか**：ソース参照はすべて動的（`EXECUTE IMMEDIATE`）なので、権限エラーは
+  その文の**実行時エラー**として BEGIN ブロック内で発生する＝例外ハンドラで捕まる。
+  静的にテーブル名を書いていると文の検証段階で落ちて捕捉できないため、この形が前提。
+- **解析への影響**：外したデータセットのテーブルはメタデータに存在しなくなるため、
+  §4.6 の分類では「消えたソース」扱い＝WARNING（公開可）であり FAILED にはならない。
+- SQL のみ／エンジン不変。**BigQuery 未検証**。
+
+## 4.25 03 実行前の対象確認 `preview_only`（SQLのみ）
+
+- **要望**：「[A] の条件で狙った対象が選ばれているか」を 03 実行前に確認したい。
+  当初は確認用の別スクリプト（02）案だったが、次の 2 点から **03 内のドライラン**にした。
+  1. **02 は空き番号ではない**（`sql/sample/02_setup_sample_environment.sql` と `02a` が既存。
+     README・INTEGRATION_TEST_PLAN からも参照されている）。
+  2. **BigQuery に include 機構が無い**ため、別ファイルにすると `[A]` が 2 箇所になり必ずズレる。
+     さらにフィルタ解決ロジックを再実装することになり、「確認した対象」と「本実行の対象」が
+     食い違いうる。03 内なら **[A] は 1 つ、表示されるのは 03 自身が解決した値**。
+- **追加**：`preview_only BOOL DEFAULT FALSE`（[B]）。TRUE で以下を出力して停止する。
+  - `PREVIEW_SETTINGS` … 実際に効いている [A] の値
+  - `PREVIEW_ANALYSIS_DATASETS` … 解析対象データセット＋View 件数（0 件も残す）
+  - `PREVIEW_SOURCE_DATASETS` … ソースデータセット＋`ACCESSIBLE`/`SKIPPED_NO_ACCESS`（理由付き）
+  - `PREVIEW_TARGET_VIEWS` … 全フィルタ通過後の View 一覧
+- **書き込みゼロ**：レジストリの MERGE/UPDATE はもちろん、column usage テーブルの
+  自己修復 `CREATE TABLE IF NOT EXISTS` も preview では実行しない。
+- **停止のさせ方**（BigQuery に RETURN が無いための構造）：
+  - 出力は STEP 1 の「target_datasets・source_datasets・フィルタ済み View が出揃い、
+    まだ何も書いていない」地点に置く。
+  - STEP 1 の残り、STEP 2（既存 IF に `AND NOT preview_only`）、STEP 3〜PIPELINE SUMMARY を
+    `IF NOT preview_only THEN ... END IF;` でゲート。既存行は再インデントせず挿入のみ（差分最小）。
+  - `CREATE TEMP TABLE non_completed_udf_results` は**ゲートの外**に残す。最終の
+    FINAL OPERATIONAL RESULT の SELECT が最外ブロックの外にあり、テーブルが無いと落ちるため
+    （preview では 0 件が返る）。
+- **対象外**：生成テーブル（Scheduled Query / DAG）は一覧に出ない。列挙には STEP 2 の
+  JOBS 走査が必要で、preview でそのコストを払わないため。通知メッセージにも明記。
+- ドキュメントは `docs/OPERATION_GUIDE.md` §7。SQL のみ／エンジン不変。**BigQuery 未検証**。
+
+## 4.26 `{project_token}` が `source_project_filters` に効かない（SQLのみ）
+
+- **症状**：`source_project_filters` の `project_id` に `{project_token}` を書くと
+  `Invalid source project_id in source_project_filters`。
+- **原因**：置換ブロック（03 の 389-396 付近）が `repository_dataset` / `udf_dataset` /
+  table・UDF の prefix/suffix しか対象にしておらず、`source_project_filters` は**未対応**。
+  リテラルのまま STEP 1 の project_id 検証 ASSERT に到達し、`{` `}` が不正文字として弾かれる。
+  対象外だったのは `source_project_filters` が **STRUCT 配列**で、単純な `REPLACE` ではなく
+  配列の作り直しが必要だったため。
+- **対応**：`SET source_project_filters = ARRAY(SELECT AS STRUCT ... FROM UNNEST(...))` で
+  `project_id` と `dataset_include/exclude_patterns` を置換して再構築。併せて
+  `scheduled_query_service_accounts` / `dag_service_accounts` も置換対象に追加
+  （SA メールはプロジェクト ID を含むのが普通で、「一部の [A] だけ効く」状態は事故のもと）。
+- **併せて**：project_id の ASSERT メッセージに「未置換の `{project_token}` を疑え／
+  `project_token_pattern` が不一致だとトークンは空文字になる」旨を追記。
+  `preview_only` の `PREVIEW_SETTINGS` に `detected_project_id` と `project_token` を追加し、
+  実行前にトークン抽出の成否が見えるようにした。
+- SQL のみ／エンジン不変。**BigQuery 未検証**。
+
+## 4.27 column usage impact ビューの `line_text` から行頭インデントを除去（SQLのみ）
+
+- **要望**：`lnge_vw_t_column_usage_impact` の `line_text` の行頭インデントが邪魔。
+- **対応（ビュー側）**：両ブランチ（depth=1 / depth=impact_rank+1）で
+  `LTRIM(u.line_text) AS line_text` に変更し、`line_indent_width`
+  （`LENGTH(line_text) - LENGTH(LTRIM(line_text))`）を追加。
+  - **エンジン側ではなくビュー側**にしたのは、収集済みの行にも即座に効き、バンドル再デプロイも
+    03 の再解析も不要なため。
+  - `column_number` は**元の行における位置**のまま据え置き（definition_registry の
+    定義本文と突き合わせたときに整合する）。トリム後テキスト内の位置は
+    `column_number - line_indent_width`。
+- **併せて 01 に `recreate_views_only BOOL DEFAULT FALSE` を追加**：
+  01 のセクション 4 は `CREATE OR REPLACE TABLE` でテーブルを作り直す（＝データ消去）ため、
+  稼働中の環境ではビュー変更を取り込むために 01 を再実行できなかった＝**ビューを貼り直す
+  安全な手段が存在しなかった**。TRUE でセクション 4（テーブル DDL）・4b/5（renderer・UDF）・
+  6（スモークテスト）をスキップし、**新設のセクション 4a（ビュー）だけ**を再作成する。
+  ビュー DDL を別スクリプトに複製せずに済むのが要点。
+  setup summary は `views_only_run` を出力し、`smoke_test_status` は NULL になる。
+- **usage の SQL 本文も同ビューに追加**（`usage_definition_text` / `usage_definition_is_current`）。
+  両ブランチで definition_registry を **object キー（project/dataset/name/type）** で LEFT JOIN。
+  このキーは registry の MERGE キーそのもので **1 オブジェクト＝1 行**なので行の増殖が起きない
+  （`definition_hash` だけで結合すると、同一 SQL の別オブジェクトと多重マッチしうる）。
+  本文を返すのは `d.definition_hash = u.definition_hash` のときだけ：オブジェクトが再定義されると
+  registry の現在のテキストは**別の SQL** で `line_number` が合わなくなるため、
+  それらしい誤情報を返さず NULL にする。`usage_definition_is_current` が
+  TRUE=一致 / FALSE=再定義済み / NULL=registry 行なし を区別する。
+  ビューなので、選択しないクエリでは BigQuery が列を刈り取りコストはかからない。
+- **`column_number` の意味と `word_number` の追加**：`column_number` は Lexer の
+  `column_no`（`advanceCharacter` で 1 文字ごとに +1、改行で 1 にリセット）由来で、
+  **行頭インデントを含む文字位置**・**タブは 1 カラム**（タブストップ換算ではない）。
+  正確だが目視で数えるには不向きなため、`word_number`（参照が入っている空白区切り
+  ワードの 1 始まり番号。インデントの影響を受けない）と `word_text`（そのワード自体）
+  を追加。`a.col` の `col` や `f(col)` の `col` のように単語の途中から始まる参照は、
+  それを含むワード（`a.col` / `f(col)`）を返す＝人が行を見て探す単位に合わせている。
+  **ビュー内で `line_text` と `column_number` から計算**しているので既存行にも効く
+  （エンジンで語彙トークン番号を持たせる案は、再デプロイ＋再解析が必要で既存行に効かない）。
+  併せてビュー本体を CTE（`usage_words` → `usage_located`）に整理し、位置計算と registry
+  参照を 2 ブランチで共有（FORMAT プレースホルダも 12→8 に減）。
+- SQL のみ／エンジン不変。**BigQuery 未検証**。
+
+## 4.28 使用箇所つき SQL の HTML 描画（Looker Studio 用・SQLとツールのみ）
+
+- **要件**：column usage impact ビューの SQL を Looker Studio で「行番号つき・該当行
+  ハイライト・該当箇所ハイライト」で表示したい。
+- **前提調査**：別ブランチ `claude/looker-studio-ddl-diff-ddqsyd` の `looker_studio/` に
+  確立された方式がある。**自作 community visualization は公開 GCS バケットが必須**で
+  （Looker Studio がサーバー側で JS を取得するため、ドメイン限定 IAM だと 403）、
+  禁止環境では使えない。ギャラリー掲載の **Templated Record**（HTML カラムを描画する
+  汎用チャート）＋ **BigQuery の JS UDF で HTML を生成**、が推奨構成。
+- **実装**：
+  - レンダラ本体 `javascript/src/html/usage_sql_html.js`（純関数・テスト可能）
+  - `javascript/scripts/build_usage_html_udf.js` が 01 の**番兵ブロック**へ差し込み、
+    自己完結の UDF `lnge_fn_usage_sql_html` / `lnge_fn_usage_sql_css` を作る。
+    **エンジン バンドルとは無関係**（GCS 再デプロイ不要・sha256 不変）。
+  - `npm test` に `verify:usage-html-udf` を組み込み、01 のブロックが src と
+    ズレていたらビルドを失敗させる。BigQuery のインライン コード ブロブ上限 32KB も
+    ここで検査（現状 15KB）。
+  - ビューは末尾に `impact_rows` CTE を足し、最終 SELECT で
+    **分析関数 ARRAY_AGG（起点カラム × オブジェクト × 定義 で PARTITION）**により
+    関連箇所を全部集めて UDF に渡す。分析関数は WHERE の後に評価されるので、
+    レポートが起点で絞れば対象も絞られる。
+- **設計上の判断**：
+  - ハイライトは 1 箇所ではなく**関連する全箇所**（1 レコード表示の Templated Record 向け）
+  - 位置は `line:column:length` 文字列。`column_number` はインデントを含む文字位置なので
+    **タブを空白に展開してはならない**（位置がずれる）
+  - 経路違いの重複と範囲の重なりは **UDF 側で畳む**（分析関数では
+    `ARRAY_AGG(DISTINCT)` が使えないため）
+  - モードは `embed`（既定・自己完結）/ `class`（最小）/ `inline`
+  - 既定は**全文**。`contextLines` で窓にできる
+- テスト `test_v1_5_0_075`（class の markup が使う class が CSS に全部あることも固定）。
+  レポート作成者向けの説明は `docs/VIEW_COLUMN_USAGE_IMPACT.md` §6。
+- **命名は他の UDF と同一扱い**（初版はテーブル用 prefix/suffix ＋ リポジトリ
+  データセットに作っていたので修正）：
+  `bootstrap_udf_name_prefix || 'lnge_' || base || bootstrap_udf_name_suffix`
+  （marker 無し。`analyze_json` / `fingerprint_sql` / `render_dynamic_sql` と同じ）。
+  作成先も `bootstrap_udf_project_id` / `bootstrap_udf_dataset`。
+  よってビューからの呼び出しは 3 部構成（`project.udf_dataset.function`）。
+  関数名は `lnge_usage_sql_html` / `lnge_usage_sql_css`。
+- SQL とツールのみ／エンジン不変。**BigQuery 未検証**。
+
+## 4.29 `CREATE ... AS` 前置きの解析と、03 のストリップを消してはいけない理由
+
+- **見つかった不具合**：`CREATE ... AS WITH c AS (...) SELECT ...` で**系統が静かに消える**。
+  `#parseCommonTableExpressions` は先頭 Token が `WITH` のときしか CTE を解析しないため、
+  `CREATE` で始まると CTE が読まれず、ClauseParser が拾う深さ0の SELECT だけが残って
+  CTE 名が未知ソース化 → `COMPLETED_WITH_WARNINGS`（エラーにならない）。
+  CTE の無い `CREATE ... AS SELECT` は通っていたので気づかれていなかった。
+- **エンジン修正**：`#stripStatementPrefix` を追加。先頭が `CREATE` / `EXPORT` のとき、
+  **深さ0の最初の `AS`** の直後（SELECT / WITH / `(` で始まること）から本体として再解析。
+  深さ0の AS を境界にするので、列スキーマ・`PARTITION BY`・`CLUSTER BY`・`OPTIONS(...)`
+  がどう並んでも影響を受けない（いずれも括弧内か AS より前）。
+  **CREATE / EXPORT 限定なのが肝**で、これが無いと `WITH t AS (...)` の AS を境界と
+  誤認して CTE ごと捨てる。テスト `test_v1_5_0_076`。
+- **⚠ 03 の CTAS ストリップは削除できない**：`definition_text` は `sql_fingerprint` の
+  入力で、フィンガープリントはリテラルを `?` にする一方**テーブル識別子は残す**。
+  前置きを残すと宛先名が毎回変わる一時テーブルが別指紋になり、**ephemeral の集約
+  （§2）が壊れてレジストリが膨張する**。エンジンが前置きを解析できるようになっても、
+  ストリップの役目は解析ではなく指紋の安定化なので残す。03 の該当箇所にコメント済み。
+- **併せて 03 の正規表現を汎用化**：旧版は前置きの形を列挙しており
+  `PARTITION BY` / `CLUSTER BY`・列スキーマ・`CREATE TEMP TABLE` を取りこぼしていた
+  （＝それらは宛先名込みで指紋化され、集約が効いていなかった）。RE2 に先読みが無いため、
+  「最初の ` AS ` で直後が SELECT / WITH / `(` のもの」を境界にし本体をキャプチャして
+  書き戻す形にした。**該当オブジェクトは definition_hash が変わるので一度だけ再解析される。**
+- **未対応のまま**：`MERGE` / `UPDATE` / `DELETE` / `INSERT ... VALUES`。これらは
+  書き込み先との列対列マッピングという別概念が要るうえ、03 の収集条件
+  （`collected_statement_types`）にも入っていない。
+
+## 4.30 別名なし UNNEST の要素フィールドをドット付きで参照した形（GA4）
+
+- **症状**：DAG SQL の
+  `COALESCE((SELECT value.string_value FROM UNNEST(event_params) WHERE key='utm_campaign'), ...)`
+  で `LINEAGE_PARTIALLY_RESOLVED ... @scope N (EXPRESSION_SUBQUERY) [UNRESOLVED_SOURCE]`。
+- **切り分け**：**式サブクエリは無関係**。FROM 句に UNNEST を書いた同じ形でも再現する。
+  真の条件は「**別名なし UNNEST × ドット付き参照**」。
+- **原因**：ColumnResolver は 2 部構成の識別子を「修飾子.列名」と読むため、
+  `value.string_value` の `value` をソース別名とみなす。別名なし UNNEST は別名を持たないので
+  UNRESOLVED_SOURCE。単一部の `key` は**修飾なし**参照として既存の単一 UNNEST フォールバックが
+  拾い、別名付き `ep.value.string_value` は別名が解決するため、この形だけが取り残されていた。
+- **修正**：`physical_column_resolver.js` で、**修飾ありかつ UNRESOLVED_SOURCE** の参照を、
+  スコープ内の UNNEST が 1 つだけのとき UNNEST 解決へ委譲する（修飾子ごと要素内フィールド
+  パス扱い。`#resolveCorrelatedUnnestReference` は `reference_name` 全体をフィールドパスとして
+  扱うので追加の細工は不要）。`#resolveStructFieldPathReference` の**後**に置いているので、
+  物理のネスト STRUCT（`geo.region`）の優先順位は不変。UNNEST が複数あるスコープでは
+  決められないため従来どおり未解決のままにする（誤帰属を作らない）。
+- テスト `test_v1_5_0_077`。エンジン変更（要 GCS 再デプロイ）。
+
+## 4.31 テーブル別名を行値として使う形と、非予約 Keyword の明示 alias
+
+- **症状**：CTE 側の
+  `SELECT ARRAY_AGG(t ORDER BY aaa LIMIT 1)[OFFSET(0)].session_id FROM cte t`
+  が原因で、外側に `DERIVED_OUTPUT_COLUMN_NOT_FOUND` の警告が波及していた。
+- **本質は警告ではなく偽陰性**：`t` を列として解決しようとして失敗し、
+  **本来の依存（その行の列）が系統から丸ごと落ちていた**。`session_id` は ORDER BY キーの
+  `aaa` にしか依存せず、`session_id` を変更してもこのオブジェクトが影響先に出てこない。
+  物理表を直接参照する形では `PHYSICAL_COLUMN_NOT_FOUND`（ERROR）になっていた。
+- **修正**：ExpressionParser が後置フィールド名を Node に残し（`field_access_name`）、
+  ColumnResolver がそれを使って「スコープ内の表ソース別名に一致し、列として解決できない
+  識別子」を `別名.フィールド` の修飾あり参照へ落とす。結果、系統はその 1 列に正確に付く。
+  - **対象は PHYSICAL_TABLE / CTE / SUBQUERY のみ**。UNNEST の別名は行ではなく要素の値なので
+    除外する（外さないと `FROM d.t AS t, UNNEST(Col) AS Col` を誤認する。開発中に
+    `test_v1_5_0_065` が検出した）。
+  - **後置フィールドが無い行値（`ARRAY_AGG(t) AS xs`）は対象外のまま**。「行の全列」に
+    相当する参照を式の途中に差し込むと、SELECT 項目のワイルドカードを前提にした下流が
+    クラッシュした。`test_v1_5_0_078` で「少なくとも落ちない」ことだけ固定してある。
+- **併せて**：`SELECT x AS offset` が `SelectParser: invalid explicit alias` で解析失敗して
+  いた問題を修正。`offset` / `value` / `key` は BigQuery の予約語ではない。暗黙 alias は
+  §4.15（v1.5.0-058）で対応済みだったが、**明示 alias が IDENTIFIER 限定のまま**だった。
+  `#isAliasToken` を `#isColumnNameToken` に揃えた（明示 `AS` がある分、暗黙側より安全）。
+  真の予約語（`AS NULL` / `AS ROWS`）は従来どおり拒否、`CAST(x AS STRING)` は深さで区別。
+- テスト `test_v1_5_0_078`。エンジン変更（要 GCS 再デプロイ）。
+
+## 4.32 オブジェクト単位の依存関係ビュー `lnge_vw_t_object_dependency`（SQLのみ）
+
+- **要件**：テーブル／ビューだけの依存関係を持つビューが欲しい。カラム情報は
+  `ARRAY<STRUCT>` で畳み込む。**推移的依存**（`impact_rank` を持つ）、出力先は
+  **Looker Studio**（配列を読めないので文字列版も併設）、**EPHEMERAL / FAILED は除外**し
+  03 の `DECLARE` で解析対象にした範囲だけを載せる。
+- **元データの選択**：`lnge_vw_t_column_usage_impact` ではなく `lnge_t_impact` から作る。
+  - usage 表は「物理カラムまで解決できた参照」しか持たないので、カラムが解決できなかった
+    オブジェクト間の辺が落ちる。
+  - usage を join すると経路×利用箇所で行が増え、`ARRAY_AGG` が汚れる。
+  - `lnge_t_impact` は既に「経路 1 本 = 1 行」で、推移的到達がそのまま入っている。
+- **2 段階ロールアップ**：`ARRAY_AGG(DISTINCT <struct>)` は BigQuery で使えないため、
+  まず (オブジェクトペア × カラムペア) 粒度に集約してから、オブジェクトペア粒度で
+  `ARRAY_AGG` する。**この 1 段目が配列の重複排除そのもの**（経路違いの同一カラムペアが
+  何本あっても要素は 1 つ）。`impact_rank` は `MIN`（最短ホップ）、`max_impact_rank` も併設。
+- **rank は起点相対**（`vw_column_usage_impact` の `depth` と同じ）。impact は全 edge を
+  再帰の base case にするので**全ノードが origin になり得る**。同じ影響先でも起点が変われば
+  rank が変わる（`A → B → C` で、起点 A なら C は rank 2、起点 B なら C は rank 1）。
+  レポート側は必ず起点を 1 つ絞ってから rank を読むこと。
+- **除外の効き方**：端点が EPHEMERAL / 非アクティブ / 未 COMPLETED なら除外。ただし
+  **除外オブジェクトを「経由する」経路は残る**（impact は中間ノードを `dependency_path`
+  の中にしか持たないので、端点だけ落としても到達関係は生きる）。逆に、参照されるだけで
+  解析対象ではない上流（生のソース表）は registry に行が無いので **残し**、
+  `origin_is_analysis_target = FALSE` で印を付ける。落とすと「外から解析対象領域に入る辺」が
+  全部消えるため。
+- **registry join の fan-out 防止**：registry を (project, dataset, name) で 1 行に
+  集約してから LEFT JOIN する。`object_type` は join キーにしない（impact 側の型は
+  解析器が見た型で、registry の型と一致するとは限らない）。
+- **Looker Studio 対応**：`column_dependencies` / `shortest_object_path` の配列に対して
+  `column_dependencies_text` / `origin_columns_text` / `impacted_columns_text` /
+  `shortest_object_path_text` を併設。配列でデータソース作成に失敗する場合は
+  `SELECT * EXCEPT (...)` で外す。
+- **経路の畳み込み**：`dependency_path` の要素は `project.dataset.object.column`。
+  末尾のカラム部分を落とし、連続する同一オブジェクトを 1 ホップに畳んで
+  `shortest_object_path` にしている。
+- エンジン変更なし（バンドル・GCS 再デプロイ不要）。01 を `recreate_views_only = TRUE` で
+  流すだけで反映できる。レポート作成者向けのカラム定義書は
+  `docs/VIEW_OBJECT_DEPENDENCY.md`。
+
+## 4.33 レポート用ビューの static 化（03 STEP 4b・SQLのみ）
+
+- **動機**：2つのレポートビューは読むたびに impact 全体を集計し直す。さらに Looker Studio 側の
+  フィルタは `origin_full_name`（`CONCAT` の計算列）に当たるため、`lnge_t_impact` の
+  クラスタリングによるプルーニングも効かない。
+- **BigQuery の MATERIALIZED VIEW は使っていない**（そもそも使えない）：`ARRAY_AGG(... ORDER BY ...)` /
+  `STRING_AGG(DISTINCT ...)` / LEFT JOIN / 分析関数 / 相関 ARRAY サブクエリのいずれも
+  BigQuery のマテビューが受け付けない。よって通常テーブルへの `CREATE OR REPLACE TABLE ... AS
+  SELECT *`。
+- **命名**：ビュー名から `vw_` を落とす。
+  `lnge_vw_t_column_usage_impact` → `lnge_t_column_usage_impact`、
+  `lnge_vw_t_object_dependency` → `lnge_t_object_dependency`。
+- **正本はビュー**：`SELECT *` で作るので、01 でビューを直せば次回実行でテーブルのスキーマも
+  追従する（二重管理しない）。各行に `updated_at` を付与。
+- **再構築条件**：STEP 4 と同じ（`has_analysis_work OR orphan_direct_dep_deleted > 0`）＋
+  **テーブル未作成なら作る**。後者が無いと「ビューをデプロイした直後の、何も変わらない実行」で
+  テーブルが作られず、レポートの参照先が無い状態になる。`preview_only` では実行しない。
+- **失敗はパイプラインを止めない**：派生データであり、想定される原因は 01 が古くビューが
+  無いこと。`REFRESH_STATIC_REPORT_TABLES / FAILED` 行と対処ヒントを出すだけ。
+- **挙動差は1点だけ**：`usage_definition_html` のハイライトは
+  `ARRAY_AGG OVER (PARTITION BY 起点カラム, 利用オブジェクト, 定義)` で集める。分析関数は
+  WHERE の後に評価されるので、**ビュー経由ならレポートの追加フィルタにハイライトが追従**するが、
+  static テーブルでは作成時に確定する。パーティションキーに起点カラムと対象オブジェクトが
+  入っているため通常用途では同結果。追従が必要なレポートだけビューを読む。
+- **サイズ**：`usage_definition_text` / `usage_definition_html` はオブジェクトの SQL 全文を
+  行ごとに繰り返す（1行 = 起点カラム × 利用箇所 × 経路）。
+  `static_tables_include_usage_sql = FALSE` で static テーブルから外せる。
+
+## 4.34 STEP 3 のバッチ分割（UDF OOM・SQLのみ）
+
+- **症状**：`process_generated_tables = TRUE` で 03 を実行すると UDF out of memory。
+  `FALSE` にすると通る。
+- **原因はデータセット単位ループの盲点**：§4.21 のデータセット単位ループは
+  「1 反復 = 1 データセット = 1 UDF 呼び出し」だが、**ephemeral な生成テーブルは
+  全部が 1 つの合成データセット（`ephemeral_object_dataset_label` = 既定
+  `ephemeral_generated_sql`）に入る**。実データセットではないので、何百個あっても
+  1 反復に詰め込まれ、ループによる保護が効かない。
+- **実測**（`sql/maintenance/10_pending_analysis_workload.sql`）：
+
+  | dataset | 種別 | 個数 | SQL 合計 | 最大 |
+  |---|---|---|---|---|
+  | ephemeral | TABLE/DAG | 928 | 2,299,596 | 55,313 |
+  | datasetA | VIEW | 4 | 57,525 | 29,367 |
+  | datasetB | TABLE/DAG | 3 | 7,683 | 2,632 |
+  | datasetC | TABLE/DAG | 2 | 4,893 | 2,616 |
+
+  ephemeral が**総バイトの 97%・オブジェクト数の 99%**。`max` が合計の 2.4% しかない
+  ＝「巨大な単体」ではなく「多数の集中」なので、**分割で解決できる形**だと判断した。
+- **対処：ループ単位を (dataset, batch_no) に変更**。
+  - `changed_object_batches`（セッション一時表）が変更オブジェクトごとに batch_no を付ける。
+    `GREATEST(DIV(自分より前の累積バイト, @max_sql_bytes), DIV(データセット内の連番, @max_objects))`。
+  - **排他的プレフィックスで切る**のが要点。予算を超える単体オブジェクトは単独バッチになり、
+    隣を巻き込まない。両項が単調増加なのでバッチは連続区間になる（**番号は飛ぶ**ので
+    `analysis_batches` の DISTINCT を回す）。
+  - **基準はバイト量**。§4.19/4.20 の**行数**チャンクは「大オブジェクトが偏ると行数を絞っても
+    OOM」で撤去された経緯があるため、同じ失敗を繰り返さない。`analysis_batch_max_objects`
+    は「極小オブジェクトが大量」の逆ケース用の二次上限。
+  - discovery 先行パスと解析ループは**同じ `analysis_batches` を読む**（バッチ定義の二重管理なし）。
+    `all_changed_with_discovery` に `batch_no` を持たせて読み戻す。
+  - `changed_definitions_to_analyze` は registry への再クエリではなく
+    `changed_object_batches` の素読みになった（反復ごとのレジストリ参照が 1 本減る）。
+- **既定値の根拠が弱いことは自覚しておく**：この環境で通ることが分かっているバッチは
+  「4 オブジェクト / 57KB」（View のみ）だけ。200000 バイト / 200 個は**観測された失敗より
+  十分小さい値を置いただけ**で、上限の実測ではない。初回成功後に
+  `ANALYSIS_BATCHES` 行の `largest_batch_bytes` を見て調整する前提。
+- **これは主に初回だけの負荷**：`is_changed` は解析成功で FALSE に落ちるので、
+  初回の 60 日分を通しきれば以降は新規フィンガープリント分だけの小さなバッチになる。
+- エンジン変更なし。**BigQuery 未検証**。
+
+## 4.22 本ドキュメントと実装の乖離（重要）
+
+`docs/SESSION_HANDOFF.md` の §1〜§4.20 は **1.5.0-032 の途中まで**しか追随していない。
+その後 CHANGELOG に追記された変更（テスト `test_v1_5_0_061`〜`073` に対応）は本書に
+節が無い。**経緯を追うときは `CHANGELOG.md` の冒頭から読むのが正**（本書は
+「なぜそう決めたか」の補助資料と割り切る）。§4.20 以降で入っている主なもの：
+
+- §4.21 のデータセット単位ループ＋メタデータ走査の絞り込み＋無変更時スキップ（SQL）
+- `script_variables` オプション（親スクリプトの `DECLARE` 変数を子ジョブ SQL の解析に渡す）
+  … `test_v1_5_0_067`
+- 位置パラメータ `?` の PARAMETER トークン化 … `test_v1_5_0_066`
+- `UNNEST` 配列引数の可視範囲を先行ソースへ限定（誤 AMBIGUOUS 解消）… `test_v1_5_0_065`
+- 相関 UNNEST の非修飾配列引数の解決 … `test_v1_5_0_063`
+- HAVING EXISTS 内の相関 UNNEST が外側集約エイリアスを指す形 … `test_v1_5_0_062`
+- 消えた一時テーブル参照を ERROR ではなく WARNING にする判定 … `test_v1_5_0_064`
+- FROM 位置の `EXTERNAL_QUERY` / TVF を不透明ソースとして解析 … `test_v1_5_0_068`
+- `column_usages` エクスポート追加（全句の解決済み物理カラム参照を1参照=1行で出力）
+  … `test_v1_5_0_069`
+- FROM サブクエリが `WITH` / セット演算で始まる形 … `test_v1_5_0_070`
+- 式パーサのエラーに位置情報を付与 … `test_v1_5_0_071`
+- 無型 STRUCT のフィールド別名 … `test_v1_5_0_072`
+- CTE の後ろの括弧付きメインQuery … `test_v1_5_0_073`（本セッション）
+- 括弧付き branch が自身のセット演算/CTE を含む形 … `test_v1_5_0_074`（本セッション）
+- 定義ソース種別フィルタ `analysis_include_generation_types`（§4.23・本セッション、SQLのみ）
+- ソースデータセットのアクセス事前チェック（§4.24・本セッション、SQLのみ）
+- 03 実行前の対象確認 `preview_only`（§4.25・本セッション、SQLのみ）
+- `{project_token}` を `source_project_filters` / SA 配列へ拡張（§4.26・本セッション、SQLのみ）
+- column usage impact ビューの `line_text` トリム＋01 の `recreate_views_only`（§4.27・本セッション、SQLのみ）
+- 使用箇所つき SQL の HTML 描画 UDF（§4.28・本セッション、SQLとツールのみ）
+- SQL 追加：`sql/maintenance/08_view_last_access.sql`、
+  `sql/maintenance/09_unanalyzed_object_definitions.sql`、
+  `definition_registry` の `labels` 列（§4.12）
+
+## 4.35 ephemeral SQL の近似重複の測定（SQLのみ・エンジン未変更）
+
+- **背景**：ephemeral（§4.32 の合成データセットに入る一時／ローテーション出力）が
+  928 個・2.3M 文字あり、STEP 3 の所要時間のほぼ全部を占める。運用側の情報として
+  「これらは別システムが毎日流す**パラメータ違いの同じ SQL**がほとんど」。
+- **ただし既に重複排除は入っている**：ephemeral の同一性は `sql_fingerprint`
+  （`fingerprintSqlForBigQuery`）で判定していて、これは**文字列・数値リテラル**、コメント、
+  空白、大小文字、バッククォートを正規化する。つまり「リテラルだけが違う毎日の実行」は
+  **すでに 1 オブジェクトに畳まれている**。928 個生き残っているなら、違いはリテラルでは**ない**。
+- **最有力の仮説は識別子内の数字**：`events_20260101` と `events_20260102` は
+  トークナイザから見れば 1 個の IDENTIFIER なので、指紋はそのまま保持する。
+  日付サフィックス付きテーブル名・パーティション id・連番がここに該当する。
+- **測定**：`sql/maintenance/12_ephemeral_sql_similarity.sql`（読み取り専用）。
+  レジストリは**既に指紋ベースで一意**なので `COUNT(*)` がそのまま基準値になる。
+  これを「指紋がやっている正規化を生テキストで再現し、さらに数字列を `#` に畳む」キーで
+  GROUP BY すると、**数字を畳むことで追加で得られる圧縮だけ**が分離できる。
+  指紋側の正規化を敢えて再現するのは、再現しないと「数字と空白の両方が違う 2 件」が
+  ここで同居してしまい**過小評価になる**ため。
+  - レポート 1：`objects_now` / `groups_after` / `objects_removable`、および
+    `lossless_` / `lossy_` / `unknown_removable` の内訳。
+  - レポート 2：グループ一覧と `distinct_source_sets`（`lnge_t_direct_dependency` から算出。
+    1 = 畳んでもロスレス、>1 = **エッジを捨てる**、0 = 未解析なので判断材料なし）。
+  - レポート 3：上位グループをメンバーごとに並べて出力。**何が違うのかを目で見る**ため。
+- **実測（min_digit_run = 1、2026-10-05）**：
+
+  | 列 | 値 |
+  |---|---|
+  | `objects_now` | 4,814 |
+  | `groups_after` | 1,420 |
+  | `objects_removable` | 3,394（70%） |
+  | `lossless_removable` | 561 |
+  | `lossy_removable` | **63**（removable の 1.9%） |
+  | `unknown_removable` | 2,770 |
+  | `sql_bytes_now` → `sql_bytes_after` | 13,891,890 → 2,655,350（**81% 減**） |
+
+  STEP 3 の所要時間は SQL バイト量にほぼ比例するので、効くのは最後の行。
+  根拠のあるグループ（561+63）のうちロスは 10%。`unknown` が 2,770 と大きいのは
+  ephemeral の大半が未解析のまま滞留している（OOM スキップ分を含む）ことの裏返しで、
+  畳めばその滞留も 1,420 件・2.66M 文字に縮む。
+- **しきい値がむしろ本題**：上記は 1 桁から畳んだ数字なので、`table_v1` と `table_v2`
+  のような「1 桁違いで本当に別物」も同一視している。日付サフィックスだけを狙うなら
+  **6 桁以上**に限定する方が安全。レポート 1 は `digit_run_thresholds`
+  （既定 1/2/4/6/8）の**各しきい値を 1 行ずつ**出すので、慎重側の代償が 1 回の実行で
+  見える。レポート 2・3 は `detail_min_digit_run`（既定 6）を使う。
+  生成 SQL はしきい値ごとに `g_<n>` CTE ＋ UNION ALL ブランチを組み立てる形にして、
+  **数字パターンを必ずリテラル**に保っている（列値の正規表現は避けた）。
+- **ハマりどころ**：CTE 名に `groups` は使えない。`GROUPS` は GoogleSQL の予約語
+  （ウィンドウフレームの `ROWS | RANGE | GROUPS`）で、
+  `Expected keyword SELECT but got keyword GROUPS` ＝ 外からは
+  `Invalid EXECUTE IMMEDIATE` として見える。
+- **対処方針（測定後に判断）**：ユーザーが挙げた「UDF で事前に弾いて解析対象外にする」より、
+  **指紋を数字に鈍感にして代表 1 件に畳む**方が良い。前者は系統ごと lineage を失うが、
+  後者は代表の lineage が残るので DAG が切れない。
+  ただし ephemeral は **`definition_hash` が指紋そのもの**なので、指紋を変えると
+  全 ephemeral が一度だけ再登録される（1 回分の再解析コスト）。加えてバンドル再ビルドと
+  GCS 再アップロード、採番つき回帰テストの追加が必要（CLAUDE.md §4）。
+  `distinct_source_sets > 1` のグループが多い場合は、畳む前にそのグループを個別に見る。
+
+## 4.36 指紋を「識別子内の長い数字列」に鈍感にする（エンジン変更）
+
+- **しきい値ごとの実測**（`12_ephemeral_sql_similarity.sql` レポート 1、
+  `objects_now = 4,814` / `sql_bytes_now = 13,891,890`）：
+
+  | min_digit_run | groups_after | objects_removable | lossless | lossy | unknown | sql_bytes_after |
+  |---|---|---|---|---|---|---|
+  | 1 | 1,420 | 3,394 | 561 | 63 | 2,770 | 2,655,350（19%） |
+  | 2 | 1,573 | 3,241 | 501 | 58 | 2,682 | 3,115,939（22%） |
+  | 4 | 2,021 | 2,793 | 377 | 58 | 2,358 | 4,193,092（30%） |
+  | 6 | 2,021 | 2,793 | 377 | 58 | 2,358 | 4,193,092（30%） |
+  | 8 | 4,135 | 679 | 0 | 58 | 621 | 12,560,828（90%） |
+
+- **ここで一度誤った判断をした**：4 と 6 が完全一致したことを「6 は平らな領域の中＝
+  頑健」と読み、6 桁を採用してバンドルまで作った。しかし一致が示すのは
+  「効いている数字列が 6〜7 桁」というだけで、**それが日付である証拠ではない**。
+  ユーザー指摘（「商品コードは 6 桁数字-3 桁数字だったりする」）で再検証した。
+- **レポート 4（識別子内の数字列の棚卸し）で決着**：
+
+  | 桁 | occurrences | distinct | date_century | date_yy_mmdd | distinct_year_prefix |
+  |---|---|---|---|---|---|
+  | 1 | 169,508 | 10 | 0 | 0 | 10 |
+  | 2 | 39,565 | 47 | 0 | 0 | 47 |
+  | 6 | 2,906 | **1,507** | **0** | **0** | **1** |
+  | 8 | 30 | 3 | 30 | 0 | 1 |
+  | 9 | 289 | 7 | 0 | 0 | 2 |
+  | 20 | 2,047 | **1,783** | 0 | 0 | **1** |
+
+  - **6 桁は日付ではない**。西暦 4 桁形（date_century）だけでなく、2 桁年形
+    （date_yy_mmdd）も **0 件**。ランダムな 6 桁でも 2 桁年形には約 4%（60 件前後）
+    偶然該当するはずなので、0 件は「月日の位置に月日が入っていない」＝完全なコード
+    体系であることを意味する。さらに 1,507 種類**すべてが同じ 2 桁で始まる**
+    （distinct_year_prefix = 1）＝固定プレフィックス付きのコード。**畳まない**。
+  - **20 桁は 1,783 種類／2,047 occurrences でほぼオブジェクト固有**＝回っている ID。
+    こちらも全種類が同じ 2 桁始まり＝タイムスタンプ／連番。**畳む対象**。
+  - 9 桁は 7 種類しかなく回っていない。8 桁は 30 件で無視できる。
+  - よって「日付形で畳む」案も不要（8 桁 30 件しか該当しない）。
+- **採用**：`FINGERPRINT_MIN_IDENTIFIER_DIGIT_RUN = 10`。
+  `fingerprintSqlForBigQuery` が IDENTIFIER / BACKTICK_IDENTIFIER に限り 10 桁以上の
+  数字列を `#` に畳む。KEYWORD や演算子には触れない。NUMBER リテラルは従来どおり `?`。
+- **期待効果はレポート 1 の 8 の行とほぼ同じ**（9 桁・8 桁の寄与は小さいので 10 ≒ 8）。
+  **679 件・13.89M → 12.56M（約 10% 減）**。6 桁を畳んだときの 70% 減は
+  **取れない**（取ってはいけない）。残りの重さは別の手段（バッチ化・滞留の解消）で扱う。
+- **影響範囲は ephemeral の同一性だけ**。03 は永続 destination を**宛先名**で
+  PARTITION しており、指紋は ELSE 側（ephemeral）のキーにしか使っていない
+  （`latest_generated_table_definitions` の QUALIFY）。代表 1 件は**実際の SQL 本文**で
+  解析されるので lineage が粗くなるわけではない。
+- **一回性コスト**：ephemeral は `definition_hash` が指紋そのものなので、新バンドル
+  適用後の初回実行で全 ephemeral が一度だけ再登録される。旧指紋のオブジェクトは既存の
+  ephemeral age-out UPDATE で落ちる。
+- 回帰テスト `test_v1_5_0_079`（20 桁・10 桁は畳む／9 桁・8 桁日付・6 桁コード・`_v1`
+  `_v2` は畳まない／構造差は従来どおり別指紋／文中の 2 個目以降の数字列も畳む）。
+- **デプロイ**：バンドル再ビルド済み（`sha256 = 25afe1d0…`、`478961` bytes、
+  `release_manifest.json` 更新済み）。GCS の `lineage_udf_bundle.js` を差し替えるだけ。
+- **教訓**：集計値（レポート 1）は「どれだけ畳めるか」しか答えない。「畳んでよいか」は
+  **値そのものを見る**（レポート 4）まで判断できない。最初に 6 を推したのはこの区別を
+  飛ばしたため。
+- **ここから先の高速化は指紋の話ではない**。ephemeral の約 4,000 件は 6 桁コードごとに
+  **本当に別の SQL** なので、件数自体は減らない。残る打ち手は (a) 未解析の滞留
+  （`09_unanalyzed_object_definitions.sql` / `10_pending_analysis_workload.sql` で実測）
+  の一度きりの消化、(b) 1 回の実行時間を縛る `analysis_max_batches_per_run`（未実装）、
+  (c) ephemeral の解析頻度を日次から落とす、のいずれか。
+
+## 4.37 ephemeral は「滞留」ではなく「毎日作り直し」だった（測定）
+
+- **レポート 6（指紋の出現日数ヒストグラム、job registry・14 日）**：
+
+  | active_days | fingerprints | % |
+  |---|---|---|
+  | 1 | **13,488** | **91.5** |
+  | 2 | 88 | 0.6 |
+  | 3 | 108 | 0.7 |
+  | 4 | 127 | 0.9 |
+  | 5 | 166 | 1.1 |
+  | 6 | 545 | 3.7 |
+  | 7 | 29 | 0.2 |
+  | 8 | 185 | 1.3 |
+
+  8 日出続ける指紋も 185 件あるので**履歴が薄いわけではない**。その中で 91.5% が
+  1 日限り＝**ephemeral の指紋は毎日作り直されている**。
+- **これで「滞留を消化すれば定常は軽い」という読みは否定された**。レポート 5 の
+  「10/5 に新規 3,880 件」はバックフィルではなく日々の発生。is_changed を消化しても
+  翌日また同量が来る。
+- **矛盾点**：毎日変わっている何かは **10 桁以上の数字列では説明できない**
+  （10 桁ルールで畳めるのは 4,814 件中 679 件）。候補は 2 つ。
+  1. **6 桁が商品コードではなく日次の実行 ID／連番**。「日付形ではない・全値が同じ
+     2 桁で始まる」という §4.36 の観測は、連番の実行 ID でも同じように成り立つ。
+     これなら 6 桁を畳むのは安全かつ必須で、レポート 1 の 70% 減が取れる。
+  2. 数字でない部分（UUID・16 進のラン ID）が毎日変わっている。数字を畳んでも効かない。
+- **区別する方法＝値の再出現**（レポート 8、`10_pending_analysis_workload.sql`）：
+  商品コードは**再利用される**ので同じ値が複数日に出る。実行 ID は**使い捨て**なので
+  各値が 1 日しか出ない。`pct_one_day` が 100 近ければ実行 ID。
+- 注意：値は job 履歴の日数より多くの日に出られない。レポート 7 の `jobs_collected` が
+  薄い日ばかりなら、全部が実行 ID に見えてしまう。
+
+## 4.38 しきい値を 6 に下げる（判断の経緯つき）
+
+- **レポート 8（値の再出現、job 履歴 8 日分）**：
+
+  | 桁 | 種類 | 1日だけ | pct_one_day | avg_days_seen |
+  |---|---|---|---|---|
+  | 1 | 10 | 0 | 0% | 7.30 |
+  | 2 | 61 | 0 | 0% | 6.82 |
+  | **6** | **3,026** | **3,026** | **100%** | **1.00** |
+  | 8 | 6 | 6 | 100% | 1.00 |
+  | 9 | 7 | 0 | 0% | 8.00 |
+  | 18 | 1,076 | 1,076 | 100% | 1.00 |
+  | 19 | 2,378 | 2,378 | 100% | 1.00 |
+  | 20 | 5,118 | 5,118 | 100% | 1.00 |
+
+- **レポート 7（日別）**：8 日分・1 日 2 万件超の job があり履歴は十分。定常は
+  **distinct 2,300 指紋／日・うち新規 1,200〜1,350**（10/5 が小さいのは収集途中）。
+- **ここでも一度誤った**：「1 日しか出ない ＝ 使い捨ての実行 ID」と断定したが、
+  ユーザー指摘のとおり**毎日違う商品コードを処理するジョブでも各値は 1 日しか出ない**。
+  再出現は「再利用されるか」しか判定できず、「畳んでよいか」は別問題。
+- **畳んでよいかを決めるのは位置**：数字が `FROM` / `JOIN` の参照先に入っていれば
+  コードごとに別テーブルを読んでいるので、畳むとエッジを捨てる。入っていなければ
+  参照関係は変わらないので安全。これを測るのが
+  `12_ephemeral_sql_similarity.sql` レポート 5（FROM/JOIN 直後の識別子に
+  `min_digit_run` 桁以上の数字があるか）。CTE 名も参照先として数えるので**危険側に
+  過大評価**する作りにしてある。
+- **決定（利用者判断）**：「シリアル ID が異なるケースもロジックは同じなので畳みたい」
+  → **しきい値 6 を採用**。受け入れるコストは「参照元名に 6 桁以上の数字がある場合、
+  代表 1 件の lineage だけが残る」こと。実測では `lossy` はしきい値 6 でも 8 でも 58 件で
+  変わらない（判明している範囲では影響は小さい）。
+- **期待効果**（レポート 1 の `min_digit_run = 6` の行）：
+  **4,814 → 2,021 件、SQL 13,891,890 → 4,193,092 文字（70% 減）**。
+  日次の新規指紋（1,200〜1,350／日）も同様の比率で減るはず。
+- 回帰テスト `test_v1_5_0_079` を 6 桁基準に更新（6 桁・8 桁・10 桁・20 桁は畳む／
+  1・2・5 桁は畳まない）。バンドル `sha256 = eecd0bc8…`、`478961` bytes。
+
+## 4.39 1 回の実行を縛る `analysis_max_batches_per_run`（SQLのみ）
+
+- **動機**：バッチ予算（`analysis_batch_max_sql_bytes` / `_max_objects`）は
+  「1 バッチの大きさ」を決めるだけで、**バッチの本数＝実行時間**は縛れない。
+  長時間 SQL が許容されない環境で、初回 lookback（例：14 日）のシードを一度に
+  流すのは筋が悪い。**小さくするのではなく、分割して複数回で流す**ための knob。
+- **既定 0 ＝ 無制限**。通常の日次運用では 1〜2 バッチなので設定不要。
+- **やり残しは触らないだけ**。`is_changed` は「自分のバッチが解析成功したとき」にしか
+  クリアされないので、対象外になったオブジェクトは pending のまま残り、**次回実行が
+  続きから**処理する。03 を繰り返すだけで滞留が等分に減る。
+  失敗扱いにも診断行にもしない（リソースエラーのスキップとはここが違う）。
+- **cap は両ループが読む共通リスト（`analysis_batches`）に掛ける**。
+  discovery 先行パスと解析ループのどちらか片方に掛けると「この実行がどのバッチを
+  カバーしたか」が食い違うため。取り出し順は (dataset, batch_no) 固定なので、
+  繰り返し実行しても**安定した順序で前進**する。
+- **可視化**：`ANALYSIS_BATCHES` 行に `batches_available` /
+  `batches_deferred_to_next_run`、run summary に `batches_deferred_to_next_run`。
+  進捗は run summary の `remaining_changed_object_count` を見る。
+
+## 4.40 非アクティブから復活したオブジェクトが再解析されない（バグ修正）
+
+- **発見の経緯**：「週次 SQL は翌週また新規扱いになるのか？」という質問の検証中。
+- **実際の挙動**（週次の ephemeral の例）：
+  1. 月曜：`fp_<hash>` として登録・解析・エッジ公開
+  2. 木曜：age-out（`incremental_lookback_days = 3` に出現なし）→ `is_active = FALSE` /
+     `is_changed = FALSE` / `analysis_status = 'INACTIVE_FINGERPRINT_NOT_SEEN'`。
+     同時に STEP 3 冒頭の孤児削除（`03:2069`）が **direct_dependency と診断行を DELETE**
+  3. 翌週月曜：job 再実行 → MERGE が同じ `fp_<hash>` 行にマッチ。指紋＝hash が同じなので
+     `is_changed = (FALSE OR hash差分なし)` ＝ **FALSE のまま**、`is_active` だけ TRUE
+  → **再解析されないが、エッジは消えたまま**。SQL 本文が変わるまで
+    「active なのに lineage 空」が続く。再解析コストが増える話ではなく**データ欠損**。
+- **修正**：両方の registry MERGE（View 用・生成テーブル用）の `is_changed` に
+  `OR target.is_active = FALSE` を追加。条件が「ephemeral かどうか」ではなく
+  **「非アクティブだったか」**なのが要点で、孤児削除は非アクティブな定義すべての行を
+  消すため、drop → 再作成された View や永続テーブルにも同じ穴があった。
+- **副次的な結論**：「同じ指紋が既にあればスキップ」は**元から成立していた**ので、
+  そこに速度の伸びしろは無い。週次 SQL を継続的に lineage に載せたいなら
+  `incremental_lookback_days` を 8 以上にする（STEP 2 の JOBS 走査は増える）。
+
+## 4.41 バッチをデータセットまたぎで作れるようにする（`analysis_batch_group_datasets`）
+
+- **症状**：ephemeral が終わった後、**View がほとんど無い通常データセット**の処理で
+  STEP 3 が延々と繰り返される。
+- **原因はバッチ 1 本あたりの固定費**。ループ本体（`03:2599`〜）には
+  `EXECUTE IMMEDIATE` 41 個＋`CREATE OR REPLACE TEMP TABLE` 19 個＝**約 60 ジョブ**が
+  あり、起動コストは中身の件数に依存しない。バッチ単位が `(dataset, batch_no)` だと
+  **変更 View が 1 本のデータセットでも 60 ジョブ**を払う。58 データセットなら
+  それだけで約 3,500 ステートメント。
+- **データセットで分ける必然性はもう無い**。ループ変数の用途は進捗表示とバッチの
+  行選択だけ（`03:2399` / `2674`）。「1 データセット＝1 UDF 呼び出し」でメモリを抑える
+  設計は、バイト／件数予算に役目を引き継いでいる。
+- **対処**：`batch_group` 列を導入。`analysis_batch_group_datasets = TRUE`（既定）なら
+  `''`＝全体で 1 グループになり、**予算だけでバッチが切られる**。FALSE で従来の
+  データセット単位に戻る。`changed_object_batches` と `all_changed_with_discovery` の
+  両方に持たせ、discovery 先行パスと解析ループのバッチ所属が一致するようにしてある。
+  グループ内の並びは dataset 優先なので、1 バッチがまたぐデータセット数は最小限。
+- **FALSE に戻すケース**：またぎバッチだと参照ソーステーブルが増え、UDF の
+  メタデータ payload が膨らむ。予算が縛るのは SQL 本文であってメタデータではないので、
+  OOM が出るならデータセット単位に戻す（リソースエラーのスキップ機構は効くが、
+  失敗の単位が小さい方が被害が小さい）。
+
+## 4.42 `incremental_lookback_days` を 3 → 8（ephemeral の保持期間でもある）
+
+- **この値は JOBS の収集期間であると同時に、ephemeral の保持期間**。指紋がこの窓の中で
+  再出現し続ける限り active、出なくなると age-out で `is_active = FALSE` ＋
+  依存行の削除（§4.40）。つまり**「どの周期の SQL を lineage に載せるか」がこの 1 つの値で決まる**。
+  - 3 → 日次のみ。**週次は毎週 age-out → 再登場で毎週再解析**、かつ週の大半は lineage が無い
+  - 8 → 日次＋週次。窓から出ないので**解析は生涯 1 回**、lineage は常時存在（採用）
+  - 32 → 月次まで。アクティブ件数は約 4 倍
+- **伸ばしても「1 件ずつ SQL を見て hash を作る」処理は増えない**（利用者からの懸念）。
+  - 指紋 UDF は `WHERE sql_fingerprint IS NULL` ガードで **job_id あたり生涯 1 回**
+  - job_registry の MERGE キーは `(job_project, job_id)` なので、収集済みの日を再収集しても
+    **UPDATE されるだけ**で指紋は再計算されない
+  - スキップ判定自体は `QUALIFY ROW_NUMBER() OVER (PARTITION BY 'FP:'||sql_fingerprint)` ＝
+    **格納済みの列を使う集合演算**
+  - 増えるのは JOBS スキャン（パーティション刈り込みあり）と MERGE の書き戻し行数で、
+    どれも集合演算 1 本。**STEP 3（1 バッチ約 60 ジョブ）は増えない**どころか、
+    週次の再解析が消えるぶん減る
+- **「古いのを残す」案は却下**：解析回数は生涯 1 回で済むが、実測の到着レート
+  （新規 1,200〜1,350 指紋/日）だと**1 年で約 45 万オブジェクト**まで膨らみ、
+  STEP 3 ではなく **STEP 4（impact 再構築）と static テーブルが際限なく重くなる**。
+- **対処済み**：job_registry の MERGE が matched 行の全列（`query_text` /
+  `definition_text` 込み）を無条件に書き戻していた問題は `WHEN MATCHED AND (...)` で
+  **差分のある行だけ更新**するようにした（8 日窓で毎回 20 万行の無駄書きが消える）。
+  BigQuery の完了済み job は不変で、lookback は意図的に重複するので、matched 行の
+  ほとんどは完全に同一。実際に変わるのは「RUNNING 中に収集して後で完了した行
+  （`end_time`）」と「エンジン更新で抽出結果が変わった行（`definition_hash` など）」だけ。
+  比較に `query_text` / `definition_text` を**入れない**のが要点で、入れると MERGE が
+  両側のテキスト列を**読む**ことになり、削ったはずのコストが読み取りで戻る。
+  `definition_hash` がその代理になる。`labels` は ARRAY<STRUCT> で等価比較できないので
+  JSON 文字列で比較。`collected_at` / `updated_at` は毎回変わるので比較対象から除外
+  （結果として `collected_at` は「最後に変化した時刻」の意味になるが、読む箇所は無い）。
+  definition_registry 側の 2 つの MERGE は対象外（オブジェクト単位で行数が桁違いに
+  少なく、`last_seen_at` は毎回進む必要がある）。
+
+## 4.43 バッチ SQL のレンダリングをループ外に出す（STEP 3）
+
+- **実測の起点**：discovery 先行パス（1 周目）が **約 44 バッチで 17 分**。1 バッチ 7
+  ステートメントなので **1 ステートメント約 3 秒**＝ほぼ BigQuery のジョブ起動コスト。
+  **つまり STEP 3 の所要時間はステートメント「数」でほぼ決まる**。
+- **発見**：解析ループの normal path 約 42 ステートメントのうち **10 個が
+  `EXECUTE IMMEDIATE render_call_sql INTO rendered_sql`**＝ SQL 文字列を組み立てるだけの
+  クエリジョブだった。しかもテンプレートは**ループ内で一切変化しない**（バッチは temp
+  テーブルとクエリパラメータ経由で渡っており、SQL テキストには入らない。`ds_row` を
+  参照しているのは進捗表示と非動的 SQL だけ）。毎バッチ同じ文字列を作り直していた。
+- **対処**：10 本をループ外で 1 回だけレンダリングし、名前付き変数
+  （`batch_sql_dependency_insert` / `batch_sql_registry_completed` など）に保持。
+  discovery ループの 1 本も同様。**normal path は約 42 → 約 32 ステートメント**。
+  変数は STEP 3 スコープで DECLARE（ループ本体と EXCEPTION 節の両方から読むため）。
+- **EXCEPTION 節の 6 本は意図的に残した**。バッチが失敗したときしか実行されないので
+  normal path のコストにならない。
+- **効果の見積り**：3 秒/ステートメント換算で 1 バッチ 126 秒 → 96 秒。
+  バッチ予算を 600,000 / 600 に上げて 15 バッチにすれば、
+  解析ループは約 24 分（従来の 200,000 / 44 バッチ・レンダリング込みだと約 92 分）。
+
+## 4.44 STEP 3 高速化の実測（2.5 時間 → 11 分 22 秒）
+
+- **計測条件**：01 で初期化後、`initial = incremental = 8` 日、同一リージョン・同一母集団。
+- **経過**：
+
+  | 版 | 条件 | 実測 |
+  |---|---|---|
+  | 指紋 6 桁ルール前 | 200,000 / 200、データセット単位バッチ | 44 バッチで**完走せず**（2.5 時間見込みで中断） |
+  | 指紋 ＋ またぎバッチ ＋ ホイスト | 1,200,000 / 1,200 | **16 分**（11 バッチ） |
+  | ＋ 5 本/バッチ削減 ＋ 予算 3M | 3,000,000 / 3,000 | **11 分 22 秒** |
+
+- **効いた順**（実測の寄与）：
+  1. **バッチ予算の引き上げ**（200k → 3M）。1 バッチ約 35 ステートメント × 1 本あたり
+     約 1.9 秒（大半はジョブ起動待ち）なので、バッチ数がそのまま時間になる。
+  2. **指紋の 6 桁ルール**。ephemeral の解析対象そのものを減らした（SQL 量 70% 減）。
+  3. **データセットまたぎバッチ**。View 1 本のデータセット 58 個が 1 バッチに。
+  4. **レンダリングのホイスト・マーカー削減・INSERT 統合**（11 本/バッチ削減）。
+- **実測で分かったコスト構造**（`11_analysis_batch_diagnostics.sql` レポート 3/4/5）：
+  - 514 ステートメントの自身の実行時間合計は 407 秒。実行全体は 960 秒。
+    **差の約 550 秒はステートメント間のギャップ**（1 本あたり約 1.1 秒）。
+  - 単独最大は `batch_udf_results`（UDF 解析本体）で 11 回・137 秒。**これは処理量に
+    比例するのでバッチを大きくしても総量は減らない＝床**。
+  - それ以外（publish の DELETE/INSERT、registry UPDATE、staging）は 1 本 0.1〜0.7 秒で、
+    **本数が時間**。
+- **残っている手**（合計 1.8 分程度）：A = DELETE+INSERT の MERGE 化、
+  B = オブジェクト集合 temp のインライン化、C = publish 前バックアップの廃止。
+  いずれも「本数を減らす」系で、A と C はデータ整合性に触れる。
+
+## 4.45 圧縮余地の打ち止め確認（レポート 6 の実測）
+
+- **リテラル個数を畳む案は否定された**。`12_ephemeral_sql_similarity.sql` レポート 6 を
+  指紋変更後のレジストリに対して実行した結果：
+
+  | rule | objects_removable |
+  |---|---|
+  | 1 `digits >= 6`（現行エンジン） | **0** |
+  | 2 `digits >= 6 + リテラル個数` | **0** |
+  | 3 `digits >= 1` | 1,049 |
+  | 4 `digits >= 1 + リテラル個数` | 1,049 |
+
+  - rule 1 が 0 ＝ **エンジンのルールが完全に適用済み**（正常な状態）。
+  - rule 2 も 0 ＝ `IN ('A','B','C')` の個数違いのような形は**存在しない**。仮説は外れ。
+  - rule 3/4 の 1,049 は **1〜2 桁の数字**を畳んだ場合の値。ただし §4.38 のレポート 8 で
+    1 桁（10 種類・avg 7.30 日）・2 桁（61 種類・avg 6.82 日）は**毎日再出現**＝名前の
+    一部と判明しており、畳むと `table_v1` と `table_v2` を同一視する。**採らない**。
+- **よって解析対象の圧縮は打ち止め**。UDF の 135 秒という床は下げられない。
+- **11 分 22 秒が実質的な下限**。これ以上は運用側の調整（lookback の短縮、
+  static テーブルの構築頻度、ephemeral の解析頻度）か、A/B/C のステートメント削減
+  （合計 1 分弱）しか残っていない。
+- **ただし 11:22 は初期ロード（01 直後・全件解析）の数字**。**変更が無い状態での
+  再実行は 4 分**で、こちらが日次運用の実コスト。差の約 7 分が「全 ephemeral の
+  初回解析」だったことの裏返しで、設計どおり（解析成功で `is_changed = FALSE` に
+  なり、翌日以降は新規指紋の分だけ）。4 分の内訳はほぼ固定費で、
+  STEP 1/2 の JOBS 収集（8 日分）と STEP 4 / 4b の再構築が主。
+
+## 4.46 「畳み残し」は畳んではいけないものだった（調査完了）
+
+- **発端**：日次の新規 SQL 数が多く感じる。dbt は同じパターンを毎日流しているだけなので、
+  新しいパターンが追加されない限り新規は発生しないはず、という利用者の見立て。
+- **調査**：`sql/maintenance/13_sql_pattern_drift.sql` を作成。
+  - レポート 0〜3：job 側から「どのモデルの SQL が毎日変わっているか」を特定する経路
+    （宛先テーブル、または `group_by_label_key` でジョブラベル）。
+  - **レポート 4〜6：レジストリ側から直接問う**。「今日増えた分のうち、数字を全部消すと
+    既存と一致するもの（＝畳む余地）は何件か」。
+- **実測**（昨日 01 から作り直したリージョン）：
+
+  | | 値 |
+  |---|---|
+  | `arrived` | 2,880（`first_seen_days = 1` なので日次ではなく**母集団全体**） |
+  | **`with_twin`** | **1,439（50%）** |
+  | `without_twin` | 1,441（50%） |
+
+  → 余地は**存在する**（半分が「数字違いだけ」）。
+- **差分の位置**：`common_prefix` が全ペアで **15**。16 文字目＝**SQL の 1 行目**で分岐して
+  おり、末尾の WHERE 句や日付サフィックスではない。
+- **差分の正体（利用者がレポート 5 で確認）**：**CTE 名の中の 1 桁**。`lvl_1` と `lvl_2`。
+  階層レベルが違えば読むデータも違うので、**畳めば片方の lineage が消える**。**別扱いが必要**。
+- **これは下限 6 桁が正しく働いた実例**。§4.38 のレポート 8 で 1 桁は「10 種類・平均 7.3 日
+  出現＝名前の一部」と出ていたが、その「名前」の正体がこれだった。1 桁から畳んでいれば
+  階層レベルを混ぜていた。
+- **よって畳み込みの余地は無い**。残っている 1,439 ペアは「畳めるのに畳んでいない」のでは
+  なく「**畳んではいけないもの**」。日次の新規発生は正当な処理対象であり、
+  §4.45 の「11 分 22 秒（初期）／4 分（日次）が下限」という結論は変わらない。
+- **なお、当初の問い「日次の新規が多い」はまだ測れていない**。`first_seen_days = 1`
+  （昨日の作り直し）なので、レポート 4 の 2,880 は母集団であって日次ではない。
+  日次の発生数は job 側から測る必要があり、
+  `10_pending_analysis_workload.sql` のレポート 7 の `new_fingerprints` がそれ
+  （`creation_time` ベースなので作り直しの影響を受けない）。指紋変更前は 1,200〜1,350/日。
+- **教訓（3 度目）**：集計値（1,439 件の余地がある）は「畳める」ことを意味しない。
+  値の意味を知っているのは利用者であり、`with_twin` は**候補の件数**であって
+  **やるべき件数ではない**。レポートもその建て付け（「measures the opportunity,
+  it does not propose taking it」）にしてある。
+
+## 4.47 日次の新規指紋が 1,250 → 1 桁台になった（最終確認）
+
+- **当初の問い**：「dbt は同じパターンを毎日流しているだけなので、新しいパターンが
+  追加されない限り新規 SQL は発生しないはず。なのに新規が多く感じる」。
+- **job 側の実測**（`10_pending_analysis_workload.sql` レポート 7、`creation_time` ベース
+  なのでリポジトリ作り直しの影響を受けない）：
+
+  | 日 | distinct_fingerprints | new_fingerprints |
+  |---|---|---|
+  | 9/27 | 1,702 | 1,702（窓の初日＝全件が新規扱い） |
+  | 9/28 | 2,621 | 1,053（立ち上がり） |
+  | 9/29 | 2,601 | 115 |
+  | 9/30 | 2,606 | 76 |
+  | 10/1 | 2,642 | 121 |
+  | 10/2 | 1,961 | **22** |
+  | 10/3 | 1,904 | **3** |
+  | 10/4 | 1,836 | **8** |
+  | 10/5 | 2,624 | **7** |
+  | 10/6 | 234 | **0**（収集途中） |
+
+- **毎日 2,600 種類が流れていて、新規は 3〜22 件**。指紋変更前の 1,200〜1,350 件/日から
+  **98% 以上の削減**。利用者の認識どおりの状態になった。
+- 9/29〜10/1 の 76〜121 件は**週次ジョブが窓の中で初めて現れた分**とみるのが自然で、
+  1 週間を過ぎた 10/2 以降が真の定常状態。
+- **これで日次 4 分の内訳も説明がつく**：STEP 3 が解析するのは 1 日数件〜20 件なので、
+  4 分のほぼ全部が固定費（JOBS 収集・impact 再構築・static テーブル）。
+- **この一連の調査の結論**：ephemeral の重複は指紋の 6 桁ルールで解消済み。残っている
+  「数字違い」（§4.46 の `lvl_1`/`lvl_2`）は畳んではいけないもの。**打ち止め**。
+
+## 5. 現在地（2026-08-22 更新）
+
+- 配置: ツリー直下の `lineage/`（リポジトリ名・ブランチ名は環境固有なので記載しない）。
+- バージョン表記: `1.5.0-032`（`release_manifest.json` / `package.json`）。
+  テスト番号は版数と独立で、現在 `test_v1_5_0_079` まで。
+- バンドル: `sha256 = eecd0bc82f1d2ca01db8b4f727ee0c35510057afefe086a6f9ef33b92d655ba4`、`478961` bytes
+  （`release_manifest.json` と一致）。
+- テスト: `test:release` **61 本 PASS** / ゴールデン（`test_v1_5_0_003`）48 ケース PASS。
+- 03 STEP 3：**データセット単位ループ ＋ 周回内フルバッチ**（§4.21）。チャンク分割は撤去済み。
+- **BigQuery 実機検証は未完了**。§4.5 のバッチ化、§4.6、§4.21 の各変更はいずれも未検証。
+  本番前に staging 実行と旧実装との出力 diff（direct_dependency / lineage_diagnostic /
+  definition_registry）で確認すること。
+- **デプロイ時**：エンジンを変更しているため GCS の `lineage_udf_bundle.js` を再アップロード。
 
 ## 6. Claude Code で続きを進める手順
 

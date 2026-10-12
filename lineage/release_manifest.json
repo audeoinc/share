@@ -2,12 +2,12 @@
   "schema_version": 1,
   "release_name": "lineage_v1.5.0-032",
   "version": "1.5.0-032",
-  "generated_at": "2026-08-10T02:01:37.000Z",
+  "generated_at": "2026-10-08T01:47:35.726Z",
   "source_of_truth": "javascript/src",
   "bundle": {
     "path": "javascript/dist/lineage_udf_bundle.js",
-    "sha256": "ad18b4bc5a015e9d831900d5ca6edfde4043b3c5ccb9fc71a6940e0e24ad00cf",
-    "size_bytes": 461888
+    "sha256": "eecd0bc82f1d2ca01db8b4f727ee0c35510057afefe086a6f9ef33b92d655ba4",
+    "size_bytes": 478961
   },
   "tests": {
     "executed": true,
@@ -25,5 +25,5 @@
     "gcs_zip_uri": null,
     "status": "NOT_REQUESTED"
   },
-  "duration_ms": 0
+  "duration_ms": 5322
 }

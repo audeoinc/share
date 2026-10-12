@@ -436,6 +436,37 @@ function discoverPhysicalSourcesForBigQuery(sqlText) {
   };
 }
 
+/*
+ * 識別子の中の数字列をフィンガープリント上だけ「#」に畳む際の最小桁数。
+ *
+ * 一時Table名に埋め込まれた実行IDや連番（tmp_123456 / tmp_01234567890123456789）は
+ * トークナイザから見れば1個のIDENTIFIERなので、リテラル正規化では畳まれず、実行の
+ * たびに別オブジェクトとして登録されてしまう。一方で短い数字列は「別物の識別子」で
+ * あることが多く、畳むと誤って同一視する。
+ *
+ * 桁数は実測で決めた。判定基準は桁数そのものではなく「その値が使い捨てか」で、
+ * 使い捨ての実行IDは各値が1日しか現れず、本物の識別子は毎日現れる
+ * （`sql/maintenance/10_pending_analysis_workload.sql` レポート8、job履歴8日分）：
+ *   20桁 5,118種類 / 1日限り100% / 平均1.00日  使い捨て
+ *   19桁 2,378種類 / 1日限り100% / 平均1.00日  使い捨て
+ *   18桁 1,076種類 / 1日限り100% / 平均1.00日  使い捨て
+ *    9桁     7種類 / 1日限り  0% / 平均8.00日  毎日出る＝安定した識別子
+ *    8桁     6種類 / 1日限り100% / 平均1.00日  使い捨て
+ *    6桁 3,026種類 / 1日限り100% / 平均1.00日  使い捨て
+ *    2桁    61種類 / 1日限り  0% / 平均6.82日  安定
+ *    1桁    10種類 / 1日限り  0% / 平均7.30日  安定
+ * 6桁以上はすべて使い捨て側に寄るので6を下限とする。唯一の例外が9桁（7種類だけ
+ * 毎日出る）で、これは巻き込まれる。ただし畳んだグループのソース集合の相違
+ * （12_ephemeral_sql_similarity.sql レポート1の lossy）はしきい値6でも8でも58件で
+ * 同じ＝6まで下げてもエッジの取りこぼしは増えない、という実測がある。
+ *
+ * 影響範囲はephemeral（一時／ローテーション出力）のオブジェクト同一性だけ。03は
+ * 永続destinationを宛先名でPARTITIONしており、フィンガープリントは
+ * ELSE側（ephemeral）のキーにしか使っていない。畳んだ結果の代表1件は実際のSQL本文で
+ * 解析されるので、lineage自体が粗くなるわけではない。
+ */
+const FINGERPRINT_MIN_IDENTIFIER_DIGIT_RUN = 6;
+
 /**
  * SQLの構造フィンガープリント（正準化文字列）を返す。
  *
@@ -446,6 +477,10 @@ function discoverPhysicalSourcesForBigQuery(sqlText) {
  * 演算子・記号は保持するため、構造（参照Table/列や結合・句の形）が異なるSQLは
  * 別のフィンガープリントになる。DATE '...' のような型付きリテラルは後続の
  * STRING が「?」になるため DATE ? へ畳まれる。
+ *
+ * さらにIDENTIFIER / BACKTICK_IDENTIFIER に限り、FINGERPRINT_MIN_IDENTIFIER_DIGIT_RUN
+ * 桁以上の数字列を「#」へ畳む。回転する一時Table名（実行ID・連番の埋め込み）の
+ * 生成SQLを1件にまとめるため。短い数字列は別物の識別子でありうるので畳まない。
  *
  * 呼び出し側（03パイプライン）はこの文字列を TO_HEX(SHA256(...)) でハッシュ化し、
  * statement_type = 'SELECT' のジョブをフィンガープリント単位でまとめ、最新の
@@ -482,6 +517,24 @@ function fingerprintSqlForBigQuery(sqlText) {
       const normalized = token.normalized_token != null
         ? token.normalized_token
         : token.token;
+
+      /*
+       * 日付サフィックス等の長い数字列は識別子の中にあるのでNUMBERにならない。
+       * 識別子トークンに限って畳む（KEYWORDや演算子には触れない）。正規表現は
+       * ここで生成する。モジュール定数にするとlastIndexを共有するため。
+       */
+      if (
+        token.token_type === "IDENTIFIER" ||
+        token.token_type === "BACKTICK_IDENTIFIER"
+      ) {
+        parts.push(
+          normalized.replace(
+            new RegExp("[0-9]{" + FINGERPRINT_MIN_IDENTIFIER_DIGIT_RUN + ",}", "g"),
+            "#"
+          )
+        );
+        continue;
+      }
 
       parts.push(normalized);
     }
