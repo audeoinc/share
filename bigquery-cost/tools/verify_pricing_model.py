@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""pricing_model / not_billed_reason の分類ロジックを再現して検証する。
+
+pipeline/01 の解決ビュー（bqc_vw_t_job_cost_resolved）の CASE 式と 1:1 で対応。
+どちらかを直したら両方直すこと。
+
+判定に使う予約IDは effective_reservation_id（自分に無ければ子から引き継いだもの）。
+親 SCRIPT は reservation_id を持たないのに課金対象バイトは子の合計を持つため、
+素の reservation_id で判定すると予約環境の親が軒並み ON_DEMAND になる。
+
+  python3 tools/verify_pricing_model.py
+"""
+import re
+import sys
+
+METADATA_PREFIX = re.compile(
+    r"^(CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|SET|DECLARE|CALL|ASSERT|EXPORT|LOAD)")
+
+
+def classify(effective_reservation_id, total_bytes_billed, error_result, cache_hit, statement_type,
+             total_slot_ms=None):
+    """pipeline/02 の CASE 式をそのまま再現する。
+
+    メーターごとに「実際に消費したか」を見るのが要点。予約が付いているだけで
+    CAPACITY にすると、割り当て直後に落ちてスロットを使っていないジョブまで
+    課金対象に見えてしまう。
+    """
+    billed = total_bytes_billed or 0
+    slots = total_slot_ms or 0
+
+    on_capacity_meter = effective_reservation_id is not None and slots > 0
+    on_demand_meter = effective_reservation_id is None and billed > 0
+
+    if on_capacity_meter:
+        pricing_model = "CAPACITY"
+    elif on_demand_meter:
+        pricing_model = "ON_DEMAND"
+    else:
+        pricing_model = "NOT_BILLED"
+
+    if on_capacity_meter or on_demand_meter:
+        reason = None
+    elif error_result is not None:
+        reason = "ERROR"
+    elif cache_hit:
+        reason = "CACHE_HIT"
+    elif METADATA_PREFIX.match(statement_type or ""):
+        reason = "METADATA_ONLY"
+    else:
+        reason = "NO_DATA_SCANNED"
+
+    return pricing_model, reason
+
+
+CASES = [
+    # (説明, reservation_id, bytes_billed, error, cache_hit, statement_type, slot_ms, 期待)
+    ("通常のオンデマンドクエリ",
+     None, 10 * 1024**2, None, False, "SELECT", 5_000, ("ON_DEMAND", None)),
+    ("予約ありのクエリ",
+     "res-1", 10 * 1024**2, None, False, "SELECT", 5_000, ("CAPACITY", None)),
+    ("予約あり・バイト0でもスロットを使っていればキャパシティ",
+     "res-1", 0, None, False, "SELECT", 5_000, ("CAPACITY", None)),
+    ("予約あり・実行前に落ちてスロット未消費 → 課金なし",
+     "res-1", None, "notFound", False, "CREATE_TABLE_AS_SELECT", None,
+     ("NOT_BILLED", "ERROR")),
+    ("予約あり・実行中に落ちてスロット消費 → キャパシティ（実際に枠を食っている）",
+     "res-1", 0, "resourcesExceeded", False, "SELECT", 900_000, ("CAPACITY", None)),
+    ("オンデマンド・実行中に落ちてスロット消費 → 課金なし（メーターはバイト）",
+     None, 0, "resourcesExceeded", False, "SELECT", 900_000, ("NOT_BILLED", "ERROR")),
+    # 親 SCRIPT は reservation_id を持たないが、バイト・スロットは子の合計を持つ。
+    # 子から引き継いだ予約IDで判定しないと、予約環境の親が ON_DEMAND になる。
+    ("親SCRIPT・子の予約を引き継ぐ → キャパシティ",
+     "res-1", 50 * 1024**3, None, False, "SCRIPT", 900_000, ("CAPACITY", None)),
+    ("親SCRIPT・オンデマンド環境ならそのままオンデマンド",
+     None, 50 * 1024**3, None, False, "SCRIPT", 900_000, ("ON_DEMAND", None)),
+    ("親SCRIPT・子が1つも走らず落ちた（引き継ぐ予約も無い）",
+     None, None, "notFound", False, "SCRIPT", None, ("NOT_BILLED", "ERROR")),
+    ("失敗したクエリは課金されない",
+     None, 0, "resourcesExceeded", False, "SELECT", 0, ("NOT_BILLED", "ERROR")),
+    ("失敗が最優先（キャッシュフラグより前）",
+     None, 0, "invalidQuery", True, "SELECT", 0, ("NOT_BILLED", "ERROR")),
+    ("キャッシュヒットは課金されない",
+     None, 0, None, True, "SELECT", 0, ("NOT_BILLED", "CACHE_HIT")),
+    ("データを伴わない CREATE",
+     None, 0, None, False, "CREATE_VIEW", 0, ("NOT_BILLED", "METADATA_ONLY")),
+    ("ALTER も同様",
+     None, 0, None, False, "ALTER_TABLE", 0, ("NOT_BILLED", "METADATA_ONLY")),
+    ("DROP も同様",
+     None, 0, None, False, "DROP_TABLE", 0, ("NOT_BILLED", "METADATA_ONLY")),
+    ("データを伴う CTAS はバイトが出るのでオンデマンド",
+     None, 5 * 1024**3, None, False, "CREATE_TABLE_AS_SELECT", 50_000, ("ON_DEMAND", None)),
+    ("0バイトのクエリ（SELECT 1 など）",
+     None, 0, None, False, "SELECT", 0, ("NOT_BILLED", "NO_DATA_SCANNED")),
+    ("statement_type が NULL でも落ちない",
+     None, 0, None, False, None, 0, ("NOT_BILLED", "NO_DATA_SCANNED")),
+    ("バイトが NULL の種別（LOAD など）は無料扱い",
+     None, None, None, False, "LOAD_DATA", None, ("NOT_BILLED", "METADATA_ONLY")),
+]
+
+
+def main() -> int:
+    failures = 0
+    for label, reservation, billed, error, cache, stmt, slots, expected in CASES:
+        actual = classify(reservation, billed, error, cache, stmt, slots)
+        if actual != expected:
+            failures += 1
+            print(f"FAIL  {label}\n        expected {expected} / actual {actual}")
+        else:
+            print(f"ok    {label}  -> {actual[0]}"
+                  + (f" / {actual[1]}" if actual[1] else ""))
+
+    # 不変条件: 課金額が 0 になるのは NOT_BILLED のときだけ、という対応が崩れていないか。
+    for label, reservation, billed, error, cache, stmt, slots, _ in CASES:
+        model, reason = classify(reservation, billed, error, cache, stmt, slots)
+        if model == "ON_DEMAND" and (billed or 0) == 0:
+            failures += 1
+            print(f"FAIL  不変条件: ON_DEMAND なのに課金対象バイトが 0 ({label})")
+        if model == "CAPACITY" and (slots or 0) == 0:
+            failures += 1
+            print(f"FAIL  不変条件: CAPACITY なのにスロット消費が 0 ({label})")
+        if model == "NOT_BILLED" and reason is None:
+            failures += 1
+            print(f"FAIL  不変条件: NOT_BILLED なのに内訳が NULL ({label})")
+        if model != "NOT_BILLED" and reason is not None:
+            failures += 1
+            print(f"FAIL  不変条件: {model} なのに内訳が入っている ({label})")
+
+    print(f"\n{'すべて通過' if not failures else str(failures) + ' 件失敗'}")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,468 @@
+# BigQuery 実行SQLコストの可視化
+
+実行された SQL のコスト（`total_bytes_billed` と `total_slot_ms`）を
+`INFORMATION_SCHEMA.JOBS` から日次で集め、Looker Studio で
+「月単位で同じ SQL にいくらかかっているか」「新しくコストを発生させた SQL はどれか」を
+確認するための一式です。
+
+```
+bigquery-cost/
+├── pipeline/                       ← 本体。日次で回す3本
+│   ├── 01_setup_cost_environment.sql   データセット・UDF・3テーブル・ビューを作成（初回のみ）
+│   ├── 02_load_job_cost.sql            JOBS → bqc_t_job_cost の増分取り込み（日次）
+│   └── 03_refresh_reports.sql          集約・fingerprint次元の再構築、刈り取り、
+│                                       レポートテーブルの焼き直し（日次、02の後）
+├── looker/README.md                Looker Studio の接続手順とレポート構成
+├── tools/
+│   ├── normalize_reference.py      正規化ロジックの RE2 リファレンス実装＋自己テスト
+│   └── check_templates.py          埋め込み動的SQLの構文チェック
+└── adhoc/                          パイプラインとは独立した単発調査用クエリ
+    ├── 01_query_cost_by_job.sql        ジョブ別のクエリ費用（高い順）
+    ├── 02_daily_query_cost.sql         日次推移
+    ├── 03_cost_by_user.sql             実行者別
+    ├── 04_storage_by_table.sql         テーブル別ストレージ費用
+    ├── 05_billing_export_bigquery.sql  請求エクスポートから BQ の実額
+    ├── 06_billing_export_all_services.sql  サービス別の実額
+    ├── 07_dry_run.sh                   実行前のスキャン量チェック
+    ├── 08_inspect_job_hierarchy.sql    親子ジョブ構造の実測（設計確認用）
+    ├── 09_top_slot_consumers_of_day.sql   ある1日のスロット消費 上位10（原文SQL＋所属スクリプト）
+    └── 10_month_over_month_by_fingerprint.sql  今月 vs 先月（正規化単位、追加/削除/増減＋親）
+```
+
+## クイックスタート
+
+> **データセットは事前に用意しておいてください。** `01` はデータセットを作りません
+> （作成はインフラチームへの依頼が必要な運用のため）。`repository_dataset` /
+> `udf_dataset` が指定リージョンに存在しない場合、`01` は作成せずエラーで停止します。
+> 黙って作ってしまうと、データセット名を打ち間違えたときに想定外の場所へ一式ができ
+> あがり、しかもエラーにならないので気づけません。
+>
+> **取り込みは対象時間帯の入れ直しです。** `02` は読み直す時間帯をいったん削除して
+から `INSERT` します。以前は `MERGE` の `INSERT` のみで、既存行が二度と更新されず、
+正規化 UDF や取り込み条件を変えると `01` を破壊的に流し直すしかありませんでした。
+いまは `incremental_lookback_days`（既定 3 日）ぶんが毎回作り直されるので、
+**ロジック変更は次の `02` で直近ぶんに自動反映されます**（それより古い期間まで
+作り直したいときだけ `01` からのやり直しが要ります）。
+
+> `DELETE` と `INSERT` は別の文なので、その間で落ちるとその時間帯が一時的に欠けます。
+> `02` は再実行で必ず復旧し、`03` は「`job_cost` にあって `daily_cost` に無い日」まで
+> 遡る自己修復型なので、次の実行で自然に直ります。
+>
+> 取り込みの加工ロジックは `bqc_vw_t_job_cost_source`（`01` が作る、
+> `INFORMATION_SCHEMA.JOBS` の上のビュー）に寄せてあります。`02` は期間を切り出して
+> `INSERT` するだけです。ビューは実行時の値を受け取れないので、
+> `executor_label_key` / `normalizer_version` / リージョンは作成時に焼き込まれます
+> （変えたら `01` を流し直す）。
+>
+> **ウォーターマーク方式（`MAX(creation_time)` より新しいぶんだけ追加）は採っていません。**
+> `creation_time` は古いのに、スキャン時点でまだ `DONE` でないジョブが取り逃されて
+> 二度と拾えなくなるためです。しかも取り逃すのは長時間実行＝スロットを最も食う
+> ジョブに偏ります。固定幅の読み直しはその取りこぼしを毎回埋め直します。
+>
+> チャンク分割（`load_chunk_days`、既定 15 日）が効くのは**初回バックフィルだけ**です。
+> 日次は 3 日ぶんなのでループは 1 回しか回りません。
+
+**`01` は破壊的です。** 表を `CREATE OR REPLACE` で作り直すので、流し直すと
+> `bqc_t_job_cost` / `bqc_t_daily_cost` / `bqc_m_query_fingerprint` の中身は消えます。
+> スキーマ変更を確実に反映させるための意図的な挙動です。流したあとは必ず
+> `02` → `03` の順で流し直してください。`02` は表が空なら `initial_lookback_days`
+> 分を自動でバックフィルするので元の状態に戻せます（正本は JOBS 側なので、
+> 保持期間内であれば失われるものはありません）。
+> データセットだけは `CREATE SCHEMA IF NOT EXISTS` のままです。
+> `CREATE OR REPLACE SCHEMA` は同居している無関係なテーブルまで消してしまうためです。
+
+```bash
+# 1. 環境構築（初回のみ）。冒頭の SET @@location と [A] ブロックだけ確認する
+#    表と UDF を別データセットに置く場合は [A] の udf_dataset を 01/02 の両方で揃える
+bq query --project_id=your-project --use_legacy_sql=false < pipeline/01_setup_cost_environment.sql
+
+# 2. 取り込み。表が空なので初回は自動で 120 日バックフィルされる
+bq query --project_id=your-project --use_legacy_sql=false < pipeline/02_load_job_cost.sql
+
+# 3. 集約とディメンションの構築
+bq query --project_id=your-project --use_legacy_sql=false < pipeline/03_refresh_reports.sql
+```
+
+2 と 3 をこの順でスケジュールドクエリに登録すれば日次運用になります。
+Looker Studio の接続は [`looker/README.md`](looker/README.md) を参照してください。
+
+## データ構成
+
+```
+INFORMATION_SCHEMA.JOBS  （履歴 180 日）
+   │  02 が日次で増分取り込み。SCRIPT 親を除外して子jobだけを取る
+   ▼
+bqc_t_job_cost           job 粒度。親 SCRIPT と子文の両方。正規化SQL・fingerprint を付与
+   │
+bqc_vw_t_job_cost_resolved   親子関係の解決ビュー（job_role / is_cost_countable /
+   │                         root_job_id / statement_index）
+   │  03 が is_cost_countable の行だけを集約し、保持期間を超えた行を刈り取る
+   ▼
+bqc_t_daily_cost         日 × fingerprint × 実行者
+   │                     ＋ bqc_m_query_fingerprint（first_seen / プレビュー）
+   ▼
+bqc_vw_t_daily_cost_report   レポート定義の正本（ビュー）
+   │  03 が毎回 CREATE OR REPLACE TABLE で焼き直す
+   ▼
+bqc_t_daily_cost_report      ← Looker Studio のデータソースはこれ 1 本
+```
+
+レポートをビューのまま読ませると、開くたびに集約と JOIN が走り、フィルタが計算列
+（`is_first_seen_date` など）に当たるためクラスタプルーニングも効きません。中身は
+日次でしか変わらないので、`03` が静的テーブルへ焼いています。**列を足したいときは
+ビューを直してください。** 次回の `03` でテーブルのスキーマも追従します。
+テーブルには `snapshot_at`（焼いた時刻）が付くので、ダッシュボードの鮮度表示に使えます。
+
+### データセットの指定
+
+**どちらも事前に作成されている必要があります。**`01` は存在確認だけを行い、
+無ければエラーで停止します（作成はしません）。
+
+表・ビューを置く `repository_dataset` と、UDF を置く `udf_dataset` は
+**別々に指定できます**（既定は同じ値）。UDF だけ共有データセットに集約している
+運用に合わせるためです。別にする場合は **`01` と `02` の両方**で同じ値に揃えてください。
+食い違うと `02` が `Not found: Function` で落ちます。
+
+`01` と `02` の実行結果には解決後の完全修飾名（`normalize_udf` / `job_cost_table`）が
+出力されるので、意図した場所を見ているかはそこで確認できます。
+
+### 対象期間と保持期間
+
+**対象は `INFORMATION_SCHEMA.JOBS` が持っている範囲（最大 180 日）だけです。**
+それより古い履歴を積み増して保持することは目的にしていないので、`03` が
+`retention_days`（既定 180 日）を超えた行を 3 表から削除します。
+
+既定値が 180 なのは JOBS の履歴保持期間と同じだからです。つまり削除されるのは
+**JOBS 側でも既に消えている期間だけ**で、元データから作り直せる範囲は失われません。
+JOBS より長く持ちたくなったら `03` の `retention_days` を伸ばしてください
+（`enable_retention_pruning = FALSE` で刈り取り自体を止められますが、表は際限なく伸びます）。
+
+この方針の帰結として、**「新しくコストを発生させた SQL」は保持期間の中での新規**という
+意味になります。それ以前に動いていた SQL でも、保持期間内で初めて現れれば新規として出ます。
+
+## 主要な設計判断
+
+### SQL の正規化と fingerprint
+
+リテラルとコメントを除去した正規化SQLを作り、そのハッシュを識別子にします。
+
+| 列 | 中身 | 用途 |
+|---|---|---|
+| `raw_fingerprint` | 原文の MD5 | 完全一致の識別 |
+| `normalized_fingerprint` | `UPPER(正規化SQL)` の MD5 | **月次の同一SQL集計・新規SQL検出の主キー** |
+| `normalized_fingerprint_t` | 上記 + 参照テーブル一覧 の MD5 | 形もテーブルも同じときだけ一致させたい場合 |
+| `normalized_preview` | 正規化SQLの先頭100文字 | レポート表示 |
+| `normalized_from_preview` | 最初の `FROM` 以降100文字 | 先頭だけだと SELECT 句で終わって識別できないため |
+
+正規化ロジックは `pipeline/01` が作る UDF `bqc_normalize_sql` に実装されています。
+実装は `tools/normalize_reference.py` と 1:1 で対応しており、**そちらは BigQuery と
+同じ RE2 エンジンで 29 件の自己テストが通ります**。どちらかを直したら両方直してください。
+
+```bash
+python3 tools/normalize_reference.py           # 自己テスト
+echo "SELECT 1 FROM t WHERE x = 'a'" | python3 tools/normalize_reference.py -
+```
+
+**正規化の結果そのものを確かめたいとき**は、`bqc_t_daily_cost` と
+`bqc_m_query_fingerprint` の `normalized_query`（全文）を見てください。
+次元表のほうが fingerprint あたり1行なので実質の正本で、`daily_cost` 側の同名列は
+**開発中に1つの表だけで確かめられるようにした冗長なコピー**です。不要になったら
+`01` の daily_cost DDL とその列、`03` STEP 1 の該当行を落としてください。
+
+`daily_cost` には原文 SQL の fingerprint も入れていますが、粒度が違うので形を変えて
+います。1 つの `normalized_fingerprint` に対して原文の fingerprint は複数ありうる
+（リテラルが違うぶんだけ別物になる）ため、**粒度キーには入れていません**。入れると
+日 × リテラル違いで行が膨らみ、正規化した意味が無くなります。
+
+| 列 | 内容 |
+|---|---|
+| `sample_query` | 代表1件の**原文SQL**。正規化前と後を並べて見るための開発用 |
+| `sample_raw_fingerprint` | その代表1件の MD5。`job_cost.raw_fingerprint` で実ジョブに辿る手がかり |
+| `distinct_raw_fingerprint_count` | 畳み込まれた原文の異なり数。**大きいほど正規化が効いている指標** |
+
+`sample_query` と `sample_raw_fingerprint` は**必ず同じ行から**取っています。列ごとに
+`ANY_VALUE()` を書くと別々の行が選ばれて対応しなくなるため、`ARRAY_AGG(STRUCT(...)
+ORDER BY creation_time DESC LIMIT 1)` で代表行を1つに固定してから展開しています。
+
+**`sample_query` はレポートビューに流していません。** 原文SQLは PII を含みうるので、
+Looker Studio 側（`bqc_t_daily_cost_report`）には載せない判断です。必要なら `01` の
+レポートビューに `d.sample_query` を1行足すだけですが、BI の閲覧者全員に原文が
+見えるようになる点は意識してください。
+
+ロジックを変更したら `normalizer_version` を必ず上げてください。正規化結果が変われば
+同じ SQL でも別 fingerprint になるため、この列が無いと履歴の断絶を説明できません。
+
+### バッククォート識別子は既定で「残す」
+
+当初の方針ではバッククォートも `?` に置換する予定でしたが、既定を
+**「バッククォート記号だけ外して識別子は残す」**（`mask_backtick_identifiers = FALSE`）に
+しています。理由は 2 つです。
+
+1. テーブル名を潰すと `` `p.d.orders_big` `` と `` `p.d.tiny_master` `` が同一
+   fingerprint に融合します。「どの SQL が高いか」「新しくコストを出したのはどれか」は
+   このレポートの主目的そのものなので、識別力を落とすと成立しません。
+2. 置換の動機だった PII 対策は、識別子経由の PII を許容する方針が別途決まったため
+   （テーブル名・列名に PII が入りうる点は受容）、ここで潰す必要がなくなりました。
+
+テーブル名にも PII が入りうる環境に移す場合は、`pipeline/01` の
+`mask_backtick_identifiers` を `TRUE` にしてください。ただし上記1の副作用と、
+スモークテストの期待値の調整が必要です。
+
+### GA4 の日次シャードは畳み込む
+
+`events_20260101` のような `_YYYYMMDD` / `_YYYYMM` サフィックスは `_?` に畳みます。
+畳まないと GA4 のクエリが毎日別 fingerprint になり、月次集計が成立しません。
+GA プロパティID（`analytics_123456789`）は桁数が違うので影響を受けません。
+
+### 親子ジョブ（SCRIPT と子文）
+
+`bqc_t_job_cost` には **親 SCRIPT と子文の両方**が入っています。親はスクリプト全文・
+ラベル・全体の所要時間を持っていて、「このスケジュールドクエリ1本でいくら」という
+単位を出すのに要るためです。
+
+ただし実測の結果、**親 SCRIPT の `total_bytes_billed` / `total_slot_ms` は子の合計と
+一致します**（親は集計行）。そのまま両方を足すと二重計上になります。
+
+そこで `bqc_vw_t_job_cost_resolved` では、**コスト列を 1 本で持たず 2 系統に分けて**
+います。素の `slot_hours` / `tib_billed` などはビューから意図的に外してあります
+（原本の値が要るときは `bqc_t_job_cost` を直接見てください）。
+
+| 系統 | 列 | 値が入る行 | 意味 |
+|---|---|---|---|
+| root | `root_slot_hours` `root_tib_billed` `root_total_slot_ms` `root_total_bytes_billed` | `PARENT` と `STANDALONE` | 作業単位（スクリプト1本／単独クエリ1本）としての消費 |
+| statement | `statement_slot_hours` `statement_tib_billed` `statement_total_slot_ms` `statement_total_bytes_billed` | `CHILD` と `STANDALONE` | 実際に計算した文としての消費 |
+
+単独ジョブは両方に同じ値が入るので、次が常に成り立ちます。
+
+```
+SUM(root_slot_hours) = SUM(statement_slot_hours) = 総量
+```
+
+**どちらの列を合計しても総量は一致し、変わるのは粒度だけです。**
+取り込み窓の先頭や保持期間の刈り取りは時刻の途中で切れるため、親だけが落ちて子が
+残る「孤児」が端に必ず生じます。root 系は `parent_job_id IS NULL` ではなく
+**親の行がこの表に実在するか**で判定しているので、孤児は自分自身が作業単位の代表に
+なり、合計から抜け落ちません（`tools/verify_hierarchy_logic.py` で検証しています）。
+逆に子が全部消えて親だけ残った場合は root 側にのみ計上されます — 消費自体は実在する
+ので、そちらが正しい扱いです。 フィルタの掛け忘れで
+壊れないので、フィルタが個々のチャートに散らばる BI ツールから使うときに効きます。
+**誤りになるのは 2 つを足したときだけ**です。値の入らない側は 0 ではなく NULL に
+してあります（`SUM` は同じ結果になり、`AVG` は構造的なゼロで薄まらないため）。
+
+| 列 | 内容 |
+|---|---|
+| `job_role` | `PARENT`（子を持つ）/ `CHILD`（親を持つ）/ `STANDALONE` |
+| `is_cost_countable` | 葉の行か（＝statement 系に値が入る行）。`NOT has_child_jobs AND statement_type != 'SCRIPT'` |
+| `is_root_job` | 作業単位の代表行か（＝root 系に値が入る行）。`NOT has_parent_row` |
+| `has_parent_row` | 親の行がこの表に実在するか。孤児の検出に使う |
+| `root_job_id` | 作業単位のキー。子なら `parent_job_id`、それ以外は自分の `job_id` |
+| `statement_index` | 親の中での実行順。スクリプトのどの文が重いかを見る軸（親・単独は NULL） |
+| `root_statement_count` | その作業単位に属する子の本数 |
+| `root_composite_fingerprint` | **作業単位の識別子**。実際に流した文の並びのハッシュ |
+
+判定を `02` ではなくビューに置いているのは、`02` が `load_chunk_days` 日ずつに
+分けて JOBS をスキャンするためです。親が前のチャンク・子が次のチャンクに落ちると
+その時点では親子関係が見えません。表全体が見えるビューで判定すれば、チャンクの
+切れ目に影響されません。
+
+`is_cost_countable` を「**葉であること**」で定義しているのも意図的です。
+`statement_type != 'SCRIPT'` だけだと、子を持つ別種のジョブ（`CALL` など）が
+将来現れたときに素通りします。両方で挟んで安全側に倒しています。
+
+`bqc_t_daily_cost` は葉だけを集める表なので、`statement_*` 系だけを集約しています。
+そのため daily_cost 以降のコスト列は 1 本のままで、分ける必要がありません
+（親行がそもそも入らないので、二重計上の余地がない）。
+
+**`bqc_t_daily_cost` 以降には集計対象の行しか入りません。** つまり Looker Studio の
+利用者は親行に触れないので、二重計上のしようがありません。親を見るのは BigQuery 側で
+アドホックに掘るときだけ、という切り分けです。
+
+### スクリプトの識別に親の SQL 文を使わない
+
+親 SCRIPT の SQL 文そのものは、識別子として使えないことがあります。**実行する SQL を
+変数に持って `EXECUTE IMMEDIATE` する定型スクリプト**だと、中身は文字列リテラルなので
+正規化で `?` に潰れ、まったく別の処理が同じ fingerprint になります。
+
+```
+DECLARE target_sql STRING; SET target_sql = ?; EXECUTE IMMEDIATE target_sql;
+```
+
+これでは「どのスクリプトが高いか」も「新しく増えたスクリプトはどれか」も出せません。
+そこで `root_composite_fingerprint` を用意しています。**その作業単位が実際に流した文の
+並び（子の `normalized_fingerprint` を実行順に連結）のハッシュ**なので、テンプレートでも
+中身が違えば違う値になります。子を持たない単独ジョブは自分の fingerprint を使うため、
+全行で必ず非 NULL です。
+
+スクリプト単位で束ねるときは、親の `normalized_fingerprint` ではなく必ずこちらを
+使ってください。`adhoc/09` と `adhoc/10` はこの列で束ねています。
+
+> **紐付け自体は壊れていません。** `parent_job_id` はジョブ実行ごとに BigQuery が
+> 振る ID なので、どの子がどの親に属するかは常に正確です。テンプレートで壊れるのは
+> 「その親が何者か」という識別だけで、コストの数値も文単位の分析も影響を受けません。
+
+多段ネスト（親がさらに親を持つ）は実測で 0 件だったため、`root_job_id` は
+`parent_job_id` の 1 ホップで解決しています。将来ネストが現れた場合は再帰的な解決が
+必要になります。
+
+### 実行者の識別
+
+ジョブラベル `subsystemid` の値、無ければ `user_email` を `executor_id` にします。
+どちらから来たかを `executor_source`（`LABEL` / `USER_EMAIL`）に持たせているので、
+**LABEL の比率がそのままラベル付与のカバレッジ指標**になります。
+
+ラベルが子ジョブに継承されることは実測で確認済みです（2026-09）。継承されない環境に
+移植する場合は、`parent_job_id` で親 SCRIPT のラベルを引く join が必要になります。
+
+### 金額を格納しない
+
+単価はリージョンとエディションで変わるため、金額を格納すると単価改定のたびに
+過去データが実態と食い違います。`tib_billed`（TiB）と `slot_hours` を持たせ、
+金額は Looker Studio の計算フィールドで掛けてください（`looker/README.md` 参照）。
+
+### 課金メーターの切り分け
+
+`pricing_model` は「このジョブにどのメーターが当たるか」を表します。
+
+| 値 | 条件 | 意味 |
+|---|---|---|
+| `CAPACITY` | 予約あり **かつスロット消費 > 0** | 課金の基礎はスロット時間 |
+| `ON_DEMAND` | 予約なし **かつ課金対象バイト > 0** | 課金の基礎は課金対象バイト |
+| `NOT_BILLED` | 上記以外 | そのメーターで何も消費していない＝課金額 0 |
+
+判定に使う予約IDは、行そのものの `reservation_id` ではなく
+**`effective_reservation_id`（自分に無ければ子から引き継いだもの）**です。
+親 SCRIPT は `reservation_id` を持たない（予約は実際に実行する子に付く）のに、
+課金対象バイトとスロットは子の合計を持ちます。素の `reservation_id` で判定すると
+**予約環境の親スクリプトが軒並み `ON_DEMAND` になります**。
+
+このため分類は `02` ではなく**解決ビューで行っています**。親子が揃うのはビューだけで、
+`02` はチャンク分割スキャンなので親と子が別チャンクに落ちると引き継げません。
+`bqc_t_job_cost` に `pricing_model` 列は無く、ビュー以降にだけ存在します。
+
+**メーターごとに「実際に消費したか」を見ています。** 予約が付いているだけで
+`CAPACITY` にすると、予約に割り当てられた直後に落ちてスロットを 1ms も使っていない
+ジョブまで課金対象のように見えます。予約の課金メーターはスロット時間なので、
+スロット消費が 0 なら予約側にも何も足していません（オートスケールも誘発しません）。
+
+裏返しに、**オンデマンドで実行中に落ちてスロットを大量に焼いたジョブは `NOT_BILLED`**
+です。オンデマンドのメーターはバイトであってスロットではないためです。
+
+**`CAPACITY` と `ON_DEMAND` を1つの合計に混ぜないでください。**
+
+`NOT_BILLED` を分けているのは、失敗・キャッシュヒット・データを伴わない DDL などを
+オンデマンドに混ぜると、「オンデマンドのジョブ数」が実態より大きく出るためです。
+課金額はどれも 0 なので金額は狂いませんが、件数や比率を見るときに効きます。
+
+判定を**課金対象バイト数**で行っているのは、無料操作の種別を列挙する方式だと、
+分類から漏れた種別が黙って `ON_DEMAND` に混ざるからです。オンデマンドの課金額は
+「課金対象バイト × 単価」なので、バイトが 0 なら理由が何であれ課金額は 0 になります。
+
+> **`reservation_id IS NULL` は「オンデマンドで実行された」を意味しません。**
+> 予約に割り当てられる前に落ちたジョブ（構文エラーなど）も NULL になりえます。
+> ただし分類の結果は変わりません。そうしたジョブは課金対象バイトも 0 なので
+> `NOT_BILLED` に落ち、`ON_DEMAND` と判定されるのは**バイトが出ているとき＝確実に
+> 実行されたとき**だけだからです。この順序が `reservation_id` の曖昧さを吸収しています。
+
+内訳は `not_billed_reason` で分かります（`NOT_BILLED` 以外は NULL）。
+
+| 値 | 意味 |
+|---|---|
+| `ERROR` | 失敗したジョブ。リトライ嵐の検出に使える |
+| `CACHE_HIT` | キャッシュヒット。削減が効いている証拠 |
+| `METADATA_ONLY` | データを伴わない CREATE / ALTER / DROP など |
+| `NO_DATA_SCANNED` | 上記以外で 0 バイト（`SELECT 1` など） |
+
+判定の優先順位は上から順です（失敗していればまず `ERROR`）。分類は
+`tools/verify_pricing_model.py` で13ケース検証しています。
+
+## 既知の限界
+
+- **正規化は字句解析ではありません。** コメントを文字列より先に除去しているため、
+  文字列リテラルの中に `--` を含む稀なクエリでは fingerprint が本来より粗くなります
+  （コメント中のアポストロフィのほうが圧倒的に多く、逆順にすると害が大きいため）。
+  コスト額の集計そのものには影響しません。より厳密にしたい場合は、lineage の
+  `lnge_fingerprint_sql`（Lexer ベースの JS UDF）に差し替えられます。その場合も
+  `normalizer_version` を上げてください。
+- **`edition` 列は取っていません。** 環境によって存在しない可能性があるため、
+  オンデマンド／キャパシティの切り分けは `reservation_id` の有無で行っています。
+  自環境の JOBS に `edition` があるなら列を追加してください。
+- **`bqc_t_job_cost.query` に原文を保持しています。** PII を含みうるので、
+  不要になった時点でこの列だけ落としてください（fingerprint は残るので分析は継続できます）。
+- **単一リージョン運用です。** 別リージョンも見る場合は各スクリプト冒頭の
+  `SET @@location` を変えて再実行します。`job_region` 列で混在して蓄積できます。
+- **`retained_*` 列は保持期間内の合計**であって通算値ではありません。刈り取りが
+  走ると値は減ります。
+- 時刻はすべて **UTC** です。月次の境界を JST にしたい場合は、02 の `creation_date` を
+  `DATE(creation_time, 'Asia/Tokyo')` に変えてバックフィルし直してください。
+
+## 検証状況
+
+| 対象 | 状況 |
+|---|---|
+| 正規化ロジック | **RE2 実機で 29/29 パス**（`tools/normalize_reference.py`） |
+| 動的SQLの構文 / DECLARE の位置 / LIMIT が定数か / DDL と INSERT 列の整合 / INSERT ROW の列順 | **40/40 パス**（`tools/check_templates.py`、sqlglot bigquery。pipeline と adhoc の両方） |
+| 課金メーターの分類 | **13/13 パス**（`tools/verify_pricing_model.py`） |
+| 親子分類の不変条件 | **6/6 パス**（`tools/verify_hierarchy_logic.py`、`SUM(root)=SUM(statement)` を孤児込みで検証） |
+| BigQuery 実機での実行 | **未実施。** 本セッションに `bq` / `gcloud` と GCP 認証が無いため |
+
+検証ツールは Python の依存が2つあります。新しい環境では先に入れてください
+（`python3` に入らないことがあるので、通ったインタプリタで実行します）。
+
+```bash
+pip install google-re2 sqlglot
+cd bigquery-cost
+python3 tools/normalize_reference.py     # 正規化ロジック（RE2 実機）
+python3 tools/verify_hierarchy_logic.py  # 親子分類の不変条件（依存なし）
+python3 tools/verify_pricing_model.py    # 課金メーターの分類（依存なし）
+python3 tools/check_templates.py         # 動的SQLの構文・列順・LIMIT・DECLARE 位置
+```
+
+`pipeline/*.sql` は BigQuery スクリプト構文（`BEGIN` / `DECLARE` / `EXECUTE IMMEDIATE`）を
+使っているのでファイル全体を静的にパースすることはできません。`tools/check_templates.py` は
+動的SQLの中身だけを取り出して検証しています。**実機での初回実行はステージング相当の
+プロジェクトか、`initial_lookback_days` を小さくして試すことを推奨します。**
+
+## 現在地と次にやること（2026-10、一時休止）
+
+**実機で未検証の変更が溜まっています。** 以下は BigQuery で一度も実行していません。
+再開時はまず `01` → `02` → `03` を流し、`03` の診断行を確認してください。
+
+- 課金メーターの3値化（`CAPACITY` / `ON_DEMAND` / `NOT_BILLED`）と内訳 `not_billed_reason`
+- 親 SCRIPT が子から予約を引き継ぐ判定（`effective_reservation_id`）
+- 取り込みの DELETE + INSERT 化（期間の作り直し）
+- 取り込みロジックの `bqc_vw_t_job_cost_source` への切り出し
+
+### 再開時に最初に確かめること
+
+**`02` の `WHERE creation_time >= ...` が取り込みビューを越えて押し下がるか。**
+押し下がらないと毎回 JOBS の全期間を舐めて正規化までかかります。同じ期間を直接
+`INFORMATION_SCHEMA.JOBS` に問い合わせた場合とスキャン量を比べ、桁違いなら
+押し下がっていません。その場合はビューをやめて `02` に SELECT を戻すことになります。
+
+### 保留中の判断
+
+- **`error_slot_hours`**（失敗が焼いたスロット時間）を `daily_cost` に足すか未決。
+  予約運用では失敗が実際の枠を食うので削減余地に直結しますが、現状は `error_count`
+  （件数）しかなく「失敗が何スロット時間か」が出せません。
+- **チャンク分割（`load_chunk_days`、既定 15 日）が本当に必要か未検証。**
+  日次はループが1回しか回らないので、効くのは初回バックフィルだけです。
+  `180` にして一発で通るならループごと落とせます。
+
+### 次の段階（Phase 2）
+
+`daily_cost` の粒度に `root_composite_fingerprint` を足し、Looker Studio で
+「スクリプト単位／文単位」を切り替えられるようにする。いまは `adhoc/10` が解決ビューから
+直接集計していて重く、ダッシュボード速度ではありません。
+
+### 落ち着いたら外す列
+
+`daily_cost` の `normalized_query` / `sample_query` / `sample_raw_fingerprint` /
+`distinct_raw_fingerprint_count` は**開発中の確認用**です。不要になったら `01` の
+daily_cost DDL と `03` STEP 1 の該当行から外してください。`sample_query` は原文SQLで
+PII を含みうるため、レポートビューには流していません。
+
+## 単発の調査
+
+パイプラインを立てるまでもない調査は `adhoc/` を使ってください。
+INFORMATION_SCHEMA からの推定（01〜04）と、請求データエクスポートからの実額（05〜06）に
+分かれています。詳細は各ファイル冒頭のコメントを参照してください。
