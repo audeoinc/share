@@ -38,14 +38,21 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-if not exist node_modules (
-  echo First run: installing the required components. This takes a few minutes...
+rem Install the components on the first run, and again whenever package-lock.json changed (e.g. after overwriting this folder with a newer zip).
+set "NEEDINSTALL="
+if not exist node_modules set "NEEDINSTALL=1"
+if not defined NEEDINSTALL (
+  fc /b package-lock.json node_modules\.crogue-lock.json >nul 2>&1 || set "NEEDINSTALL=1"
+)
+if defined NEEDINSTALL (
+  echo Installing the required components. This takes a few minutes on the first run...
   call npm install --omit=optional --no-audit --no-fund
   if errorlevel 1 (
     echo Installation failed. Please check your network connection.
     pause
     exit /b 1
   )
+  copy /y package-lock.json node_modules\.crogue-lock.json >nul
 )
 node server.js --cwd "%TARGET%" %OPENFLAG%
 if errorlevel 1 pause

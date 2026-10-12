@@ -509,3 +509,23 @@ button.danger:disabled { opacity: .45; cursor: default; }
 .fdlg-it { gap: 8px; } .fdlg-it input[type=checkbox] { flex: none; margin: 0; }
 .fdlg-it .fm { margin-left: auto; color: var(--muted); font-size: calc(var(--fs, 14px) - 3px); flex: none; }
 .attmenu { min-width: 300px; } .attmenu .ci { padding: 8px 12px; } .attmenu .cs { color: var(--muted); font-size: calc(var(--fs, 14px) - 3px); margin-top: 2px; white-space: normal; max-width: 340px; }
+
+/* 状態の欄 (差し込み口) と、環境の情報 */
+.statusitems { display: inline-flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+.sitem { white-space: nowrap; max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+.sitem .sl { color: var(--muted); margin-right: 6px; } .sitem .sv { font-variant-numeric: tabular-nums; }
+.sitem.warn .sv { color: var(--warn); } .sitem.bad .sv { color: var(--bad); } .sitem.ok .sv { color: var(--ok); }
+.statuspop { position: fixed; z-index: 60; width: min(520px, 94vw); max-height: 60vh; display: flex; flex-direction: column; padding: 10px 12px; background: var(--panel); border: 1px solid var(--rule); border-radius: 12px; box-shadow: 0 8px 28px rgba(0,0,0,.14); font-size: calc(var(--fs, 14px) - 1px); }
+.statuspop .sp-h { font-weight: 600; margin-bottom: 6px; } .statuspop .sp-b { margin: 0; overflow: auto; white-space: pre-wrap; word-break: break-word; font: calc(var(--fs, 14px) - 2px)/1.45 var(--mono); }
+.statuspop .sp-f { display: flex; align-items: center; gap: 8px; margin-top: 8px; } .statuspop .sp-m { flex: 1; color: var(--muted); font-size: calc(var(--fs, 14px) - 3px); }
+.envbtn { padding: 6px 10px; }
+.envcard { width: min(860px, 96vw); height: min(640px, 90vh); }
+.env-body { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 16px 12px; }
+.env-sec { margin-top: 12px; } .env-h { font-weight: 600; margin-bottom: 4px; padding-bottom: 3px; border-bottom: 1px solid var(--rule); }
+.env-row { display: flex; gap: 12px; padding: 2px 0; font-size: calc(var(--fs, 14px) - 1px); } .env-row .ek { flex: 0 0 190px; color: var(--muted); } .env-row .ev { flex: 1; min-width: 0; word-break: break-all; }
+.env-row.bad .ev { color: var(--bad); } .env-row.warn .ev { color: var(--warn); } .env-note { color: var(--muted); font-size: calc(var(--fs, 14px) - 2px); padding: 2px 0; }
+.env-foot { display: flex; gap: 8px; justify-content: flex-end; padding: 10px 14px; border-top: 1px solid var(--rule); }
+
+/* 拡張の差し込み口 (左ペインの下) */
+.sidefoot { flex: none; border-top: 1px solid var(--rule); padding: 6px 8px; display: flex; flex-direction: column; gap: 6px; max-height: 40vh; overflow-y: auto; }
+.sidefoot[hidden] { display: none; }

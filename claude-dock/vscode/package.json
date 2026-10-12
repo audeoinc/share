@@ -1,0 +1,61 @@
+{
+  "name": "crogue",
+  "displayName": "Claude Rogue",
+  "description": "Claude Code の会話画面 (非公式)。会話ごとの許可・ブランチの確認・利用状況の表示など。",
+  "version": "0.1.0",
+  "publisher": "audeo",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "main": "./extension.js",
+  "activationEvents": [],
+  "categories": [
+    "Other"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "crogue.open",
+        "title": "Claude Rogue: 開く"
+      },
+      {
+        "command": "crogue.newPanel",
+        "title": "Claude Rogue: 新しい会話パネルを開く"
+      },
+      {
+        "command": "crogue.attach",
+        "title": "Claude Rogue に添付"
+      },
+      {
+        "command": "crogue.restart",
+        "title": "Claude Rogue: サーバーを再起動"
+      }
+    ],
+    "configuration": {
+      "title": "Claude Rogue",
+      "properties": {
+        "crogue.claudePath": {
+          "type": "string",
+          "default": "",
+          "description": "claude.exe のパス (空なら、PC にインストール済みのものを探します)"
+        }
+      }
+    },
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "crogue.attach",
+          "group": "navigation@99"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "crogue.attach",
+          "group": "navigation@99"
+        }
+      ]
+    }
+  }
+}
