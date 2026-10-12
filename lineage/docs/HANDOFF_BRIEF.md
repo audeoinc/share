@@ -42,13 +42,17 @@ BigQuery の SQL を解析して「**出力列 ← 物理テーブル.物理列*
 
 ### 環境の作り方
 
-ZIP を展開するだけです。**依存パッケージはありません**（Node 18+ の標準機能のみ）。
+ツリーを置くだけです。**依存パッケージはありません**（Node 18+ の標準機能のみ）。
 
 ```
 cd javascript
 npm test                 # build → bundle 検証 → 回帰 61 本
-npm run build:everything # 上記 ＋ リリース ZIP の作り直し
+npm run build:everything # 上記 ＋ リリース ZIP を release/ に生成
 ```
+
+**リリース ZIP はリポジトリにコミットしていません**（ツリーから完全に再現できるうえ、
+既圧縮の 800 KB が毎回履歴に積まれるため）。別プロジェクトへ移すときは
+`npm run build:everything` で `release/lineage_v<version>.zip` を作ってください。
 
 ---
 

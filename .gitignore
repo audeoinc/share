@@ -2,10 +2,12 @@
 .claude/
 pa/.claude/
 
-# `npm run build:everything` stages a full copy of lineage/ here before zipping it.
-# The release ZIP beside it IS committed; the staging directory is a duplicate of
-# the tree and must not be.
-/release/lineage_v*/
+# `npm run build:everything` output. Neither the staging directory nor the ZIP is
+# committed: both are byte-for-byte reproducible from the tree, and the ZIP is an
+# already-compressed 800 KB blob that git cannot delta, so committing each rebuild
+# only grew the history. Rebuild it when you need it; release_manifest.json carries
+# the bundle sha256 for verification.
+/release/
 
 # Installed dependencies are reproducible from the lockfile.
 node_modules/
