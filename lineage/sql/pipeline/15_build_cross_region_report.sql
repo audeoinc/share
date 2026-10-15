@@ -33,13 +33,15 @@
 --
 -- IT CHECKS BEFORE IT PUBLISHES. The combined table is only replaced once every
 -- source has passed:
---   * exactly one distinct updated_at per source. Every row of one 03 rebuild
---     carries the same CURRENT_TIMESTAMP(), so two values mean two exports are being
---     read at once -- stale shards left under the URI prefix. That would double a
---     region silently, so it is a hard stop.
 --   * no source older than max_staleness_hours. Reported, and a hard stop only when
 --     fail_on_stale is TRUE; by default a stale region is surfaced while the report
 --     keeps working.
+--   * one distinct updated_at per source. More than one means shards from more than
+--     one export sit under that prefix, because `*` shards the export by size and
+--     overwrite may not remove the extra files a LARGER previous run produced. This
+--     is reported, not fatal: the union reads only the newest updated_at per source,
+--     so leftovers cannot reach the published table. Correctness does not depend on
+--     what overwrite does -- only tidiness of the bucket does.
 -- A missing export fails the check query itself, which is the intended behavior:
 -- better than publishing a report with a region quietly absent.
 --
@@ -242,9 +244,20 @@ BEGIN
       export_uri_prefix, region_row.region
     );
 
+    -- Only the newest export is read. `*` in the export URI shards by size, and
+    -- whether overwrite deletes shards from a LARGER previous run is not something
+    -- to depend on: every row of one 03 rebuild carries the same updated_at, so
+    -- leftover shards carry the older one and drop out here. The host branch above
+    -- needs no such filter -- 03 owns that table and replaces it whole.
     SET union_usage_impact_sql = union_usage_impact_sql || FORMAT(
-      "\nUNION ALL\nSELECT '%s' AS source_region, * FROM `%s.%s.%s`",
+      """
+
+      UNION ALL
+      SELECT '%s' AS source_region, *
+      FROM `%s.%s.%s`
+      WHERE updated_at = (SELECT MAX(updated_at) FROM `%s.%s.%s`)""",
       region_row.region,
+      repository_project_id, report_dataset, src_usage_name,
       repository_project_id, report_dataset, src_usage_name
     );
 
@@ -276,8 +289,14 @@ BEGIN
       );
 
       SET union_object_dependency_sql = union_object_dependency_sql || FORMAT(
-        "\nUNION ALL\nSELECT '%s' AS source_region, * FROM `%s.%s.%s`",
+        """
+
+        UNION ALL
+        SELECT '%s' AS source_region, *
+        FROM `%s.%s.%s`
+        WHERE updated_at = (SELECT MAX(updated_at) FROM `%s.%s.%s`)""",
         region_row.region,
+        repository_project_id, report_dataset, src_dependency_name,
         repository_project_id, report_dataset, src_dependency_name
       );
     END IF;
@@ -316,13 +335,16 @@ BEGIN
       SELECT STRING_AGG(source_region, ', ' ORDER BY source_region)
       FROM source_freshness WHERE is_mixed_export
     );
-    -- More than one updated_at in one source means more than one export is being
-    -- read: 14 left shards from an earlier, larger run under the same prefix.
-    -- Publishing would double those rows, so stop instead.
-    RAISE USING MESSAGE = FORMAT(
-      'Source region(s) %s carry more than one updated_at, so more than one export is being read -- stale Parquet shards under the export prefix. Delete the objects under <export_uri_prefix>/<region>/ and re-run 14 there, then re-run this script. The combined table was NOT replaced.',
-      offending_sources
-    );
+    -- More than one updated_at in one source means shards from more than one export
+    -- are sitting under that prefix: a previous, larger export left files behind.
+    -- The union reads only the newest updated_at, so the published rows are right
+    -- either way -- this is reported rather than fatal, because the condition is
+    -- untidy storage, not wrong data. Row counts here still include the leftovers.
+    SELECT
+      'LEFTOVER_EXPORT_SHARDS' AS step_name,
+      'WARNING' AS status,
+      offending_sources AS affected_sources,
+      'Shards from an earlier export remain under <export_uri_prefix>/<region>/. The combined table is still correct: only the newest updated_at per source is read. To clear it, delete the objects under those prefixes and let 14 re-export.' AS note;
   END IF;
 
   SET stale_source_count = (SELECT COUNTIF(is_stale) FROM source_freshness);

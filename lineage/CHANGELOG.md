@@ -10,9 +10,11 @@
   rows have to be brought together physically. 14 exports 03's two static tables to
   Parquet under `<prefix>/<region>/<table>/` in a bucket belonging to the HOST
   region, which is what removes any need to copy objects between buckets (no SQL
-  statement can do that). 15 runs in the host region, reads that region's tables
-  locally (no export, no round trip), defines one external table per remote region
-  over its Parquet, and publishes the union.
+  statement can do that). It is two plain `EXPORT DATA` statements rather than a
+  script: `OPTIONS` takes constants, so the URI cannot be a variable and there is
+  nothing for a DECLARE to do. 15 runs in the host region, reads that region's
+  tables locally (no export, no round trip), defines one external table per remote
+  region over its Parquet, and publishes the union.
   Parquet is required, not preferred: `lnge_t_column_usage_impact` carries
   `dependency_path ARRAY<STRING>` and `lnge_t_object_dependency` carries
   `column_dependencies ARRAY<STRUCT<...>>`, and a CSV export of either fails
@@ -25,13 +27,21 @@
   the combined table separate leaves each region's copy as its own atomic truth and
   keeps 03 region-agnostic.
   15 checks before it publishes, because trusting the schedule hides a failed
-  export behind rows that are merely old. Every row of one 03 rebuild carries the
-  same `CURRENT_TIMESTAMP()`, so more than one `updated_at` in a single source
-  means more than one export is being read -- stale shards under the prefix, which
-  would double that region -- and that is a hard stop. A source older than
+  export behind rows that are merely old. A source older than
   `max_staleness_hours` is reported and, with `fail_on_stale`, fatal; a missing
   export fails the check query itself. The combined tables keep their previous
-  contents whenever the check fails.
+  contents whenever a check fails.
+  Leftover export shards cannot corrupt the result, and the design does not depend
+  on knowing what `overwrite` does. `*` in the export URI shards by size, so an
+  export smaller than the last one may leave the extra files behind, and the
+  documented behavior of `overwrite = TRUE` does not settle whether those are
+  removed. Instead, 15 reads each remote source through
+  `WHERE updated_at = (SELECT MAX(updated_at) FROM <source>)`. Every row of one 03
+  rebuild carries the same `CURRENT_TIMESTAMP()`, and leftovers can only arise when
+  the data shrank -- which means 03 rebuilt, which means a newer `updated_at` --
+  so the stale rows always drop out. More than one `updated_at` in a source is
+  therefore reported as untidy storage, not treated as an error. The host region's
+  own branch needs no such filter: 03 owns that table and replaces it whole.
 - 03 STEP 4b: `origin_project` is no longer a clustering key on either static
   report table (`origin_dataset, origin_object[, origin_column]` now). Pruning
   needs a PREFIX of the clustering columns, so a leading column that is
