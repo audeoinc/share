@@ -42,6 +42,15 @@
   so the stale rows always drop out. More than one `updated_at` in a source is
   therefore reported as untidy storage, not treated as an error. The host region's
   own branch needs no such filter: 03 owns that table and replaces it whole.
+  14 also carries the single-file export form as a commented alternative, since no
+  SQL statement can delete a Cloud Storage object and the prefix therefore cannot
+  be cleared from SQL at all. A URI without `*` writes exactly one file at a fixed
+  path, which overwrite replaces outright, so sharding has nothing to strand; the
+  trade is that an export too large for one file fails instead of sharding
+  silently, which is the better failure for this project. The default stays
+  sharded so a first run cannot be blocked by size. 15 needs no change either way:
+  its external tables read `.../*.parquet`, which matches both a `data.parquet` and
+  a sharded `000000000000.parquet`.
 - 03 STEP 4b: `origin_project` is no longer a clustering key on either static
   report table (`origin_dataset, origin_object[, origin_column]` now). Pruning
   needs a PREFIX of the clustering columns, so a leading column that is

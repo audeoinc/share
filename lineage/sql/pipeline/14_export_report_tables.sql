@@ -32,13 +32,22 @@
 -- export fails outright; Parquet carries them natively and self-describes its
 -- schema, so 15 declares no schema for the external tables it reads them through.
 --
--- LEFTOVER SHARDS ARE HANDLED ON THE READING SIDE. `*` in the URI shards the output
--- by size, and whether overwrite = TRUE deletes shards from a LARGER previous export
--- is not something this script can guarantee. It does not have to: every row of one
--- 03 rebuild carries the same updated_at, so 15 reads only each source's newest
--- updated_at and reports the leftovers instead of counting them. Deleting the
--- objects under this prefix before an export is therefore optional tidying, not a
--- correctness requirement.
+-- LEFTOVER SHARDS. `*` in the URI shards the output by size, so an export smaller
+-- than the last one may leave the extra files behind -- and no SQL statement can
+-- delete a Cloud Storage object, so this script cannot clear the prefix first.
+-- Two things keep that from mattering, and either is enough on its own:
+--
+--   1. 15 reads only each source's newest updated_at. Every row of one 03 rebuild
+--      carries the same CURRENT_TIMESTAMP(), and leftovers can only arise when the
+--      data shrank -- which means 03 rebuilt, which means a newer updated_at -- so
+--      the stale rows always drop out. Clearing the prefix is tidying, not a
+--      correctness requirement.
+--   2. DROPPING THE WILDCARD makes leftovers impossible. A URI without `*` writes
+--      exactly ONE file at a fixed path, which overwrite replaces outright, so
+--      there is nothing for sharding to strand. The trade is that an export too
+--      large for a single file (roughly 1 GB) FAILS instead of silently sharding.
+--      If the tables fit, prefer it: a loud failure beats a silent hazard. The
+--      single-file form is written out below each statement -- swap the uri line.
 --
 -- SCHEDULING: after 03 in this region, and far enough before 15 that the export has
 -- finished. 15 does not trust that timing -- it checks each source's age from the
@@ -50,7 +59,12 @@ SET @@location = 'asia-northeast1';
 
 -- The column usage x impact table: the Looker Studio data source.
 EXPORT DATA OPTIONS (
+  -- Sharded form: always succeeds, may strand files when the export shrinks.
   uri = 'gs://YOUR_BUCKET/lineage/cross_region/YOUR_REGION/column_usage_impact/*.parquet',
+  -- Single-file form: swap the line above for this one once you know the export
+  -- fits in one file (gsutil ls after a run). Leftovers then cannot happen, and an
+  -- export that outgrows a single file fails rather than sharding silently.
+  -- uri = 'gs://YOUR_BUCKET/lineage/cross_region/YOUR_REGION/column_usage_impact/data.parquet',
   format = 'PARQUET',
   compression = 'SNAPPY',
   overwrite = TRUE
@@ -63,6 +77,8 @@ FROM `project_id.lineage_repository.lnge_t_column_usage_impact`;
 -- otherwise 15 looks for files that were never written.
 EXPORT DATA OPTIONS (
   uri = 'gs://YOUR_BUCKET/lineage/cross_region/YOUR_REGION/object_dependency/*.parquet',
+  -- Single-file alternative, as above:
+  -- uri = 'gs://YOUR_BUCKET/lineage/cross_region/YOUR_REGION/object_dependency/data.parquet',
   format = 'PARQUET',
   compression = 'SNAPPY',
   overwrite = TRUE
