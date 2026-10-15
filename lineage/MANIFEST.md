@@ -12,6 +12,7 @@ Generated: 2026-07-28
 - `SECURITY.md`
 - `docs/ARCHITECTURE.md`
 - `docs/BUSINESS_REQUIREMENTS.md`
+- `docs/CROSS_REGION_REPORT.md`
 - `docs/DEVELOPMENT_GUIDE.md`
 - `docs/HANDOFF_BRIEF.md`
 - `docs/LOOKER_STUDIO_DESIGN.md`
@@ -206,6 +207,8 @@ Generated: 2026-07-28
 - `sql/maintenance/12_ephemeral_sql_similarity.sql`
 - `sql/maintenance/13_sql_pattern_drift.sql`
 - `sql/pipeline/03_run_daily_lineage_pipeline.sql`
+- `sql/pipeline/14_export_report_tables.sql`
+- `sql/pipeline/15_build_cross_region_report.sql`
 - `sql/sample/02_setup_sample_environment.sql`
 - `sql/sample/02a_create_cost_measurement_view.sql`
 - `sql/setup/01_setup_lineage_environment.sql`

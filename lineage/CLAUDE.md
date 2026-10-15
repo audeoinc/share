@@ -17,6 +17,8 @@ JavaScript エンジンと、それを日次で回す BigQuery パイプライ�
 - エンジン本体: `javascript/src`（Lexer → Parser → Resolver → Exporter/Diagnostics）
 - デプロイ成果物: `javascript/dist/lineage_udf_bundle.js`（24 ソースを束ねた単一バンドル）
 - パイプライン SQL: `sql/setup/01_*`, `sql/pipeline/03_*`, `sql/validation/04_*`, `tests/integration/05_*`
+- リージョン横断レポート: `sql/pipeline/14_*`（各リージョンで export）＋ `sql/pipeline/15_*`
+  （集約リージョンで UNION）。`docs/CROSS_REGION_REPORT.md` 参照
 - 設計資料: `docs/`（ARCHITECTURE / SYSTEM_DESIGN / SQL_DESIGN / UDF_DESIGN / SUPPORTED_SQL、ADR は `docs/adr/`）
 
 ## 2. エンジン構成（javascript/src）
