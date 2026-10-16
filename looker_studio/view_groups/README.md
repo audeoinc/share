@@ -1,7 +1,10 @@
 # suffix 違い View のロジック グループ比較
 
-> **この文書は作る人・直す人向け。** レポートを見る人向けの読み方は
-> `usage.md`（使い方・データの見方）、導入の背景と効果は `introduction.md`。
+> **この文書は作る人・直す人向け。** ほかに 3 つあります。
+> **入れる手順は [`DEPLOY.md`](./DEPLOY.md)**（何もない状態から動くレポートまでの
+> 順路・確認・落ちたときの見どころ）、レポートの読み方は
+> [`usage.md`](./usage.md)、導入の背景と効果は
+> [`introduction.md`](./introduction.md)。
 
 `INFORMATION_SCHEMA` から取った View の DDL を、**suffix を除いた base 名ごとに束ね、
 SQL ロジックが同じもの同士でグループ化**する。グループ内の差分はパラメータ化して
@@ -315,17 +318,22 @@ node build_udf.mjs
 | `node test.mjs` | アナライザ（`analyze.js`）の判定 | 195 |
 | `node preview.mjs` | 描画の markup と CSS（`dist/preview.html` も作る） | 178 |
 | `node build_udf.mjs` | UDF の生成物（JS の構文・サイズ・クラス網羅） | 75 |
-| `node check_sql.mjs` | `build_table.sql` と `view_group_html.sql` の突き合わせ、`usage.md` の引用のずれ | 78 |
+| `node check_sql.mjs` | `build_table.sql` と `view_group_html.sql` の突き合わせ、`usage.md` / `DEPLOY.md` の引用のずれ | 82 |
 | `node check_cross_region.mjs` | リージョン間の運搬 3 ファイルの命名と配線 | 22 |
 
 件数は現時点の値。**増えるぶんには気にしなくてよい**（数を合わせるための
 検証ではない）。`--check` を付けると生成物を書かずに検証だけ走る
 （`preview.mjs` / `build_udf.mjs`）。
 
-> **`usage.md` は画面の文言をそのまま引用している。** タブの並び・打ち切りの
-> 案内文・読むオブジェクトの名前は `check_sql.mjs` が突き合わせるので、
-> 引用元を直すとそこが落ちる。**落ちたら `usage.md` を直す**（読む人にとっては
-> 資料と画面が食い違っているほうが困るため、黙って通さない）。
+> **`usage.md` と `DEPLOY.md` は本体の文言と数字をそのまま引用している。**
+> `check_sql.mjs` が突き合わせるので、引用元を直すとそこが落ちる。
+> **落ちたら資料を直す**（読む人にとっては資料と実物が食い違っているほうが
+> 困るため、黙って通さない）。
+>
+> | 資料 | 見張っているもの |
+> |---|---|
+> | `usage.md` | 外側タブの並び / 打ち切りの案内文 / 読むオブジェクトの既定名 |
+> | `DEPLOY.md` | `ASSERT` の文言 / 確認クエリ 5-x の一覧 / 画面の上限 / 貼る順番 |
 
 ## suffix を認識できなかった View
 
@@ -2829,6 +2837,10 @@ ORDER BY base;
 やると決めていて、まだ手を付けていないもの。着手するときの前提もここに書く。
 
 ### 1. カラムの description（JSON）を編集する仕組み
+
+> **保留。** リリースの範囲から外してある（`introduction.md` の「description
+> （論理名）は今回の範囲外」）。**読む側はできているので、書く運用が始まれば
+> 翌日のカードから出る。** 以下は着手するときのための覚書。
 
 いまカラム定義タブに出している論理名は、View のカラムに付けた description を
 JSON として読んだもの（`{"ja": "受注日", "en": "order date"}`）。**読むだけで、

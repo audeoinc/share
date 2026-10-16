@@ -17,6 +17,7 @@ const udf = await readFile(join(here, 'view_group_html.sql'), 'utf8');
 const chrome = await readFile(join(here, 'chrome.js'), 'utf8');
 const sqltext = await readFile(join(here, 'sqltext.js'), 'utf8');
 const usage = await readFile(join(here, 'usage.md'), 'utf8');
+const deploy = await readFile(join(here, 'DEPLOY.md'), 'utf8');
 
 const checks = [];
 const add = (name, ok, detail) => checks.push([name, ok, detail]);
@@ -850,6 +851,55 @@ for (const [name, src] of [['build_table.sql', table], ['view_group_html.sql', u
     add(`usage.md の ${label} が build_table.sql の組み立てと同じ`,
       table.includes(expr) && usage.includes(label), `組み立て: ${expr}`);
   }
+}
+
+// --- 7. DEPLOY.md が本体とずれていないか --------------------------------
+// 手順書は**入れる人が上から順にやる**ものなので、ずれていると「書いてある
+// 通りにやったのに落ちる」になる。しかも本体は動いているので誰も気づかない。
+// 引用しているものと、順番が意味を持つものだけを突き合わせる。
+{
+  // 落ちたときの見どころの表は ASSERT の文言をそのまま引いている。
+  // 文言を直したら手順書も直す（引けなければ原因が辿れない）。
+  const quoted = [
+    'UDF が 7 つそろっていません',
+    '対象の View が 0 件です',
+    'suffix を持つデータセットが 0 件です',
+    'プロジェクト ID を自動検出できません',
+    '運んできたメタデータが足りません',
+  ];
+  const lost = quoted.filter((q) => !table.includes(q) || !deploy.includes(q));
+  add('DEPLOY.md が引く ASSERT の文言が build_table.sql に実在する',
+    lost.length === 0, `引けないもの: ${lost.join(' / ') || 'なし'}`);
+
+  // 確認クエリの一覧。番号を足したり消したりしたら手順書の対応表も変わる。
+  const nums = [...table.matchAll(/^-- (5-[0-9]+b?) /gm)].map((m) => m[1]);
+  const missing = nums.filter((n) => !deploy.includes(`**${n}**`));
+  add('DEPLOY.md の確認クエリの対応表に 5-x が全部ある',
+    nums.length > 0 && missing.length === 0,
+    `本体=${nums.join(',')} / 手順書に無いもの=${missing.join(',') || 'なし'}`);
+
+  // 画面の上限。手順書は「黙って消えるものは無い」と書いているので、
+  // 数字がずれていると読んだ人が別の数で判断する。
+  const caps = [
+    ['MAX_TABS', 'ロジック差分のグループ タブ'],
+    ['MAX_SQL_TABS', 'SQL タブ（View 単位）'],
+    ['MAX_DESC_TABS', 'description の種類'],
+    ['MAX_LABEL_TABS', 'ラベルの種類'],
+  ];
+  const wrong = caps.filter(([k, label]) => {
+    const v = (chrome.match(new RegExp(`^const ${k} = (\\d+);`, 'm')) || [])[1];
+    return !v || !new RegExp(`\\| ${label} \\| ${v} \\|`).test(deploy);
+  }).map(([k]) => k);
+  add('DEPLOY.md の上限の数字が chrome.js と同じ',
+    wrong.length === 0, `ずれているもの: ${wrong.join(' / ') || 'なし'}`);
+
+  // 貼る順番。UDF が先でないと build_table.sql は関数を見つけられない。
+  const o = ['view_group_html.sql', 'build_table.sql', 'template_style.html']
+    .map((f) => deploy.indexOf('### ① `' + f + '`') >= 0
+      ? deploy.indexOf('### ① `' + f + '`')
+      : deploy.indexOf('`' + f + '` →'));
+  add('DEPLOY.md の貼る順番が UDF → テーブル → CSS になっている',
+    o.every((x) => x >= 0) && o[0] < o[1] && o[1] < o[2], `位置=${o.join(',')}`);
 }
 
 // --- 結果 --------------------------------------------------------------
