@@ -451,7 +451,7 @@ function descCss() {
   ];
   // タブ本体。ID ではなくクラスで書くので、レコードが変わってもこの CSS のまま。
   // 形は「兄弟 > 子」から動かさない。この viz で radio + :checked が動くと
-  // 確かめたときの形がこれ（templated_record/samples/07_radio_tabs_test.html）。
+  // 確かめたときの形がこれ（radio_tabs_test.html）。
   rules.push(groupRule(MAX_DESC_TABS,
     (i) => `.vg-dr${i}:checked ~ .vg-dpanels > .vg-dp${i}`, 'display:block'));
   rules.push(groupRule(MAX_DESC_TABS,

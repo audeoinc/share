@@ -227,7 +227,7 @@ function sqlCss() {
   ];
   // タブ本体。ID ではなくクラスで書くので、レコードが変わってもこの CSS のまま。
   // 形は「兄弟 > 子」から動かさない。この viz で radio + :checked が動くと
-  // 確かめたときの形がこれ（templated_record/samples/07_radio_tabs_test.html）。
+  // 確かめたときの形がこれ（radio_tabs_test.html）。
   // 選択中は青系にして、外側（黒）・基準（薄い赤）と見分けられるようにする。
   rules.push(groupRule(MAX_SQL_TABS,
     (i) => `.vg-sr${i}:checked ~ .vg-spanels > .vg-sp${i}`, 'display:block'));

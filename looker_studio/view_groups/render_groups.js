@@ -434,7 +434,7 @@ function chromeCss() {
   //
   // どちらも「兄弟 > 子（> 子）」で、子孫結合子や * は使わない。この viz で
   // radio + :checked が動くと確かめたときの形が子結合子なので
-  // （templated_record/samples/07_radio_tabs_test.html）、そこから外れない。
+  // （radio_tabs_test.html）、そこから外れない。
   //
   // 枚数は OUTER_TABS ではなく MAX_OUTER_TABS ぶん出す。ズレはもう一方向にも
   // 起きるため。**カードは日次で作り直され、CSS は手で貼る**ので、タブを足すと

@@ -1614,7 +1614,7 @@ COUNT にすると「1 か空白」の表になる。
 数個なので、G² でも走査は実質ゼロ。
 
 > 差分を短くする手立て（変更行の前後だけ描く `contextLines` など）は
-> `templated_record` 側の `render.js` にはあるが、こちらがベンダリングして
+> 2 者比較の頃の `render.js` にはあるが、こちらがベンダリングして
 > いる `ddl_diff_viz` 側には無い。効かせたければまずそちらの移植から。
 
 タブは 3 段になる。クラスはすべて分けてある。同じクラスだとどれかのラジオが
@@ -1669,7 +1669,7 @@ COUNT にすると「1 か空白」の表になる。
 
 **どれも「兄弟 > 子（> 子）」で、子孫結合子や `*` は使わない。** この viz で
 radio + `:checked` が動くことを確かめたときの形が子結合子だから
-（`templated_record/samples/07_radio_tabs_test.html`）。
+（`radio_tabs_test.html`）。
 
 **規則は「いま並べる枚数」ではなく `MAX_OUTER_TABS`（8 枚）ぶん出す。** ズレは
 もう一方向にも起きるため。順序はいつも「カードが先・CSS が後」なので、タブを
@@ -2808,7 +2808,7 @@ SELECT `<project>.<udf_dataset>.viewlgc_group_css`('{"mode": "class"}');
 `<style> … </style>` で囲んでテンプレートの先頭に置き、その下に
 `diff_html` のフィールドを差し込む。
 
-> **`templated_record/samples/04_template_style.html` は使えない。**
+> **2 者比較の頃に配っていた CSS は使えない。**
 > あちらは 2 者比較用の `DIFF_CSS` の出力で、見出し・タブ・パラメータ表の
 > `.vg-*` 規則を含まないため、タブが動かない。
 

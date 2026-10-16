@@ -260,8 +260,8 @@ const kindText = (k) => KIND_TEXT[k] || k;
  *
  * 見出しは .vg-otablist の「中」に置く。外に出して包むと、選択中のタブを塗る
  * 規則が :checked ~ .vg-otablist > .vg-otN（子）ではなく子孫になる。
- * この viz で動くと確認できているのは子のほうで（templated_record/samples/
- * 07_radio_tabs_test.html）、子孫に変えたら実機で反転しなくなった。
+ * この viz で動くと確認できているのは子のほうで（radio_tabs_test.html）、
+ * 子孫に変えたら実機で反転しなくなった。
  * 並びは .vg-otablist を flex-wrap にして、見出しだけ 1 行占有させる。
  *
  * ラジオは .vg-outer の直下。ここに置いてあれば .vg-otablist も .vg-opanels も

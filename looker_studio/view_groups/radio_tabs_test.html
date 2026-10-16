@@ -2,6 +2,19 @@
   Templated Record で「radio + :checked」による CSS だけのタブが動くかを確認する。
   JavaScript は一切使っていない（innerHTML 経由の <script> は実行されないため）。
 
+  **このツールのタブは全部これを根拠にしている。** Looker Studio のコミュニティ
+  ビジュアライゼーションの中では JavaScript が動かないので、外側の 5 タブも
+  その中のタブも、すべて radio + :checked で切り替えている。
+  chrome.js / render_groups.js / sqltext.js / viewdesc.js / preview.mjs が
+  このファイルを根拠として参照している。
+
+  **効く形は `:checked ~ 親 > 対象`（子結合子）。** 子孫結合子に変えたら実機で
+  反転しなくなった。セレクタの形を変えるときは、まずここで確かめること。
+
+  貼り方: Templated Record のテンプレートにこの中身をそのまま入れる。
+  （以前は templated_record/samples/07_radio_tabs_test.html に置いていた。
+  2 者比較の試作を消したときに、参照している側へ引き取った。）
+
   判定:
     A) 上の灰色の帯だけ見える            → HTML/CSS は通っているが radio が効いていない
     B) タブが出るが押しても切り替わらない → input が残っているが :checked が効いていない

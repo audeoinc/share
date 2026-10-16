@@ -1,3 +1,5 @@
 node_modules/
 dist/
 !dist/.gitkeep
+# GCS に手で置く一式。npm run release で作れるので追跡しない
+release/

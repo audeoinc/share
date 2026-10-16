@@ -8,8 +8,7 @@
 > **⚠️ 前提: GCS バケットの一般公開（`allUsers` に読み取り）が必須。**
 > Looker Studio は `getThirdPartyScript` というサーバー側フェッチャで JS を取得し、
 > 閲覧者の認証情報を持たない。ドメイン限定 IAM では 403 になり動作しない。
-> 公開バケットが禁止されている組織ではこの方式は使えないので、
-> [`../ddl_diff.sql`](../ddl_diff.sql) の **セクション 4（カスタムクエリ方式）**を使う。
+> 公開バケットが禁止されている組織ではこの方式は使えない。
 > 詳細は[バケットは一般公開が必須](#バケットは一般公開が必須)。
 
 BigQuery に **`key` と `ddl` の 2 列**でデータを持ち、Looker Studio のフィルタで
@@ -75,7 +74,10 @@ SELECT
 FROM `PROJECT.DATASET.view_ddl_snapshot`;
 ```
 
-スナップショット表の作り方は [`../ddl_diff.sql`](../ddl_diff.sql) の冒頭を参照。
+> スナップショット表の作り方を書いた `../ddl_diff.sql` は消した（2 者比較の
+> 試作を整理したときに。経緯は [`../README.md`](../README.md) の「消したもの」）。
+> `INFORMATION_SCHEMA.VIEWS` から `(key, ddl)` の 2 列を作るだけなので、
+> 必要になったら書き直せばよい。
 
 > `key` は一意にすること。同じ `key` に複数行あると先頭の 1 件だけが使われる。
 
@@ -137,7 +139,7 @@ scripts/
   preview.mjs    ローカルプレビュー兼スモークテスト（viz.js を直接叩く）
   e2e.mjs        dscc 結線の通しテスト（実ブラウザ + RENDER の postMessage）
   release.mjs    GCS に手で置く一式を release/ に組み立てる
-release/         ↑の生成物（コミット済み。手動配置用。直接編集しない）
+release/         ↑の生成物。**コミットしない**（.gitignore 済み）
 samples/         動作確認用の SQL
 deploy.sh        ビルド + GCS へアップロード
 ```
@@ -153,7 +155,7 @@ npm run e2e     # dscc 結線の通しテスト。実ブラウザに RENDER を 
                 # （playwright 未インストールならスキップされる）
 npm run preview # dist/preview.html を生成 → ブラウザで開いて全シナリオを確認
 npm run build   # dist/index.js（bundle, 約 26KB）+ index.json + index.css + icon.png
-npm run release # ↑を release/ に組み立てる（手動配置用。コミットする）
+npm run release # ↑を release/ に組み立てる（手動配置用。コミットしない）
 ```
 
 ## デプロイ
@@ -191,10 +193,10 @@ GCS_BUCKET=my-bucket GCS_PREFIX=viz/ddl-diff ./deploy.sh
 
 ### 手動で配置する場合
 
-`release/` に**ビルド済みの 5 ファイルをコミットしてある**ので、npm 実行環境がなくても
-そのままアップロードできる（`npm run release` で再生成する）。
+`npm run release` で**ビルド済みの 5 ファイルが `release/` にできる**ので、
+そのままアップロードできる（**`release/` は追跡していない。** 使うときに作る）。
 
-1. `release/` の 5 ファイルをダウンロードする
+1. `npm run release` を走らせて `release/` の 5 ファイルを得る
 2. **`manifest.json` の 2 箇所のプレースホルダを置換する**（ここだけ手作業）
    - `GCS_URI_BASE` → `gs://my-bucket/viz/ddl-diff`
    - `GCS_HTTPS_BASE` → `https://storage.googleapis.com/my-bucket/viz/ddl-diff`

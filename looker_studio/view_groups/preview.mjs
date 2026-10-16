@@ -673,8 +673,8 @@ const checks = [
   ['帯ごとスクロールに追従する（見出し＋タブ・全世代）',
     /\.vg-otablist,\.vg-ohead\{[^}]*position:sticky[^}]*top:0/.test(R.chromeCss())],
   // 選択中のタブを塗る規則は「兄弟 > 子」から動かさない。この viz で
-  // radio + :checked が動くと確かめたときの形がこれで（templated_record/
-  // samples/07_radio_tabs_test.html）、子孫に変えたら実機で反転しなくなった。
+  // radio + :checked が動くと確かめたときの形がこれで（radio_tabs_test.html）、
+  // 子孫に変えたら実機で反転しなくなった。
   // 見出しを別の入れ物で包むと子孫になるので、包まないことも合わせて見る。
   ['選択中のタブを塗る規則が、配った全世代のカードで効く形になっている', (() => {
     const css = R.chromeCss();
