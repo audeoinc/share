@@ -1,5 +1,11 @@
 # Templated Record + BigQuery で DDL 差分を表示する
 
+> **これは [`../view_groups/`](../view_groups/) の前身です。** Templated Record に
+> HTML を渡す、という土台はそのまま引き継いでいます。違うのは比べ方で、
+> **ここは 2 つの DDL を人が選んで突き合わせる**のに対し、`view_groups/` は
+> base に属する View を全部まとめてロジックのグループに分けます。
+> Templated Record 自体の使い方を知りたいときは、こちらが最小の例です。
+
 **公開 GCS バケットを一切使わずに、GitHub compare と同等の差分表示ができる構成。**
 
 [Templated Record](https://lookerstudio.google.com/reporting/fd0db9a6-2d6b-443a-adbc-f6a7c7a285a7/page/GUgQB)

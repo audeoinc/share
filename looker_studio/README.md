@@ -1,4 +1,33 @@
-# Looker Studio で View DDL の差分を GitHub compare 風に表示する
+# Looker Studio で View の SQL を見せる
+
+BigQuery の View の定義を Looker Studio 上で読めるようにするための仕組みが
+4 つ入っています。**用途が違うので、先にどれを見るかを決めてください。**
+
+## どれを見ればよいか
+
+| 入っているもの | 何をするもの | 状態 |
+|---|---|---|
+| **[`view_groups/`](./view_groups/)** | **suffix 違いの View を base ごとに束ね、ロジックが何通りあるかを見せる。** note / カラム定義 / 参照関係 / ロジック差分 / SQL の 5 タブのカードを日次で作り置きする | **これが本体。運用中** |
+| [`templated_record/`](./templated_record/) | 2 つの View の DDL を GitHub compare 風に見せる。Templated Record を使う最小の例 | `view_groups` の前身 |
+| [`ddl_diff.sql`](./ddl_diff.sql) | 同じことを表グラフ＋条件付き書式でやる。コミュニティ ビジュアライゼーションが使えない場合の代替 | 初期の検討 |
+| [`ddl_diff_viz/`](./ddl_diff_viz/) | 自作のコミュニティ ビジュアライゼーション。**GCS バケットの一般公開が必須**（Looker Studio がサーバー側で JS を取得するため） | 公開バケットが使えないなら採れない |
+
+**下の 3 つはすべて「2 つの DDL を突き合わせる」話です。** 比べる 2 本を人が選ぶ
+必要があり、**選ばなかった組み合わせは見えません。** `view_groups/` は base に
+属する View を全部まとめてグループに分けるので、そこが違います。
+
+### `view_groups/` から読むもの
+
+| 資料 | 誰が読むか |
+|---|---|
+| [`view_groups/introduction.md`](./view_groups/introduction.md) | 導入を検討する人。背景・効果・必要なもの |
+| [`view_groups/DEPLOY.md`](./view_groups/DEPLOY.md) | **入れる人。何もない状態から動くレポートまでの順路** |
+| [`view_groups/usage.md`](./view_groups/usage.md) | レポートを見る人。使い方とデータの見方 |
+| [`view_groups/README.md`](./view_groups/README.md) | 作る人・直す人。仕組みと設定 |
+
+---
+
+# 以下は 2 者比較（`ddl_diff.sql` / `templated_record/` / `ddl_diff_viz/`）の話
 
 2 つのデータに格納された View の DDL を突き合わせて、GitHub の compare 画面のような
 行単位の差分を Looker Studio 上で見せるための手順とクエリ。
