@@ -317,8 +317,8 @@ node build_udf.mjs
 |---|---|---|
 | `node test.mjs` | アナライザ（`analyze.js`）の判定 | 195 |
 | `node preview.mjs` | 描画の markup と CSS（`dist/preview.html` も作る） | 178 |
-| `node build_udf.mjs` | UDF の生成物（JS の構文・サイズ・クラス網羅） | 75 |
-| `node check_sql.mjs` | `build_table.sql` と `view_group_html.sql` の突き合わせ、`usage.md` / `DEPLOY.md` の引用のずれ | 82 |
+| `node build_udf.mjs` | UDF の生成物（JS の構文・サイズ・クラス網羅） | 76 |
+| `node check_sql.mjs` | `build_table.sql` と `view_group_html.sql` の突き合わせ、`usage.md` / `DEPLOY.md` の引用のずれ | 83 |
 | `node check_cross_region.mjs` | リージョン間の運搬 3 ファイルの命名と配線 | 22 |
 
 件数は現時点の値。**増えるぶんには気にしなくてよい**（数を合わせるための
@@ -576,27 +576,45 @@ node check_sql.mjs          # build_table.sql と view_group_html.sql の突き�
 | 関数 | 戻り値 |
 |---|---|
 | `viewlgc_analyze(views, options_json)` | 解析結果の JSON（`viewCount` / `groupCount` / `groupLabels` / `groupSizes` / `suffixes` / `unmatchedCount` / `bases`） |
-| `viewlgc_render(analysis_json, options_json)` | ロジック差分のカード |
+| `viewlgc_panes(analysis_json, options_json, ref_index)` | ロジック差分のペイン（左右の比較）の JSON |
+| `viewlgc_render(analysis_json, panes_json, options_json, ref_index)` | ペインを嵌めてタブと外枠を付けた、ロジック差分のカード |
 | `viewlgc_erd(analysis_json, options_json)` | 参照関係の図（それだけ。束ねない） |
-| `viewlgc_page(analysis_json, diff_html, erd_html, columns_json, sql_json, options_json)` | カラム定義の表と View ごとの素の SQL を作り、メモ（目印のみ）・差分・図と外側タブで束ねた 1 枚 |
+| `viewlgc_page(analysis_json, diff_html, erd_html, columns_json, sql_json, descs_json, labels_json, regions_json, options_json)` | カラム定義の表と View ごとの素の SQL を作り、メモ（目印のみ）・差分・図と外側タブで束ねた 1 枚 |
 | `viewlgc_markdown(md)` | base ごとのメモ（Markdown）の HTML。**ビューの中から呼ぶ** |
 | `viewlgc_group_css(options_json)` | `mode='class'` でテンプレートに貼る CSS。**SQL 関数で、生成時に焼き込んだ固定文字列を返す**（`options_json` は見ない） |
 | `viewlgc_render_dynamic_sql(sql_template, …)` | `build_table.sql` の `__…__` を展開した SQL（JavaScript ではなく SQL 関数） |
 
-### 解析と描画は別の UDF に分ける
+### UDF は依存が独立しているところで割る
 
 **インラインのコード ブロブは 1 個あたり 32 KB までに制限される（標準 SQL でも
-同じ）。** 1 本にまとめると枠が 1 つしか使えず、実際 29.3 KB まで詰まっていた。
-依存は素直に割れる（解析は `analyze.js` だけ、描画は `diff` / `render` /
-`render_groups` だけ）ので、2 つの UDF に分けて枠を 2 つ使う。
+同じ）。** 1 本にまとめると枠が 1 つしか使えないので、**依存が独立している
+ところで割って枠を増やす。**
 
 ```
-viewlgc_analyze     素 23.7 KB → 最小化 10.7 KB（上限比 36%）
-viewlgc_render      素 45.8 KB → 最小化 27.5 KB（上限比 92%）
-viewlgc_erd         素 34.7 KB → 最小化 16.2 KB（上限比 54%）
-viewlgc_page        素 27.9 KB → 最小化 13.5 KB（上限比 45%）
+viewlgc_analyze     素 26.4 KB → 最小化 11.1 KB（上限比 37%）
+viewlgc_panes       素 30.2 KB → 最小化 13.3 KB（上限比 44%）
+viewlgc_render      素 31.2 KB → 最小化 15.8 KB（上限比 53%）
+viewlgc_erd         素 47.9 KB → 最小化 20.1 KB（上限比 67%）
+viewlgc_page        素 51.7 KB → 最小化 21.6 KB（上限比 72%）
 viewlgc_markdown    素 11.1 KB → 最小化  6.5 KB（上限比 22%）
 ```
+
+割った履歴と、そのとき何が詰まっていたか。
+
+| 割った先 | きっかけ | 境目 |
+|---|---|---|
+| `analyze` / 描画 | 1 本で 29.3 KB | 解析は `analyze.js` だけ、描画は `diff` / `render` / `render_groups` だけ |
+| `erd` を独立 | 描画 1 本で 28 KB（92%） | 図にはトークナイザ（`analyze.js`）が要り、それだけで 9 KB |
+| `panes` を独立 | `render` が 27.0 KB（90%） | **「1 組 = 1 ペイン分の HTML」の 1 か所だけ**（`tabs()` が `pair()` を呼んでいたところ） |
+
+**`panes` を割ったときの出力は、バイト単位で変わっていない**（`dist/preview.html`
+462,603 バイトと配る CSS の両方を分割前の版と突き合わせて確認）。コードの置き場所
+だけを動かした変更なので、`CSS_GEN` も上げていない（テンプレートの貼り直しは不要）。
+
+> **境目を選ぶ基準は「互いを呼ばないこと」。** 差分エンジン（`diff.js` /
+> `render.js`）とタブ・パラメータ表は、ペイン 1 枚を受け渡す以外に接点が無い。
+> 逆に、グループの数え方やラベルの作り方は両方が使うので（`label()` /
+> `MAX_TABS`）、そこで割ると同じものを 2 か所に持つことになる。
 
 （`viewlgc_group_css` は JavaScript ではなく SQL 関数になったので、この枠とは
 無関係。生成時に焼き込んだ固定文字列を返すだけ。）
@@ -614,13 +632,39 @@ viewlgc_markdown    素 11.1 KB → 最小化  6.5 KB（上限比 22%）
 **`viewlgc_erd` を `viewlgc_page` から割ったのはこのため。** 図を描くには SQL の
 トークナイザ（`analyze.js`）が要り、それだけで最小化後 9 KB ある。同居させて
 いた頃は 1 本で 27.7 KB（92%）まで来ていて、カラム定義に手を入れるたびに枠を
-気にすることになっていた。依存が独立している場所で割れば、両方に余裕ができる
-（54% と 45%）。
+気にすることになっていた。依存が独立している場所で割れば、両方に余裕ができる。
 
-残るは `viewlgc_render` の 92%。CSS を足すときは
-`node build_udf.mjs` の最後に出るサイズを見ること。**メモの CSS を
-`markdown.js` の `memoCss()` に置いてあるのはこのため**で、差分側の
-`chromeCss()` に混ぜると `viewlgc_render` にも使わない CSS が乗る。
+いまはどの関数も 72% 以下で、いちばん詰まっているのは `viewlgc_page` の 72%。
+CSS を足すときは `node build_udf.mjs` の最後に出るサイズを見ること。
+**メモの CSS を `markdown.js` の `memoCss()` に置いてあるのはこのため**で、
+差分側の `chromeCss()` に混ぜると `viewlgc_render` にも使わない CSS が乗る。
+
+#### `viewlgc_panes` と `viewlgc_render` は添字で対応する
+
+ペインの並べ方の規則を**両方が持っている**（基準を除いた残りを `MAX_TABS`
+件まで）。片方だけ変えると、タブと中身がずれる。
+
+```
+viewlgc_panes(analysis, options, ref_index)   → {"bases":[{"panes":[…]}, …]}
+viewlgc_render(analysis, panes_json, …)       → それを嵌めた HTML
+```
+
+ずれ方は 2 通りで、どちらも**落ちない**。
+
+| ずれ | 見え方 | 見張り |
+|---|---|---|
+| 枚数が合わない | タブは出るのに中身が空 | `tabs()` が「ペインを N 枚のうち M 枚しか受け取れませんでした」と画面に出す |
+| `ref_index` が片方だけ | タブは基準 B なのに中身は基準 A | `node check_sql.mjs` が SQL の呼び出しで両方に同じ値を渡しているか見る |
+
+**`__applyMode`（class モードへの畳み込み）は render 側で最後に 1 回だけ。**
+panes は style 属性のまま返す。ペイン側で畳むと、畳んだ結果をもう一度畳むことに
+なり、ハッシュの素が変わってテンプレートの CSS と合わなくなる。
+
+**配る CSS の fixture もペインを描く。** `__fixtureRules` は
+`renderBase(b, opts, buildPanes(b, opts, 0))` と呼ぶ。ペインを描かないと、差分の
+markup が持つ style 属性のクラスが配る CSS に入らず、**貼ったのに色が付かない**
+形で欠ける。CSS を組み立てるコードは BigQuery に載らない（Node で評価して
+出来た文字列だけを焼き込む）ので、こちらは 32 KB の枠と無関係。
 配る 1 枚は `viewlgc_group_css` が両方を連結して作る。
 
 **JS UDF の中から別の UDF は呼べない。** JS は V8 のサンドボックスで動き、

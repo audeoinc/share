@@ -22,32 +22,13 @@
  * 一意にする必要があるため、ID を参照すると CSS を静的にできない。
  */
 
-const { splitLines, build2Way } = require('../ddl_diff_viz/src/lib/diff');
-const { renderFragment1, renderFragment2 } = require('../ddl_diff_viz/src/lib/render');
+// **差分エンジン（diff.js / render.js）はここには無い。** ペインを作るのは
+// panes.js（viewlgc_panes）で、こちらは出来上がったペインを嵌めるだけ。
+// 分けた理由と境目の決め方は panes.js の冒頭に書いてある。
 const {
   MAX_TABS, OUTER_TABS, MAX_OUTER_TABS, CSS_GEN, groupRule,
   esc, hashId, label, header, notice, kindText,
 } = require('./chrome.js');
-
-/**
- * ペインの副題を差し替える。
- * render.js は 2 ペインを (before)/(after)、3 ペインを (base)/(after)/(reference) と
- * 出すが、ロジック系統の間に時間的な前後関係も優劣もないので誤解を招く。
- * ベンダリングした render.js は書き換えたくないため、出力側で置換する。
- */
-function relabelPanes(html, subs) {
-  let i = 0;
-  return html.replace(
-    /(<span style="[^"]*font-weight:400;">)\((?:before|after|base|reference)\)(<\/span>)/g,
-    (m, open, close) => {
-      const sub = subs[i++];
-      return sub == null ? m : open + esc(sub) + close;
-    }
-  );
-}
-
-/** 「3 View」のような、系統の規模が分かる副題。 */
-const paneSub = (g) => `${g.members.length} View`;
 
 const REASON_TEXT = {
   'length': 'トークン数が違う（構造そのものが別）',
@@ -130,35 +111,6 @@ function paramsTable(groups) {
 }
 
 /**
- * SQL 中の {{P1}} に付ける tooltip の文言。{ P1: '…' } の形で返す。
- *
- * 何に置き換わるのかは末尾の一覧に出しているが、SQL を読んでいる最中に
- * そこまで目を往復させずに済むよう、その場でも見えるようにする。
- * パラメータ名はグループごとに独立して振るので、対応表もグループごとに作る。
- */
-function paramTips(g) {
-  const tips = {};
-  for (const p of g.params) {
-    tips[p.name] = `${p.name}: ${kindText(p.kind)}\n` +
-      Object.entries(p.values).map(([s, v]) => `${s || '(suffix なし)'} = ${v}`).join('\n');
-  }
-  return tips;
-}
-
-/** 基準グループと 1 グループの 2 ペイン比較。 */
-function pair(baseGroup, other, opts) {
-  return relabelPanes(
-    renderFragment2(
-      label(baseGroup), label(other),
-      build2Way(splitLines(baseGroup.sql), splitLines(other.sql)),
-      opts,
-      { left: paramTips(baseGroup), right: paramTips(other) }
-    ),
-    [`基準 / ${paneSub(baseGroup)}`, paneSub(other)]
-  );
-}
-
-/**
  * 基準グループのタブ。左ペインに出っぱなしなので、選択状態で固定して出す。
  * ラジオを持たないので押しても切り替わらない（label ではなく span）。
  */
@@ -176,10 +128,13 @@ function baseTab(g) {
  *
  * 1 グループのときもタブを 1 枚出す。比較相手がいないので中身は SQL 1 ペイン。
  */
-function tabs(groups, refIndex, opts, idPrefix) {
+function tabs(groups, refIndex, opts, idPrefix, built) {
   const base = groups[refIndex];
   const others = groups.filter((_, i) => i !== refIndex);
   const shown = others.slice(0, MAX_TABS);
+  // ペインは viewlgc_panes が作ったものを嵌めるだけ。**並べ方の規則は
+  // あちらと同じ**（基準を除いた残りを MAX_TABS 件まで）なので、添字で対応する。
+  const made = (built && built.panes) || [];
   const radios = shown.map((g, i) =>
     `<input class="vg-r vg-r${i + 1}" type="radio" name="${idPrefix}"` +
     ` id="${idPrefix}-${i + 1}"${i === 0 ? ' checked' : ''}>`).join('');
@@ -188,16 +143,25 @@ function tabs(groups, refIndex, opts, idPrefix) {
     `${esc(label(g))}<span class="vg-tabn">${g.members.length}</span></label>`).join('');
   const panels = shown.length
     ? shown.map((g, i) =>
-      `<div class="vg-panel vg-p${i + 1}">${pair(base, g, opts)}</div>`).join('')
-    : `<div class="vg-single">${renderFragment1(
-      label(base), paneSub(base), splitLines(base.sql), opts, paramTips(base))}</div>`;
+      `<div class="vg-panel vg-p${i + 1}">${made[i] || ''}</div>`).join('')
+    : `<div class="vg-single">${(built && built.single) || ''}</div>`;
 
   const over = others.length > shown.length
     ? notice(`グループが多いため先頭 ${MAX_TABS} 件のみタブ表示しています` +
       `（全 ${others.length} 件）。`)
     : '';
 
-  return over +
+  // **ペインの数が合わないときは黙らない。** 枚数がずれるのは
+  // panes 側と並べ方の規則が食い違ったときで、放っておくと
+  // 「タブは出るのに中身が空」になり、故障なのか設計なのか読み取れない。
+  const want = shown.length ? shown.length : 1;
+  const got = shown.length ? made.length : ((built && built.single) ? 1 : 0);
+  const lack = got !== want
+    ? notice(`ペインを ${want} 枚のうち ${got} 枚しか受け取れませんでした。` +
+      `viewlgc_panes と viewlgc_render の版が揃っているか確認してください。`)
+    : '';
+
+  return over + lack +
     `<div class="vg-tabs">${radios}` +
     `<div class="vg-tablist">${tablist}</div>` +
     `<div class="vg-panels">${panels}</div></div>`;
@@ -207,14 +171,14 @@ function tabs(groups, refIndex, opts, idPrefix) {
  * 基準ごとのひとかたまり（比較タブ ＋ なぜ別グループになったか）。
  * 基準が変わると比較の中身も「なぜ別か」の向きも変わるので、対にして扱う。
  */
-function refPanel(b, refIndex, opts) {
+function refPanel(b, refIndex, opts, built) {
   const groups = b.groups;
   // id はレコード内で一意であればよいが、同じページに複数レコードが並ぶ場合に
   // 備えて、base 名・グループ構成・基準を混ぜてハッシュする。
   // 基準ごとに別の名前にしないと、ラジオが全基準で 1 つの組になり、
   // 選ばれていない基準の比較タブがどれも開かなくなる。
   const idPrefix = 'vgt' + hashId(b.base + '|' + groups.map(label).join('|') + '|' + refIndex);
-  return tabs(groups, refIndex, opts, idPrefix) +
+  return tabs(groups, refIndex, opts, idPrefix, built) +
     missTable(groups, refIndex, label(groups[refIndex]));
 }
 
@@ -248,9 +212,16 @@ function refCaption(b, refIndex, opts) {
 
 /**
  * base 1 件分の HTML を返す。
+ *
+ * **ペインは自分で作らない。** panes.js の `buildPanes()` が作ったものを
+ * `built` で受け取って嵌める（別の UDF に分かれているため。理由は panes.js
+ * の冒頭）。`built` が無ければペインの中身だけが空になり、タブと外枠は出る。
+ *
  * @param {{base:string, viewCount:number, groupCount:number, groups:object[]}} b
+ * @param {object} opts
+ * @param {{panes?:string[], single?:string}} built buildPanes() の戻り値
  */
-function renderBase(b, opts) {
+function renderBase(b, opts, built) {
   const o = opts || {};
   const groups = b.groups;
   const n = groups.length;
@@ -280,9 +251,9 @@ function renderBase(b, opts) {
     body = notice(b.unmatched
       ? 'suffix を認識できなかった View です。比較相手がないので単独で表示しています。'
       : `${b.viewCount} View すべてが同一ロジックです。比較の必要がないので SQL だけ出しています。`) +
-      refPanel(b, 0, o);
+      refPanel(b, 0, o, built);
   } else {
-    body = refCaption(b, ref, o) + refPanel(b, ref, o);
+    body = refCaption(b, ref, o) + refPanel(b, ref, o, built);
   }
 
   return `<div class="vg-root">` +

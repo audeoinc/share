@@ -89,12 +89,13 @@ udf_name_suffix   既定 ''
 
 BigQuery のコンソールにファイルの中身をそのまま貼って実行します。
 
-**できるもの: ルーチン 11 本。**
+**できるもの: ルーチン 12 本。**
 
 | | |
 |---|---|
 | `viewlgc_analyze` | View 群を解析して JSON を返す（JavaScript） |
-| `viewlgc_render` | その JSON をロジック差分の HTML にする |
+| `viewlgc_panes` | ロジック差分のペイン（左右の比較）を作る |
+| `viewlgc_render` | そのペインを嵌めてタブと外枠を付ける |
 | `viewlgc_erd` | 参照関係の図を作る |
 | `viewlgc_page` | カラム定義と SQL を足し、外側タブで束ねる |
 | `viewlgc_markdown` | 運用メモの Markdown を HTML にする |
@@ -102,7 +103,7 @@ BigQuery のコンソールにファイルの中身をそのまま貼って実�
 | `viewlgc_render_dynamic_sql` | `build_table.sql` の `__…__` を展開する（SQL 関数） |
 | `viewlgc_group_css_p1` 〜 `p4` | CSS の部品。`group_css` が連結する（1 本では 32 KB に収まらないため） |
 
-**OK の判定**: 最後に 7 つの関数名と `created_at` が 1 行で出ます。
+**OK の判定**: 最後に 8 つの関数名と `created_at` が 1 行で出ます。
 これを次の段に使うので、`system_name` / `udf_dataset` を変えたなら控えておきます。
 
 ### ② `build_table.sql` → テーブルとビューを作る
@@ -242,7 +243,7 @@ Templated Record のテンプレート側に 1 回貼ります。
 
 | 出る文言 | 原因と直し方 |
 |---|---|
-| `UDF が 7 つそろっていません` | ①を飛ばしたか、`system_name` / `udf_dataset` / `udf_name_prefix` / `udf_name_suffix` が両ファイルで違う |
+| `UDF が 8 つそろっていません` | ①を飛ばしたか、`system_name` / `udf_dataset` / `udf_name_prefix` / `udf_name_suffix` が両ファイルで違う |
 | `対象の View が 0 件です` | `@@location` が違うか、`analysis_include_dataset_patterns` / `analysis_include_object_patterns` が絞り過ぎ |
 | `suffix を持つデータセットが 0 件です` | データセット名から suffix が拾えていない。`suffix_list` に一覧を並べるか `suffix_extra_list` に足す |
 | `プロジェクト ID を自動検出できません` | そのリージョンにデータセットが無い。`work_project_id` などにリテラルを入れて固定する |
@@ -309,10 +310,25 @@ UDF を作り直すときは、先に `node build_udf.mjs` で生成物を更新
 
 ### 次に触るとき知っておくこと
 
-**`viewlgc_render` が 32 KB の上限に対し 27.0 KB（90%）です。** ロジック差分に
-機能を足すと入らなくなります。そのときは CSS と同じように関数を分割する必要が
-あります。他は余裕があります（analyze 37% / erd 67% / page 72% / markdown 22%）。
-現在値は `node build_udf.mjs` が毎回出します。
+**UDF の本体は 1 個 32 KB まで**で、いまの余裕はこうです。
+
+| 関数 | 最小化後 | 上限比 |
+|---|---|---|
+| `viewlgc_analyze` | 11.1 KB | 37% |
+| `viewlgc_panes` | 13.3 KB | 44% |
+| `viewlgc_render` | 15.8 KB | 53% |
+| `viewlgc_erd` | 20.1 KB | 67% |
+| `viewlgc_page` | 21.6 KB | 72% |
+| `viewlgc_markdown` | 6.5 KB | 22% |
+
+現在値は `node build_udf.mjs` が毎回出し、**30 KB を超えたら生成が失敗します**
+（BigQuery に弾かれるものを出荷しないため）。詰まってきたら依存が独立している
+ところで UDF を割るか、`OPTIONS(library=["gs://…"])` に移します（BigQuery は
+ジョブの認証情報で読むので**非公開バケットで構いません**）。
+
+> `viewlgc_render` は 27.0 KB（90%）まで来ていたので、差分エンジンを
+> `viewlgc_panes` に切り出して 15.8 KB（53%）にしました。**出力は
+> バイト単位で変わっていません。**
 
 ---
 

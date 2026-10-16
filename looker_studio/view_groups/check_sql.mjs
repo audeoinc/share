@@ -185,6 +185,7 @@ add('IF … RAISE ではなく ASSERT を使っている',
 {
   const NAMES = {
     udf_analyze_function_name: '__UDF_ANALYZE__',
+    udf_panes_function_name: '__UDF_PANES__',
     udf_render_function_name: '__UDF_RENDER__',
     udf_erd_function_name: '__UDF_ERD__',
     udf_page_function_name: '__UDF_PAGE__',
@@ -222,7 +223,7 @@ add('IF … RAISE ではなく ASSERT を使っている',
   // 改行で割る形と 1 行の形の両方を受ける。
   const defs = [...udf.matchAll(
     /CREATE OR REPLACE FUNCTION `%s\.%s\.%s`\((?:\n)?([\s\S]*?)(?:\n)?\)\nRETURNS STRING\nLANGUAGE js AS %s\n''',\n\s*udf_project_id, udf_dataset, (udf_[a-z_]+_function_name)/g)];
-  add('JS UDF の定義を 5 本とも読み取れる', defs.length === 5,
+  add('JS UDF の定義を 6 本とも読み取れる', defs.length === 6,
     `見つかった定義 ${defs.length} 本`);
   for (const d of defs) {
     const mark = NAMES[d[2]];
@@ -612,8 +613,13 @@ for (const t of ['__T_DIFF_SRC__', '__T_DIFF__']) {
 
   // (3) 描画に基準を渡しているか。渡さないと全部が先頭基準のカードになる
   //     （落ちないので気づけない）。
-  add('描画に基準の番号を渡している',
-    /`__UDF_RENDER__`\(analysis, options_json, CAST\(ref_index AS FLOAT64\)\)/
+  // **panes と render の両方に同じ ref_index を渡すこと。** 片方だけ渡すと
+  // 「タブは基準 B なのに中身は基準 A のペイン」になり、落ちないので
+  // 画面からは正しく見える。
+  add('描画に基準の番号を渡している（panes と render の両方）',
+    /`__UDF_PANES__`\(analysis, options_json, CAST\(ref_index AS FLOAT64\)\)/
+      .test(table) &&
+    /`__UDF_RENDER__`\(\s*analysis,\s*`__UDF_PANES__`\(analysis, options_json, CAST\(ref_index AS FLOAT64\)\),\s*options_json,\s*CAST\(ref_index AS FLOAT64\)\)/
       .test(table));
 
   // (3b) メモを繋ぐビューが ref_index / ref_label を落としていないか。
@@ -861,7 +867,7 @@ for (const [name, src] of [['build_table.sql', table], ['view_group_html.sql', u
   // 落ちたときの見どころの表は ASSERT の文言をそのまま引いている。
   // 文言を直したら手順書も直す（引けなければ原因が辿れない）。
   const quoted = [
-    'UDF が 7 つそろっていません',
+    'UDF が 8 つそろっていません',
     '対象の View が 0 件です',
     'suffix を持つデータセットが 0 件です',
     'プロジェクト ID を自動検出できません',

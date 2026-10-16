@@ -38,7 +38,8 @@
 --   __V_MATRIX__           base × suffix のマトリクス用ビュー。1 行 = 1 View で
 --                          location と suffix を別々の列に持つ（セクション 3c）
 --   __UDF_ANALYZE__        analyze 関数（project.dataset.function）
---   __UDF_RENDER__         render 関数（同上）
+--   __UDF_PANES__          ロジック差分のペインを作る関数（同上）
+--   __UDF_RENDER__         それを嵌めてタブと外枠を付ける関数（同上）
 --   __UDF_ERD__            参照関係の図を作る関数（同上）
 --   __UDF_PAGE__           カラム定義と SQL を作り、外側タブで束ねる関数（同上）
 --   __UDF_MARKDOWN__       メモの Markdown を HTML にする関数（同上）
@@ -414,6 +415,7 @@ DECLARE import_diag STRING;  -- 取り込みが足りないときの説明。足
 -- 解析と描画が別の UDF なのは、インラインのコード ブロブが 1 個あたり 32 KB
 -- までのため。JS UDF から別の UDF は呼べないので、つなぐのはこの SQL の仕事。
 DECLARE udf_analyze_function_name  STRING;
+DECLARE udf_panes_function_name    STRING;
 DECLARE udf_render_function_name   STRING;
 DECLARE udf_erd_function_name      STRING;
 DECLARE udf_page_function_name     STRING;
@@ -514,6 +516,8 @@ ASSERT ARRAY_LENGTH(import_sources) = ARRAY_LENGTH(
 --      （view_group_html.sql と同じ。system_name も同じ値でなければ見つからない）
 SET udf_analyze_function_name =
   udf_name_prefix || system_name || '_' || 'analyze' || udf_name_suffix;
+SET udf_panes_function_name =
+  udf_name_prefix || system_name || '_' || 'panes' || udf_name_suffix;
 SET udf_render_function_name =
   udf_name_prefix || system_name || '_' || 'render' || udf_name_suffix;
 SET udf_erd_function_name =
@@ -528,6 +532,8 @@ SET udf_sql_function_name =
   udf_name_prefix || system_name || '_' || 'render_dynamic_sql' || udf_name_suffix;
 ASSERT REGEXP_CONTAINS(udf_analyze_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_analyze_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_panes_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_panes_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_render_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_render_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_erd_function_name, r'^[A-Za-z0-9_]+$') AS
@@ -694,12 +700,12 @@ SET src_table_opts = IF(ARRAY_LENGTH(import_sources) = 0,
 -- 固定の設定はここで焼き込み、テンプレートだけを @sql_template で渡す。
 -- 値は %T で埋める。条件文には引用符が入るので、%s だと壊れる。
 SET render_call_sql = FORMAT(
-  """SELECT `%s.%s.%s`(@sql_template, %T, %T, %T, %T, %T, %T, STRUCT(%T AS diff_src, %T AS diff_table, %T AS diff_view, %T AS matrix_view, %T AS base_note, %T AS analyze_function, %T AS render_function, %T AS erd_function, %T AS page_function, %T AS markdown_function, %T AS css_function), STRUCT(%T AS time_zone, %T AS suffix_pattern, %T AS note_sheet_url, %T AS note_sheet_range), STRUCT(%T AS schema_condition, %T AS view_dataset_condition, %T AS view_name_condition), STRUCT(%T AS schemata, %T AS views, %T AS columns, %T AS field_paths, %T AS table_opts))""",
+  """SELECT `%s.%s.%s`(@sql_template, %T, %T, %T, %T, %T, %T, STRUCT(%T AS diff_src, %T AS diff_table, %T AS diff_view, %T AS matrix_view, %T AS base_note, %T AS analyze_function, %T AS panes_function, %T AS render_function, %T AS erd_function, %T AS page_function, %T AS markdown_function, %T AS css_function), STRUCT(%T AS time_zone, %T AS suffix_pattern, %T AS note_sheet_url, %T AS note_sheet_range), STRUCT(%T AS schema_condition, %T AS view_dataset_condition, %T AS view_name_condition), STRUCT(%T AS schemata, %T AS views, %T AS columns, %T AS field_paths, %T AS table_opts))""",
   udf_project_id, udf_dataset, udf_sql_function_name,
   work_project_id, work_dataset, udf_project_id, udf_dataset,
   target_project_id, job_region,
   table_diff_src, table_diff, view_diff, view_matrix, table_base_note,
-  udf_analyze_function_name, udf_render_function_name,
+  udf_analyze_function_name, udf_panes_function_name, udf_render_function_name,
   udf_erd_function_name, udf_page_function_name,
   udf_markdown_function_name, udf_css_function_name,
   snapshot_time_zone, suffix_pattern,
@@ -717,10 +723,10 @@ EXECUTE IMMEDIATE FORMAT(
   udf_project_id, udf_dataset,
   [udf_analyze_function_name, udf_render_function_name, udf_erd_function_name,
    udf_page_function_name, udf_markdown_function_name, udf_css_function_name,
-   udf_sql_function_name]
+   udf_sql_function_name, udf_panes_function_name]
 ) INTO udf_found_count;
-ASSERT udf_found_count = 7 AS
-  'UDF が 7 つそろっていません。先に view_group_html.sql を実行してください（system_name / udf_dataset / udf_name_prefix / udf_name_suffix は両ファイルで同じ値に）。';
+ASSERT udf_found_count = 8 AS
+  'UDF が 8 つそろっていません。先に view_group_html.sql を実行してください（system_name / udf_dataset / udf_name_prefix / udf_name_suffix は両ファイルで同じ値に）。';
 
 
 -- 事前チェック。0 件のまま進むと空のテーブルができ、設定の間違いに気づけない。
@@ -1437,16 +1443,24 @@ SELECT
   view_names,
   CAST(JSON_VALUE(analysis, '$.unmatchedCount') AS INT64) AS unmatched_count,
   --
-  -- 描画は 3 本の UDF に分かれている。render がロジック差分のカード、erd が
-  -- 参照関係の図を作り、page がその 2 つを受け取ってカラム定義の表と
-  -- View ごとの素の SQL を足し、外側タブで 1 枚に束ねる。
+  -- 描画は 4 本の UDF に分かれている。panes がロジック差分のペイン（左右の
+  -- 比較）を作り、render がそれを嵌めてタブと外枠を付け、erd が参照関係の図を
+  -- 作り、page がその 2 つを受け取ってカラム定義の表と View ごとの素の SQL を
+  -- 足し、外側タブで 1 枚に束ねる。
   -- JS UDF から別の UDF は呼べないので、つなぐのは SQL の仕事。
   --
   -- 分けてあるのは、インラインのコード ブロブが 1 個 32 KB までのため
   -- （図の解析にはトークナイザが要り、それだけで最小化後 9 KB ある）。
   `__UDF_PAGE__`(
     analysis,
-    `__UDF_RENDER__`(analysis, options_json, CAST(ref_index AS FLOAT64)),
+    -- ロジック差分は 2 段。**ペインと外枠が別の UDF**（1 個 32 KB の上限に
+    -- 1 本では収まらない）なので、繋ぐのは SQL の仕事。
+    -- 両方に同じ ref_index を渡すこと。**片方だけ変えるとペインがずれる。**
+    `__UDF_RENDER__`(
+      analysis,
+      `__UDF_PANES__`(analysis, options_json, CAST(ref_index AS FLOAT64)),
+      options_json,
+      CAST(ref_index AS FLOAT64)),
     `__UDF_ERD__`(analysis, options_json),
     columns_json,
     sql_json,

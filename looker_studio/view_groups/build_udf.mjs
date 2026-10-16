@@ -45,11 +45,21 @@ const SIZE_LIMIT = 30 * 1024;
 const ANALYZE_SOURCES = [
   ['analyze.js', join(here, 'analyze.js')],
 ];
+// ロジック差分のタブ・パラメータ表・外枠。**差分エンジンは積まない。**
+// 1 本に積んでいた頃は最小化後 27.0 KB（1 個 32 KB の上限に対し 90%）で、
+// ロジック差分に機能を足すと入らない状態だった。
 const RENDER_SOURCES = [
+  ['chrome.js', join(here, 'chrome.js')],
+  ['render_groups.js', join(here, 'render_groups.js')],
+];
+// ペインだけを作る UDF。**差分エンジン（diff.js / render.js）はこちらが持つ。**
+// render との境目は「1 組 = 1 ペイン分の HTML」の 1 か所だけ。
+// 分けた理由と並べ方の取り決めは panes.js の冒頭に書いてある。
+const PANES_SOURCES = [
   ['chrome.js', join(here, 'chrome.js')],
   ['lib/diff.js', join(here, '..', 'ddl_diff_viz', 'src', 'lib', 'diff.js')],
   ['lib/render.js', join(here, '..', 'ddl_diff_viz', 'src', 'lib', 'render.js')],
-  ['render_groups.js', join(here, 'render_groups.js')],
+  ['panes.js', join(here, 'panes.js')],
 ];
 // 参照関係の UDF。差分エンジン（diff.js / render.js）は要らないので積まない。
 // 積むと 1 個 32 KB のインライン上限に収まらなくなる。
@@ -79,7 +89,17 @@ const MARKDOWN_SOURCES = [
 // テンプレートに貼る CSS は 1 枚にまとめて配る。差分カード側の chromeCss() と
 // メモ側の memoCss() を両方持つ必要があるので、CSS の UDF だけ両方を積む。
 // markdown.js の描画側は要らないので下の UNUSED_CSS で落とす。
-const CSS_SOURCES = RENDER_SOURCES.concat([
+// 配る CSS を組み立てるコード。**これは BigQuery に載らない**
+// （下の new Function で Node で評価し、出来た CSS の文字列だけを焼き込む）。
+// なので 1 個 32 KB の枠は関係なく、ペインまで含めて全部積んでよい。
+// **ペインの markup も fixture で描く**ので、差分エンジンと panes.js が要る。
+const CSS_SOURCES = [
+  ['chrome.js', join(here, 'chrome.js')],
+  ['lib/diff.js', join(here, '..', 'ddl_diff_viz', 'src', 'lib', 'diff.js')],
+  ['lib/render.js', join(here, '..', 'ddl_diff_viz', 'src', 'lib', 'render.js')],
+  ['render_groups.js', join(here, 'render_groups.js')],
+  ['panes.js', join(here, 'panes.js')],
+].concat([
   ['markdown.js', join(here, 'markdown.js')],
   ['columns.js', join(here, 'columns.js')],
   ['sqltext.js', join(here, 'sqltext.js')],
@@ -128,11 +148,19 @@ const UNUSED_PAGE = ['columnsCss', 'sqlCss', 'descCss'];
 // 外枠で束ねるのは page の仕事。render はロジック差分のカードを作るだけなので
 // wrapPage は要らない（chrome.js を共有しているぶん付いてくる）。
 // cssGuard は wrapPage（＝ page）専用。CSS_GEN のほうは chromeCss() が使うので残す。
-const UNUSED_RENDER = ['renderFragment3', 'build3Way', 'mapToBase', 'baseCell',
-  'segsText', 'wrapPage', 'cssGuard'];
+const UNUSED_RENDER = ['wrapPage', 'cssGuard'];
+// ペインの UDF。3 ペイン横並びは使わない方針なので、3-way 系ごと外す
+// （インラインの 32 KB 枠に効く）。chrome.js のうち外枠・見出し・タブの類は
+// render が持つので、こちらには要らない。
+const UNUSED_PANES = ['renderFragment3', 'build3Way', 'mapToBase', 'baseCell',
+  'segsText', 'wrapPage', 'cssGuard', 'header', 'badge', 'groupRule',
+  'regionByView'];
 // CSS の UDF は markdown.js から memoCss() しか呼ばない。Markdown を HTML に
 // する側は viewlgc_markdown が持っているので、こちらには積まない。
+// （UNUSED_RENDER から派生させていたが、あちらが差分エンジンを持たなくなった
+// ので 3-way 系はここで明示する。）
 const UNUSED_CSS = UNUSED_RENDER.concat([
+  'renderFragment3', 'build3Way', 'mapToBase', 'baseCell', 'segsText',
   'markdownHtml', 'mdRender', 'mdBlocks', 'mdList', 'mdAligns', 'mdCells',
   'mdKind', 'mdIndent', 'mdInline', 'mdLink', 'mdUrl', 'mdEsc',
   'renderColumnsBase', 'renderColumns', 'groupColumns', 'columnOrder',
@@ -166,6 +194,7 @@ async function bundle(sources, unused) {
 }
 const analyzeLib = await bundle(ANALYZE_SOURCES, UNUSED_ANALYZE);
 const renderLib = await bundle(RENDER_SOURCES, UNUSED_RENDER);
+const panesLib = await bundle(PANES_SOURCES, UNUSED_PANES);
 const erdLib = await bundle(ERD_SOURCES, UNUSED_ERD);
 const pageLib = await bundle(PAGE_SOURCES, UNUSED_PAGE);
 const markdownLib = await bundle(MARKDOWN_SOURCES, []);
@@ -313,14 +342,50 @@ function __run(views, options_json) {
 return __run(views, options_json);
 `.trim();
 
-// --- render のドライバ -------------------------------------------------
-// analyze の JSON を受け取って HTML にする。解析はしない。
-const renderDriver = `
+// --- panes のドライバ ---------------------------------------------------
+// ペインだけを作って JSON で返す。タブも外枠も作らない。
+//
+// **base ごとの配列で返す。** render 側のドライバが a.bases をそのまま回すので、
+// 添字で対応させる（bases[i] のペインが panes.bases[i]）。
+//
+// style 属性のままにしておく。class モードへの畳み込み（__applyMode）は
+// **render 側で最後に 1 回**かける。ここで畳むと、畳んだ結果をもう一度
+// 畳むことになり、ハッシュの素が変わってテンプレートの CSS と合わなくなる。
+const panesDriver = `
 function __run(analysis_json, options_json, ref_index) {
   var opts = __opts(options_json);
   var a;
   try { a = JSON.parse(analysis_json); } catch (e) { a = null; }
+  if (!a) return JSON.stringify({ bases: [] });
+
+  var ref = 0;
+  if (ref_index !== null && ref_index !== undefined) {
+    ref = Math.floor(Number(ref_index));
+  }
+
+  var bases = a.bases || [];
+  var out = [];
+  for (var i = 0; i < bases.length; i++) out.push(buildPanes(bases[i], opts, ref));
+  return JSON.stringify({ bases: out });
+}
+
+return __run(analysis_json, options_json, ref_index);
+`.trim();
+
+// --- render のドライバ -------------------------------------------------
+// analyze の JSON を受け取って HTML にする。解析もペインも作らない。
+const renderDriver = `
+function __run(analysis_json, panes_json, options_json, ref_index) {
+  var opts = __opts(options_json);
+  var a;
+  try { a = JSON.parse(analysis_json); } catch (e) { a = null; }
   if (!a) return __notice('解析結果を読み取れませんでした。');
+
+  // ペインは viewlgc_panes が作ったもの。**読めなくても止めない。**
+  // タブと外枠は出し、ペインの中が空であることを renderBase が画面に書く。
+  var built;
+  try { built = JSON.parse(panes_json); } catch (e) { built = null; }
+  var madeBases = (built && built.bases) || [];
 
   // 基準は行で決まる。NULL なら従来どおり全基準をタブで載せる。
   // **INT64 は JS UDF が扱えない**ので FLOAT64 で受けて丸める。
@@ -330,12 +395,15 @@ function __run(analysis_json, options_json, ref_index) {
 
   var html = a.lead ? __notice(a.lead) : '';
   var bases = a.bases || [];
-  for (var i = 0; i < bases.length; i++) html += renderBase(bases[i], opts);
+  for (var i = 0; i < bases.length; i++) {
+    html += renderBase(bases[i], opts, madeBases[i]);
+  }
   if (a.tail) html += __notice(a.tail);
+  // **畳むのはここで 1 回だけ。** ペインの style 属性もこの時点で畳まれる。
   return __applyMode(html, opts.mode || 'inline');
 }
 
-return __run(analysis_json, options_json, ref_index);
+return __run(analysis_json, panes_json, options_json, ref_index);
 `.trim();
 
 // --- erd のドライバ -----------------------------------------------------
@@ -436,7 +504,9 @@ const cssDriver = `
 function __fixtureRules(opts) {
   var rules = {};
   function collect(b) {
-    var r = __split(renderBase(b, opts)).rules;
+    // **ペインも描く。** 差分の markup が持つ style 属性のクラスは、ここで
+    // 描かないと配る CSS に入らない（貼ったのに色が付かない形で欠ける）。
+    var r = __split(renderBase(b, opts, buildPanes(b, opts, 0))).rules;
     for (var k in r) rules[k] = r[k];
   }
   function grp(sufs, sql, params, miss) {
@@ -507,6 +577,9 @@ function pack(driver, label, lib, extra) {
 
 const analyzePack = pack(analyzeDriver, 'viewlgc_analyze', analyzeLib);
 const renderPack = pack(renderDriver, 'viewlgc_render', renderLib, sharedRender);
+// panes は style 属性のまま返すので __applyMode は要らないが、__hashClass を
+// 含む sharedRender を積まない代わりに esc などは chrome.js が持っている。
+const panesPack = pack(panesDriver, 'viewlgc_panes', panesLib);
 const cssPack = pack(cssDriver, 'viewlgc_group_css', cssLib, sharedRender);
 
 // 配る CSS を載せる関数の数。**本文の 32 KB は関数ごとの上限**なので、
@@ -549,13 +622,24 @@ const markdownPack = pack(markdownDriver, 'viewlgc_markdown', markdownLib);
 // --- 検証: 最小化した本体をそのまま実行する -----------------------------
 const S = require(join(here, 'sample_views.js'));
 const VIEWLGC_ANALYZE = new Function('views', 'options_json', analyzePack.code);
-const VIEWLGC_RENDER = new Function('analysis_json', 'options_json', 'ref_index',
-  renderPack.code);
+const VIEWLGC_PANES = new Function('analysis_json', 'options_json', 'ref_index',
+  panesPack.code);
+const VIEWLGC_RENDER = new Function('analysis_json', 'panes_json', 'options_json',
+  'ref_index', renderPack.code);
 const VIEWLGC_ERD = new Function('analysis_json', 'options_json', erdPack.code);
 const VIEWLGC_PAGE = new Function('analysis_json', 'diff_html', 'erd_html',
   'columns_json', 'sql_json', 'descs_json', 'labels_json', 'regions_json', 'options_json',
   pagePack.code);
 const VIEWLGC_MARKDOWN = new Function('md', markdownPack.code);
+
+/**
+ * 検証用。**SQL と同じ順（panes → render）で通す。**
+ * 直に VIEWLGC_RENDER を呼ぶと引数が 1 つずれても気づけない
+ * （数が合わないまま文字列が返り、比べ合うだけの検証は素通りする）。
+ */
+const RENDER = (analysis, options_json, ref) =>
+  VIEWLGC_RENDER(analysis, VIEWLGC_PANES(analysis, options_json, ref),
+    options_json, ref);
 const VIEW_GROUP_CSS = new Function('options_json', cssPack.code);
 
 // JS UDF から別の UDF は呼べないので、つなぐのは呼び出し側の SQL の仕事。
@@ -623,11 +707,12 @@ function VIEW_GROUP_INFO(views, options_json) {
     group_sizes: j.groupSizes,
     suffixes: j.suffixes,
     unmatched_count: j.unmatchedCount,
-    html: VIEWLGC_RENDER(a, options_json, null),
-    // build_table.sql は render の結果をさらに page へ渡す。ここも同じ順で通し、
-    // 最小化した page 本体が実際に動くことを確かめる。
+    // build_table.sql と同じ順で通す。panes → render → page の 3 段を
+    // 最小化した本体で実際に動かし、繋ぎが合っていることを確かめる。
+    panes: VIEWLGC_PANES(a, options_json, null),
+    html: RENDER(a, options_json, null),
     erd: VIEWLGC_ERD(a, options_json),
-    page: VIEWLGC_PAGE(a, VIEWLGC_RENDER(a, options_json, null),
+    page: VIEWLGC_PAGE(a, RENDER(a, options_json, null),
       VIEWLGC_ERD(a, options_json),
       fakeColumns(views), fakeSql(views), fakeDescs(views), fakeLabels(views),
       '[]', options_json),
@@ -723,7 +808,7 @@ const checks = [
   ['カードに載る基準は 1 つだけ（比較は G−1 枚・線形）', (() => {
     const a = VIEWLGC_ANALYZE(views, OPTS);
     const G = info.group_count;
-    const one = VIEWLGC_RENDER(a, OPTS, 1);
+    const one = RENDER(a, OPTS, 1);
     const paneCount = (h) => (h.match(/<th colspan=/g) || []).length / 2;
     return G > 1 &&
       // 基準を選ぶタブは無い。いま何を基準にしているかは文字で出す
@@ -732,28 +817,28 @@ const checks = [
       // 枚数は G×(G−1) ではなく G−1
       paneCount(one) === G - 1 &&
       // 基準が違えば中身も違う
-      one !== VIEWLGC_RENDER(a, OPTS, 0);
+      one !== RENDER(a, OPTS, 0);
   })()],
   ['ref_index を省いても落ちない（先頭の基準になる）', (() => {
     const a = VIEWLGC_ANALYZE(views, OPTS);
-    return VIEWLGC_RENDER(a, OPTS, null) === VIEWLGC_RENDER(a, OPTS, 0);
+    return RENDER(a, OPTS, null) === RENDER(a, OPTS, 0);
   })()],
   ['ref_index が範囲外でも落ちない（端に丸める）', (() => {
     const a = VIEWLGC_ANALYZE(views, OPTS);
     const G = info.group_count;
-    return VIEWLGC_RENDER(a, OPTS, 99) === VIEWLGC_RENDER(a, OPTS, G - 1) &&
-      VIEWLGC_RENDER(a, OPTS, -5) === VIEWLGC_RENDER(a, OPTS, 0);
+    return RENDER(a, OPTS, 99) === RENDER(a, OPTS, G - 1) &&
+      RENDER(a, OPTS, -5) === RENDER(a, OPTS, 0);
   })()],
   ['基準を載せきれないときは、選べないだけだと書く', (() => {
     const a = VIEWLGC_ANALYZE(views, OPTS);
-    const capped = VIEWLGC_RENDER(a,
+    const capped = RENDER(a,
       JSON.stringify({ suffixParts: S.SUFFIX_PARTS, maxRefRows: 2 }), 0);
     // 3 グループあるので上限 2 は超える
     return info.group_count > 2 &&
       capped.includes('基準にできるのは先頭 2 グループまで') &&
       capped.includes(`全 ${info.group_count} 件`) &&
       // 上限に達していなければ出さない
-      !VIEWLGC_RENDER(a,
+      !RENDER(a,
         JSON.stringify({ suffixParts: S.SUFFIX_PARTS, maxRefRows: 99 }), 0)
         .includes('基準にできるのは');
   })()],
@@ -1057,7 +1142,7 @@ const checks = [
   ['解析結果に tokens / ddl を積んでいない',
     !/"tokens"|"ddl"|"raw"/.test(VIEWLGC_ANALYZE(views, OPTS))],
   ['render は壊れた JSON でも落ちない',
-    typeof VIEWLGC_RENDER('{ broken', OPTS, null) === 'string'],
+    typeof RENDER('{ broken', OPTS, null) === 'string'],
   // 複雑な SQL（多段 CTE / ウィンドウ / UNION / UNNEST / 相関サブクエリ）が
   // 最小化した本体でも通ること。単純な SELECT だけだと実体名の検出が素通りする。
   ['複雑な SQL でもコピー展開なら 1 グループ', COMPLEX.group_count === 1],
@@ -1137,7 +1222,7 @@ const checks = [
 ];
 
 // サイズ検証
-for (const p of [analyzePack, renderPack, erdPack, pagePack, markdownPack]) {
+for (const p of [analyzePack, panesPack, renderPack, erdPack, pagePack, markdownPack]) {
   const size = Buffer.byteLength(p.code);
   checks.push([`${p.label} が ${(SIZE_LIMIT / 1024).toFixed(0)} KB 以内`, size <= SIZE_LIMIT]);
 }
@@ -1179,7 +1264,7 @@ for (const [name, ok] of checks) {
 const kb = (n) => (n / 1024).toFixed(1) + ' KB';
 console.log(`\n${checks.length - failed}/${checks.length} passed\n`);
 console.log('UDF 本体のサイズ（インライン上限 32 KB）');
-for (const p of [analyzePack, renderPack, erdPack, pagePack, markdownPack]) {
+for (const p of [analyzePack, panesPack, renderPack, erdPack, pagePack, markdownPack]) {
   console.log(`  ${p.label.padEnd(20)} 素 ${kb(p.raw).padStart(8)} → ` +
     (p.min === null ? '最小化なし' : `最小化 ${kb(p.min).padStart(8)}`) +
     `  （上限比 ${(Buffer.byteLength(p.code) / SIZE_LIMIT * 100).toFixed(0)}%）`);
@@ -1274,6 +1359,7 @@ DECLARE udf_name_suffix STRING DEFAULT '';
 -- 関数名（[C] で組み立てる）。基本名はリテラルで、変えるならここではなく
 -- 下の SET を直す。build_table.sql の同名の変数と必ず同じ値にすること。
 DECLARE udf_analyze_function_name  STRING;
+DECLARE udf_panes_function_name    STRING;
 DECLARE udf_render_function_name   STRING;
 DECLARE udf_erd_function_name      STRING;
 DECLARE udf_page_function_name     STRING;
@@ -1296,6 +1382,10 @@ DECLARE project_token      STRING;
 -- （JSON のエスケープは BigQuery の文字列リテラルと互換）。
 DECLARE js_analyze STRING DEFAULT r"""
 ${analyzePack.code}
+""";
+
+DECLARE js_panes STRING DEFAULT r"""
+${panesPack.code}
 """;
 
 DECLARE js_render STRING DEFAULT r"""
@@ -1345,6 +1435,8 @@ ASSERT REGEXP_CONTAINS(system_name, r'^[A-Za-z0-9_]+$') AS
   'system_name は英数字と _ だけにしてください（ルーチン名に - は使えません）。';
 SET udf_analyze_function_name =
   udf_name_prefix || system_name || '_' || 'analyze' || udf_name_suffix;
+SET udf_panes_function_name =
+  udf_name_prefix || system_name || '_' || 'panes' || udf_name_suffix;
 SET udf_render_function_name =
   udf_name_prefix || system_name || '_' || 'render' || udf_name_suffix;
 SET udf_css_function_name =
@@ -1360,6 +1452,8 @@ SET udf_sql_function_name =
   udf_name_prefix || system_name || '_' || 'render_dynamic_sql' || udf_name_suffix;
 ASSERT REGEXP_CONTAINS(udf_analyze_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_analyze_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
+ASSERT REGEXP_CONTAINS(udf_panes_function_name, r'^[A-Za-z0-9_]+$') AS
+  'udf_panes_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_render_function_name, r'^[A-Za-z0-9_]+$') AS
   'udf_render_function_name が不正です（ルーチン名に使えるのは英数字と _ だけ。- は不可）。';
 ASSERT REGEXP_CONTAINS(udf_erd_function_name, r'^[A-Za-z0-9_]+$') AS
@@ -1468,6 +1562,32 @@ LANGUAGE js AS %s
 EXECUTE IMMEDIATE FORMAT('''
 CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
   analysis_json STRING,
+  options_json STRING,
+  ref_index FLOAT64
+)
+RETURNS STRING
+LANGUAGE js AS %s
+''',
+  udf_project_id, udf_dataset, udf_panes_function_name,
+  TO_JSON_STRING(js_panes));
+
+
+-- ---------------------------------------------------------------------
+-- 2b. viewlgc_render
+--     ペインを嵌めてタブと外枠を付ける
+--
+-- **ペインは自分で作らない。** 差分エンジン（diff.js / render.js）は
+-- viewlgc_panes が持っていて、こちらはその JSON を受け取る。
+-- 1 本に積んでいた頃は最小化後 27.0 KB（1 個 32 KB の上限に対し 90%%）で、
+-- ロジック差分に機能を足すと入らない状態だった。
+--
+-- JS UDF から別の UDF は呼べないので、2 つを繋ぐのは SQL の仕事
+-- （build_table.sql が __UDF_RENDER__(analysis, __UDF_PANES__(…), …) と書く）。
+-- ---------------------------------------------------------------------
+EXECUTE IMMEDIATE FORMAT('''
+CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
+  analysis_json STRING,
+  panes_json STRING,
   options_json STRING,
   ref_index FLOAT64
 )
@@ -1635,6 +1755,7 @@ ${cssConcatArgs});
 --                          焼き込んだ __T_DIFF__ のほうを読む）
 --   __V_MATRIX__           base × suffix のマトリクス用ビュー（同上）
 --   __UDF_ANALYZE__        analyze 関数（project.dataset.function）
+--   __UDF_PANES__          panes 関数（同上）
 --   __UDF_RENDER__         render 関数（同上）
 --   __UDF_ERD__            参照関係の図を作る関数（同上）
 --   __UDF_PAGE__           page 関数（同上）
@@ -1678,6 +1799,7 @@ CREATE OR REPLACE FUNCTION \`%s.%s.%s\`(
     matrix_view       STRING,
     base_note         STRING,
     analyze_function  STRING,
+    panes_function    STRING,
     render_function   STRING,
     erd_function      STRING,
     page_function     STRING,
@@ -1730,6 +1852,7 @@ AS (
   REPLACE(
   REPLACE(
   REPLACE(
+  REPLACE(
     sql_template,
     '__TARGET_PROJECT__', target_project_id),
     '__JOB_REGION__', job_region),
@@ -1745,6 +1868,8 @@ AS (
       work_project_id || '.' || work_dataset || '.' || objects.matrix_view),
     '__UDF_ANALYZE__',
       udf_project_id || '.' || udf_dataset || '.' || objects.analyze_function),
+    '__UDF_PANES__',
+      udf_project_id || '.' || udf_dataset || '.' || objects.panes_function),
     '__UDF_RENDER__',
       udf_project_id || '.' || udf_dataset || '.' || objects.render_function),
     '__UDF_ERD__',
@@ -1772,9 +1897,10 @@ AS (
   udf_project_id, udf_dataset, udf_sql_function_name);
 
 
--- 作った 7 つの名前を出す。build_table.sql に同じ値を入れる。
+-- 作った 8 つの名前を出す。build_table.sql に同じ値を入れる。
 SELECT
   FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_analyze_function_name)  AS analyze_function,
+  FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_panes_function_name)    AS panes_function,
   FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_render_function_name)   AS render_function,
   FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_erd_function_name)      AS erd_function,
   FORMAT('%s.%s.%s', udf_project_id, udf_dataset, udf_page_function_name)     AS page_function,
@@ -1799,8 +1925,9 @@ END;
   const marker = 'DECLARE (js_[a-z_]+) STRING DEFAULT r' + '"'.repeat(3) + '\\n';
   const blobs = [...sql.matchAll(
     new RegExp(marker + '([\\s\\S]*?)\\n' + '"'.repeat(3), 'g'))];
-  if (blobs.length !== 5) {
-    console.log(`  FAIL  埋め込んだ JS が 5 つ見つかりません（${blobs.length} 個）`);
+  // analyze / panes / render / erd / page / markdown の 6 本。
+  if (blobs.length !== 6) {
+    console.log(`  FAIL  埋め込んだ JS が 6 つ見つかりません（${blobs.length} 個）`);
     process.exit(1);
   }
   for (const [, name, code] of blobs) {
@@ -1809,7 +1936,7 @@ END;
       process.exit(1);
     }
   }
-  console.log('  PASS  埋め込んだ JS が 5 つとも本物');
+  console.log('  PASS  埋め込んだ JS が 6 つとも本物');
 
   // CSS は JS ではないので別に見る。焼き込んだ本文が template_style.html と
   // 食い違うと、貼った CSS と UDF が返す CSS が別物になる。
@@ -1851,9 +1978,9 @@ END;
   // FORMAT のテンプレートに素の % があると書式指定と解釈される。
   // 引数側（JS 本体）の % は無関係なので、''' … ''' の中だけを見る。
   const templates = [...sql.matchAll(/FORMAT\('''([\s\S]*?)'''/g)].map((m) => m[1]);
-  // 関数 7 本（analyze / render / erd / page / markdown / group_css / dynamic_sql）
-  // ＋ CSS の部品ぶん。部品を増やすとここも増える。
-  const WANT_TEMPLATES = 7 + CSS_PARTS;
+  // 関数 8 本（analyze / panes / render / erd / page / markdown /
+  // group_css / dynamic_sql）＋ CSS の部品ぶん。部品を増やすとここも増える。
+  const WANT_TEMPLATES = 8 + CSS_PARTS;
   if (templates.length !== WANT_TEMPLATES) {
     console.log(`  FAIL  FORMAT のテンプレートが ${WANT_TEMPLATES} つ見つかりません（${templates.length} 個）`);
     process.exit(1);

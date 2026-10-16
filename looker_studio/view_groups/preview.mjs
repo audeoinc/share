@@ -14,8 +14,17 @@ const require = createRequire(import.meta.url);
 const A = require(join(here, 'analyze.js'));
 const S = require(join(here, 'sample_views.js'));
 const R = require(join(here, 'render_groups.js'));
+const P = require(join(here, 'panes.js'));
 const E = require(join(here, 'erd.js'));
 const Ch = require(join(here, 'chrome.js'));
+
+/**
+ * ロジック差分のカード 1 枚。**本番と同じ順（panes → render）で通す。**
+ * ペインは別の UDF（viewlgc_panes）が作るので、renderBase に直に渡す。
+ * ここを素の R.renderBase に戻すと、**ペインが空のカードを検証してしまう。**
+ */
+const renderBase = (b, opts) =>
+  R.renderBase(b, opts, P.buildPanes(b, opts, (opts || {}).refIndex || 0));
 const Md = require(join(here, 'markdown.js'));
 const Co = require(join(here, 'columns.js'));
 const Sq = require(join(here, 'sqltext.js'));
@@ -73,7 +82,7 @@ const cases = [
   { title: '複雑な SQL（多段 CTE / ウィンドウ / UNION）', b: baseComplex, opts: {} },
 ];
 
-const parts = cases.map((c) => ({ ...c, html: R.renderBase(c.b, c.opts) }));
+const parts = cases.map((c) => ({ ...c, html: renderBase(c.b, c.opts) }));
 
 // base ごとのメモ。カードのいちばん左のタブに出る。
 // Confluence から移ってくる書き方（見出し・表・箇条書き・コード・引用）を
@@ -308,7 +317,7 @@ const pageCases = [
     b: base2, opts: {}, note: null, pick: () => '', labels: () => [] },
 ].map((c) => ({ ...c,
   html: splice(
-    Ch.wrapPage(R.renderBase(c.b, c.opts), E.renderErdBase(c.b),
+    Ch.wrapPage(renderBase(c.b, c.opts), E.renderErdBase(c.b),
       Co.renderColumnsBase(c.b, fakeColumns(c.b)), Sq.renderSqlBase(c.b, fakeSql(c.b)),
       V.renderNote(c.b, fakeDescs(c.b, c.pick), Ch.NOTE_MARK,
         fakeLabels(c.b, c.labels || (() => LABELS_COMMON))),
@@ -461,7 +470,7 @@ const checks = [
     !hOdd.includes('<div class="vg-plabel"></div>')],
   // suffix と連動する 'JP'/'US' は吸収されるので、連動しない値で割る
   ['リテラル差で割れたときは substitutable の指定を案内する',
-    R.renderBase(A.analyze([
+    renderBase(A.analyze([
       { view_name: 'v_x_abjp', ddl: "SELECT a FROM t_abjp WHERE s = 'A'" },
       { view_name: 'v_x_abus', ddl: "SELECT a FROM t_abus WHERE s = 'B'" },
     ], { suffixParts: [['ab'], ['jp', 'us']], substitutable: ['entity'] }).bases[0], {})
@@ -472,7 +481,7 @@ const checks = [
       { view_name: 'v_x_abus', ddl: "SELECT a FROM t_abus WHERE c = 'US'" },
     ], { suffixParts: [['ab'], ['jp', 'us']] }).bases[0].groupCount === 1],
   ['同値リテラルの案内を出す',
-    R.renderBase(A.analyze([
+    renderBase(A.analyze([
       { view_name: 'v_v_abjp', ddl: "SELECT a FROM t_abjp WHERE z = 'apac'" },
       { view_name: 'v_v_abus', ddl: "SELECT a FROM t_abus WHERE z = 'amer'" },
     ], { suffixParts: [['ab'], ['jp', 'us']], substitutable: ['entity'] }).bases[0], {})
@@ -516,7 +525,7 @@ const checks = [
       { view_name: 'v_y_cdus', ddl: "SELECT 'Z' AS k, b FROM t_cdus" },
     ], { suffixParts: [['ab', 'cd'], ['jp', 'us']] }).bases[0];
     // 基準は 1 つなので、目印は 1 基準ぶん
-    const h = R.renderBase(b, {});
+    const h = renderBase(b, {});
     const marks = h.match(/\{(?:<[^>]+>)*\{(?:<[^>]+>)*P\d+(?:<[^>]+>)*\}(?:<[^>]+>)*\}/g) || [];
     return marks.length === 3 && marks.some((m) => m.includes('<')) &&
       (h.match(/class="vg-ph/g) || []).length === marks.length;
@@ -542,7 +551,7 @@ const checks = [
     }
     const b = A.analyze(rows, { suffixParts: [ps.map((p) => p[0]), ['jp', 'us']],
       substitutable: ['entity'] }).bases[0];
-    const one = R.renderBase(b, { refIndex: 0 });
+    const one = renderBase(b, { refIndex: 0 });
     return b.groups.length === 6 &&
       // 比較は G−1 組。基準を選ぶタブは無い
       (one.match(/<th colspan=/g) || []).length === 2 * (b.groups.length - 1) &&
@@ -553,12 +562,12 @@ const checks = [
   ['基準ごとに左ペインが入れ替わる', (() => {
     // refIndex を変えると、その基準が左ペインに出る
     return base3.groups.every((g, i) =>
-      R.renderBase(base3, { refIndex: i })
+      renderBase(base3, { refIndex: i })
         .indexOf(`基準</span>${Ch.label(g)}`) > 0);
   })()],
   ['基準ごとに「なぜ別グループになったか」の向きが変わる', (() => {
     return base3.groups.every((g, i) => {
-      const p = R.renderBase(base3, { refIndex: i });
+      const p = renderBase(base3, { refIndex: i });
       const vs = [...p.matchAll(/class="vg-mvs">vs ([^<]*)</g)].map((m) => m[1]);
       // 全部その基準に対する差で、基準そのものは並ばない
       return vs.length === base3.groupCount - 1 &&
@@ -566,17 +575,17 @@ const checks = [
     });
   })()],
   ['基準の見出しに、その基準の suffix と View 数が出る', (() => {
-    const h = R.renderBase(base3, { refIndex: 1 });
+    const h = renderBase(base3, { refIndex: 1 });
     const m = h.match(/class="vg-refname">([^<]*)<span class="vg-tabn">(\d+)</);
     return m !== null && m[1] === Ch.label(base3.groups[1]) &&
       Number(m[2]) === base3.groups[1].members.length;
   })()],
   ['基準を載せきれないときは、選べないだけだと書く', (() => {
-    const capped = R.renderBase(base3, { refIndex: 0, maxRefRows: 2 });
+    const capped = renderBase(base3, { refIndex: 0, maxRefRows: 2 });
     return base3.groupCount > 2 &&
       capped.includes('基準にできるのは先頭 2 グループまで') &&
       capped.includes(`全 ${base3.groupCount} 件`) &&
-      !R.renderBase(base3, { refIndex: 0, maxRefRows: 99 }).includes('基準にできるのは');
+      !renderBase(base3, { refIndex: 0, maxRefRows: 99 }).includes('基準にできるのは');
   })()],
   ['基準を選ぶタブの機構が残っていない',
     !R.chromeCss().includes('.vg-btab') && !R.chromeCss().includes('.vg-bpanel') &&
@@ -1655,7 +1664,7 @@ const checks = [
   ['メモの CSS は markdown.js 側にある（差分の UDF に積まない）',
     Md.memoCss().includes('.vg-mdtable') && !R.chromeCss().includes('.vg-mdtable')],
   ['伏せ字は診断で見える表記に戻す',
-    R.renderBase(A.analyze([
+    renderBase(A.analyze([
       { view_name: 'v_w_abjp', ddl: "SELECT a FROM t WHERE c = 'abjp'" },
       { view_name: 'v_w_abus', ddl: "SELECT a FROM t WHERE c = 'zz'" },
     ], { suffixParts: [['ab'], ['jp', 'us']], substitutable: ['entity'] }).bases[0], {})
