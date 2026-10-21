@@ -1,5 +1,80 @@
 # 1.5.0-032
 
+- Cross-region reporting: `sql/pipeline/14_export_report_tables.sql` and
+  `sql/pipeline/15_build_cross_region_report.sql` combine every region's report
+  tables into one, so Looker Studio reads a single data source instead of blending
+  per-region ones.
+  A blend puts the union in the BI layer, where a filter never reaches the table
+  scan: clustering cannot prune and the page slows down with every region added.
+  A query cannot fix it either -- BigQuery reads datasets in ONE region -- so the
+  rows have to be brought together physically. 14 exports 03's two static tables to
+  Parquet under `<prefix>/<region>/<table>/` in a bucket belonging to the HOST
+  region, which is what removes any need to copy objects between buckets (no SQL
+  statement can do that). It is two plain `EXPORT DATA` statements rather than a
+  script: `OPTIONS` takes constants, so the URI cannot be a variable and there is
+  nothing for a DECLARE to do. 15 runs in the host region, reads that region's
+  tables locally (no export, no round trip), defines one external table per remote
+  region over its Parquet, and publishes the union.
+  Parquet is required, not preferred: `lnge_t_column_usage_impact` carries
+  `dependency_path ARRAY<STRING>` and `lnge_t_object_dependency` carries
+  `column_dependencies ARRAY<STRUCT<...>>`, and a CSV export of either fails
+  outright. Parquet also self-describes, so the reading side declares no schema --
+  which makes a region on a different 01/03 surface as a column mismatch rather
+  than as quietly wrong data.
+  The combined table is NOT the host region's own table. 03 STEP 4b owns that one
+  and rebuilds it with `CREATE OR REPLACE` from local rows, so loaded remote rows
+  would survive only until the next run, and 03 runs daily and gets re-run. Keeping
+  the combined table separate leaves each region's copy as its own atomic truth and
+  keeps 03 region-agnostic.
+  15 checks before it publishes, because trusting the schedule hides a failed
+  export behind rows that are merely old. A source older than
+  `max_staleness_hours` is reported and, with `fail_on_stale`, fatal; a missing
+  export fails the check query itself. The combined tables keep their previous
+  contents whenever a check fails.
+  Leftover export shards cannot corrupt the result, and the design does not depend
+  on knowing what `overwrite` does. `*` in the export URI shards by size, so an
+  export smaller than the last one may leave the extra files behind, and the
+  documented behavior of `overwrite = TRUE` does not settle whether those are
+  removed. Instead, 15 reads each remote source through
+  `WHERE updated_at = (SELECT MAX(updated_at) FROM <source>)`. Every row of one 03
+  rebuild carries the same `CURRENT_TIMESTAMP()`, and leftovers can only arise when
+  the data shrank -- which means 03 rebuilt, which means a newer `updated_at` --
+  so the stale rows always drop out. More than one `updated_at` in a source is
+  therefore reported as untidy storage, not treated as an error. The host region's
+  own branch needs no such filter: 03 owns that table and replaces it whole.
+  14 also carries the single-file export form as a commented alternative, since no
+  SQL statement can delete a Cloud Storage object and the prefix therefore cannot
+  be cleared from SQL at all. A URI without `*` writes exactly one file at a fixed
+  path, which overwrite replaces outright, so sharding has nothing to strand; the
+  trade is that an export too large for one file fails instead of sharding
+  silently, which is the better failure for this project. The default stays
+  sharded so a first run cannot be blocked by size. 15 needs no change either way:
+  its external tables read `.../*.parquet`, which matches both a `data.parquet` and
+  a sharded `000000000000.parquet`.
+- 03 STEP 4b: `origin_project` is no longer a clustering key on either static
+  report table (`origin_dataset, origin_object[, origin_column]` now). Pruning
+  needs a PREFIX of the clustering columns, so a leading column that is
+  single-valued in a one-project deployment and never filtered on spent the first
+  key for nothing -- while `origin_dataset`, which is what reports actually filter
+  by, sat behind it. A STRING column cannot be a partition key in BigQuery
+  (partitioning takes a DATE/TIMESTAMP/DATETIME column, ingestion time, or an
+  INT64 range), so clustering is the only lever for this filter.
+- `docs/CROSS_REGION_REPORT.md` records the setup, the run order, what each check
+  catches, the version lock the `SELECT *` union imposes, and the three things the
+  first real run has to confirm.
+  SQL and docs only; the bundle is unchanged. **Neither script has been run against
+  BigQuery.** Offline they were checked mechanically for `FORMAT` placeholder/argument
+  agreement, for `EXECUTE IMMEDIATE ... USING` parameters being used by the SQL they
+  are passed to (BigQuery rejects an unused named parameter), for `DECLARE` preceding
+  the first statement of its block, and for `''` used as an escape. That check is
+  only sound for a single-block script: run against 03 it reports dozens of false
+  positives, because 03 nests ten BEGIN blocks, builds some FORMAT templates by
+  concatenating literals across comments, passes parameters through the render UDF
+  rather than to the statement that uses them, and writes `ARRAY<STRUCT<a, b>>`
+  types whose commas are not inside parentheses. So it says nothing about 03, and
+  the 03 change here (two CLUSTER BY lines and two descriptions) rests on reading
+  the diff, not on a tool.
+
 - `sql/maintenance/10_pending_analysis_workload.sql` gained reports 9 and 10, the
   row-level forms of the questions reports 5/7 and 1-3 answer as counts. Reports 5 and
   7 say how many objects are new per day, which is the right shape for "is the arrival

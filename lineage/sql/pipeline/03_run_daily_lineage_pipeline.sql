@@ -4877,9 +4877,9 @@ THEN
     EXECUTE IMMEDIATE FORMAT(
       """
       CREATE OR REPLACE TABLE `%s.%s.%s`
-      CLUSTER BY origin_project, origin_dataset, origin_object
+      CLUSTER BY origin_dataset, origin_object
       OPTIONS (
-        description = 'Static copy of the object-level dependency view, rebuilt by 03 STEP 4b whenever the impact graph is rebuilt. An ordinary table, not a BigQuery materialized view. Same columns as the view plus updated_at. Clustered on the origin object so filtering by origin prunes. The view is the definition; edit it in 01 and this table follows on the next run.'
+        description = 'Static copy of the object-level dependency view, rebuilt by 03 STEP 4b whenever the impact graph is rebuilt. An ordinary table, not a BigQuery materialized view. Same columns as the view plus updated_at. Clustered on origin_dataset first, then the origin object, because that is the order reports filter in; pruning needs a prefix of the clustering columns, so a leading origin_project -- single-valued in a one-project deployment and never filtered on -- would spend the first key for nothing. The view is the definition; edit it in 01 and this table follows on the next run.'
       )
       AS
       SELECT *, CURRENT_TIMESTAMP() AS updated_at
@@ -4892,9 +4892,9 @@ THEN
     EXECUTE IMMEDIATE FORMAT(
       """
       CREATE OR REPLACE TABLE `%s.%s.%s`
-      CLUSTER BY origin_project, origin_dataset, origin_object, origin_column
+      CLUSTER BY origin_dataset, origin_object, origin_column
       OPTIONS (
-        description = 'Static copy of the column usage x impact view, rebuilt by 03 STEP 4b whenever the impact graph is rebuilt. An ordinary table, not a BigQuery materialized view. Same columns as the view plus updated_at, unless static_tables_include_usage_sql was FALSE, which drops usage_definition_text and usage_definition_html. Clustered on the origin column so filtering by origin prunes. Highlights inside usage_definition_html are fixed at build time over the full partition; a report that filters further and needs the highlights to follow should read the view instead.'
+        description = 'Static copy of the column usage x impact view, rebuilt by 03 STEP 4b whenever the impact graph is rebuilt. An ordinary table, not a BigQuery materialized view. Same columns as the view plus updated_at, unless static_tables_include_usage_sql was FALSE, which drops usage_definition_text and usage_definition_html. Clustered on origin_dataset first, then the origin object and column, because that is the order reports filter in; pruning needs a prefix of the clustering columns, so a leading origin_project -- single-valued in a one-project deployment and never filtered on -- would spend the first key for nothing. Highlights inside usage_definition_html are fixed at build time over the full partition; a report that filters further and needs the highlights to follow should read the view instead.'
       )
       AS
       SELECT %s, CURRENT_TIMESTAMP() AS updated_at
