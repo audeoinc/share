@@ -25,18 +25,28 @@ suffix 違いの View をロジックのグループに分けて Looker Studio �
 （BigQuery の JS UDF ＋ スケジュールドクエリ ＋ Templated Record）。**運用中**です。
 
 **何をするより先に
-[`looker_studio/view_groups/README.md`](looker_studio/view_groups/README.md)
-を読むこと。** 仕組み・設定・なぜその作りなのかが入っています。
-レポートの読み方は `usage.md`、導入の背景は `introduction.md` にあります。
+[`looker_studio/view_groups/HANDOVER.md`](looker_studio/view_groups/HANDOVER.md)
+を最後まで読むこと。** 現在地・次にやること・決まっていないこと・
+**壊してもエラーが出ない決めごと**がまとまっています。
+文脈をまったく持たない状態から読む前提で書かれているので、これだけで
+作業を再開できます。
 
-この 3 つは読み手が違うので、**直したときは該当するものだけを直すこと**
-（README = 作る人 / usage = 見る人 / introduction = 導入を検討する人）。
+**作業を終える前に、同じ文書を更新してからコミットすること**（更新ルールは
+文書の 9 章）。
+
+仕組みと設定は [`README.md`](looker_studio/view_groups/README.md)、
+入れる手順は `DEPLOY.md`、レポートの読み方は `usage.md`、
+導入の背景は `introduction.md`。**4 つは読み手が違うので、直したときは
+該当するものだけを直すこと**（README = 作る人 / DEPLOY = 入れる人 /
+usage = 見る人 / introduction = 導入を検討する人）。
 
 押さえておくこと。
 
-- **BigQuery にはこの環境から触れない。** SQL は静的な検証しか通せないので、
+- **BigQuery はこれまで触れなかった。** SQL は静的な検証しか通せないので、
   `node check_sql.mjs` などの検証スイート 5 本を必ず走らせる
   （README の「検証スイート」の節）。実行は依頼者が手で貼って行う。
+  **ただし BigQuery の MCP ツールが使える場合がある** ―― 届くかどうかを
+  先に確かめること（`HANDOVER.md` の 8 章）。届くならこの行を直す。
 - **デプロイに shell は使えない。** 生成物を手で貼る前提なので、貼る順番が変わる
   変更をしたら手順書（`DEPLOY.md`）も直す。
 - **`CSS_GEN` を上げたら UDF とテーブルも作り直しが要る**（番号が CSS と

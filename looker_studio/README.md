@@ -46,6 +46,7 @@ view_groups/build_udf.mjs  ← ddl_diff_viz/src/lib/diff.js    を UDF に同梱
 
 | 資料 | 誰が読むか |
 |---|---|
+| [`view_groups/HANDOVER.md`](./view_groups/HANDOVER.md) | **作業を引き継ぐ人。現在地・次にやること・落とし穴。まずこれ** |
 | [`view_groups/introduction.md`](./view_groups/introduction.md) | 導入を検討する人。背景・効果・必要なもの |
 | [`view_groups/DEPLOY.md`](./view_groups/DEPLOY.md) | **入れる人。何もない状態から動くレポートまでの順路** |
 | [`view_groups/usage.md`](./view_groups/usage.md) | レポートを見る人。使い方とデータの見方 |
