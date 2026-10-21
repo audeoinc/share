@@ -1,9 +1,14 @@
 # 引き継ぎ（HANDOVER）
 
 **文脈を何も持たない状態から読んで作業を再開できるように書いてある。**
-`looker_studio/view_groups/` を触るなら、まずこれを最後まで読むこと。
+`view_logic/view_groups/` を触るなら、まずこれを最後まで読むこと。
 
 最終更新: 2026-10-21 / ブランチ `claude/viewlgc-resume`
+
+> **ディレクトリ名が変わりました。** `looker_studio/` → **`view_logic/`**。
+> 出す先ではなく実態（View のロジックを比べる）に合わせたもので、
+> システム名 `viewlgc` ともそろいます。古い資料やコミット メッセージには
+> `looker_studio/` が出てきますが、同じ場所です。
 
 ---
 
@@ -15,7 +20,7 @@
 
 ```
 やったこと（この一連の作業）
-  ① 入口を直した            looker_studio/README.md が view_groups に言及していなかった
+  ① 入口を直した            view_logic/README.md が view_groups に言及していなかった
   ② description を範囲外に   「導入時に決めること」から外し、出す範囲を書き分けた
   ③ 導入手順書を書いた       DEPLOY.md（何もない状態から動くレポートまで）
   ④ viewlgc_render を分割    32 KB 上限の 90% → 53%。出力はバイト単位で不変
@@ -67,7 +72,7 @@ main に無い   9177142 refactor: 差分エンジンを viewlgc_panes に切り
 main の先端   0154181（2026-10-21 時点）
 ```
 
-**main は別の作業で活発に動いている**が、`looker_studio/` は触られていない
+**main は別の作業で活発に動いている**が、`view_logic/` は触られていない
 （動いているのは `ccp-docs` と `pa`）。**だから取り込みは衝突しない。**
 main に載せるときは、先に `git merge origin/main` するか `origin/main` に
 rebase してから push する。
@@ -214,7 +219,7 @@ base の切り出しは View 名だけで畳む。**重複すると 1 本だけ�
 ### 検証スイート 5 本を必ず走らせる
 
 ```bash
-cd looker_studio/view_groups
+cd view_logic/view_groups
 node test.mjs               # アナライザの判定          195
 node preview.mjs            # 描画の markup と CSS      178
 node build_udf.mjs          # UDF の生成物              76
@@ -228,7 +233,7 @@ node check_cross_region.mjs # リージョン間の運搬        22
 `node_modules` が消えるので、最初に入れ直す。
 
 ```bash
-cd looker_studio/ddl_diff_viz && npm install
+cd view_logic/ddl_diff_viz && npm install
 ```
 
 esbuild が無いと最小化がスキップされ、UDF が 30 KB を超えて
@@ -303,5 +308,5 @@ esbuild が無いと最小化がスキップされ、UDF が 30 KB を超えて
 - 冒頭の「最終更新」の日付とブランチ名を直す
 
 **消したものの理由は消さない。** 何を採らなかったか、なぜ採らなかったかは、
-同じ検討を繰り返さないために残してある（`looker_studio/README.md` の
+同じ検討を繰り返さないために残してある（`view_logic/README.md` の
 「消したもの」、`ddl_diff_viz/README.md` の冒頭）。

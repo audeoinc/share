@@ -558,7 +558,7 @@ try {
   esbuild = req('esbuild');
 } catch {
   console.warn('WARN: esbuild が見つからないため最小化をスキップします');
-  console.warn('      (looker_studio/ddl_diff_viz で npm install してください)');
+  console.warn('      (view_logic/ddl_diff_viz で npm install してください)');
 }
 
 function pack(driver, label, lib, extra) {
@@ -1280,7 +1280,7 @@ const sql = `-- ================================================================
 -- suffix 違い View のロジック グループ比較の UDF を作る
 --
 -- ※ このファイルは build_udf.mjs が生成する。直接編集しないこと。
---    再生成: node looker_studio/view_groups/build_udf.mjs
+--    再生成: node view_logic/view_groups/build_udf.mjs
 --    本体は esbuild で最小化してある（インラインのコード ブロブは
 --    32 KB までに制限されるため。素の連結は約 48 KB で確実に弾かれる）。
 --

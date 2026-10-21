@@ -44,7 +44,7 @@
 そのまま貼るなら不要**ですが、作り直すなら Node.js と esbuild が要ります。
 
 ```bash
-cd looker_studio/ddl_diff_viz && npm install   # esbuild が入る
+cd view_logic/ddl_diff_viz && npm install   # esbuild が入る
 cd ../view_groups && node build_udf.mjs        # 2 つを作り直す
 ```
 

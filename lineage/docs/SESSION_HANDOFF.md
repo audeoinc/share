@@ -637,7 +637,7 @@ Claude Code セッション（会話の記憶を持たない）へ引き継ぐ�
 
 - **要件**：column usage impact ビューの SQL を Looker Studio で「行番号つき・該当行
   ハイライト・該当箇所ハイライト」で表示したい。
-- **前提調査**：別ブランチ `claude/looker-studio-ddl-diff-ddqsyd` の `looker_studio/` に
+- **前提調査**：別ブランチ `claude/looker-studio-ddl-diff-ddqsyd`（削除済み。成果は main の `view_logic/`。旧名 `looker_studio/`）に
   確立された方式がある。**自作 community visualization は公開 GCS バケットが必須**で
   （Looker Studio がサーバー側で JS を取得するため、ドメイン限定 IAM だと 403）、
   禁止環境では使えない。ギャラリー掲載の **Templated Record**（HTML カラムを描画する

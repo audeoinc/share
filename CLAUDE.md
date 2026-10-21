@@ -19,13 +19,13 @@
 このプロジェクトについては、依頼者が Python に詳しくないことが前提です。
 前提知識を置かず、用語をその場で定義して説明してください。
 
-## looker_studio/view_groups/ を触る場合
+## view_logic/view_groups/ を触る場合
 
 suffix 違いの View をロジックのグループに分けて Looker Studio に出すツール
 （BigQuery の JS UDF ＋ スケジュールドクエリ ＋ Templated Record）。**運用中**です。
 
 **何をするより先に
-[`looker_studio/view_groups/HANDOVER.md`](looker_studio/view_groups/HANDOVER.md)
+[`view_logic/view_groups/HANDOVER.md`](view_logic/view_groups/HANDOVER.md)
 を最後まで読むこと。** 現在地・次にやること・決まっていないこと・
 **壊してもエラーが出ない決めごと**がまとまっています。
 文脈をまったく持たない状態から読む前提で書かれているので、これだけで
@@ -34,7 +34,7 @@ suffix 違いの View をロジックのグループに分けて Looker Studio �
 **作業を終える前に、同じ文書を更新してからコミットすること**（更新ルールは
 文書の 9 章）。
 
-仕組みと設定は [`README.md`](looker_studio/view_groups/README.md)、
+仕組みと設定は [`README.md`](view_logic/view_groups/README.md)、
 入れる手順は `DEPLOY.md`、レポートの読み方は `usage.md`、
 導入の背景は `introduction.md`。**4 つは読み手が違うので、直したときは
 該当するものだけを直すこと**（README = 作る人 / DEPLOY = 入れる人 /
