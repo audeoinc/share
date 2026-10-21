@@ -199,21 +199,45 @@ static テーブルが際限なく重くなる**ためです。
 - `lnge_t_diagnostic` を `diagnostic_code` 別に集計（`UDF_RESOURCE_ERROR` とそれ以外の切り分け）
 - `lnge_t_unanalyzed_definition` の `coverage_reason` 別件数
 
-### 8.2 JOBS 収集窓と保持窓の分離（優先度: 低、効果 約 30 秒/日）
+### 8.2 JOBS 収集窓と保持窓の分離 ―― **対応済み**
 
-日次 4 分のうち、**毎回 8 日分の JOBS を走査・MERGE している**のが 40 秒前後です。
-ところが保持の判定は job registry（手元のテーブル）を見れば済むので、
-**収集は「前回収集以降」だけで十分**です。
+`job_collection_lookback_days`（既定 3、前回収集時刻から自動延長）と
+`object_retention_days`（既定 40）に分離済みです（`03:427` / `03:445`）。
+**効果は未実測**なので、気になるなら `11` のレポート 3・4 を日次実行に対して流して
+内訳を確認してください。
 
+### 8.3 リージョン横断レポートの実機検証（優先度: 高 ―― 未実行）
+
+`sql/pipeline/14_*` と `15_*`、および `10` のレポート 9・10 は
+**一度も BigQuery で実行していません**。設計と制約は
+`docs/CROSS_REGION_REPORT.md` に全部書いてあります。初回に確認すべき点：
+
+1. **シャード数**。初回 export 後に `gsutil ls`。1テーブル1ファイルに収まるなら、
+   14 の URI を `*` なしの単一ファイル形式（ファイル内にコメントで併記）に切り替える。
+   残留シャードが原理的に起こらなくなる
+2. **外部テーブル越しの `MAX(updated_at)` / `COUNT(DISTINCT updated_at)`**
+   （Parquet の TIMESTAMP 変換）。15 の残留シャード無害化がここに依存している
+3. **`10` のレポート 9 の `labels` 展開**。ビューでは `labels` が NULL になるはずで、
+   `dag_id` / `task_id` が想定どおり NULL で返るか
+
+### 8.4 レポートテーブルのサイズ測定（上記の判断材料、未測定）
+
+`static_tables_include_usage_sql` を `FALSE` にすべきかが、これで決まります。既定の
+`TRUE` だと `usage_definition_text` / `usage_definition_html` が**対象オブジェクトの
+SQL 全文を行ごとに複製**します。export の転送量・GCS 費用・集約テーブルのサイズ・
+1ファイルに収まるかの判定、すべてに効きます。
+
+```sql
+SELECT table_name,
+       ROUND(SUM(total_logical_bytes)/1048576, 1) AS mb,
+       SUM(row_count) AS rows
+FROM `project_id.lineage_repository.INFORMATION_SCHEMA.TABLE_STORAGE`
+WHERE table_name LIKE '%column_usage_impact%'
+   OR table_name LIKE '%object_dependency%'
+GROUP BY table_name
 ```
-収集窓 = max(2日, 前回収集からの経過日数 + 余裕)   ← 新設
-保持窓 = incremental_lookback_days（8 日、変更なし）
-```
 
-**着手する前に `11` のレポート 3・4 を日次実行に対して流し、内訳を実測してください。**
-上記の 40 秒は初期ロード時の測定からの推定です。
-
-### 8.3 日次運用の開始
+### 8.5 日次運用の開始
 
 スケジュール設定と、初回数日の監視ポイント:
 
